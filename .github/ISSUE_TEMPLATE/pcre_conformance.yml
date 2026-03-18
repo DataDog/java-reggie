@@ -1,0 +1,41 @@
+name: PCRE Conformance Issue
+description: Report a PCRE compatibility issue
+labels: ["type/bug", "pcre-conformance"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to report patterns where Reggie's behavior differs from PCRE.
+  - type: input
+    id: pattern
+    attributes:
+      label: Regex Pattern
+      description: The PCRE pattern that behaves differently
+      placeholder: e.g., (?:a|b(*SKIP)c)d
+    validations:
+      required: true
+  - type: textarea
+    id: test-case
+    attributes:
+      label: Test Case
+      description: Input string, expected result (from PCRE), and actual result (from Reggie)
+      placeholder: |
+        Input: "test string"
+        PCRE result: matches "test"
+        Reggie result: no match
+    validations:
+      required: true
+  - type: input
+    id: pcre-reference
+    attributes:
+      label: PCRE Documentation Reference
+      description: Link to relevant PCRE documentation or test suite entry
+    validations:
+      required: false
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Which PCRE test cases fail? Impact on conformance percentage?
+    validations:
+      required: false

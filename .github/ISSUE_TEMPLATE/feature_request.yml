@@ -1,0 +1,37 @@
+name: Feature Request
+description: Suggest an enhancement to Reggie
+labels: ["type/feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! For significant features requiring design discussion, please use the RFC template instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature Description
+      description: What feature would you like to see?
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: Why is this feature useful? What problem does it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples
+      description: Example usage or code snippets showing the desired behavior
+      render: java
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative approaches you've considered
+    validations:
+      required: false

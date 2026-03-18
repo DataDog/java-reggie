@@ -1,0 +1,62 @@
+plugins {
+    id 'java-library'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    api project(':reggie-annotations')
+    implementation project(':reggie-codegen')
+
+    // ASM for runtime bytecode generation
+    implementation 'org.ow2.asm:asm:9.9.1'
+    implementation 'org.ow2.asm:asm-util:9.9.1'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:6.0.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs('--add-opens', 'java.base/java.lang=ALL-UNNAMED')
+    // Pass system properties for bytecode debugging
+    systemProperty 'reggie.debug.trace', System.getProperty('reggie.debug.trace')
+}
+
+// Task to run bytecode debugger
+tasks.register('debugPattern', JavaExec) {
+    description = 'Debug bytecode generation for a regex pattern'
+    group = 'debug'
+    mainClass = 'com.datadoghq.reggie.debug.BytecodeDebugger'
+    classpath = sourceSets.main.runtimeClasspath
+
+    // Usage: ./gradlew debugPattern -Ppattern="a{30,}" [-PoutputDir=/tmp/debug]
+    if (project.hasProperty('pattern')) {
+        args project.property('pattern')
+        if (project.hasProperty('outputDir')) {
+            args project.property('outputDir')
+        }
+    } else {
+        // Default example if no pattern specified
+        args "\\d+"
+    }
+}
+
+tasks.register('verifyCoverage', JacocoCoverageVerification) {
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                minimum = 0.75  // 75% target for public API
+            }
+        }
+    }
+}

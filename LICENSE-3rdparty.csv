@@ -1,0 +1,37 @@
+Component,Origin,License,Copyright
+org.ow2.asm:asm:9.9.1,https://asm.ow2.io/,BSD-3-Clause,"Copyright (c) 2000-2011 INRIA, France Telecom"
+org.ow2.asm:asm-commons:9.9.1,https://asm.ow2.io/,BSD-3-Clause,"Copyright (c) 2000-2011 INRIA, France Telecom"
+org.ow2.asm:asm-util:9.9.1,https://asm.ow2.io/,BSD-3-Clause,"Copyright (c) 2000-2011 INRIA, France Telecom"
+com.google.auto.service:auto-service:1.1.1,https://github.com/google/auto/tree/main/service,Apache-2.0,Copyright 2024 Google LLC
+com.google.auto.service:auto-service-annotations:1.1.1,https://github.com/google/auto/tree/main/service,Apache-2.0,Copyright 2024 Google LLC
+com.google.auto:auto-common:1.2.1,https://github.com/google/auto,Apache-2.0,Copyright 2024 Google LLC
+com.google.guava:guava:32.0.1-jre,https://github.com/google/guava,Apache-2.0,Copyright 2024 The Guava Authors
+com.google.guava:failureaccess:1.0.1,https://github.com/google/guava,Apache-2.0,Copyright 2024 The Guava Authors
+com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava,https://github.com/google/guava,Apache-2.0,Copyright 2024 The Guava Authors
+com.google.code.gson:gson:2.13.2,https://github.com/google/gson,Apache-2.0,Copyright 2008 Google Inc.
+com.google.errorprone:error_prone_annotations:2.18.0,https://github.com/google/error-prone,Apache-2.0,Copyright 2016 Google Inc.
+com.google.code.findbugs:jsr305:3.0.2,https://github.com/findbugsproject/findbugs,Apache-2.0,Copyright 2012 FindBugs developers
+com.google.j2objc:j2objc-annotations:2.8,https://github.com/google/j2objc,Apache-2.0,Copyright 2012 Google Inc.
+com.google.re2j:re2j:1.8,https://github.com/google/re2j,BSD-3-Clause,Copyright 2010-2024 The RE2/J Authors
+org.checkerframework:checker-qual:3.33.0,https://checkerframework.org/,MIT,Copyright 2004-2024 The Checker Framework developers
+org.junit.jupiter:junit-jupiter:6.0.2,https://junit.org/junit5/,EPL-2.0,Copyright 2015-2024 the original author or authors
+org.junit.jupiter:junit-jupiter-api:6.0.2,https://junit.org/junit5/,EPL-2.0,Copyright 2015-2024 the original author or authors
+org.junit.jupiter:junit-jupiter-engine:6.0.2,https://junit.org/junit5/,EPL-2.0,Copyright 2015-2024 the original author or authors
+org.junit.jupiter:junit-jupiter-params:6.0.2,https://junit.org/junit5/,EPL-2.0,Copyright 2015-2024 the original author or authors
+org.junit.platform:junit-platform-commons:6.0.2,https://junit.org/junit5/,EPL-2.0,Copyright 2015-2024 the original author or authors
+org.junit.platform:junit-platform-engine:6.0.2,https://junit.org/junit5/,EPL-2.0,Copyright 2015-2024 the original author or authors
+org.junit.platform:junit-platform-launcher:6.0.2,https://junit.org/junit5/,EPL-2.0,Copyright 2015-2024 the original author or authors
+org.opentest4j:opentest4j:1.3.0,https://github.com/ota4j-team/opentest4j,Apache-2.0,Copyright 2015-2024 the original author or authors
+org.openjdk.jmh:jmh-core:1.37,https://github.com/openjdk/jmh,GPL-2.0-with-classpath-exception,Copyright 2014-2024 Oracle and/or its affiliates
+org.openjdk.jmh:jmh-generator-annprocess:1.37,https://github.com/openjdk/jmh,GPL-2.0-with-classpath-exception,Copyright 2014-2024 Oracle and/or its affiliates
+org.apache.httpcomponents.client5:httpclient5:5.6,https://hc.apache.org/,Apache-2.0,Copyright 2005-2024 The Apache Software Foundation
+org.apache.httpcomponents.core5:httpcore5:5.2.4,https://hc.apache.org/,Apache-2.0,Copyright 2005-2024 The Apache Software Foundation
+org.apache.httpcomponents.core5:httpcore5-h2:5.2.4,https://hc.apache.org/,Apache-2.0,Copyright 2005-2024 The Apache Software Foundation
+org.apache.commons:commons-math3:3.6.1,https://commons.apache.org/proper/commons-math/,Apache-2.0,Copyright 2001-2016 The Apache Software Foundation
+net.sf.jopt-simple:jopt-simple:5.0.4,https://github.com/jopt-simple/jopt-simple,MIT,Copyright (c) 2004-2016 Paul R. Holser Jr.
+org.slf4j:slf4j-simple:2.0.16,https://www.slf4j.org/,MIT,Copyright (c) 2004-2022 QOS.ch
+net.jqwik:jqwik:1.9.3,https://github.com/jqwik-team/jqwik,MIT,Copyright (c) 2017-2024 Johannes Link and the jqwik contributors
+net.jqwik:jqwik-api:1.9.3,https://github.com/jqwik-team/jqwik,MIT,Copyright (c) 2017-2024 Johannes Link and the jqwik contributors
+net.jqwik:jqwik-engine:1.9.3,https://github.com/jqwik-team/jqwik,MIT,Copyright (c) 2017-2024 Johannes Link and the jqwik contributors
+net.jqwik:jqwik-web:1.9.3,https://github.com/jqwik-team/jqwik,MIT,Copyright (c) 2017-2024 Johannes Link and the jqwik contributors
+net.jqwik:jqwik-time:1.9.3,https://github.com/jqwik-team/jqwik,MIT,Copyright (c) 2017-2024 Johannes Link and the jqwik contributors

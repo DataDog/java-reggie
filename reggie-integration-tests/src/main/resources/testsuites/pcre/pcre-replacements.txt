@@ -1,0 +1,66 @@
+# Replacement/Substitution Tests
+# Format: pattern;input;replacement;expectedOutput;global
+# Features: Basic replacement functionality with capturing groups
+
+# Basic literal replacement
+cat;The cat sat;dog;The dog sat;false
+cat;The cat sat;dog;The dog sat;true
+cat;cat cat cat;dog;dog cat cat;false
+cat;cat cat cat;dog;dog dog dog;true
+
+# Group replacement - single group
+(\d+);Order #123;Number: $1;Order #Number: 123;false
+(\d+);123 456;[$1];[123] 456;false
+(\d+);123 456;[$1];[123] [456];true
+
+# Group replacement - multiple groups
+(\w+)@(\w+);alice@example;$2:$1;example:alice;false
+(\d{3})-(\d{3})-(\d{4});Call 555-123-4567;($1) $2-$3;Call (555) 123-4567;false
+(\w+)\s+(\w+);John Doe;$2, $1;Doe, John;false
+
+# Multiple occurrences - replaceFirst vs replaceAll
+a;banana;X;bXnana;false
+a;banana;X;bXnXnX;true
+\d;a1b2c3;#;a#b2c3;false
+\d;a1b2c3;#;a#b#c#;true
+
+# Empty groups
+(a)?b;b;[$1];[];false
+(a)?b;ab;[$1];[a];false
+(a*)b;b;[$1];[];false
+(a*)b;aaab;[$1];[aaa];false
+
+# Character classes
+[aeiou];hello;*;h*llo;false
+[aeiou];hello;*;h*ll*;true
+[A-Z];Hello World;x;xello World;false
+[A-Z];Hello World;x;xello xorld;true
+
+# Quantifiers
+a+;baaac;X;bXc;false
+a+;baaac baac;X;bXc bXc;true
+\s+;a  b   c;-;a-b   c;false
+\s+;a  b   c;-;a-b-c;true
+
+# Dots and special characters
+.;abc;X;Xbc;false
+.;abc;X;XXX;true
+\.;a.b.c;-;a-b.c;false
+\.;a.b.c;-;a-b-c;true
+
+# Escaping in replacement
+(\d+);Price: 100;$$1 = $1;Price: $1 = 100;false
+
+# Complex realistic examples (fixed to handle group ordering)
+#(\w+);Replace #hashtag with link;<a href="$1">$1</a>;Replace <a href="hashtag">hashtag</a> with link;false
+(\d{4})-(\d{2})-(\d{2});Date: 2024-01-15;$2/$3/$1;Date: 01/15/2024;false
+
+# Edge cases
+a;aaa;b;baa;false
+a;aaa;b;bbb;true
+(a|b);ab;[$1];[a][b];true
+(a|b);aba;X;Xba;false
+(a|b);aba;X;XXX;true
+
+# Optional groups with replacement (when group matches)
+(foo)?bar;bar;[$1]-baz;[]-baz;false

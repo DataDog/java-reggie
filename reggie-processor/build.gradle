@@ -1,0 +1,47 @@
+plugins {
+    id 'java-library'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation project(':reggie-annotations')
+    implementation project(':reggie-codegen')
+
+    // ASM for ImplClass generation (minimal - main bytecode generation is in reggie-codegen)
+    implementation 'org.ow2.asm:asm:9.9.1'
+
+    // Auto-service for annotation processor registration
+    implementation 'com.google.auto.service:auto-service-annotations:1.1.1'
+    annotationProcessor 'com.google.auto.service:auto-service:1.1.1'
+
+    testImplementation project(':reggie-runtime')
+    testImplementation 'org.junit.jupiter:junit-jupiter:6.0.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // Enable annotation processor for test sources
+    testAnnotationProcessor project(':reggie-processor')
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+tasks.register('verifyCoverage', JacocoCoverageVerification) {
+    violationRules {
+        rule {
+            limit {
+                counter = 'LINE'
+                minimum = 0.65  // 65% target for processor
+            }
+        }
+    }
+}

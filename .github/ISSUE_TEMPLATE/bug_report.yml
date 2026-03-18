@@ -1,0 +1,68 @@
+name: Bug Report
+description: Report a bug in Reggie
+labels: ["type/bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill in the details below.
+  - type: input
+    id: reggie-version
+    attributes:
+      label: Reggie Version
+      description: Which version of Reggie are you using?
+      placeholder: e.g., 0.0.1-SNAPSHOT
+    validations:
+      required: true
+  - type: input
+    id: java-version
+    attributes:
+      label: Java Version
+      description: Which Java version are you using?
+      placeholder: e.g., Java 21.0.2
+    validations:
+      required: true
+  - type: dropdown
+    id: compilation-mode
+    attributes:
+      label: Compilation Mode
+      options:
+        - Runtime (Reggie.compile())
+        - Compile-Time (@RegexPattern)
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: pattern
+    attributes:
+      label: Regex Pattern
+      description: The regex pattern that triggers the bug
+      placeholder: e.g., (\d+)-(\d+)
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect?
+      placeholder: |
+        Input: "123-456"
+        Expected: matches → true
+        Actual: matches → false
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal Reproduction
+      description: Minimal code to reproduce the issue
+      render: java
+    validations:
+      required: false
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other information (stack traces, logs, etc.)
+    validations:
+      required: false
