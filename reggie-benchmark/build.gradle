@@ -1,0 +1,192 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation project(':reggie-runtime')
+    annotationProcessor project(':reggie-processor')
+
+    // Integration tests for benchmark patterns
+    implementation project(':reggie-integration-tests')
+
+    // JMH for benchmarking
+    implementation 'org.openjdk.jmh:jmh-core:1.37'
+    annotationProcessor 'org.openjdk.jmh:jmh-generator-annprocess:1.37'
+
+    // RE2J for comparison benchmarks (linear-time, limited features)
+    implementation 'com.google.re2j:re2j:1.8'
+
+    // HTTP client for corpus downloads
+    implementation 'org.apache.httpcomponents.client5:httpclient5:5.6'
+    implementation 'com.google.code.gson:gson:2.13.2'
+    runtimeOnly 'org.slf4j:slf4j-simple:2.0.16'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+application {
+    mainClass = 'com.datadoghq.reggie.benchmark.SimpleMatcherTest'
+}
+
+// Add a task for running JMH benchmarks separately
+tasks.register('jmh', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.openjdk.jmh.Main'
+
+    // Capture output directory during configuration time
+    def outputDir = layout.buildDirectory.dir('reports/jmh').get().asFile
+
+    // Build args list: pattern first, then options
+    def jmhArgs = []
+
+    // Parse user-provided args
+    if (project.hasProperty('jmh.args')) {
+        def userArgs = project.property('jmh.args').toString().split('\\s+')
+
+        // Separate pattern (non-option argument) from JMH options
+        // Options have format: -option value or -option (flag)
+        def pattern = null
+        def options = []
+
+        def i = 0
+        while (i < userArgs.length) {
+            def arg = userArgs[i]
+
+            if (arg.startsWith('-')) {
+                // This is an option
+                options.add(arg)
+
+                // Check if next arg is the value for this option
+                if (i + 1 < userArgs.length && !userArgs[i + 1].startsWith('-')) {
+                    options.add(userArgs[i + 1])
+                    i += 2
+                } else {
+                    i += 1
+                }
+            } else {
+                // First non-option arg is the benchmark pattern
+                if (pattern == null) {
+                    pattern = arg
+                }
+                i += 1
+            }
+        }
+
+        // Add pattern first if provided
+        if (pattern != null) {
+            jmhArgs.add(pattern)
+        }
+
+        // Add options
+        jmhArgs.addAll(options)
+    }
+
+    // Add output format options after user args
+    jmhArgs.addAll(['-rf', 'json', '-rff', 'build/reports/jmh/results.json'])
+
+    args = jmhArgs
+
+    // Create output directory
+    doFirst {
+        if (!outputDir.exists()) {
+            outputDir.mkdirs()
+        }
+    }
+}
+
+// Run JMH benchmarks and generate comprehensive report
+tasks.register('benchmarkAndReport', JavaExec) {
+    description = 'Run JMH benchmarks, generate HTML report, and print console summary'
+    group = 'benchmark'
+
+    dependsOn 'jmh'
+
+    // Configure classpath at task configuration time (not in doLast)
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.datadoghq.reggie.benchmark.reporting.BenchmarkReport'
+
+    // Configure baseline file path
+    def baselineFilePath = file('build/reports/jmh/baseline.json')
+
+    // Configure args at configuration time, checking for baseline
+    args = [
+        'build/reports/jmh/results.json',
+        'build/reports/benchmark-report.html',
+        '--console-summary'
+    ]
+
+    // Add baseline comparison if baseline file exists (evaluated at execution time)
+    doFirst {
+        if (baselineFilePath.exists()) {
+            args '--baseline', baselineFilePath.path
+        }
+    }
+
+    doLast {
+        println "\n✅ Benchmark report generated: build/reports/benchmark-report.html"
+    }
+}
+
+// Save current benchmark results as baseline for future comparisons
+tasks.register('saveBaseline', Copy) {
+    description = 'Save current benchmark results as baseline for future comparisons'
+    group = 'benchmark'
+
+    from 'build/reports/jmh/results.json'
+    into 'build/reports/jmh'
+    rename { 'baseline.json' }
+
+    doLast {
+        println "✅ Baseline saved: build/reports/jmh/baseline.json"
+        println "Future benchmark runs will automatically compare against this baseline"
+    }
+}
+
+// Custom task to download test corpora
+tasks.register('downloadCorpora', JavaExec) {
+    description = 'Download large test corpora for benchmarking'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.datadoghq.reggie.benchmark.corpus.CorpusManager'
+    args = ['download']
+}
+
+// Custom task to generate HTML benchmark report
+tasks.register('benchmarkReport', JavaExec) {
+    description = 'Generate HTML benchmark report from JMH results'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.datadoghq.reggie.benchmark.reporting.BenchmarkReport'
+    args = [
+        'build/reports/jmh/results.json',
+        'build/reports/benchmark-report.html'
+    ]
+}
+
+// Generate report with console summary from existing results
+tasks.register('generateReportWithSummary', JavaExec) {
+    description = 'Generate HTML report and console summary from existing JMH results'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.datadoghq.reggie.benchmark.reporting.BenchmarkReport'
+
+    def reportArgs = [
+        'build/reports/jmh/results.json',
+        'build/reports/benchmark-report.html',
+        '--console-summary'
+    ]
+
+    // Add baseline comparison if baseline file exists
+    def baselineFile = file('build/reports/jmh/baseline.json')
+    if (baselineFile.exists()) {
+        reportArgs.addAll(['--baseline', baselineFile.path])
+    }
+
+    args = reportArgs
+}

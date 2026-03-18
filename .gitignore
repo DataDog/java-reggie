@@ -1,0 +1,70 @@
+# Gradle
+.gradle/
+build/
+bin/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+*.backup*
+*.bak
+*.old
+*.orig
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+hs_err_pid*
+
+# Logs
+*.log
+
+# Testing
+.jqwik-database
+
+# Generated sources
+**/generated/
+
+# Downloads (corpus files, etc.)
+**/downloads/
+
+# Test data
+*.txt.gz
+**/testdata-cache/
+
+# Claude settings
+.claude/settings.local.json
+
+# Working documents (temporary, not for commit)
+doc/temp/
+
+# Secrets and credentials
+.env
+.env.*
+*.key
+*.pem
+*.p12
+credentials*
+
+# Security scan artifacts
+SECURITY-SCAN-SUMMARY.md
+
+# Benchmark results (not for commit)
+.jmh-runs/
+.jmh-baseline
+reggie-benchmark/com.datadoghq.reggie.benchmark*/
+.cachebro/

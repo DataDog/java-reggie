@@ -1,0 +1,52 @@
+name: RFC (Request for Comments)
+description: Propose a new feature or major change
+labels: ["type/feature", "rfc/discussion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template to propose significant features or changes that need discussion before implementation.
+        For simple feature suggestions, use the Feature Request template instead.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Brief description of the proposal
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this change needed? What problem does it solve?
+    validations:
+      required: true
+  - type: textarea
+    id: use-cases
+    attributes:
+      label: Use Cases
+      description: Concrete examples showing how this would be used
+      render: java
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed Design
+      description: How would you implement this? Which modules are affected?
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing Strategy
+      description: How will this be tested?
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other approaches did you consider?
+    validations:
+      required: false

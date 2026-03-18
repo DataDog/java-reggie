@@ -1,0 +1,18 @@
+{
+  "corpora": [
+    {
+      "name": "gutenberg_small",
+      "description": "Project Gutenberg - The Complete Works of William Shakespeare",
+      "url": "https://www.gutenberg.org/cache/epub/100/pg100.txt",
+      "size": 5638525,
+      "sha256": "4291cb282e90f6580fa683148f7c94a55276acb1757d725a2e84caf8c00cb9a5"
+    },
+    {
+      "name": "access_log",
+      "description": "Apache access log sample from Elastic examples",
+      "url": "https://raw.githubusercontent.com/elastic/examples/master/Common%20Data%20Formats/apache_logs/apache_logs",
+      "size": 2370789,
+      "sha256": "f15c31e905f86c7b4b6ab44aee74d0a2086dce89f010187d983edea7ef0364ef"
+    }
+  ]
+}

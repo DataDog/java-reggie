@@ -1,0 +1,40 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+dependencies {
+    // Access to Reggie runtime for pattern compilation (future)
+    implementation project(':reggie-runtime')
+    implementation project(':reggie-annotations')
+
+    // JSON parsing for test data
+    implementation 'com.google.code.gson:gson:2.13.2'
+
+    // JUnit for integration testing
+    testImplementation 'org.junit.jupiter:junit-jupiter:6.0.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed"
+        showStandardStreams = true
+    }
+}
+
+// Custom task to run correctness validation standalone
+tasks.register('validate', JavaExec) {
+    description = 'Run correctness validation tests'
+    mainClass = 'com.datadoghq.reggie.integration.validation.CorrectnessValidator'
+    classpath = sourceSets.main.runtimeClasspath
+}

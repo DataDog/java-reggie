@@ -1,0 +1,140 @@
+plugins {
+    id 'jacoco'
+    id 'com.diffplug.spotless' version '8.2.1'
+}
+
+repositories {
+    mavenCentral()
+}
+
+jacoco {
+    toolVersion = '0.8.11'
+}
+
+allprojects {
+    group = 'com.datadoghq'
+    version = '0.0.1-SNAPSHOT'
+}
+
+subprojects {
+    apply plugin: 'java'
+    apply plugin: 'jacoco'
+    apply plugin: 'com.diffplug.spotless'
+
+    repositories {
+        mavenCentral()
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    spotless {
+        java {
+            target 'src/**/*.java'
+
+            // Use Google Java Format
+            googleJavaFormat('1.35.0')
+
+            // Exclude generated sources
+            targetExclude 'build/generated/**'
+
+            // Check for Apache 2.0 license header
+            licenseHeaderFile rootProject.file('.github/license-header.txt')
+        }
+    }
+
+    jacoco {
+        toolVersion = '0.8.11'
+    }
+
+    tasks.named('test') {
+        finalizedBy jacocoTestReport
+    }
+
+    tasks.named('jacocoTestReport') {
+        dependsOn test
+        reports {
+            xml.required = true
+            html.required = true
+            csv.required = false
+        }
+    }
+
+    // Set artifact ID to match project name
+    // This ensures com.datadoghq:reggie-processor:0.0.1-SNAPSHOT, etc.
+    tasks.withType(Jar) {
+        archiveBaseName = project.name
+    }
+}
+
+// Aggregate coverage report for all modules (excluding benchmarks and test infrastructure)
+tasks.register('jacocoAggregateReport', JacocoReport) {
+    group = 'verification'
+    description = 'Generates aggregate JaCoCo coverage report'
+
+    dependsOn subprojects*.test
+
+    // Collect execution data from all subprojects except benchmark
+    subprojects.each { subproject ->
+        if (subproject.name != 'reggie-benchmark') {
+            subproject.plugins.withType(JavaPlugin) {
+                executionData subproject.tasks.withType(Test)
+                sourceSets subproject.sourceSets.main
+            }
+        }
+    }
+
+    // Exclude test data, corpus, and debug packages
+    classDirectories.setFrom(files(classDirectories.files.collect {
+        fileTree(dir: it, exclude: [
+            '**/testdata/**',
+            '**/corpus/**',
+            '**/debug/**'
+        ])
+    }))
+
+    reports {
+        xml.required = true
+        xml.outputLocation = layout.buildDirectory.file('reports/jacoco/aggregate/jacocoTestReport.xml')
+        html.required = true
+        html.outputLocation = layout.buildDirectory.dir('reports/jacoco/aggregate/html')
+    }
+}
+
+// Coverage verification with module-specific thresholds (excluding benchmarks and test infrastructure)
+tasks.register('jacocoVerify', JacocoCoverageVerification) {
+    group = 'verification'
+    description = 'Verifies code coverage meets minimum thresholds'
+
+    dependsOn subprojects*.test
+
+    violationRules {
+        rule {
+            limit {
+                minimum = 0.70  // 70% overall minimum
+            }
+        }
+    }
+
+    // Collect execution data from all subprojects except benchmark
+    subprojects.each { subproject ->
+        if (subproject.name != 'reggie-benchmark') {
+            subproject.plugins.withType(JavaPlugin) {
+                executionData subproject.tasks.withType(Test)
+                sourceSets subproject.sourceSets.main
+            }
+        }
+    }
+
+    // Exclude test data, corpus, and debug packages
+    classDirectories.setFrom(files(classDirectories.files.collect {
+        fileTree(dir: it, exclude: [
+            '**/testdata/**',
+            '**/corpus/**',
+            '**/debug/**'
+        ])
+    }))
+}

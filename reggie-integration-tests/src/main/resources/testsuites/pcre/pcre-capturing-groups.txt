@@ -1,0 +1,391 @@
+# Capturing Group Tests
+# Format: pattern;input;group1Value;group2Value;...
+# Position format: pattern;input;group1Start-group1End;group2Start-group2End;...
+
+(?i)\\b(foo)\\s+(\\w+);Food is on the foo table;foo;table
+\\A(abc|def)=(\\1){2,3}\\Z;abc=abcabc;abc;abc
+\\A(abc|def)=(\\1){2,3}\\Z;def=defdefdef;def;def
+((?s)b.)c(?!.);a\nb\nc\n;b\x0a
+((?s)b.)c(?!.);a\nb\nc\n;b\x0a
+^(a?)+b;b;
+^(a?)+b;ab;
+a(?:b|c|d){6,7}?(.);acdbcdbe;e
+(|ab)*?d;abd;ab
+(?i)(a+|b){0,};AB;B
+^(a){0,2};abc;a
+^(a){0,2};aab;a
+(a|)*\\d;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4;
+(a)\\1{8,};aaaaaaaaa;a
+(a)\\1{8,};aaaaaaaaaa;a
+^(a|)\\1+b;aab;a
+^(a|)\\1+b;aaaab;a
+^(a|)\\1+b;b;
+(another)?(\\1+)test;hello world test; # NO_MATCH
+^((a|b)+)*ax;aax;a;a
+a(b*);a;
+a(b*);ab;b
+a(b*);abbbb;bbbb
+^(?:a(b(c)))(?:d(e(f)))(?:h(i(j)))(?:k(l(m)))$;abcdefhijklm;bc;c;ef;f;ij;j;lm;m
+(?i)(a+|b){1,};AB;B
+^((a|bc)+)*ax;aax;a;a
+^(a|)\\1{2}b;aaab;a
+^(a|)\\1{2}b;b;
+(A)((?-2)B);XAABX;A;AB
+((.*))\\d+\\1;abc123abc;abc;abc
+((.*))\\d+\\1;abc123bc;bc;bc
+((.*))\\d+\\1;a123::a123;
+((.*))\\d+\\1;a123:b342::abcd;
+((.*))\\d+\\1;a123:b342::324e:abcd;
+((.*))\\d+\\1;a123:ddde:b342::324e:abcd;
+((.*))\\d+\\1;a123:ddde:b342::324e:dcba:abcd;
+((.*))\\d+\\1;a123:ddde:9999:b342::324e:dcba:abcd;;
+(?s)(.*X|^B);abcde\n1234Xyz;abcde\x0a1234X
+(?s)(.*X|^B);BarFoo;B
+(?s)(.*X|^B);abcde\nBar; # NO_MATCH
+(a|)*(?1)b;b;
+(a|)*(?1)b;ab;
+^(?=(a+?))\\1ab;aaab; # NO_MATCH
+^(?=(a+?))\\1ab;aaab; # NO_MATCH
+([a-c]*)\\1;abcabc;abc
+(foo)\\Kbar;foobar;foo
+([^ab]*)*;cccc;
+([^ab]*)*;abab;
+(?i)a([bc]+)(c*d);ABCD;BC;D
+a([bc]*)c*;abc;bc
+(.*)(\\d*);I have 2 numbers: 53147;I have 2 numbers: 53147;
+(?=(b))b|c;Ab;b
+a(?:b|c|d){5,6}?(.);acdbcdbe;b
+(?|(?'a'aaa)|(?'a'b))(?'a'cccc)\\k'a';aaaccccaaa;aaa;cccc
+(?|(?'a'aaa)|(?'a'b))(?'a'cccc)\\k'a';bccccb;b;cccc
+^(a){1,2};abc;a
+^(a){1,2};aab;a
+\\A(.)*\\Z;abc\ndef; # NO_MATCH
+(?i)(a+|b)+;AB;B
+^(b+|a){1,2}?c;bac;a
+^(b+|a){1,2}?c;bbac;a
+^(b+|a){1,2}?c;bbbac;a
+^(b+|a){1,2}?c;bbbbac;a
+^(b+|a){1,2}?c;bbbbbac;a
+(?i)(?:(?:(?:(?:(?:(?:(?:(?:(?:(a))))))))));A;A
+(?|(abc)|(xyz))(?1);abcabc;abc
+(?|(abc)|(xyz))(?1);xyzabc;xyz
+^(abc){1,2}zz;abczz;abc
+^(abc){1,2}zz;abcabczz;abc
+(a+|b)+;ab;b
+^(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)\\11*(\\3\\4)\\1(?#)2$;abcdefghijkcda2;a;b;c;d;e;f;g;h;i;j;k;cd
+( \\( )? [^()]+ (?(1) \\) ) ;(abcd); # NO_MATCH
+(.*X|^B);abcde\n1234Xyz;1234X
+(.*X|^B);BarFoo;B
+^X(?7)(a)(?|(b|(r)(s))|(q))(c)(d)(Y);XYabcdY;a;b;;;c;d;Y
+^(?:a(?:(?:))+)+;aaaa
+(a(?i)bc|BB)x;abcx;abc
+(?i)(a(?i)bc|BB)x;aBCx;aBC
+(a(?i)bc|BB)x;bbx;bb
+(?i)(a(?i)bc|BB)x;BBx;BB
+((?m)^b$);a\nb\nc\n;b
+^[\\da-f](\\.[\\da-f])*$;a.b.c.d;.d
+(?i)^[\\da-f](\\.[\\da-f])*$;A.B.C.D;.D
+(.*?)(\\d+);I have 2 numbers: 53147;I have ;2
+^[ab]{1,3}?(ab*?|b);aabbbbb;a
+(?i)(bc+d$|ef*g.|h?i(j|k));EFFGZ;EFFGZ;
+(?i)(bc+d$|ef*g.|h?i(j|k));IJ;IJ;J
+(?i)(bc+d$|ef*g.|h?i(j|k));REFFGZ;EFFGZ;
+(?=(a))?.;ab;a
+(?i)([^.]*)\\.([^:]*):[t ]+(.*);track1.title:TBlah blah blah;track1;title;Blah blah blah
+(abc)\\100;abc@;abc
+^(?=(?1))?[az]([abc])d;abd;b
+(?:(?!foo)...|^.{0,2})bar(.*);foobar crowbar etc; etc
+(?:(?!foo)...|^.{0,2})bar(.*);barrel;rel
+(?:(?!foo)...|^.{0,2})bar(.*);2barrel;rel
+"([^\\\\"]+|\\\\.)*";the \\"quick\\" brown fox; # NO_MATCH
+"([^\\\\"]+|\\\\.)*";\"the \\\"quick\\\" brown fox\"; brown fox
+(?1)(a(b)|(c));abc;c;;c
+(?1)(a(b)|(c));cab;ab;b
+(a(b)|(c))(?1);abc;ab;b
+a(?:b|c|d){6,7}(.);acdbcdbe;e
+^(a)\\1{2,3}(.);aaab;a;b
+^(a)\\1{2,3}(.);aaaab;a;b
+^(a)\\1{2,3}(.);aaaaab;a;a
+(.*X|^B);abcde\n1234Xyz;1234X
+(.*X|^B);BarFoo;B
+(.*X|^B);abcde\nBar; # NO_MATCH
+(.*X|^B);abcde\n1234Xyz;1234X
+(.*X|^B);BarFoo;B
+^(ba|b*){1,2}?bc;babc;ba
+^(ba|b*){1,2}?bc;bbabc;ba
+^(ba|b*){1,2}?bc;bababc;ba
+a(?:b|c|d){5,6}(.);acdbcdbe;e
+(?i)(?:(?-i)a)b;aB
+^(\\(+)?blah(?(1)(\\)))$;(blah);(;)
+(?i)a([bc]*)c*;ABC;BC
+^(a)(?1)+ab;aaaab;a
+([a]*?)*;a;
+([a]*?)*;aaaa;
+^((.)(?1)\\2|.?)$;a;a
+^((.)(?1)\\2|.?)$;aba;aba;a
+^((.)(?1)\\2|.?)$;abba;abba;a
+^((.)(?1)\\2|.?)$;abcba;abcba;a
+^((.)(?1)\\2|.?)$;ababa;ababa;a
+^((.)(?1)\\2|.?)$;abccba;abccba;a
+^((.)(?1)\\2|.?)$;abcdcba;abcdcba;a
+a([bc]+)(c*d);abcd;bc;d
+(*MARK:A)(*PRUNE:B)(C|X);C;C
+(.*)(\\d+);I have 2 numbers: 53147;I have 2 numbers: 5314;7
+(?|(aaa)|(b));xaaa;aaa
+(a+|b){1,};ab;b
+(a\\Kb);ab;ab
+a(?:b|c|d){2}(.);acdbcdbe;b
+((?s).)c(?!.);a\nb\nc\n;\x0a
+((?s).)c(?!.);a\nb\nc\n;\x0a
+^(a?)+b(?1)a;abaa;
+^(a?)+b(?1)a;aba;
+^(a?)+b(?1)a;baa;
+^(a?)+b(?1)a;ba;
+^(a.)\\g{-1}Z;aXaXZ;aX
+^(x(y|(?1){2})z);xyz;xyz;y
+^(x(y|(?1){2})z);xxyzxyzz;xxyzxyzz;xyzxyz
+^\\".*\\"\\s*(\;.*)?$;\\"abcd\\" \;;\; # PATTERN_ERROR
+^\\".*\\"\\s*(\;.*)?$;\\"\\" \; rhubarb;\; rhubarb # PATTERN_ERROR
+# Whitespace in quantifiers tests (PCRE allows whitespace in {n,m} even outside extended mode)
+(a){ 3 };aaa;a
+(b){ 2, };bb;b
+(c){ 2, };ccc;c
+([0-9]){ 1 , 3 };123;3
+(Z(())|A)*;ZABCDEFG;A;;
+(foo\\Kbar)baz;foobarbaz;foobar
+(?|(aaa)|(b))(?1);aaaaaa;aaa
+(?|(aaa)|(b))(?1);baaa;b
+(?|(aaa)|(b))(?1);bb; # NO_MATCH
+^(a){1,};abc;a
+^(a){1,};aab;a
+^(a){1,};aaa;a
+^(a){1,};aaaaaaaa;a
+^ (?(DEFINE) ( (?!(a)\\2b)..) )   ()(?1)  ;acb; # NO_MATCH
+^(\\()?blah(?(1)(\\)))$;(blah);(;)
+^(\\()?blah(?(1)(\\)))$;a; # NO_MATCH
+(?i)^(\\d+)\\s+IN\\s+SOA\\s+(\\S+)\\s+(\\S+)\\s*\\(\\s*$;1 IN SOA non-sp1 non-sp2(;1;non-sp1;non-sp2
+^(\\d+)\\s+IN\\s+SOA\\s+(\\S+)\\s+(\\S+)\\s*\\(\\s*$;Ax; # NO_MATCH
+^(a(?(1)\\1)){4}$;aaaaaaaaaa;aaaa
+^[ab]{1,3}(ab*?|b);aabbbbb;b
+^([^a])([^\\b])([^c]*)([^d]{3,4});baNOTccccd;b;a;NOT;cccc
+^([^a])([^\\b])([^c]*)([^d]{3,4});baNOTcccd;b;a;NOT;ccc
+^([^a])([^\\b])([^c]*)([^d]{3,4});baNOTccd;b;a;NO;Tcc
+^([^a])([^\\b])([^c]*)([^d]{3,4});bacccd;b;a;;ccc
+^([^!]+)!(.+)=apquxz\\.ixr\\.zzz\\.ac\\.uk$;abc!pqr=apquxz.ixr.zzz.ac.uk;abc;pqr
+([ab]*)*;a;
+([ab]*)*;b;
+([ab]*)*;ababab;
+([ab]*)*;aaaabcde;
+([ab]*)*;bbbb;
+^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$;aaaa;a;a;a;a
+^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$;aaaaa;a;aa;a;a
+^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$;aaaaaa;a;aa;a;aa
+^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$;aaaaaaa;a;aa;aaa;a
+^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$;aaaaaaaaaa;a;aa;aaa;aaaa
+^(.|(.)(?1)\\2)$;a;a
+^(.|(.)(?1)\\2)$;aba;aba;a
+^(.|(.)(?1)\\2)$;abcba;abcba;a
+^(.|(.)(?1)\\2)$;ababa;ababa;a
+^[ab]{1,3}?(ab*|b);aabbbbb;abbbbb
+(.*\\D)(\\d+)$;I have 2 numbers: 53147;I have 2 numbers: ;53147
+(a+|b){0,1};ab;a
+(?i)(a+|b)?;AB;A
+(cat(a(ract|tonic)|erpillar)) \\1()2(3);cataract cataract23;cataract;aract;ract;;3
+(cat(a(ract|tonic)|erpillar)) \\1()2(3);catatonic catatonic23;catatonic;atonic;tonic;;3
+^(?1)\\d{3}(a);a123a;a
+(?'abc'\\w+):\\k<abc>{2};a:aaxyz;a
+(?'abc'\\w+):\\k<abc>{2};ab:ababxyz;ab
+^(.|(.)(?1)?\\2)$;abcba;abcba;a
+^([ab](?i)[cd]|[ef]);ac;ac
+(?i)^([ab](?i)[cd]|[ef]);aC;aC
+(?i)^([ab](?i)[cd]|[ef]);bD;bD
+^([ab](?i)[cd]|[ef]);elephant;e
+(?i)^([ab](?i)[cd]|[ef]);Europe;E
+^([ab](?i)[cd]|[ef]);frog;f
+(?i)^([ab](?i)[cd]|[ef]);France;F
+^(?:((.)(?1)\\2|)|((.)(?3)\\4|.))$;1221;1221;1
+^(?:((.)(?1)\\2|)|((.)(?3)\\4|.))$;Satanoscillatemymetallicsonatas; # NO_MATCH
+^(?:((.)(?1)\\2|)|((.)(?3)\\4|.))$;AmanaplanacanalPanama; # NO_MATCH
+^(?:((.)(?1)\\2|)|((.)(?3)\\4|.))$;AblewasIereIsawElba; # NO_MATCH
+^(a){0,3};abc;a
+^(a){0,3};aab;a
+^(a|)\\1{2,3}b;aaab;a
+^(a|)\\1{2,3}b;aaaab;a
+^(a|)\\1{2,3}b;b;
+([a]*)*;a;
+([a]*)*;aaaaa;
+([ab]*?)*;a;
+([ab]*?)*;b;
+([ab]*?)*;abab;
+([ab]*?)*;baba;
+(a)|\\1;a;a
+(a)|\\1;ab;a
+^(.{3,6}!)+$;abc!defghi!;defghi!
+^(.{3,6}!)+$;abcdef!ghi!;ghi!
+^(.{3,6}!)+$;abc!def!ghi!jkl!;jkl!
+^(.{3,6}!)+$;ab!cd!;ab!cd!
+^(a|)\\1?b;ab;a
+^(a|)\\1?b;aab;a
+^(a|)\\1?b;b;
+^(a){1,1};abc;a
+^(a){1,1};aab;a
+^(?|(abc)|(def))(?1);abcabc;abc
+^(?|(abc)|(def))(?1);defabc;def
+^(?|(abc)|(def))(?1);a\\"aaaaa; # NO_MATCH
+^(?|(abc)|(def))(?1);b\\"aaaaa; # NO_MATCH
+(a (?x)b c)d e;a bcd e;a bc
+(a+|b){0,};ab;b
+a([bc]*)(c+d);abcd;b;cd
+foo(.*)bar;The food is under the bar in the barn.;d is under the bar in the 
+^X(?7)(a)(?|(b|(?|(r)|(t))(s))|(q))(c)(d)(Y);XYabcdY;a;b;;;c;d;Y
+(\\d+)(\\w);12345a;12345;a
+(.*)\\d+\\1;abc123abc;abc
+(.*)\\d+\\1;abc123bc;bc
+([^a]*)*;b;
+([^a]*)*;bbbb;
+([^a]*)*;aaa;
+(*MARK:A)(*SKIP:B)(C|X);C;C
+(abc|)+;abc;
+(abc|)+;abcabc;
+(abc|)+;abcabcabc;
+^(a){0,1};abc;a
+^(a){1,3};abc;a
+^(a){1,3};aab;a
+^(a){1,3};aaa;a
+\\A.*?(?:a|bc|d);ba
+([^.]*)\\.([^:]*):[T ]+(.*);track1.title:TBlah blah blah;track1;title;Blah blah blah
+(bc+d$|ef*g.|h?i(j|k));effgz;effgz;
+(bc+d$|ef*g.|h?i(j|k));ij;ij;j
+(bc+d$|ef*g.|h?i(j|k));reffgz;effgz;
+a(?:b|c|d){5,7}?(.);acdbcdbe;b
+^(?:a(?:(?:))*)*;aaaa
+a(?:b|c|d)+(.);acdbcdbe;e
+a(?:b|c|d)*(.);ace;e
+^(A(*THEN:A)B|C(*THEN:B)D);AB;AB
+^(A(*THEN:A)B|C(*THEN:B)D);CD;CD
+^(b+|a){1,2}c;bc;b
+^(b+|a){1,2}c;bbc;bb
+^(b+|a){1,2}c;bbbc;bbb
+^(b+|a){1,2}c;bac;a
+^(b+|a){1,2}c;bbac;a
+^(b+|a){1,2}c;aac;a
+^(b+|a){1,2}c;abbbbbbbbbbbc;bbbbbbbbbbb
+^(b+|a){1,2}c;bbbbbbbbbbbac;a
+^(a|)\\1*b;ab;a
+^(a|)\\1*b;aaaab;a
+^(a|)\\1*b;b;
+^(){3,5};abc;
+(.*)\\b(\\d+)$;I have 2 numbers: 53147;I have 2 numbers: ;53147
+(a(?i)b)c;abc;ab
+(?i)(a(?i)b)c;aBc;aB
+^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z);ab;ab
+(?i)^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z);aBd;aB
+^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z);xy;xy
+(?i)^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z);xY;xY
+^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z);zebra;z
+(?i)^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z);Zambesi;Z
+a(?:b|c|d){4,5}?(.);acdbcdbe;d
+([\\da-f:]+)$;0abc;0abc
+([\\da-f:]+)$;abc;abc
+([\\da-f:]+)$;fed;fed
+([\\da-f:]+)$;E; # NO_MATCH
+([\\da-f:]+)$;::;::
+([\\da-f:]+)$;5f03:12C0::932e;0::932e
+([\\da-f:]+)$;fed def;def
+(?i)([\\da-f:]+)$;Any old stuff;ff
+(?i)a([bc]*)(c+d);ABCD;B;CD
+(.*)\\d+\\1;abc123abc;abc
+(?'abc'\\w+):\\g{abc}{2};a:aaxyz;a
+(?'abc'\\w+):\\g{abc}{2};ab:ababxyz;ab
+(?i)(a+|b){0,1}?;AB;
+([^ab]*?)*;c;
+([^ab]*?)*;cccc;
+([^ab]*?)*;baba;
+^(?=(\\w+))\\1:;abcd:;abcd
+(*MARK:A)(*THEN:B)(C|X);C;C
+(foo)(\\Kbar|baz);foobar;foo;bar
+^([^()]|\\((?1)*\\))*$;a(b)c;c
+((?i)AB(?-i)C|D)E;abCE;abC
+((?i)AB(?-i)C|D)E;DE;D
+(?|(aaa)|(b))\\g{1};aaaaaa;aaa
+^.*\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$;.1.2.3;1;2;3
+^.*\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$;A.12.123.0;12;123;0
+^((.)(?1)\\2|.)$;a;a
+^((.)(?1)\\2|.)$;aba;aba;a
+^((.)(?1)\\2|.)$;aabaa;aabaa;a
+^((.)(?1)\\2|.)$;abcdcba;abcdcba;a
+^((.)(?1)\\2|.)$;pqaabaaqp;pqaabaaqp;p
+^((.)(?1)\\2|.)$;ablewasiereisawelba;ablewasiereisawelba;a
+()^b;a\nb\nc\n; # NO_MATCH
+()^b;a\nb\nc\n; # NO_MATCH
+((?i)blah)\\s+\\1;blah blah;blah
+(?i)((?i)blah)\\s+\\1;BLAH BLAH;BLAH
+(?i)((?i)blah)\\s+\\1;Blah Blah;Blah
+(?i)((?i)blah)\\s+\\1;blaH blaH;blaH
+^[a-zA-Z\\d][a-zA-Z\\d\\-]*(\\.[a-zA-Z\\d][a-zA-Z\\d\\-]*)*\\.$;ab-c.pq-r.;.pq-r
+^[a-zA-Z\\d][a-zA-Z\\d\\-]*(\\.[a-zA-Z\\d][a-zA-Z\\d\\-]*)*\\.$;sxk.zzz.ac.uk.;.uk
+^[a-zA-Z\\d][a-zA-Z\\d\\-]*(\\.[a-zA-Z\\d][a-zA-Z\\d\\-]*)*\\.$;x-.y-.;.y-
+(?|(abc)|(xyz))\\1;abcabc;abc
+(?|(abc)|(xyz))\\1;xyzxyz;xyz
+^>abc>([^()]|\\((?1)*\\))*<xyz<$;>abc>123<xyz<;3
+^>abc>([^()]|\\((?1)*\\))*<xyz<$;>abc>1(2)3<xyz<;3
+(?=(a))ab|(a)c;ac;;a
+a(?:b|c|d){4,5}(.);acdbcdbe;b
+([\\w:]+::)?(\\w+)$;abcd;;abcd
+([\\w:]+::)?(\\w+)$;xy:z:::abcd;xy:z:::;abcd
+(.*)(\\d+)$;I have 2 numbers: 53147;I have 2 numbers: 5314;7
+^(A(*PRUNE:A)B|C(*PRUNE:B)D);AB;AB
+^(A(*PRUNE:A)B|C(*PRUNE:B)D);CD;CD
+(AB)*\\1;ABABAB;AB
+(?|(?'a'aaa)|(?'a'b))\\k'a';aaaaaa;aaa
+^(cow|)\\1(bell);cowcowbell;cow;bell
+^(cow|)\\1(bell);bell;;bell
+(?i)([a-c]*)\\1;ABCABC;ABC
+^(A(*PRUNE:)B|C(*PRUNE:B)D);AB;AB
+^(A(*PRUNE:)B|C(*PRUNE:B)D);CD;CD
+(?i)(a)b(c);ABC;A;C
+^(\\d+|\\((?1)([+*-])(?1)\\)|-(?1))$;12;12
+^(\\d+|\\((?1)([+*-])(?1)\\)|-(?1))$;(((2+2)*-3)-7);(((2+2)*-3)-7);-
+^(\\d+|\\((?1)([+*-])(?1)\\)|-(?1))$;-12;-12
+^(b+?|a){1,2}?c;bac;a
+^(b+?|a){1,2}?c;bbac;a
+^(b+?|a){1,2}?c;bbbac;a
+^(b+?|a){1,2}?c;bbbbac;a
+(.*?)(\\d+)$;I have 2 numbers: 53147;I have 2 numbers: ;53147
+(\\.\\d\\d[1-9]?)\\d+;1.230003938;.23
+(\\.\\d\\d[1-9]?)\\d+;1.875000282;.875
+(\\.\\d\\d[1-9]?)\\d+;1.235;.23
+(a+|b)?;ab;a
+(?i)A(((((((((a)))))))))\\9B;AaaB;a;a;a;a;a;a;a;a;a
+^(?|(abc)|(def))\\1;abcabc;abc
+^(?|(abc)|(def))\\1;defdef;def
+a(?:b|c|d)+?(.);ace;e
+(a)b(c);abc;a;c
+\\n((?m)^b);a\nb\n;b
+(?i)(a+|b){0,1};AB;A
+(?i)((?x)x y z | a b c);XabcY;abc
+^\\*\\.[a-z]([a-z\\-\\d]*[a-z\\d]+)?(\\.[a-z]([a-z\\-\\d]*[a-z\\d]+)?)*$;*.b0-a;0-a
+^\\*\\.[a-z]([a-z\\-\\d]*[a-z\\d]+)?(\\.[a-z]([a-z\\-\\d]*[a-z\\d]+)?)*$;*.c3-b.c;3-b;.c
+^\\*\\.[a-z]([a-z\\-\\d]*[a-z\\d]+)?(\\.[a-z]([a-z\\-\\d]*[a-z\\d]+)?)*$;*.c-a.b-c;-a;.b-c;-c
+(?i)(ab)\\d\\1;Ab4ab;Ab
+(a b(?x)c d (?-x)e f);a bcde f;a bcde f
+^(a?)b(?1)a;abaa;a
+^(a?)b(?1)a;aba;a
+^(a?)b(?1)a;baa;
+^(a\\1?){4}$;aaaa;a
+(\\.\\d\\d((?=0)|\\d(?=\\d)));1.230003938;.23;
+(\\.\\d\\d((?=0)|\\d(?=\\d)));1.875000282;.875;5
+(abc)\\1000;abc@0;abc
+^(a){0,};abc;a
+^(a){0,};aab;a
+^(a){0,};aaa;a
+(.*X|^B);abcde\n1234Xyz;1234X
+(.*X|^B);BarFoo;B
+(?i)^From\\s+\\S+\\s+([a-zA-Z]{3}\\s+){2}\\d{1,2}\\s+\\d\\d:\\d\\d;From abcd  Mon Sep 01 12:33:02 1997;Sep 
+(?i)^From\\s+\\S+\\s+([a-zA-Z]{3}\\s+){2}\\d{1,2}\\s+\\d\\d:\\d\\d;From abcd  Mon Sep  1 12:33:02 1997;Sep  
+^(\\D*)(?=\\d)(?!123);ABC445;ABC
+a(?:b|c|d){5,7}(.);acdbcdbe;e
+([^a]*?)*;b;
+([^a]*?)*;bbbb;
+([^a]*?)*;aaa;
+(([a-c])b*?\\2){3};ababbbcbc;cbc;c

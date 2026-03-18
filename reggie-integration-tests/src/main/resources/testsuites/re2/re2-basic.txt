@@ -1,0 +1,142 @@
+# RE2 Test Suite - Based on actual RE2 test patterns
+# Format: pattern;input;should_match;features
+# Patterns extracted from RE2 project test suite
+
+# Basic literals
+abc;abc;true;literal
+abc;xbc;false;literal
+abc;axc;false;literal
+abc;xabcy;true;literal
+xyz;xyz;true;literal
+
+# Character classes
+[a-z];a;true;character_class
+[a-z];z;true;character_class
+[a-z];A;false;character_class
+[0-9];5;true;character_class
+[0-9];a;false;character_class
+[a-zA-Z];M;true;character_class
+[^a-z];A;true;negated_class
+[^a-z];a;false;negated_class
+[abc];b;true;character_class
+[abc];d;false;character_class
+
+# Quantifiers - Star
+a*;aaa;true;quantifier
+a*;;true;quantifier
+ab*c;ac;true;quantifier
+ab*c;abbc;true;quantifier
+
+# Quantifiers - Plus
+a+;aaa;true;quantifier
+a+;a;true;quantifier
+a+;;false;quantifier
+ab+c;abc;true;quantifier
+ab+c;ac;false;quantifier
+
+# Quantifiers - Question
+a?;a;true;quantifier
+a?;;true;quantifier
+ab?c;ac;true;quantifier
+ab?c;abc;true;quantifier
+ab?c;abbc;false;quantifier
+
+# Quantifiers - Range
+a{2};aa;true;quantifier
+a{2};a;false;quantifier
+a{2};aaa;true;quantifier
+a{2,4};aa;true;quantifier
+a{2,4};aaaa;true;quantifier
+a{2,4};aaaaa;true;quantifier
+a{2,};aa;true;quantifier
+a{2,};aaaaaa;true;quantifier
+
+# Alternation
+a|b;a;true;alternation
+a|b;b;true;alternation
+a|b;c;false;alternation
+cat|dog;cat;true;alternation
+cat|dog;dog;true;alternation
+
+# Groups and capturing
+(abc);abc;true;group
+(a)(b)(c);abc;true;group
+(abc)+;abcabc;true;group,quantifier
+(abc)+;ab;false;group,quantifier
+(a|b)c;ac;true;group,alternation
+(a|b)c;bc;true;group,alternation
+
+# Anchors - Start of line
+^abc;abc;true;anchor
+^abc;xabc;false;anchor
+^a;a;true;anchor
+
+# Anchors - End of line
+abc$;abc;true;anchor
+abc$;abcx;false;anchor
+a$;a;true;anchor
+
+# Anchors - Both
+^abc$;abc;true;anchor
+^abc$;abcx;false;anchor
+^abc$;xabc;false;anchor
+
+# Dot metacharacter
+a.c;abc;true;dot
+a.c;axc;true;dot
+a.c;ac;false;dot
+.+;abc;true;dot,quantifier
+.+;;false;dot,quantifier
+
+# Escape sequences - digits
+\d;0;true;escape
+\d;5;true;escape
+\d;a;false;escape
+\d+;123;true;escape,quantifier
+
+# Escape sequences - word chars
+\w;a;true;escape
+\w;Z;true;escape
+\w;_;true;escape
+\w;-;false;escape
+\w+;hello_world;true;escape,quantifier
+
+# Escape sequences - whitespace
+\s; ;true;escape
+\s;a;false;escape
+\s+;   ;true;escape,quantifier
+
+# Negated escape sequences
+\D;a;true;escape
+\D;0;false;escape
+\W;-;true;escape
+\W;a;false;escape
+\S;a;true;escape
+\S; ;false;escape
+
+# Complex real-world patterns from RE2 tests
+\d{3}-\d{3}-\d{4};555-123-4567;true;escape,quantifier,literal
+[a-z]+@[a-z]+\.[a-z]+;test@example.com;true;character_class,quantifier,literal
+https?://[^\s]+;https://example.com;true;alternation,quantifier,negated_class
+
+# Word boundaries
+\btest\b;test;true;word_boundary
+\btest\b;testing;false;word_boundary
+\btest\b;a test here;true;word_boundary
+
+# Non-capturing groups
+(?:abc)+;abcabc;true;group,quantifier
+(?:a|b)+;abab;true;group,alternation,quantifier
+
+# Greedy vs non-greedy (both should match, just different lengths)
+a.*b;aXXXb;true;quantifier,dot
+a.*?b;aXXXb;true;quantifier,dot
+
+# Character class shortcuts
+[\d]+;123;true;character_class,quantifier
+[\w]+;abc_123;true;character_class,quantifier
+[\s]+;   ;true;character_class,quantifier
+
+# Empty matches
+a*;b;true;quantifier
+a?;b;true;quantifier
