@@ -50,7 +50,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@603b797f8b14b413fe025cd935a91c16c4782713 # v3
+        uses: github/codeql-action/init@b1bff81932f5cdfc8695c7752dcee935dcd061c8 # v4.33.0
         with:
           languages: java
 
@@ -61,5 +61,5 @@ jobs:
         run: ./gradlew build -x test
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@603b797f8b14b413fe025cd935a91c16c4782713 # v3
+        uses: github/codeql-action/analyze@b1bff81932f5cdfc8695c7752dcee935dcd061c8 # v4.33.0
 
