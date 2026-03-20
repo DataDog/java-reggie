@@ -10,7 +10,6 @@ Welcome! We are glad you are interested in contributing to Reggie. This guide wi
   - [Signing Commits](#signing-commits)
   - [New Features](#new-features)
   - [Bug Fixes](#bug-fixes)
-  - [Signing the CLA](#signing-the-cla)
 - [Getting Started](#getting-started)
 - [Development Setup](#development-setup)
 - [Coding Guidelines](#coding-guidelines)
@@ -103,10 +102,6 @@ If you have identified an issue that is already labeled as `type/bug` that hasn'
 If you've found a new bug, report it using the **[Bug Report template](.github/ISSUE_TEMPLATE/bug_report.yml)** first.
 
 Once you have some code ready, open a PR using the **[PR template](.github/PULL_REQUEST_TEMPLATE.md)**, [linking it to the issue](https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue#manually-linking-a-pull-request-to-an-issue-using-the-pull-request-sidebar). Take into account that if the changes to fix the bug are not trivial, you need to follow the RFC process as well to discuss the options with the maintainers.
-
-### Signing the CLA
-
-This repository requires you to sign the [Datadog Contributor License Agreement](https://cla.datadoghq.com/). The first time you submit a PR, a bot will walk you through the automated process. On subsequent contributions you will not be prompted unless the content of the agreement has changed.
 
 ## Getting Started
 

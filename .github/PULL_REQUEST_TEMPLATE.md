@@ -23,7 +23,6 @@
 ### Checklist
 
 - [ ] I have read the [CONTRIBUTING.md](../CONTRIBUTING.md) guidelines
-- [ ] I have signed the [CLA](https://cla.datadoghq.com/)
 - [ ] All existing tests pass (`./gradlew build`)
 - [ ] I have added tests for my changes
 - [ ] I have updated documentation (if applicable)
