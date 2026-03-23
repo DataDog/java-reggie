@@ -4,7 +4,6 @@ Welcome! We are glad you are interested in contributing to Reggie. This guide wi
 
 ## Table of Contents
 
-- [Code of Conduct](#code-of-conduct)
 - [Contributing to Code](#contributing-to-code)
   - [Available Templates](#available-templates)
   - [Signing Commits](#signing-commits)
@@ -26,10 +25,6 @@ Welcome! We are glad you are interested in contributing to Reggie. This guide wi
 - [Communication](#communication)
 - [Recognition](#recognition)
 - [License](#license)
-
-## Code of Conduct
-
-This project adheres to the Datadog [Code of Conduct](https://www.datadoghq.com/code-of-conduct/). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainers.
 
 ## Contributing to Code
 
