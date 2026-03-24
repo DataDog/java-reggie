@@ -1,21 +1,50 @@
 plugins {
     id 'java-library'
+    id 'com.vanniktech.maven.publish'
 }
+
+description = 'Reggie - high-performance regex with compile-time and runtime pattern compilation'
 
 repositories {
     mavenCentral()
 }
 
 dependencies {
+    // Internal modules bundled into the published JAR; removed from POM via withXml below
     api project(':reggie-annotations')
     implementation project(':reggie-codegen')
 
-    // ASM for runtime bytecode generation
+    // ASM - real runtime dependency, kept in the published POM
     implementation 'org.ow2.asm:asm:9.9.1'
+    implementation 'org.ow2.asm:asm-commons:9.9.1'
     implementation 'org.ow2.asm:asm-util:9.9.1'
 
     testImplementation 'org.junit.jupiter:junit-jupiter:6.0.3'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Bundle all internal modules into the single published JAR.
+// reggie-processor is included so users can declare this artifact as both
+// 'implementation' and 'annotationProcessor' without a separate dependency.
+jar {
+    dependsOn ':reggie-processor:classes'
+    from project(':reggie-annotations').sourceSets.main.output
+    from project(':reggie-codegen').sourceSets.main.output
+    from project(':reggie-processor').sourceSets.main.output
+}
+
+// Strip bundled internal module coordinates from the published POM so that
+// consumers only see the real external dependencies (ASM).
+mavenPublishing {
+    pom {
+        withXml {
+            def deps = asNode().dependencies[0]
+            if (deps) {
+                deps.dependency.findAll { it.groupId.text() == 'com.datadoghq' }
+                        .each { deps.remove(it) }
+            }
+        }
+    }
 }
 
 java {

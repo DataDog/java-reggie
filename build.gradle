@@ -1,7 +1,10 @@
 plugins {
     id 'jacoco'
     id 'com.diffplug.spotless' version '8.4.0'
+    id 'com.vanniktech.maven.publish' version '0.35.0' apply false
 }
+
+project.version = "0.0.1-SNAPSHOT"
 
 repositories {
     mavenCentral()
@@ -13,7 +16,41 @@ jacoco {
 
 allprojects {
     group = 'com.datadoghq'
-    version = '0.0.1-SNAPSHOT'
+    version = rootProject.version
+}
+
+// Configure Maven Central publishing for all publishable subprojects
+subprojects {
+    plugins.withId('com.vanniktech.maven.publish') {
+        mavenPublishing {
+            publishToMavenCentral()
+            signAllPublications()
+
+            pom {
+                name = project.name
+                description = project.description ?: "Part of the Reggie project"
+                url = 'https://github.com/DataDog/java-reggie'
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'DataDog'
+                        name = 'Datadog'
+                        email = 'oss@datadoghq.com'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:git://github.com/DataDog/java-reggie.git'
+                    developerConnection = 'scm:git:ssh://github.com/DataDog/java-reggie.git'
+                    url = 'https://github.com/DataDog/java-reggie'
+                }
+            }
+        }
+    }
 }
 
 subprojects {
