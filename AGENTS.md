@@ -575,6 +575,35 @@ Keep runtime dependencies minimal.
   - New code should maintain or improve coverage
   - Target: 70-75% line coverage overall
 
+## Publishing & Releasing
+
+### Published Artifacts
+`com.datadoghq:reggie-runtime` — all-in-one artifact bundling annotations, codegen, processor, and runtime.
+(Not published: `reggie-annotations`, `reggie-codegen`, `reggie-processor`, `reggie-benchmark`, `reggie-integration-tests`)
+
+### Release Commands
+```bash
+# 1. Add CHANGELOG entry, then:
+./scripts/release.sh minor        # major|minor|patch — bumps, verifies, tags
+git push origin main <tag>        # triggers release workflow → Maven Central
+
+# 2. After workflow completes:
+./scripts/post-release.sh minor   # bump to next SNAPSHOT
+git push origin main
+```
+
+### Local Publish (test)
+```bash
+./gradlew publishToMavenLocal     # publishes all modules to ~/.m2
+```
+
+### Required GitHub Secrets
+`ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME`, `ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD`,
+`ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY`, `ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYID`,
+`ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYPASSWORD`
+
+See `doc/RELEASING.md` for full setup instructions.
+
 ## Getting Started
 
 ### First Time Setup
@@ -621,7 +650,10 @@ cd reggie
 ### Helper Scripts
 - `scripts/debug-helper.sh`: Quick access to common tasks
 - `scripts/security-scan.sh`: Security scanning
+- `scripts/release.sh`: Cut a release (version bump, tag)
+- `scripts/post-release.sh`: Bump to next SNAPSHOT after release
 - `.github/workflows/security.yml`: CI security checks
+- `.github/workflows/release.yml`: Automated Maven Central publishing
 
 ## Project Status
 
