@@ -16,6 +16,8 @@ updates:
           - "patch"
 
   # GitHub Actions
+    cooldown:
+      default-days: 2
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -24,3 +26,5 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    cooldown:
+      default-days: 2
