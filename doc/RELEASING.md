@@ -4,8 +4,7 @@
 
 Before releasing, ensure:
 1. All changes are merged to `main`
-2. `CHANGELOG.md` has an entry for the new version
-3. The following GitHub secrets are configured:
+2. The following GitHub secrets are configured:
    - `ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME` - Sonatype Central Portal token username
    - `ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD` - Sonatype Central Portal token password
    - `ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY` - GPG private key (armored)
@@ -22,50 +21,73 @@ The following artifact is published to Maven Central under `com.datadoghq`:
 
 Not published: `reggie-annotations`, `reggie-codegen`, `reggie-processor`, `reggie-benchmark`, `reggie-integration-tests`.
 
-## Release Steps
+## Release Types
 
-### 1. Update CHANGELOG.md
+| Type | Branch | When |
+|---|---|---|
+| `major` / `minor` | `main` | Normal feature/breaking releases |
+| `patch` | `release/X.Y._` | Hotfixes cherry-picked onto a maintenance branch |
 
-Add an entry for the new version:
+---
 
-```markdown
-## [0.1.0] - 2026-04-01
+## Major / Minor Release
 
-### Added
-- Feature X
-```
-
-### 2. Run the release script
+### 1. Run the release script
 
 ```bash
-./scripts/release.sh minor   # or: major | patch
+./scripts/release.sh minor             # dry-run: shows what would happen
+./scripts/release.sh minor --no-dry-run  # actually performs the release
 ```
 
-The script computes the new version by bumping the current SNAPSHOT version:
-- `patch`: `0.1.0-SNAPSHOT` → releases `0.1.1`
-- `minor`: `0.1.0-SNAPSHOT` → releases `0.2.0`
-- `major`: `0.1.0-SNAPSHOT` → releases `1.0.0`
+The script:
+- Computes the new version by bumping the current SNAPSHOT:
+  - `minor`: `0.1.0-SNAPSHOT` → `0.2.0`
+  - `major`: `0.1.0-SNAPSHOT` → `1.0.0`
+- Collects merged PRs since the last tag and generates a `CHANGELOG.md` entry. PRs labelled **`no release notes`** are excluded.
+- Runs `spotlessApply` + `build`
+- Creates a release commit + annotated tag
+- Creates and pushes the `release/X.Y._` maintenance branch
+- Pushes `main` and the tag — this triggers the release workflow
 
-It also validates the CHANGELOG entry, runs `spotlessApply` + `build`, and creates an annotated tag.
+The release workflow verifies the tag, publishes to Maven Central, and creates a GitHub Release.
 
-### 3. Push tag to trigger the workflow
-
-```bash
-git push origin main v0.2.0   # use the tag printed by release.sh
-```
-
-The GitHub Actions release workflow will:
-1. Verify the version in `build.gradle` matches the tag
-2. Publish `reggie-runtime` to Maven Central (signed)
-3. Create a GitHub Release with changelog notes
-
-### 4. Bump to next SNAPSHOT
-
-After the workflow completes:
+### 2. Bump to next SNAPSHOT
 
 ```bash
-./scripts/post-release.sh minor   # or: major | patch
+./scripts/post-release.sh minor
 git push origin main
+```
+
+---
+
+## Patch Release
+
+### 1. Cherry-pick fixes onto the maintenance branch
+
+```bash
+./scripts/backport-pr.sh 0.2._ 123   # cherry-picks PR #123 onto release/0.2._
+```
+
+This creates a `$USER/backport-pr-123` branch, opens a PR against `release/0.2._`, and comments on the original PR for traceability. Repeat for each fix to include.
+
+### 2. Run the release script from the maintenance branch
+
+```bash
+git checkout release/0.2._
+git pull
+./scripts/release.sh patch             # dry-run first
+./scripts/release.sh patch --no-dry-run
+```
+
+The script collects the merged backport PRs on this branch (resolving their original PR references from the `🍒` title format) and generates the CHANGELOG entry.
+
+The script pushes the release branch and tag automatically, triggering the release workflow.
+
+### 3. Bump to next SNAPSHOT on the maintenance branch
+
+```bash
+./scripts/post-release.sh patch
+git push origin release/0.2._
 ```
 
 ## One-time Setup: GPG Key
