@@ -13,7 +13,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   prepare:
@@ -24,13 +23,21 @@ jobs:
     steps:
       - name: Extract version
         id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
             TAG="v${VERSION}"
           else
-            TAG="${{ github.ref_name }}"
+            TAG="$REF_NAME"
             VERSION="${TAG#v}"
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Invalid version format: $VERSION"
+            exit 1
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
@@ -59,10 +66,12 @@ jobs:
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
 
       - name: Verify version matches tag
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           PROJECT_VERSION=$(grep '^project.version' build.gradle | cut -d'"' -f2)
-          if [ "$PROJECT_VERSION" != "${{ needs.prepare.outputs.version }}" ]; then
-            echo "ERROR: build.gradle version ($PROJECT_VERSION) != tag version (${{ needs.prepare.outputs.version }})"
+          if [ "$PROJECT_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "ERROR: build.gradle version ($PROJECT_VERSION) != tag version ($EXPECTED_VERSION)"
             exit 1
           fi
 
@@ -82,8 +91,9 @@ jobs:
 
       - name: Extract changelog for this version
         id: changelog
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
           awk "/## \[$VERSION\]/,/## \[/{if(/## \[/ && !/## \[$VERSION\]/)exit;print}" CHANGELOG.md > /tmp/release-notes.md
           if [ ! -s /tmp/release-notes.md ]; then
             echo "Release $VERSION" > /tmp/release-notes.md
@@ -92,9 +102,9 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.version_tag }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          TAG="${{ needs.prepare.outputs.version_tag }}"
           gh release create "$TAG" \
             --title "Release $VERSION" \
             --notes-file /tmp/release-notes.md

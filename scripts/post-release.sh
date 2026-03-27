@@ -44,7 +44,9 @@ rm -f "$ROOT/build.gradle.bak"
 
 # Add [Unreleased] section to CHANGELOG if missing
 CHANGELOG="$ROOT/CHANGELOG.md"
-if ! grep -q "## \[Unreleased\]" "$CHANGELOG"; then
+if [ ! -f "$CHANGELOG" ]; then
+    printf '# Changelog\n\n## [Unreleased]\n' > "$CHANGELOG"
+elif ! grep -q "## \[Unreleased\]" "$CHANGELOG"; then
     sed -i.bak "2s|^|\n## [Unreleased]\n|" "$CHANGELOG"
     rm -f "$CHANGELOG.bak"
 fi

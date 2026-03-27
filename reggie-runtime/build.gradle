@@ -31,6 +31,7 @@ jar {
     from project(':reggie-annotations').sourceSets.main.output
     from project(':reggie-codegen').sourceSets.main.output
     from project(':reggie-processor').sourceSets.main.output
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
 // Strip bundled internal module coordinates from the published POM so that
