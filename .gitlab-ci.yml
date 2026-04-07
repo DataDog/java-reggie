@@ -1,0 +1,71 @@
+stages:
+  - build
+  - publish
+  - generate-signing-key
+
+variables:
+  REGISTRY: 486234852809.dkr.ecr.us-east-1.amazonaws.com
+  # Reuse a dd-trace-java builder image — provides Java 21, Gradle wrapper support, and AWS CLI.
+  # Pin to a specific digest via the images mirror when a dedicated image is available.
+  BUILDER_IMAGE: "registry.ddbuild.io/images/mirror/dd-trace-java-docker-build:ci-base"
+  # Route external Maven/Gradle plugin resolution through Datadog's internal proxy.
+  MAVEN_REPO_PROXY: "https://depot-read-api-java.us1.ddbuild.io/magicmirror/magicmirror/@current/"
+  GRADLE_PLUGIN_PROXY: "https://depot-read-api-java.us1.ddbuild.io/magicmirror/magicmirror/@current/"
+  VAULT_ADDR: "https://vault.us1.ddbuild.io"
+
+default:
+  tags: ["arch:aarch64"]
+
+.gradle_job:
+  image: $BUILDER_IMAGE
+  before_script:
+    - export ORG_GRADLE_PROJECT_mavenRepositoryProxy=$MAVEN_REPO_PROXY
+    - export ORG_GRADLE_PROJECT_gradlePluginProxy=$GRADLE_PLUGIN_PROXY
+    - export GRADLE_ARGS="--no-daemon --stacktrace --parallel"
+
+build:
+  extends: .gradle_job
+  stage: build
+  script:
+    - ./gradlew build -x :reggie-integration-tests:test $GRADLE_ARGS
+  artifacts:
+    when: always
+    reports:
+      junit: "**/build/test-results/**/*.xml"
+
+publish_to_maven_central:
+  extends: .gradle_job
+  stage: publish
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+      when: on_success
+    - when: manual
+      allow_failure: true
+  # Maven Central credentials: written via scripts/update-maven-central-secrets.sh
+  # GPG signing key: created via the create_key job below
+  # Both are stored in Vault and read automatically by the CI runner.
+  script:
+    - export ORG_GRADLE_PROJECT_mavenCentralUsername=$(vault kv get -field=username kv/k8s/gitlab-runner/java-reggie/maven-central)
+    - export ORG_GRADLE_PROJECT_mavenCentralPassword=$(vault kv get -field=password kv/k8s/gitlab-runner/java-reggie/maven-central)
+    - export ORG_GRADLE_PROJECT_signingInMemoryKey=$(vault kv get -field=gpg_private_key kv/k8s/gitlab-runner/java-reggie/signing)
+    - export ORG_GRADLE_PROJECT_signingInMemoryKeyId=$(vault kv get -field=gpg_key_id kv/k8s/gitlab-runner/java-reggie/signing)
+    - export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=$(vault kv get -field=gpg_passphrase kv/k8s/gitlab-runner/java-reggie/signing)
+    - ./gradlew :reggie-runtime:publishAllPublicationsToMavenCentralRepository $GRADLE_ARGS
+
+# Run once manually to generate the GPG signing key and store it in AWS SSM
+# under ci.java-reggie.signing.*. The public key is exported as a job artifact
+# and uploaded to the public keyserver if EXPORT_TO_KEYSERVER=true.
+create_key:
+  stage: generate-signing-key
+  when: manual
+  needs: []
+  variables:
+    PROJECT_NAME: "java-reggie"
+    EXPORT_TO_KEYSERVER: "true"
+  image: $REGISTRY/ci/agent-key-management-tools/gpg:1
+  script:
+    - /create.sh
+  artifacts:
+    expire_in: 13 months
+    paths:
+      - pubkeys

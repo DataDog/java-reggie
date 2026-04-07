@@ -42,47 +42,8 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-  publish-maven:
-    needs: prepare
-    runs-on: ubuntu-latest
-    env:
-      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME }}
-      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD }}
-      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY }}
-      ORG_GRADLE_PROJECT_signingInMemoryKeyId: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYID }}
-      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYPASSWORD }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ needs.prepare.outputs.version_tag }}
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-
-      - name: Verify version matches tag
-        env:
-          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          PROJECT_VERSION=$(grep '^project.version' build.gradle | cut -d'"' -f2)
-          if [ "$PROJECT_VERSION" != "$EXPECTED_VERSION" ]; then
-            echo "ERROR: build.gradle version ($PROJECT_VERSION) != tag version ($EXPECTED_VERSION)"
-            exit 1
-          fi
-
-      - name: Publish to Maven Central
-        run: |
-          ./gradlew \
-            :reggie-runtime:publishAllPublicationsToMavenCentralRepository \
-            --no-daemon --stacktrace
-
   create-release:
-    needs: [prepare, publish-maven]
+    needs: [prepare]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

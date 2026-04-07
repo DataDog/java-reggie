@@ -4,12 +4,12 @@
 
 Before releasing, ensure:
 1. All changes are merged to `main`
-2. The following GitHub secrets are configured:
-   - `ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME` - Sonatype Central Portal token username
-   - `ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD` - Sonatype Central Portal token password
-   - `ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY` - GPG private key (armored)
-   - `ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYID` - GPG key ID (8 hex chars)
-   - `ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYPASSWORD` - GPG key passphrase
+2. The following AWS SSM parameters are populated (one-time infra setup):
+   - `ci.java-reggie.central_username` — Sonatype Central Portal token username
+   - `ci.java-reggie.central_password` — Sonatype Central Portal token password
+   - `ci.java-reggie.signing.gpg_private_key` — armored GPG private key
+   - `ci.java-reggie.signing.gpg_key_id` — 8-char GPG key ID
+   - `ci.java-reggie.signing.gpg_passphrase` — GPG key passphrase
 
 ## Published Artifacts
 
@@ -49,7 +49,9 @@ The script:
 - Creates and pushes the `release/X.Y._` maintenance branch
 - Pushes `main` and the tag — this triggers the release workflow
 
-The release workflow verifies the tag, publishes to Maven Central, and creates a GitHub Release.
+Pushing the tag triggers two pipelines:
+- **GitLab CI** (`publish_to_maven_central` job) — publishes to Maven Central using credentials from AWS SSM
+- **GitHub Actions** (`create-release` job) — creates a GitHub Release with the changelog excerpt
 
 ### 2. Bump to next SNAPSHOT
 
@@ -88,50 +90,6 @@ The script pushes the release branch and tag automatically, triggering the relea
 ```bash
 ./scripts/post-release.sh patch
 git push origin release/0.2._
-```
-
-## One-time Setup: GPG Key
-
-```bash
-# Create key (if needed)
-gpg --gen-key
-
-# List keys
-gpg --list-secret-keys --keyid-format=long
-
-# Export private key
-gpg --export-secret-keys --armor <KEY_ID> > private-key.asc
-
-# Upload public key to keyserver
-gpg --keyserver keyserver.ubuntu.com --send-keys <KEY_ID>
-
-# Add secrets to GitHub
-gh secret set ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME
-gh secret set ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD
-gh secret set ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY < private-key.asc
-gh secret set ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYID   # last 8 hex chars of KEY_ID
-gh secret set ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYPASSWORD
-```
-
-## One-time Setup: Sonatype Central Portal
-
-1. Create account at https://central.sonatype.com
-2. Go to **Account** → **Generate User Token**
-3. Use the token username/password as the `MAVENCENTRALUSERNAME` / `MAVENCENTRALPASSWORD` secrets
-4. Register your `com.datadoghq` namespace (requires DNS or GitHub org verification)
-
-## Manual Publish (emergency)
-
-```bash
-export ORG_GRADLE_PROJECT_mavenCentralUsername=<token-user>
-export ORG_GRADLE_PROJECT_mavenCentralPassword=<token-pass>
-export ORG_GRADLE_PROJECT_signingInMemoryKey="$(cat private-key.asc)"
-export ORG_GRADLE_PROJECT_signingInMemoryKeyId=<8-char-key-id>
-export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=<passphrase>
-
-./gradlew \
-  :reggie-runtime:publishAllPublicationsToMavenCentralRepository \
-  --no-daemon
 ```
 
 ## Version Numbering
