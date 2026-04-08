@@ -19,6 +19,8 @@ default:
 .gradle_job:
   image: $BUILDER_IMAGE
   before_script:
+    - export JAVA_HOME=$JAVA_21_HOME
+    - export PATH=$JAVA_HOME/bin:$PATH
     - export ORG_GRADLE_PROJECT_mavenRepositoryProxy=$MAVEN_REPO_PROXY
     - export ORG_GRADLE_PROJECT_gradlePluginProxy=$GRADLE_PLUGIN_PROXY
     - export GRADLE_ARGS="--no-daemon --stacktrace --parallel"
