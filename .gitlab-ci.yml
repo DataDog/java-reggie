@@ -14,7 +14,7 @@ variables:
   VAULT_ADDR: "https://vault.us1.ddbuild.io"
 
 default:
-  tags: ["arch:arm64"]
+  tags: ["arch:amd64"]
 
 .gradle_job:
   image: $BUILDER_IMAGE
