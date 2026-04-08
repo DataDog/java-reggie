@@ -60,12 +60,12 @@ publish_snapshot:
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: on_success
   script:
-    - export ORG_GRADLE_PROJECT_mavenCentralUsername=$(vault kv get -field=username kv/k8s/gitlab-runner/java-reggie/maven-central)
-    - export ORG_GRADLE_PROJECT_mavenCentralPassword=$(vault kv get -field=password kv/k8s/gitlab-runner/java-reggie/maven-central)
+    - export SONATYPE_USERNAME=$(vault kv get -field=username kv/k8s/gitlab-runner/java-reggie/maven-central)
+    - export SONATYPE_PASSWORD=$(vault kv get -field=password kv/k8s/gitlab-runner/java-reggie/maven-central)
     - export ORG_GRADLE_PROJECT_signingInMemoryKey=$(vault kv get -field=gpg_private_key kv/k8s/gitlab-runner/java-reggie/signing)
     - export ORG_GRADLE_PROJECT_signingInMemoryKeyId=$(vault kv get -field=gpg_key_id kv/k8s/gitlab-runner/java-reggie/signing)
     - export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=$(vault kv get -field=gpg_passphrase kv/k8s/gitlab-runner/java-reggie/signing)
-    - ./gradlew :reggie-runtime:publishAllPublicationsToSonatypeSnapshotsRepository $GRADLE_ARGS
+    - ./gradlew :reggie-runtime:publishToSonatype $GRADLE_ARGS
 
 # Run once manually to generate the GPG signing key and store it in AWS SSM
 # under ci.java-reggie.signing.*. The public key is exported as a job artifact
