@@ -37,7 +37,9 @@ subprojects {
 
         mavenPublishing {
             publishToMavenCentral()
-            signAllPublications()
+            if (findProperty('signingInMemoryKeyId')) {
+                signAllPublications()
+            }
 
             pom {
                 name = project.name

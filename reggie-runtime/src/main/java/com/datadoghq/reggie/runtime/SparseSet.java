@@ -16,7 +16,7 @@
 package com.datadoghq.reggie.runtime;
 
 /**
- * Sparse set data structure with O(1) clear, add, and contains operations. Based on Briggs &
+ * Sparse set data structure with O(1) clear, add, and contains operations. Based on Briggs &amp;
  * Torczon algorithm.
  *
  * <p>Space: O(2N) for dense/sparse arrays Time: O(1) for all operations including clear
