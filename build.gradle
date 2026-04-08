@@ -22,6 +22,19 @@ allprojects {
 // Configure Maven Central publishing for all publishable subprojects
 subprojects {
     plugins.withId('com.vanniktech.maven.publish') {
+        publishing {
+            repositories {
+                maven {
+                    name = 'SonatypeSnapshots'
+                    url = 'https://oss.sonatype.org/content/repositories/snapshots/'
+                    credentials {
+                        username = findProperty('mavenCentralUsername') ?: ''
+                        password = findProperty('mavenCentralPassword') ?: ''
+                    }
+                }
+            }
+        }
+
         mavenPublishing {
             publishToMavenCentral()
             signAllPublications()
