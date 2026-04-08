@@ -8,9 +8,8 @@ variables:
   # Reuse a dd-trace-java builder image — provides Java 21, Gradle wrapper support, and AWS CLI.
   # Pin to a specific digest via the images mirror when a dedicated image is available.
   BUILDER_IMAGE: "registry.ddbuild.io/images/mirror/dd-trace-java-docker-build:ci-base"
-  # Route external Maven/Gradle plugin resolution through Datadog's internal proxy.
-  MAVEN_REPO_PROXY: "https://depot-read-api-java.us1.ddbuild.io/magicmirror/magicmirror/@current/"
-  GRADLE_PLUGIN_PROXY: "https://depot-read-api-java.us1.ddbuild.io/magicmirror/magicmirror/@current/"
+  # Route external Maven/Gradle resolution through Datadog's internal proxy.
+  MAVEN_REPOSITORY_PROXY: "https://depot-read-api-java.us1.ddbuild.io/magicmirror/magicmirror/@current/"
   VAULT_ADDR: "https://vault.us1.ddbuild.io"
 
 default:
@@ -21,8 +20,8 @@ default:
   before_script:
     - export JAVA_HOME=$JAVA_21_HOME
     - export PATH=$JAVA_HOME/bin:$PATH
-    - export ORG_GRADLE_PROJECT_mavenRepositoryProxy=$MAVEN_REPO_PROXY
-    - export ORG_GRADLE_PROJECT_gradlePluginProxy=$GRADLE_PLUGIN_PROXY
+    - export ORG_GRADLE_PROJECT_mavenRepositoryProxy=$MAVEN_REPOSITORY_PROXY
+    - export ORG_GRADLE_PROJECT_gradlePluginProxy=$MAVEN_REPOSITORY_PROXY
     - export GRADLE_ARGS="--no-daemon --stacktrace --parallel"
 
 build:
