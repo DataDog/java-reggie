@@ -100,6 +100,10 @@ subprojects {
         toolVersion = '0.8.11'
     }
 
+    tasks.withType(Javadoc).configureEach {
+        options.addStringOption('Xdoclint:none', '-quiet')
+    }
+
     tasks.named('test') {
         finalizedBy jacocoTestReport
     }
