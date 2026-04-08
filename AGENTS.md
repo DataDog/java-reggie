@@ -66,7 +66,7 @@ Reggie is a high-performance Java regex library with dual compilation modes (com
 - Build: Gradle 8.11+
 - Architecture: Thompson NFA → DFA → Specialized Bytecode
 - Performance: 7-389x faster than JDK Pattern
-- PCRE Conformance: 94.3% (364/386 tests)
+- PCRE Conformance: 91.3% (303/332 tests)
 - Modules: 6 (annotations, codegen, processor, runtime, benchmark, integration-tests)
 
 ## Architecture
@@ -85,7 +85,7 @@ Pattern String → RegexParser → AST → ThompsonBuilder → NFA → SubsetCon
 ### Module Structure
 - **reggie-annotations**: Single `@RegexPattern` annotation
 - **reggie-codegen**: Core compilation engine (shared by both modes)
-  - `ast/`: 8 AST node types
+  - `ast/`: 12 AST node types
   - `parsing/`: RegexParser (pattern → AST)
   - `automaton/`: ThompsonBuilder (NFA), SubsetConstructor (DFA)
   - `analysis/`: PatternAnalyzer (strategy selection)
@@ -254,8 +254,7 @@ open build/reports/jacoco/aggregate/html/index.html
 ### Test Locations
 - Unit tests: `src/test/java/` in each module (mirrored package structure)
 - Integration tests: `reggie-integration-tests/src/test/java/`
-  - `PCRETestSuite.java`: 386 PCRE tests (94.3% passing)
-  - `RE2TestSuite.java`: RE2 compatibility
+  - `CorrectnessTest.java`: PCRE and RE2 integration tests (91.3% PCRE passing)
 - Benchmarks: `reggie-benchmark/src/main/java/`
 
 ### Documentation
@@ -319,8 +318,8 @@ open build/reports/jacoco/aggregate/html/index.html
 6. Profile if needed: Use async-profiler
 
 ### Improving PCRE Conformance
-Current: 94.3% (364/386), Target: 95%+
-1. Run: `./gradlew :reggie-integration-tests:test --tests PCRETestSuite`
+Current: 91.3% (303/332), Target: 95%+
+1. Run: `./gradlew :reggie-integration-tests:test --tests CorrectnessTest`
 2. Analyze failures by category
 3. Implement fix (follow "Adding Feature" workflow)
 4. Update: `doc/plans/pcre-conformance-roadmap.md`
@@ -658,7 +657,7 @@ cd reggie
 ## Project Status
 
 - **Maturity**: Production-ready
-- **PCRE Conformance**: 94.3% (364/386)
+- **PCRE Conformance**: 91.3% (303/332)
 - **Performance**: 7-389x faster than JDK Pattern
 - **Test Coverage**:
   - Line Coverage: 73.0% (within 70-75% target) ✅

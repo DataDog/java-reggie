@@ -588,7 +588,7 @@ Returns an instance of the generated implementation class.
 
 ## Supported Features
 
-**PCRE Compatibility: 94.3%** (364/386 tests passing from PCRE test suite)
+**PCRE Compatibility: 91.3%** (303/332 tests passing from PCRE test suite)
 
 ### ✅ Fully Supported
 
@@ -871,7 +871,7 @@ Reggie is based on decades of regex engine research:
 
 - [PCRE (Perl Compatible Regular Expressions)](https://www.pcre.org/)
   - Industry-standard regex compatibility target
-  - Reggie achieves 94.3% compatibility (364/386 tests)
+  - Reggie achieves 91.3% compatibility (303/332 tests)
 
 ### Novel Contributions
 
@@ -881,7 +881,7 @@ Based on extensive research, Reggie's hybrid compile-time/runtime approach is **
 - Combines .NET's source generation concept with Java annotation processing
 - Unified codegen for both compile-time and runtime paths
 - Industry-proven hybrid DFA/NFA strategy
-- High PCRE compatibility (94.3%) with linear-time guarantees
+- High PCRE compatibility (91.3%) with linear-time guarantees
 
 ## Contributing
 

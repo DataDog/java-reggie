@@ -26,7 +26,7 @@ Runtime compilation means regex patterns are:
 3. **Lazy bytecode generation** - Only compiled when actually used
 4. **Hidden classes** - Uses Java 21+ hidden classes for efficient memory use
 
-**PCRE Compatibility**: Reggie achieves 94.3% PCRE compatibility (364/386 tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences.
+**PCRE Compatibility**: Reggie achieves 91.3% PCRE compatibility (303/332 tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences.
 
 ### Benefits
 

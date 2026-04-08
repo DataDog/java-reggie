@@ -25,7 +25,7 @@ Compile-time compilation means your regex patterns are:
 3. **Optimized aggressively** - JIT compiler can fully inline the generated code
 4. **Zero overhead** - No Pattern.compile() cost at runtime
 
-**PCRE Compatibility**: Reggie achieves 94.3% PCRE compatibility (364/386 tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences.
+**PCRE Compatibility**: Reggie achieves 91.3% PCRE compatibility (303/332 tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences.
 
 ### Benefits
 
