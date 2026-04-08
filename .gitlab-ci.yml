@@ -57,6 +57,7 @@ publish_to_maven_central:
 # and uploaded to the public keyserver if EXPORT_TO_KEYSERVER=true.
 create_key:
   stage: generate-signing-key
+  tags: []
   when: manual
   needs: []
   variables:
