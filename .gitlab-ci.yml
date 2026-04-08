@@ -4,7 +4,7 @@ stages:
   - generate-signing-key
 
 variables:
-  REGISTRY: 486234852809.dkr.ecr.us-east-1.amazonaws.com
+  REGISTRY: registry.ddbuild.io
   # Reuse a dd-trace-java builder image — provides Java 21, Gradle wrapper support, and AWS CLI.
   # Pin to a specific digest via the images mirror when a dedicated image is available.
   BUILDER_IMAGE: "registry.ddbuild.io/images/mirror/dd-trace-java-docker-build:ci-base"
