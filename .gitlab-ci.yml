@@ -78,7 +78,6 @@ create_key:
   variables:
     PROJECT_NAME: "java-reggie"
     EXPORT_TO_KEYSERVER: "true"
-    KUBERNETES_SERVICE_ACCOUNT_OVERWRITE: java-reggie
   image: $REGISTRY/ci/agent-key-management-tools/gpg:1
   script:
     - /create.sh
