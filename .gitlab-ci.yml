@@ -14,7 +14,7 @@ variables:
   VAULT_ADDR: "https://vault.us1.ddbuild.io"
 
 default:
-  tags: ["arch:aarch64"]
+  tags: ["arch:arm64"]
 
 .gradle_job:
   image: $BUILDER_IMAGE
@@ -57,7 +57,7 @@ publish_to_maven_central:
 # and uploaded to the public keyserver if EXPORT_TO_KEYSERVER=true.
 create_key:
   stage: generate-signing-key
-  tags: []
+  tags: ["arch:amd64"]
   when: manual
   needs: []
   variables:
