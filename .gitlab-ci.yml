@@ -10,7 +10,8 @@ variables:
   BUILDER_IMAGE: "registry.ddbuild.io/images/mirror/dd-trace-java-docker-build:ci-base"
   # Route external Maven/Gradle resolution through Datadog's internal proxy.
   MAVEN_REPOSITORY_PROXY: "https://depot-read-api-java.us1.ddbuild.io/magicmirror/magicmirror/@current/"
-  VAULT_ADDR: "https://vault.us1.ddbuild.io"
+  # NOTE: do NOT set VAULT_ADDR here. The CI runner injects it via Emissary.
+  # Overriding it bypasses Emissary and removes the Vault token, causing auth failures.
 
 default:
   tags: ["arch:amd64"]
@@ -67,8 +68,8 @@ publish_snapshot:
     - export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=$(vault kv get -field=gpg_passphrase kv/k8s/gitlab-runner/java-reggie/signing)
     - ./gradlew :reggie-runtime:publishToSonatype $GRADLE_ARGS
 
-# Run once manually to generate the GPG signing key and store it in AWS SSM
-# under ci.java-reggie.signing.*. The public key is exported as a job artifact
+# Run once manually to generate the GPG signing key and store it in Vault
+# at kv/k8s/gitlab-runner/java-reggie/signing. The public key is exported as a job artifact
 # and uploaded to the public keyserver if EXPORT_TO_KEYSERVER=true.
 create_key:
   stage: generate-signing-key
