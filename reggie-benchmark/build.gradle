@@ -22,7 +22,7 @@ dependencies {
     implementation 'com.google.re2j:re2j:1.8'
 
     // HTTP client for corpus downloads
-    implementation 'org.apache.httpcomponents.client5:httpclient5:5.6'
+    implementation 'org.apache.httpcomponents.client5:httpclient5:5.6.1'
     implementation 'com.google.code.gson:gson:2.13.2'
     runtimeOnly 'org.slf4j:slf4j-simple:2.0.17'
 }
