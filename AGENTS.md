@@ -577,7 +577,7 @@ Keep runtime dependencies minimal.
 ## Publishing & Releasing
 
 ### Published Artifacts
-`com.datadoghq:reggie-runtime` — all-in-one artifact bundling annotations, codegen, processor, and runtime.
+`com.datadoghq:reggie` — all-in-one artifact bundling annotations, codegen, processor, and runtime.
 (Not published: `reggie-annotations`, `reggie-codegen`, `reggie-processor`, `reggie-benchmark`, `reggie-integration-tests`)
 
 ### Release Commands
