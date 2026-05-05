@@ -1,7 +1,7 @@
 plugins {
     id 'jacoco'
     id 'com.diffplug.spotless' version '8.4.0'
-    id 'com.vanniktech.maven.publish' version '0.35.0' apply false
+    id 'com.vanniktech.maven.publish' version '0.36.0' apply false
     id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
 }
 
