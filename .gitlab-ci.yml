@@ -51,15 +51,15 @@ publish_to_maven_central:
   # GPG signing key: created via the create_key job below
   # Both are stored in AWS SSM and read via the java-reggie K8s service account IAM role.
   script:
-    - ORG_GRADLE_PROJECT_mavenCentralUsername=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_username --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for mavenCentralUsername"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_mavenCentralUsername=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_username --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for mavenCentralUsername"; exit 1; }'
     - export ORG_GRADLE_PROJECT_mavenCentralUsername
-    - ORG_GRADLE_PROJECT_mavenCentralPassword=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_password --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for mavenCentralPassword"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_mavenCentralPassword=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_password --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for mavenCentralPassword"; exit 1; }'
     - export ORG_GRADLE_PROJECT_mavenCentralPassword
-    - ORG_GRADLE_PROJECT_signingInMemoryKey=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_private_key --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKey"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_signingInMemoryKey=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_private_key --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKey"; exit 1; }'
     - export ORG_GRADLE_PROJECT_signingInMemoryKey
-    - ORG_GRADLE_PROJECT_signingInMemoryKeyId=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_key_id --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyId"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_signingInMemoryKeyId=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_key_id --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyId"; exit 1; }'
     - export ORG_GRADLE_PROJECT_signingInMemoryKeyId
-    - ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_passphrase --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyPassword"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_passphrase --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyPassword"; exit 1; }'
     - export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword
     - ./gradlew :reggie-runtime:publishAllPublicationsToMavenCentralRepository $GRADLE_ARGS
 
@@ -72,16 +72,16 @@ publish_snapshot:
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: on_success
   script:
-    - SONATYPE_USERNAME=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_username --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for username"; exit 1; }
-    - SONATYPE_PASSWORD=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_password --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for password"; exit 1; }
+    - 'SONATYPE_USERNAME=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_username --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for username"; exit 1; }'
+    - 'SONATYPE_PASSWORD=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.maven_central_password --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for password"; exit 1; }'
     - '[[ -n "$SONATYPE_USERNAME" ]] || { echo "ERROR: SONATYPE_USERNAME is empty"; exit 1; }'
     - '[[ -n "$SONATYPE_PASSWORD" ]] || { echo "ERROR: SONATYPE_PASSWORD is empty"; exit 1; }'
     - export SONATYPE_USERNAME SONATYPE_PASSWORD
-    - ORG_GRADLE_PROJECT_signingInMemoryKey=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_private_key --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKey"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_signingInMemoryKey=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_private_key --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKey"; exit 1; }'
     - export ORG_GRADLE_PROJECT_signingInMemoryKey
-    - ORG_GRADLE_PROJECT_signingInMemoryKeyId=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_key_id --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyId"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_signingInMemoryKeyId=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_key_id --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyId"; exit 1; }'
     - export ORG_GRADLE_PROJECT_signingInMemoryKeyId
-    - ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_passphrase --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyPassword"; exit 1; }
+    - 'ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=$(aws ssm get-parameter --region us-east-1 --name ci.java-reggie.signing.gpg_passphrase --with-decryption --query "Parameter.Value" --out text) || { echo "ERROR: SSM read failed for signingInMemoryKeyPassword"; exit 1; }'
     - export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword
     - ./gradlew :reggie-runtime:publishToSonatype $GRADLE_ARGS
 
