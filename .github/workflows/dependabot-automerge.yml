@@ -1,8 +1,9 @@
 name: Dependabot Auto-Merge
 
 on:
-  pull_request:
-    branches: [ main ]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 permissions:
   contents: write
@@ -10,12 +11,31 @@ permissions:
 
 jobs:
   automerge:
-    name: Enable auto-merge for Dependabot PRs
+    name: Auto-merge Dependabot PRs after CI passes
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
-      - name: Enable auto-merge
-        run: gh pr merge --auto --squash "$PR_URL"
+      - name: Find associated PR
+        id: find-pr
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          PR=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            -H "Accept: application/vnd.github+json" \
+            --jq '.[0] | {number: .number, actor: .user.login}')
+          NUMBER=$(echo "$PR" | jq -r '.number // empty')
+          ACTOR=$(echo "$PR" | jq -r '.actor // empty')
+          echo "pr_number=$NUMBER" >> "$GITHUB_OUTPUT"
+          echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
+
+      - name: Approve and merge if Dependabot PR
+        if: steps.find-pr.outputs.actor == 'dependabot[bot]' && steps.find-pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.find-pr.outputs.pr_number }}
+        run: |
+          gh pr review "$PR_NUMBER" --approve --repo "$REPO"
+          gh pr merge "$PR_NUMBER" --squash --repo "$REPO"
