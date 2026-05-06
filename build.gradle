@@ -12,7 +12,7 @@ repositories {
 }
 
 jacoco {
-    toolVersion = '0.8.11'
+    toolVersion = '0.8.14'
 }
 
 allprojects {
@@ -105,7 +105,7 @@ subprojects {
     }
 
     jacoco {
-        toolVersion = '0.8.11'
+        toolVersion = '0.8.14'
     }
 
     tasks.withType(Javadoc).configureEach {
