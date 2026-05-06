@@ -20,6 +20,7 @@ import static org.objectweb.asm.Opcodes.*;
 import com.datadoghq.reggie.codegen.analysis.BackreferencePatternInfo;
 import com.datadoghq.reggie.codegen.analysis.ConcatGreedyGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.ConcatQuantifiedGroupsInfo;
+import com.datadoghq.reggie.codegen.analysis.FallbackPatternDetector;
 import com.datadoghq.reggie.codegen.analysis.FixedRepetitionBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.GreedyBacktrackInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
@@ -160,6 +161,12 @@ public class RuntimeCompiler {
       // 3. Analyze and select strategy
       PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
+
+      // 3.5. Fall back to java.util.regex for patterns with known engine bugs
+      String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+      if (fallbackReason != null) {
+        return new JavaRegexFallbackMatcher(pattern, fallbackReason);
+      }
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {

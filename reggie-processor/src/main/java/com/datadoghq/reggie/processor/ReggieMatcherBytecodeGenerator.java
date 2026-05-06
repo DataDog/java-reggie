@@ -18,6 +18,7 @@ package com.datadoghq.reggie.processor;
 import static org.objectweb.asm.Opcodes.*;
 
 import com.datadoghq.reggie.codegen.analysis.BackreferencePatternInfo;
+import com.datadoghq.reggie.codegen.analysis.FallbackPatternDetector;
 import com.datadoghq.reggie.codegen.analysis.FixedRepetitionBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
 import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
@@ -52,12 +53,12 @@ import org.objectweb.asm.*;
  * Generates bytecode for ReggieMatcher subclasses using ASM. Uses DFA/NFA pipeline: Pattern → AST →
  * NFA → Strategy → Bytecode.
  */
-public class ReggiMatcherBytecodeGenerator {
+public class ReggieMatcherBytecodeGenerator {
 
   private final String className;
   private final String pattern;
 
-  public ReggiMatcherBytecodeGenerator(String packageName, String className, String pattern) {
+  public ReggieMatcherBytecodeGenerator(String packageName, String className, String pattern) {
     this.className = packageName.replace('.', '/') + "/" + className;
     this.pattern = pattern;
   }
@@ -85,6 +86,18 @@ public class ReggiMatcherBytecodeGenerator {
     PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
     PatternAnalyzer.MatchingStrategy strategy = result.strategy;
     DFA dfa = result.dfa;
+
+    // Reject patterns with known engine bugs at compile time — emitting buggy bytecode is worse
+    // than a build failure. Use Reggie.compile() for runtime compilation with automatic fallback.
+    String fallbackReason = FallbackPatternDetector.needsFallback(ast, strategy);
+    if (fallbackReason != null) {
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' cannot be compiled at annotation-processing time: "
+              + fallbackReason
+              + ". Use Reggie.compile() for runtime compilation with automatic fallback.");
+    }
 
     // 4. Generate bytecode based on strategy
     ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);

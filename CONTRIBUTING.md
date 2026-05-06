@@ -149,7 +149,7 @@ cd reggie
 **Debug Helper Script** - Common workflows:
 ```bash
 ./scripts/debug-helper.sh pattern "\d{3}-\d{3}-\d{4}"  # Debug pattern
-./scripts/debug-helper.sh test ReggiMatcherTest         # Run test
+./scripts/debug-helper.sh test ReggieMatcherTest         # Run test
 ./scripts/debug-helper.sh benchmark ".*Phone.*"         # Run benchmark
 ./scripts/debug-helper.sh pcre                          # PCRE conformance
 ./scripts/debug-helper.sh quick-check                   # Fast verification
@@ -279,7 +279,7 @@ public class MyBenchmark {
 ./gradlew :reggie-runtime:test
 
 # Specific test class
-./gradlew :reggie-runtime:test --tests ReggiMatcherTest
+./gradlew :reggie-runtime:test --tests ReggieMatcherTest
 
 # Include known failures
 ./gradlew test -Dreggie.test.knownFailures=true
@@ -474,7 +474,7 @@ Also, any contributions, even with the help of AI assistants, should be yours an
 
 2. **Dual-path consistency**: Changes to bytecode generation require updates to BOTH:
    - `RuntimeCompiler.java` (runtime path)
-   - `ReggiMatcherBytecodeGenerator.java` (compile-time path)
+   - `ReggieMatcherBytecodeGenerator.java` (compile-time path)
 
 3. **Structural hash completeness**: `PatternInfo.structuralHashCode()` must include ALL fields affecting bytecode
 

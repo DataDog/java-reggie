@@ -54,7 +54,7 @@ Commands:
 
 Examples:
   $0 pattern "\d{3}-\d{3}-\d{4}"
-  $0 test ReggiMatcherTest
+  $0 test ReggieMatcherTest
   $0 test-module reggie-runtime
   $0 benchmark ".*Phone.*"
   $0 pcre

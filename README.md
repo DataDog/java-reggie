@@ -1,6 +1,6 @@
 # Reggie - Hybrid Compile-Time and Runtime Optimized Regex for Java
 
-[![Java 8+](https://img.shields.io/badge/Java-8%2B-blue)](https://openjdk.org/)
+[![Java 21+](https://img.shields.io/badge/Java-21%2B-blue)](https://openjdk.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![CI](https://github.com/DataDog/java-reggie/actions/workflows/ci.yml/badge.svg)](https://github.com/DataDog/java-reggie/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/DataDog/java-reggie/branch/main/graph/badge.svg)](https://codecov.io/gh/DataDog/java-reggie)
@@ -268,12 +268,11 @@ repositories {
 }
 
 dependencies {
-    // For runtime API only
-    implementation 'com.datadoghq:reggie-runtime:0.0.1-SNAPSHOT'
+    // Reggie (runtime API + bundled annotation processor)
+    implementation 'com.datadoghq:reggie:<version>'
 
-    // For compile-time API (annotation processing)
-    implementation 'com.datadoghq:reggie-annotations:0.0.1-SNAPSHOT'
-    annotationProcessor 'com.datadoghq:reggie-processor:0.0.1-SNAPSHOT'
+    // Add for compile-time API (annotation processing)
+    annotationProcessor 'com.datadoghq:reggie:<version>'
 }
 
 ```
@@ -284,24 +283,11 @@ Add to your `pom.xml`:
 
 ```xml
 <dependencies>
-    <!-- For runtime API -->
+    <!-- Reggie (runtime API + bundled annotation processor) -->
     <dependency>
         <groupId>com.datadoghq</groupId>
-        <artifactId>reggie-runtime</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
-    </dependency>
-
-    <!-- For compile-time API -->
-    <dependency>
-        <groupId>com.datadoghq</groupId>
-        <artifactId>reggie-annotations</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
-    </dependency>
-    <dependency>
-        <groupId>com.datadoghq</groupId>
-        <artifactId>reggie-processor</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
-        <scope>provided</scope>
+        <artifactId>reggie</artifactId>
+        <version><!-- version --></version>
     </dependency>
 </dependencies>
 ```
@@ -804,7 +790,7 @@ reggie/
 
 ### Requirements
 
-- Java 8+
+- Java 21+
 - Gradle 8.11+
 
 ### Build Commands

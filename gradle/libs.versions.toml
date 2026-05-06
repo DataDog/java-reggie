@@ -3,7 +3,7 @@
 
 [versions]
 commons-math3 = "3.6.1"
-guava = "33.5.0-jre"
+guava = "33.6.0-jre"
 junit-jupiter = "6.0.3"
 
 [libraries]

@@ -34,9 +34,19 @@ jar {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
-// Strip bundled internal module coordinates from the published POM so that
-// consumers only see the real external dependencies (ASM).
+// Gradle Module Metadata (.module files) bypasses withXml POM stripping and
+// still lists bundled submodules as dependencies. Disable it so consumers
+// resolve via the POM only, where internal coordinates are already removed.
+tasks.withType(GenerateModuleMetadata).configureEach {
+    enabled = false
+}
+
+// Publish as com.datadoghq:reggie rather than com.datadoghq:reggie-runtime so
+// the artifact ID reflects that this is the full, self-contained library.
+// Strip bundled internal module coordinates from the POM so consumers only
+// see the real external dependency (ASM).
 mavenPublishing {
+    coordinates('com.datadoghq', 'reggie', project.version.toString())
     pom {
         withXml {
             def deps = asNode().dependencies[0]

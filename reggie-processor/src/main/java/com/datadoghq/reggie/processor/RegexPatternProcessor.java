@@ -161,8 +161,8 @@ public class RegexPatternProcessor extends AbstractProcessor {
         "Generating bytecode for matcher " + matcherClassName + " for pattern: " + pattern);
 
     // Use ASM to generate bytecode
-    ReggiMatcherBytecodeGenerator generator =
-        new ReggiMatcherBytecodeGenerator(packageName, matcherClassName, pattern);
+    ReggieMatcherBytecodeGenerator generator =
+        new ReggieMatcherBytecodeGenerator(packageName, matcherClassName, pattern);
 
     byte[] bytecode = generator.generate();
 

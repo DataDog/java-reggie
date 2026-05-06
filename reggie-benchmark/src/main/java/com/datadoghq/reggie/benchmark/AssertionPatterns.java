@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggiePatterns;
 import com.datadoghq.reggie.annotations.RegexPattern;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
@@ -57,6 +58,11 @@ public abstract class AssertionPatterns implements ReggiePatterns {
   @RegexPattern("(?=\\w*\\d)")
   public abstract ReggieMatcher variableWidthLookahead();
 
-  @RegexPattern("(?<=a|b)c")
-  public abstract ReggieMatcher alternationLookbehind();
+  // Uses runtime compilation: alternation inside lookbehind triggers automatic fallback
+  // to java.util.regex and cannot be compiled at annotation-processing time.
+  public ReggieMatcher alternationLookbehind() {
+    return ALT_LOOKBEHIND;
+  }
+
+  private static final ReggieMatcher ALT_LOOKBEHIND = Reggie.compile("(?<=a|b)c");
 }

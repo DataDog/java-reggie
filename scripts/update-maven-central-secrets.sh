@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Writes Maven Central credentials to Vault at kv/k8s/gitlab-runner/java-reggie/maven-central.
-# The GitLab CI runner reads them automatically from that path via its K8s service account.
+# Writes Maven Central credentials to AWS SSM Parameter Store.
+# The GitLab CI runner reads them via the java-reggie K8s service account IAM role.
 #
 # Credentials are resolved in order:
 #   1. 1Password item "Maven Central Portal Token" (vault: Shared-Public-Software-Repositories)
@@ -9,16 +9,15 @@
 #
 # Usage: ./scripts/update-maven-central-secrets.sh [--dry-run]
 #
-# Prerequisites:
-#   - ddtool (for Vault OIDC login)
-#   - vault CLI
-#   - op (1Password CLI) — optional but recommended
+# AWS credentials are obtained automatically via aws-vault (sso-build-stable-developer).
+# 1Password CLI (op) is optional but recommended.
 
 set -euo pipefail
 
+AWS_PROFILE="sso-build-stable-developer"
 DRY_RUN=0
-VAULT_ADDR_DEFAULT="https://vault.us1.ddbuild.io"
-VAULT_PATH="kv/k8s/gitlab-runner/java-reggie/maven-central"
+AWS_REGION="us-east-1"
+SSM_PREFIX="ci.java-reggie"
 KEYCHAIN_SERVICE="java-reggie-maven-central"
 OP_ITEM_NAME="Maven Central Portal Token"
 OP_VAULT="Shared-Public-Software-Repositories"
@@ -34,7 +33,13 @@ for arg in "$@"; do
     esac
 done
 
-export VAULT_ADDR="${VAULT_ADDR:-$VAULT_ADDR_DEFAULT}"
+# ── Re-exec via aws-vault if not already running inside it ────────────────────
+
+if [[ -z "${AWS_VAULT:-}" ]]; then
+    command -v aws-vault >/dev/null 2>&1 || { echo "ERROR: aws-vault is required"; exit 1; }
+    echo "Re-executing via aws-vault ($AWS_PROFILE)..."
+    exec aws-vault exec "$AWS_PROFILE" -- "$0" "$@"
+fi
 
 # ── Platform detection ────────────────────────────────────────────────────────
 
@@ -43,19 +48,25 @@ IS_MACOS=0
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 
-for cmd in vault ddtool; do
-    command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $cmd is required"; exit 1; }
-done
+command -v aws >/dev/null 2>&1 || { echo "ERROR: aws CLI is required"; exit 1; }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 op_read() {
     local field="$1"
-    op item get "$OP_ITEM_NAME" --vault "$OP_VAULT" --field "$field" 2>/dev/null || true
+    op item get "$OP_ITEM_NAME" --vault "$OP_VAULT" --field "$field" --reveal 2>/dev/null || true
 }
 
-op_available() {
-    command -v op >/dev/null 2>&1 && op whoami &>/dev/null
+op_signin() {
+    if ! command -v op >/dev/null 2>&1; then
+        return 1
+    fi
+    if op whoami &>/dev/null; then
+        return 0
+    fi
+    echo "1Password CLI found but not signed in — signing in..."
+    eval "$(op signin)" || return 1
+    op whoami &>/dev/null
 }
 
 keychain_read() {
@@ -82,6 +93,16 @@ prompt_secret() {
     printf '%s' "$value"
 }
 
+ssm_put() {
+    local name="$1" value="$2"
+    aws ssm put-parameter \
+        --region "$AWS_REGION" \
+        --name "$name" \
+        --value "$value" \
+        --type SecureString \
+        --overwrite
+}
+
 # ── Resolve credentials ───────────────────────────────────────────────────────
 
 USERNAME=""
@@ -89,7 +110,7 @@ PASSWORD=""
 SOURCE=""
 
 # 1. Try 1Password
-if op_available; then
+if op_signin; then
     echo "Reading from 1Password (\"$OP_ITEM_NAME\" in $OP_VAULT)..."
     USERNAME=$(op_read "username")
     PASSWORD=$(op_read "password")
@@ -99,8 +120,6 @@ if op_available; then
     else
         echo "  Item not found or missing fields — falling back"
     fi
-else
-    command -v op >/dev/null 2>&1 && echo "1Password CLI found but not signed in (run: op signin). Falling back..."
 fi
 
 # 2. Try macOS Keychain
@@ -130,24 +149,18 @@ fi
 
 [ -n "$SOURCE" ] || SOURCE="prompt"
 
-# ── Vault login (skip if already authenticated) ───────────────────────────────
-
-echo ""
-if vault token lookup &>/dev/null; then
-    echo "Already authenticated to Vault ($VAULT_ADDR)"
-else
-    echo "Authenticating to Vault ($VAULT_ADDR)..."
-    ddtool auth login
-fi
-
-# ── Write to Vault ────────────────────────────────────────────────────────────
+# ── Write to SSM ──────────────────────────────────────────────────────────────
 
 echo ""
 if [ $DRY_RUN -eq 1 ]; then
-    echo "[dry-run] would write: vault kv put $VAULT_PATH username=<...> password=<...>"
+    echo "[dry-run] would write:"
+    echo "  ${SSM_PREFIX}.maven_central_username"
+    echo "  ${SSM_PREFIX}.maven_central_password"
 else
-    vault kv put "$VAULT_PATH" username="$USERNAME" password="$PASSWORD"
-    echo "  ✓ $VAULT_PATH"
+    ssm_put "${SSM_PREFIX}.maven_central_username" "$USERNAME"
+    echo "  ✓ ${SSM_PREFIX}.maven_central_username"
+    ssm_put "${SSM_PREFIX}.maven_central_password" "$PASSWORD"
+    echo "  ✓ ${SSM_PREFIX}.maven_central_password"
 fi
 
 # ── Offer to save to Keychain if values came from a prompt ───────────────────
@@ -163,4 +176,4 @@ if [ "$SOURCE" = "prompt" ] && [ $IS_MACOS -eq 1 ] && [ $DRY_RUN -eq 0 ]; then
 fi
 
 echo ""
-echo "Done. GitLab CI reads from: $VAULT_PATH"
+echo "Done. GitLab CI reads from: ${SSM_PREFIX}.maven_central_{username,password}"

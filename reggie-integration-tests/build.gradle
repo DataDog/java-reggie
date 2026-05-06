@@ -17,7 +17,7 @@ dependencies {
     implementation project(':reggie-annotations')
 
     // JSON parsing for test data
-    implementation 'com.google.code.gson:gson:2.13.2'
+    implementation 'com.google.code.gson:gson:2.14.0'
 
     // JUnit for integration testing
     testImplementation 'org.junit.jupiter:junit-jupiter:6.0.3'

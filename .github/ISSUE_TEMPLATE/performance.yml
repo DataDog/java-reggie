@@ -10,7 +10,7 @@ body:
     id: reggie-version
     attributes:
       label: Reggie Version
-      placeholder: e.g., 0.0.1-SNAPSHOT
+      placeholder: e.g., 1.2.3
     validations:
       required: true
   - type: input

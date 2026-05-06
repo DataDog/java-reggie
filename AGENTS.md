@@ -392,7 +392,7 @@ public class MyBytecodeGenerator implements BytecodeGenerator {
 - ✅ No failing tests (even if skipped)
 - ✅ Code has tests
 - ✅ Coverage maintained or improved: `./gradlew jacocoVerify`
-- ✅ Both RuntimeCompiler and ReggiMatcherBytecodeGenerator stay in sync
+- ✅ Both RuntimeCompiler and ReggieMatcherBytecodeGenerator stay in sync
 
 **Pre-commit checklist**:
 ```bash
@@ -413,7 +413,7 @@ git commit -m "Your message"
 ### Bytecode Generation Dual-Path Rule
 **CRITICAL**: Changes to bytecode generation require updates to BOTH:
 1. `RuntimeCompiler.java` (runtime path: `Reggie.compile()`)
-2. `ReggiMatcherBytecodeGenerator.java` (compile-time path: `@RegexPattern`)
+2. `ReggieMatcherBytecodeGenerator.java` (compile-time path: `@RegexPattern`)
 
 Verify both:
 ```bash
@@ -577,7 +577,7 @@ Keep runtime dependencies minimal.
 ## Publishing & Releasing
 
 ### Published Artifacts
-`com.datadoghq:reggie-runtime` — all-in-one artifact bundling annotations, codegen, processor, and runtime.
+`com.datadoghq:reggie` — all-in-one artifact bundling annotations, codegen, processor, and runtime.
 (Not published: `reggie-annotations`, `reggie-codegen`, `reggie-processor`, `reggie-benchmark`, `reggie-integration-tests`)
 
 ### Release Commands
@@ -596,10 +596,20 @@ git push origin main
 ./gradlew publishToMavenLocal     # publishes all modules to ~/.m2
 ```
 
-### Required GitHub Secrets
-`ORG_GRADLE_PROJECT_MAVENCENTRALUSERNAME`, `ORG_GRADLE_PROJECT_MAVENCENTRALPASSWORD`,
-`ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEY`, `ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYID`,
-`ORG_GRADLE_PROJECT_SIGNINGINMEMORYKEYPASSWORD`
+### Required Credentials
+
+Publishing uses **GitLab CI** with credentials stored in **AWS SSM Parameter Store** (not GitHub Secrets).
+The following SSM parameters must be populated before the first release (one-time setup):
+
+| SSM Parameter | Description |
+|---|---|
+| `ci.java-reggie.maven_central_username` | Sonatype Central Portal token username |
+| `ci.java-reggie.maven_central_password` | Sonatype Central Portal token password |
+| `ci.java-reggie.signing.gpg_private_key` | Armored GPG private key (set by `create_key` GitLab CI job) |
+| `ci.java-reggie.signing.gpg_passphrase` | GPG key passphrase (set by `create_key` GitLab CI job) |
+
+To populate Maven Central credentials: `./scripts/update-maven-central-secrets.sh`
+To generate the GPG signing key: run the `create_key` job manually in GitLab CI.
 
 See `doc/RELEASING.md` for full setup instructions.
 
@@ -665,6 +675,38 @@ cd reggie
   - 322 JMH benchmarks, 386 PCRE integration tests
   - 699 unit tests across 86 test classes
 - **Active Development**: PCRE conformance improvements ongoing
+
+## Automatic Fallback to java.util.regex
+
+Certain pattern structures trigger known correctness bugs in the reggie engine. For these patterns,
+`Reggie.compile()` automatically falls back to `java.util.regex` and emits a `WARNING` log:
+
+```
+Falling back to java.util.regex for pattern '<pattern>': <reason>
+```
+
+**Patterns that fall back** (handled by `FallbackPatternDetector`):
+
+| Bug | Example | Reason |
+|-----|---------|--------|
+| Multiple `\1` to same group in NFA/variable-capture path | `(\w+)\s+\1\s+\1` | `multiple backreferences to group 1 in NFA mode` |
+| Lookahead inside a quantified group | `(?:(?=\d)\d)+` | `lookahead inside quantified group` |
+| Lookbehind followed by unbounded quantifier | `(?<=\d)[a-z]+` | `lookbehind followed by unbounded quantifier` |
+| Alternation inside lookbehind | `(?<=a\|b)c` | `alternation inside lookbehind` |
+| Lookbehind and lookahead used together | `(?<=\[)[^\]]+(?=\])` | `lookbehind and lookahead combined` |
+
+> **Note:** Bug 1 (multiple backreferences to same group) only applies when the analyzer selects
+> `OPTIMIZED_NFA_WITH_BACKREFS` or `VARIABLE_CAPTURE_BACKREF` strategy. Patterns routed through
+> other backref strategies (`SPECIALIZED_BACKREFERENCE`, `FIXED_REPETITION_BACKREF`, etc.) are
+> not subject to this fallback.
+
+The fallback applies only to `Reggie.compile()` (runtime path). Patterns compiled via the
+`@RegexPattern` annotation processor that trigger a known bug will fail at build time with an
+`UnsupportedOperationException` — use `Reggie.compile()` instead for those patterns.
+
+The fallback is transparent to callers of `Reggie.compile()` — correctness is guaranteed at the
+cost of reggie's allocation-free performance. All other patterns continue to use the fast reggie
+engine.
 
 ## Known Limitations
 

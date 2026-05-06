@@ -174,12 +174,20 @@ echo "Updated CHANGELOG.md"
 sed -i.bak "s|^project.version = \".*\"|project.version = \"$VERSION\"|" "$ROOT/build.gradle"
 rm -f "$ROOT/build.gradle.bak"
 
+# Update version references in documentation
+ESCAPED_CURRENT="${CURRENT//./\\.}"
+while IFS= read -r -d '' f; do
+    sed -i.bak "s|${ESCAPED_CURRENT}|${VERSION}|g" "$ROOT/$f"
+    rm -f "$ROOT/${f}.bak"
+done < <(git -C "$ROOT" ls-files -z '*.md')
+
 # Run spotless + build to verify everything is clean
 echo "Running build verification..."
 "$ROOT/gradlew" -p "$ROOT" spotlessApply build -x :reggie-benchmark:build -x :reggie-integration-tests:test --quiet
 
-# Commit and tag
+# Commit and tag — stage only the files this script touched
 git -C "$ROOT" add build.gradle CHANGELOG.md
+git -C "$ROOT" ls-files -z -- '*.md' | xargs -0 git -C "$ROOT" add --
 git -C "$ROOT" commit -m "Release $VERSION"
 git -C "$ROOT" tag -a "$TAG" -m "Release $VERSION"
 

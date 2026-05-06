@@ -1,18 +1,18 @@
 plugins {
     id 'jacoco'
     id 'com.diffplug.spotless' version '8.4.0'
-    id 'com.vanniktech.maven.publish' version '0.35.0' apply false
+    id 'com.vanniktech.maven.publish' version '0.36.0' apply false
     id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
 }
 
-project.version = "0.0.1-SNAPSHOT"
+project.version = "0.1.0-SNAPSHOT"
 
 repositories {
     mavenCentral()
 }
 
 jacoco {
-    toolVersion = '0.8.11'
+    toolVersion = '0.8.14'
 }
 
 allprojects {
@@ -36,9 +36,7 @@ subprojects {
     plugins.withId('com.vanniktech.maven.publish') {
         mavenPublishing {
             publishToMavenCentral()
-            if (findProperty('signingInMemoryKeyId')) {
-                signAllPublications()
-            }
+            signAllPublications()
 
             pom {
                 name = project.name
@@ -63,6 +61,15 @@ subprojects {
                     url = 'https://github.com/DataDog/java-reggie'
                 }
             }
+        }
+        signing {
+            useInMemoryPgpKeys(
+                providers.environmentVariable("GPG_PRIVATE_KEY").orNull,
+                providers.environmentVariable("GPG_PASSWORD").orNull
+            )
+        }
+        tasks.withType(Sign).configureEach {
+            onlyIf { providers.environmentVariable("GPG_PRIVATE_KEY").isPresent() }
         }
     }
 }
@@ -98,7 +105,7 @@ subprojects {
     }
 
     jacoco {
-        toolVersion = '0.8.11'
+        toolVersion = '0.8.14'
     }
 
     tasks.withType(Javadoc).configureEach {
@@ -119,7 +126,7 @@ subprojects {
     }
 
     // Set artifact ID to match project name
-    // This ensures com.datadoghq:reggie-processor:0.0.1-SNAPSHOT, etc.
+    // This ensures artifact IDs match the project name (e.g. reggie-processor).
     tasks.withType(Jar) {
         archiveBaseName = project.name
     }
@@ -142,12 +149,13 @@ tasks.register('jacocoAggregateReport', JacocoReport) {
         }
     }
 
-    // Exclude test data, corpus, and debug packages
+    // Exclude test data, corpus, debug packages, and standalone debug utilities
     classDirectories.setFrom(files(classDirectories.files.collect {
         fileTree(dir: it, exclude: [
             '**/testdata/**',
             '**/corpus/**',
-            '**/debug/**'
+            '**/debug/**',
+            '**/PatternDebugger.class'
         ])
     }))
 
@@ -184,12 +192,13 @@ tasks.register('jacocoVerify', JacocoCoverageVerification) {
         }
     }
 
-    // Exclude test data, corpus, and debug packages
+    // Exclude test data, corpus, debug packages, and standalone debug utilities
     classDirectories.setFrom(files(classDirectories.files.collect {
         fileTree(dir: it, exclude: [
             '**/testdata/**',
             '**/corpus/**',
-            '**/debug/**'
+            '**/debug/**',
+            '**/PatternDebugger.class'
         ])
     }))
 }

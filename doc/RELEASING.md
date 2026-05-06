@@ -7,9 +7,8 @@ Before releasing, ensure:
 2. The following AWS SSM parameters are populated (one-time infra setup):
    - `ci.java-reggie.central_username` — Sonatype Central Portal token username
    - `ci.java-reggie.central_password` — Sonatype Central Portal token password
-   - `ci.java-reggie.signing.gpg_private_key` — armored GPG private key
-   - `ci.java-reggie.signing.gpg_key_id` — 8-char GPG key ID
-   - `ci.java-reggie.signing.gpg_passphrase` — GPG key passphrase
+   - `ci.java-reggie.signing.gpg_private_key` — armored GPG private key (set by `create_key` CI job)
+   - `ci.java-reggie.signing.gpg_passphrase` — GPG key passphrase (set by `create_key` CI job)
 
 ## Published Artifacts
 
@@ -41,8 +40,8 @@ Not published: `reggie-annotations`, `reggie-codegen`, `reggie-processor`, `regg
 
 The script:
 - Computes the new version by bumping the current SNAPSHOT:
-  - `minor`: `0.1.0-SNAPSHOT` → `0.2.0`
-  - `major`: `0.1.0-SNAPSHOT` → `1.0.0`
+  - `minor`: `x.y.z-SNAPSHOT` → `x.(y+1).0`
+  - `major`: `x.y.z-SNAPSHOT` → `(x+1).0.0`
 - Collects merged PRs since the last tag and generates a `CHANGELOG.md` entry. PRs labelled **`no release notes`** are excluded.
 - Runs `spotlessApply` + `build`
 - Creates a release commit + annotated tag

@@ -387,11 +387,9 @@ public final class SWARUtils {
       // Check: byte <= high  =>  (high - byte) has high bit clear
       long belowHigh = highBroadcast - chunk;
 
-      // Both conditions must hold for in-range: high bit SET means byte is in range
-      long inRange = aboveLow & belowHigh & SWAR_0x80;
-
-      // NOT in range: invert and check for any byte not matching
-      long notInRange = ~inRange & SWAR_0x80;
+      // A byte is NOT in range if aboveLow OR belowHigh has its high bit set
+      // (i.e., b < low or b > high caused a borrow in subtraction)
+      long notInRange = (aboveLow | belowHigh) & SWAR_0x80;
 
       if (notInRange != 0) {
         // Found at least one byte not in range - locate exact position

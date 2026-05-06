@@ -20,10 +20,10 @@ import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 
 /** Base test class for generated regex matchers. */
-public class ReggiMatcherTest {
+public class ReggieMatcherTest {
 
   @Test
-  public void testReggiMatcherClass() {
+  public void testReggieMatcherClass() {
     ReggieMatcher matcher = new TestMatcher();
     assertEquals("test", matcher.pattern());
     assertTrue(matcher.matches("test"));
