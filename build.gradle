@@ -149,12 +149,13 @@ tasks.register('jacocoAggregateReport', JacocoReport) {
         }
     }
 
-    // Exclude test data, corpus, and debug packages
+    // Exclude test data, corpus, debug packages, and standalone debug utilities
     classDirectories.setFrom(files(classDirectories.files.collect {
         fileTree(dir: it, exclude: [
             '**/testdata/**',
             '**/corpus/**',
-            '**/debug/**'
+            '**/debug/**',
+            '**/PatternDebugger.class'
         ])
     }))
 
@@ -191,12 +192,13 @@ tasks.register('jacocoVerify', JacocoCoverageVerification) {
         }
     }
 
-    // Exclude test data, corpus, and debug packages
+    // Exclude test data, corpus, debug packages, and standalone debug utilities
     classDirectories.setFrom(files(classDirectories.files.collect {
         fileTree(dir: it, exclude: [
             '**/testdata/**',
             '**/corpus/**',
-            '**/debug/**'
+            '**/debug/**',
+            '**/PatternDebugger.class'
         ])
     }))
 }
