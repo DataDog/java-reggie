@@ -40,8 +40,8 @@ Not published: `reggie-annotations`, `reggie-codegen`, `reggie-processor`, `regg
 
 The script:
 - Computes the new version by bumping the current SNAPSHOT:
-  - `minor`: `0.1.0-SNAPSHOT` → `0.2.0`
-  - `major`: `0.1.0-SNAPSHOT` → `1.0.0`
+  - `minor`: `x.y.z-SNAPSHOT` → `x.(y+1).0`
+  - `major`: `x.y.z-SNAPSHOT` → `(x+1).0.0`
 - Collects merged PRs since the last tag and generates a `CHANGELOG.md` entry. PRs labelled **`no release notes`** are excluded.
 - Runs `spotlessApply` + `build`
 - Creates a release commit + annotated tag

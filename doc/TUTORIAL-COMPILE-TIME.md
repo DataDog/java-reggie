@@ -56,8 +56,8 @@ Compile-time compilation means your regex patterns are:
 
 ```gradle
 dependencies {
-    implementation 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
-    annotationProcessor 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
+    implementation 'com.datadoghq:reggie:<version>'
+    annotationProcessor 'com.datadoghq:reggie:<version>'
 }
 ```
 
@@ -107,8 +107,8 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
-    annotationProcessor 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
+    implementation 'com.datadoghq:reggie:<version>'
+    annotationProcessor 'com.datadoghq:reggie:<version>'
 }
 
 java {
@@ -132,7 +132,7 @@ Add to your `pom.xml`:
     <dependency>
         <groupId>com.datadoghq</groupId>
         <artifactId>reggie</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
+        <version><!-- version --></version>
     </dependency>
 </dependencies>
 ```
@@ -729,7 +729,7 @@ IllegalArgumentException: No service provider found for com.example.patterns.Val
 
 # 2. Verify annotation processor in build.gradle
 dependencies {
-    annotationProcessor 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
+    annotationProcessor 'com.datadoghq:reggie:<version>'
 }
 
 # 3. Ensure class implements ReggiePatterns

@@ -5,7 +5,7 @@ plugins {
     id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
 }
 
-project.version = "0.0.1-SNAPSHOT"
+project.version = "0.1.0-SNAPSHOT"
 
 repositories {
     mavenCentral()
@@ -126,7 +126,7 @@ subprojects {
     }
 
     // Set artifact ID to match project name
-    // This ensures com.datadoghq:reggie-processor:0.0.1-SNAPSHOT, etc.
+    // This ensures artifact IDs match the project name (e.g. reggie-processor).
     tasks.withType(Jar) {
         archiveBaseName = project.name
     }

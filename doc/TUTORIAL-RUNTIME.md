@@ -57,7 +57,7 @@ Runtime compilation means regex patterns are:
 
 ```gradle
 dependencies {
-    implementation 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
+    implementation 'com.datadoghq:reggie:<version>'
 }
 ```
 
@@ -99,7 +99,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
+    implementation 'com.datadoghq:reggie:<version>'
 }
 
 java {
@@ -123,7 +123,7 @@ Add to your `pom.xml`:
     <dependency>
         <groupId>com.datadoghq</groupId>
         <artifactId>reggie</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
+        <version><!-- version --></version>
     </dependency>
 </dependencies>
 ```

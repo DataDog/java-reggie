@@ -11,7 +11,7 @@ body:
     attributes:
       label: Reggie Version
       description: Which version of Reggie are you using?
-      placeholder: e.g., 0.0.1-SNAPSHOT
+      placeholder: e.g., 1.2.3
     validations:
       required: true
   - type: input

@@ -269,10 +269,10 @@ repositories {
 
 dependencies {
     // Reggie (runtime API + bundled annotation processor)
-    implementation 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
+    implementation 'com.datadoghq:reggie:<version>'
 
     // Add for compile-time API (annotation processing)
-    annotationProcessor 'com.datadoghq:reggie:0.0.1-SNAPSHOT'
+    annotationProcessor 'com.datadoghq:reggie:<version>'
 }
 
 ```
@@ -287,7 +287,7 @@ Add to your `pom.xml`:
     <dependency>
         <groupId>com.datadoghq</groupId>
         <artifactId>reggie</artifactId>
-        <version>0.0.1-SNAPSHOT</version>
+        <version><!-- version --></version>
     </dependency>
 </dependencies>
 ```
