@@ -98,7 +98,7 @@ class SelfReferencingBackrefTest {
   void allocationFreeContract_repeatedMatchingDoesNotThrow() {
     ReggieMatcher m = Reggie.compile("^(a\\1?){4}$");
     for (int i = 0; i < 1000; i++) {
-      assertNotNull(m.match("aaaa"), "match must succeed on iteration " + i);
+      assertTrue(m.matches("aaaa"), "match must succeed on iteration " + i);
     }
   }
 
