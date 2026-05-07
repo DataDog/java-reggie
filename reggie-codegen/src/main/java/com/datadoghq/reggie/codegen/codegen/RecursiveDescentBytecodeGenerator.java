@@ -1549,6 +1549,10 @@ public class RecursiveDescentBytecodeGenerator {
     private final ClassWriter cw;
     private final MethodVisitor mv;
     private final String className;
+    // Slot holding the depth parameter in the currently-generated method.
+    // Stays 5 for normal methods; set to 2 by generateConcatWithBacktracking,
+    // which repurposes slot 5 as currentPos and the now-dead pos slot (2) for depth.
+    private int depthSlot = 5;
 
     public ParserMethodGenerator(ClassWriter cw, MethodVisitor mv, String className) {
       this.cw = cw;
@@ -2171,7 +2175,8 @@ public class RecursiveDescentBytecodeGenerator {
      */
     private void generateConcatWithBacktracking(ConcatNode node, int backtrackChildIndex) {
       // Local variable allocation:
-      // slot 5: currentPos
+      // slot 2: depth (repurposed from pos — pos is dead once moved to slot 5)
+      // slot 5: currentPos (repurposed from depth parameter)
       // slot 6: savedGroups (int[])
       // slot 7: quantifierStartPos
       // slot 8: maxMatches (greedy match count)
@@ -2181,9 +2186,14 @@ public class RecursiveDescentBytecodeGenerator {
       // slot 14: greedyIterations (BacktrackConfig limit tracking)
       // slot 15: backtrackIterations (BacktrackConfig limit tracking)
 
-      // Initialize currentPos
-      mv.visitVarInsn(ILOAD, 2); // currentPos = pos
-      mv.visitVarInsn(ISTORE, 5);
+      // Preserve depth before repurposing slot 5 as currentPos.
+      // Push pos then depth in order; store depth into the now-dead pos slot (2),
+      // then store pos into slot 5 (currentPos = pos).
+      mv.visitVarInsn(ILOAD, 2); // pos
+      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ISTORE, 2); // depth → slot 2 (pos slot repurposed)
+      mv.visitVarInsn(ISTORE, 5); // slot 5 = currentPos (= original pos)
+      depthSlot = 2;
 
       // Process children before the backtracking point
       for (int i = 0; i < backtrackChildIndex; i++) {
@@ -2197,7 +2207,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 5); // currentPos
         mv.visitVarInsn(ILOAD, 3); // end
         mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, 5); // depth
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
         mv.visitMethodInsn(
             INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
         mv.visitVarInsn(ISTORE, 5); // currentPos = result
@@ -2313,7 +2323,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5); // currentPos
       mv.visitVarInsn(ILOAD, 3); // end
       mv.visitVarInsn(ALOAD, 4); // groups
-      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, quantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, 11); // result in slot 11
@@ -2437,7 +2447,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5);
       mv.visitVarInsn(ILOAD, 3);
       mv.visitVarInsn(ALOAD, 4);
-      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, quantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, 11);
@@ -2518,7 +2528,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5); // depth
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2548,7 +2558,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2622,7 +2632,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 5);
         mv.visitVarInsn(ILOAD, 3);
         mv.visitVarInsn(ALOAD, 4);
-        mv.visitVarInsn(ILOAD, 5);
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
         mv.visitMethodInsn(
             INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
         mv.visitVarInsn(ISTORE, 5);
@@ -2645,7 +2655,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(INVOKESPECIAL, className, method, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
           mv.visitVarInsn(ILOAD, 5);
@@ -2701,7 +2711,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5);
       mv.visitVarInsn(ILOAD, 3);
       mv.visitVarInsn(ALOAD, 4);
-      mv.visitVarInsn(ILOAD, 5);
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, nestedQuantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, RESULT_SLOT);
@@ -2789,7 +2799,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5);
       mv.visitVarInsn(ILOAD, 3);
       mv.visitVarInsn(ALOAD, 4);
-      mv.visitVarInsn(ILOAD, 5);
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, nestedQuantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, RESULT_SLOT);
@@ -2844,7 +2854,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2872,7 +2882,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2991,7 +3001,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5); // currentPos
       mv.visitVarInsn(ILOAD, 3); // end
       mv.visitVarInsn(ALOAD, 4); // groups
-      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, fullGroupMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, resultSlot);
@@ -3030,7 +3040,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5); // currentPos
       mv.visitVarInsn(ILOAD, 3); // end
       mv.visitVarInsn(ALOAD, 4); // groups
-      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, mandatoryMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, resultSlot);
@@ -3111,7 +3121,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 5);
         mv.visitVarInsn(ILOAD, 3);
         mv.visitVarInsn(ALOAD, 4);
-        mv.visitVarInsn(ILOAD, 5);
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
         mv.visitMethodInsn(
             INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
         mv.visitVarInsn(ISTORE, 5);
@@ -3159,7 +3169,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 5); // currentPos
         mv.visitVarInsn(ILOAD, 3); // end
         mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, 5); // depth
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
         mv.visitMethodInsn(
             INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
         mv.visitVarInsn(ISTORE, 5);
