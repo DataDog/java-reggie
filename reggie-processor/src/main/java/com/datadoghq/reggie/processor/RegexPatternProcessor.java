@@ -39,7 +39,6 @@ import javax.tools.StandardLocation;
  */
 @AutoService(Processor.class)
 @SupportedAnnotationTypes("com.datadoghq.reggie.annotations.RegexPattern")
-@SupportedSourceVersion(SourceVersion.RELEASE_21)
 public class RegexPatternProcessor extends AbstractProcessor {
 
   private Elements elementUtils;
@@ -52,6 +51,11 @@ public class RegexPatternProcessor extends AbstractProcessor {
     this.elementUtils = processingEnv.getElementUtils();
     this.typeUtils = processingEnv.getTypeUtils();
     this.messager = processingEnv.getMessager();
+  }
+
+  @Override
+  public SourceVersion getSupportedSourceVersion() {
+    return SourceVersion.latestSupported();
   }
 
   @Override
