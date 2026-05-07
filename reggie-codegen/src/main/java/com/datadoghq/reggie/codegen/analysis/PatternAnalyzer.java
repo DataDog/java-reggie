@@ -4259,6 +4259,96 @@ public class PatternAnalyzer {
     }
   }
 
+  /**
+   * Returns true if the subtree of {@code group} contains a {@link BackreferenceNode} whose {@code
+   * groupNumber} equals {@code group.groupNumber}. Evaluated at code-generation time.
+   *
+   * <p>Early exit: if the group's subtree has no backreferences at all, returns false immediately.
+   */
+  public static boolean hasSelfReferencingBackref(GroupNode group) {
+    if (group.groupNumber <= 0) {
+      return false;
+    }
+    // Quick check: does the subtree contain ANY backref?
+    BackrefDetector anyBackref = new BackrefDetector();
+    if (!group.child.accept(anyBackref)) {
+      return false;
+    }
+    SelfRefBackrefDetector detector = new SelfRefBackrefDetector(group.groupNumber);
+    return group.child.accept(detector);
+  }
+
+  /** Detects whether a subtree contains a backreference to a specific group number. */
+  private static class SelfRefBackrefDetector implements RegexVisitor<Boolean> {
+    private final int targetGroupNumber;
+
+    SelfRefBackrefDetector(int targetGroupNumber) {
+      this.targetGroupNumber = targetGroupNumber;
+    }
+
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      return node.children.stream().anyMatch(child -> child.accept(this));
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return node.groupNumber == targetGroupNumber;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return node.subPattern != null && node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      boolean hasThen = node.thenBranch.accept(this);
+      boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
+      return hasThen || hasElse;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+  }
+
   /** Information about a greedy char class pattern like (\d+) or ([a-z]*). */
   public static class GreedyCharClassInfo implements PatternInfo {
     public final CharSet charset;

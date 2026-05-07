@@ -19,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 /**
  * Minimal reproduction tests for RecursiveDescent PCRE failures. These tests document the specific
@@ -107,7 +106,6 @@ public class TestRecursiveDescentFailures {
   // Known limitation - run with -Dreggie.test.knownFailures=true to enable
 
   @Test
-  @EnabledIfSystemProperty(named = "reggie.test.knownFailures", matches = "true")
   void testSelfReferencingBackref_Complex() {
     // Pattern: ^(a\1?)(a\1?)(a\2?)(a\3?)$
     // Should match: "aaaa", "aaaaaa"
@@ -119,7 +117,6 @@ public class TestRecursiveDescentFailures {
   }
 
   @Test
-  @EnabledIfSystemProperty(named = "reggie.test.knownFailures", matches = "true")
   void testSelfReferencingBackref_InQuantifier() {
     // Pattern: ^(a\1?){4}$
     // Should match: "aaaa"

@@ -249,11 +249,13 @@ Mark items `[x]` when completed. Add commit hash in parentheses.
 
 ### Phase 4: Very High Complexity (Target: 97% pass rate)
 
-- [ ] **4.1** Implement self-referencing backreferences
-  - Fundamentally new feature - group references itself during matching
-  - Test patterns: `^(a\1?){4}$`
-  - Expected gain: +3 tests
-  - Note: May require significant architectural changes
+- [x] **4.1** Implement self-referencing backreferences (2026-05-07)
+  - Added `PatternAnalyzer.hasSelfReferencingBackref()` compile-time predicate
+  - `visitGroup`: write partial-open sentinel (`groups[start]=pos`, `groups[end]=-1`) before calling child, guarded by `hasSelfReferencingBackref`
+  - `visitBackreference`: detect partial-open state and return zero-length match (C-03, atomic with C-01)
+  - `visitQuantifier`: emit per-iteration partial-open write at top of both min-loop and greedy loop for self-referencing child groups (C-02)
+  - Test patterns: `^(a\1?){4}$`, `^(a\1?)(a\1?)(a\2?)(a\3?)$`
+  - Actual gain: +3 tests
 
 ---
 
@@ -293,6 +295,7 @@ Mark items `[x]` when completed. Add commit hash in parentheses.
 | 2026-01-30 | b2733de | Support per-alternative negation in quantified groups | 91.0% |
 | 2026-02-03 | 1cab08f | Fix test data unescape order and escaped quote test encoding | 91.0% |
 | 2026-02-03 | 27e03c6 | Support recursive nested backtracking for multiple quantifiers | 91.3% |
+| 2026-05-07 | (pending) | Implement self-referencing backreferences (Phase 4.1) | ~92.2% |
 
 ---
 
