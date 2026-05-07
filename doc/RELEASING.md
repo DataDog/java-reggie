@@ -34,30 +34,25 @@ Not published: `reggie-annotations`, `reggie-codegen`, `reggie-processor`, `regg
 ### 1. Run the release script
 
 ```bash
-./scripts/release.sh minor             # dry-run: shows what would happen
-./scripts/release.sh minor --no-dry-run  # actually performs the release
+./scripts/release.sh minor                       # dry-run preview
+./scripts/release.sh minor --no-dry-run          # actually performs the release
+./scripts/release.sh minor --commit <sha>        # skip the interactive picker
 ```
 
+By default the script shows an arrow-key picker over the last 10 commits on the current branch. Pass `--commit <sha>` to skip the picker (the chosen commit must equal the local HEAD, which must equal `origin/<branch>`).
+
 The script:
-- Computes the new version by bumping the current SNAPSHOT:
-  - `minor`: `x.y.z-SNAPSHOT` → `x.(y+1).0`
-  - `major`: `x.y.z-SNAPSHOT` → `(x+1).0.0`
-- Collects merged PRs since the last tag and generates a `CHANGELOG.md` entry. PRs labelled **`no release notes`** are excluded.
-- Runs `spotlessApply` + `build`
-- Creates a release commit + annotated tag
-- Creates and pushes the `release/X.Y._` maintenance branch
-- Pushes `main` and the tag — this triggers the release workflow
+- Reads the version from `build.gradle` and strips `-SNAPSHOT` for the release version.
+- Collects merged PRs since the last tag and generates a `CHANGELOG.md` entry (PRs labelled **`no release notes`** are excluded).
+- Runs `spotlessApply` + `build`.
+- **Cuts the `release/X.Y._` branch from the chosen commit** and lands the `Release X.Y.Z` commit + tag there — the default branch never receives the release commit.
+- Bumps the release branch to `X.Y.1-SNAPSHOT` (`Prepare for X.Y.1-SNAPSHOT`).
+- Bumps the default branch to the next minor/major `-SNAPSHOT` and mirrors the CHANGELOG release entry back so history stays intact (`Prepare for X.Y.Z-SNAPSHOT`).
+- Pushes the default branch, the release branch and the tag — this triggers the release workflow.
 
 Pushing the tag triggers two pipelines:
 - **GitLab CI** (`publish_to_maven_central` job) — publishes to Maven Central using credentials from AWS SSM
 - **GitHub Actions** (`create-release` job) — creates a GitHub Release with the changelog excerpt
-
-### 2. Bump to next SNAPSHOT
-
-```bash
-./scripts/post-release.sh minor
-git push origin main
-```
 
 ---
 
@@ -76,20 +71,14 @@ This creates a `$USER/backport-pr-123` branch, opens a PR against `release/0.2._
 ```bash
 git checkout release/0.2._
 git pull
-./scripts/release.sh patch             # dry-run first
+./scripts/release.sh patch                       # dry-run preview
 ./scripts/release.sh patch --no-dry-run
+./scripts/release.sh patch --commit <sha>        # skip the interactive picker
 ```
 
 The script collects the merged backport PRs on this branch (resolving their original PR references from the `🍒` title format) and generates the CHANGELOG entry.
 
-The script pushes the release branch and tag automatically, triggering the release workflow.
-
-### 3. Bump to next SNAPSHOT on the maintenance branch
-
-```bash
-./scripts/post-release.sh patch
-git push origin release/0.2._
-```
+After tagging, the script bumps the release branch to `X.Y.(Z+1)-SNAPSHOT` (`Prepare for ...` commit) and pushes the branch and tag, triggering the release workflow.
 
 ## Version Numbering
 

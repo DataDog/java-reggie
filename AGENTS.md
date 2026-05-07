@@ -582,14 +582,19 @@ Keep runtime dependencies minimal.
 
 ### Release Commands
 ```bash
-# 1. Add CHANGELOG entry, then:
-./scripts/release.sh minor        # major|minor|patch — bumps, verifies, tags
-git push origin main <tag>        # triggers release workflow → Maven Central
-
-# 2. After workflow completes:
-./scripts/post-release.sh minor   # bump to next SNAPSHOT
-git push origin main
+./scripts/release.sh minor                       # dry-run preview (major|minor|patch)
+./scripts/release.sh minor --no-dry-run          # execute
+./scripts/release.sh minor --commit <sha>        # skip interactive commit picker
 ```
+
+For `major`/`minor`, the script cuts a new `release/X.Y._` branch from the chosen commit and lands the
+`Release X.Y.Z` commit + tag **on that branch** — the default branch never carries the release commit.
+The release branch is bumped to `X.Y.1-SNAPSHOT`; the default branch is bumped to the next minor/major
+`-SNAPSHOT` and the CHANGELOG release entry is mirrored back so history stays intact.
+
+For `patch`, the script tags on the current `release/X.Y._` branch and bumps it to `X.Y.(Z+1)-SNAPSHOT`.
+
+Pushing the tag triggers the release workflow → Maven Central.
 
 ### Local Publish (test)
 ```bash
@@ -659,8 +664,7 @@ cd reggie
 ### Helper Scripts
 - `scripts/debug-helper.sh`: Quick access to common tasks
 - `scripts/security-scan.sh`: Security scanning
-- `scripts/release.sh`: Cut a release (version bump, tag)
-- `scripts/post-release.sh`: Bump to next SNAPSHOT after release
+- `scripts/release.sh`: Cut a release (tag, cut maintenance branch, bump SNAPSHOTs, push)
 - `.github/workflows/security.yml`: CI security checks
 - `.github/workflows/release.yml`: Automated Maven Central publishing
 
