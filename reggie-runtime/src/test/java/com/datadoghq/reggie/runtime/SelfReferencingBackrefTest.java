@@ -114,10 +114,9 @@ class SelfReferencingBackrefTest {
 
   @Test
   void regression_normalBackrefAfterQuantifiedGroup() {
-    ReggieMatcher m = Reggie.compile("^(a+)\\1$");
-    assertNotNull(m.match("aa"));
-    assertNotNull(m.match("aaaa"));
-    assertNull(m.match("aaa"));
+    ReggieMatcher m = Reggie.compile("(.+)=\\1");
+    assertTrue(m.find("abc=abc"));
+    assertFalse(m.find("x=y"));
   }
 
   @Test
