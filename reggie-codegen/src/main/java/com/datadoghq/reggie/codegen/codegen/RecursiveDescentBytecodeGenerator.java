@@ -1703,10 +1703,11 @@ public class RecursiveDescentBytecodeGenerator {
         // Capturing group: record start/end positions
         int startIndex = node.groupNumber * 2;
         int endIndex = node.groupNumber * 2 + 1;
+        boolean selfReferencingBackref = PatternAnalyzer.hasSelfReferencingBackref(node);
 
         // C-01: For self-referencing groups write partial-open sentinel before calling child.
         // This lets \N inside the group resolve to zero-length match on the first entry.
-        if (PatternAnalyzer.hasSelfReferencingBackref(node)) {
+        if (selfReferencingBackref) {
           // Save prior groups[startIndex]/groups[endIndex] so they can be restored on child
           // failure.
           // Slot 7 = prior start, slot 8 = prior end. (Slots 0-6 hold
@@ -1751,7 +1752,7 @@ public class RecursiveDescentBytecodeGenerator {
         // Child failed: restore the partial-open sentinel writes (if any) so we leave groups
         // unchanged on -1 return. Without this, an enclosing quantifier/alternation that retries
         // would observe the sentinel from this failed attempt.
-        if (PatternAnalyzer.hasSelfReferencingBackref(node)) {
+        if (selfReferencingBackref) {
           mv.visitVarInsn(ALOAD, 4); // groups
           BytecodeUtil.pushInt(mv, startIndex);
           mv.visitVarInsn(ILOAD, 7); // prior start
