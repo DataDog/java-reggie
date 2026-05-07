@@ -103,7 +103,6 @@ public class TestRecursiveDescentFailures {
   }
 
   // Category 3: Self-Referencing Backreferences
-  // Known limitation - run with -Dreggie.test.knownFailures=true to enable
 
   @Test
   void testSelfReferencingBackref_Complex() {

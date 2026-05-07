@@ -2932,9 +2932,9 @@ public class RecursiveDescentBytecodeGenerator {
      * the same logic for subsequent groups in the concat that also have trailing optional backrefs.
      *
      * <p>Uses slots already reserved by generateConcatWithBacktracking: 5=currentPos,
-     * 6=savedGroups, 7=quantifierStartPos (position before the group). Uses slots 11+ for
-     * intermediates, and dynamically allocates higher slots via {@code extraSlotBase} for deeper
-     * recursion.
+     * 6=savedGroups, 7=quantifierStartPos (position before the group). Allocates one extra slot via
+     * {@code extraSlotBase} for the child result, and higher slots via {@code extraSlotBase+1} for
+     * deeper recursion.
      *
      * <p>On overall failure, jumps to {@code overallFailLabel} (caller is responsible for emitting
      * any code at that label). On success, falls through with currentPos (slot 5) updated.
@@ -2957,8 +2957,6 @@ public class RecursiveDescentBytecodeGenerator {
         Label overallFailLabel) {
 
       int resultSlot = extraSlotBase; // temp result from group call
-      int postGroupPosSlot = extraSlotBase + 1; // pos after this group (for save/restore on retry)
-      int postGroupSavedGroupsSlot = extraSlotBase + 2; // groups snapshot after this group
 
       // Build the "mandatory-only" parser node for this group.
       RegexNode mandatoryChild;
@@ -3007,14 +3005,9 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, resultSlot);
       mv.visitVarInsn(ISTORE, 5);
 
-      // Save pos/groups after the full-group match (needed if rest fails and we retry)
-      mv.visitVarInsn(ILOAD, 5);
-      mv.visitVarInsn(ISTORE, postGroupPosSlot);
-      generateGroupArraySave(4, postGroupSavedGroupsSlot);
-
       // Try remaining children (with recursive backtracking if needed)
       // On failure, jump to restFailed; on success, fall through
-      generateRemainingWithBacktracking(node, fromIndex + 1, restFailed, extraSlotBase + 3);
+      generateRemainingWithBacktracking(node, fromIndex + 1, restFailed, extraSlotBase + 1);
 
       // All remaining children succeeded with full group result: fall through (success)
       // Jump past Attempt 2
@@ -3067,7 +3060,7 @@ public class RecursiveDescentBytecodeGenerator {
 
       // Try remaining children after mandatory match (with backtracking if needed)
       // On failure, jump to overall fail; on success, fall through
-      generateRemainingWithBacktracking(node, fromIndex + 1, overallFailLabel, extraSlotBase + 3);
+      generateRemainingWithBacktracking(node, fromIndex + 1, overallFailLabel, extraSlotBase + 1);
 
       mv.visitLabel(doneSuccess);
       // Success: slot 5 (currentPos) is already updated; caller falls through here
