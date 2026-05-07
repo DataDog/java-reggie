@@ -162,17 +162,28 @@ with open(json_path) as f:
     prs = json.load(f)
 
 lines = []
+seen_issues = set()
 for pr in sorted(prs, key=lambda p: p['number']):
     labels = [l['name'] for l in pr.get('labels', [])]
     if 'no release notes' in labels:
         continue
-    title = pr['title']
-    # Backport PRs use "🍒 <orig_num> - <orig_title>"; surface the original PR ref.
-    m = re.match(r'[^\x00-\x7F]\s+(\d+)\s+-\s+(.*)', title)
-    if m:
-        lines.append(f"- #{m.group(1)} {m.group(2).strip()}")
+    issue_nodes = pr.get('closingIssuesReferences', {}).get('nodes', [])
+    if issue_nodes:
+        for issue in issue_nodes:
+            issue_labels = [l['name'] for l in issue.get('labels', [])]
+            if 'no release notes' in issue_labels:
+                continue
+            if issue['number'] not in seen_issues:
+                seen_issues.add(issue['number'])
+                lines.append(f"- #{issue['number']} {issue['title']}")
     else:
-        lines.append(f"- #{pr['number']} {title}")
+        title = pr['title']
+        # Backport PRs use "🍒 <orig_num> - <orig_title>"; surface the original PR ref.
+        m = re.match(r'[^\x00-\x7F]\s+(\d+)\s+-\s+(.*)', title)
+        if m:
+            lines.append(f"- #{m.group(1)} {m.group(2).strip()}")
+        else:
+            lines.append(f"- #{pr['number']} {title}")
 
 entries = '\n'.join(lines) if lines else '- No user-facing changes.'
 new_section = f'## [{version}] - {date}\n\n{entries}\n'
@@ -229,12 +240,147 @@ ensure_unreleased_changelog() {
     fi
 }
 
+# ── GraphQL / milestone helpers ──────────────────────────────────────────────
+
+# Collect merged PRs (with closingIssuesReferences) via GitHub GraphQL API.
+# Args: $1=base_branch, $2=since_date(ISO8601 or ""), $3=output_json_path
+collect_prs_with_issues() {
+    python3 - "$REPO_OWNER" "$REPO_NAME" "$1" "$2" "$3" <<'PYEOF'
+import json, subprocess, sys
+
+owner, repo, base, since, outfile = sys.argv[1:6]
+
+QUERY = """\
+query($owner: String!, $repo: String!, $base: String!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(
+      states: [MERGED], baseRefName: $base, first: 100, after: $cursor,
+      orderBy: {field: UPDATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title mergedAt updatedAt
+        labels(first: 20)                  { nodes { name } }
+        closingIssuesReferences(first: 10) { nodes { number title labels(first: 10) { nodes { name } } } }
+      }
+    }
+  }
+}"""
+
+cursor = None
+results = []
+page = 0
+
+while page < 5:
+    args = ['gh', 'api', 'graphql',
+            '-F', f'owner={owner}',
+            '-F', f'repo={repo}',
+            '-F', f'base={base}',
+            '-f', f'query={QUERY}']
+    if cursor:
+        args += ['-F', f'cursor={cursor}']
+    try:
+        out = subprocess.check_output(args, stderr=subprocess.DEVNULL)
+        data = json.loads(out)
+    except Exception:
+        break
+
+    pr_data = data.get('data', {}).get('repository', {}).get('pullRequests', {})
+    nodes    = pr_data.get('nodes', [])
+    page_info = pr_data.get('pageInfo', {})
+
+    stop = False
+    for n in nodes:
+        if since and (n.get('updatedAt') or '') < since:
+            stop = True
+            break
+        merged = n.get('mergedAt') or ''
+        if merged and (not since or merged > since):
+            results.append({
+                'number':   n['number'],
+                'title':    n['title'],
+                'labels':   [{'name': l['name']} for l in n['labels']['nodes']],
+                'closingIssuesReferences': {
+                    'nodes': [{'number': i['number'], 'title': i['title'],
+                                'labels': [{'name': l['name']} for l in i['labels']['nodes']]}
+                               for i in n['closingIssuesReferences']['nodes']]
+                },
+            })
+
+    page += 1
+    if stop or not page_info.get('hasNextPage'):
+        break
+    cursor = page_info.get('endCursor')
+
+with open(outfile, 'w') as f:
+    json.dump(results, f)
+PYEOF
+}
+
+# Return the number of an existing milestone named $1, creating it if absent.
+# Queries ?state=all so previously-closed milestones are found (idempotency).
+get_or_create_milestone() {
+    local title="$1"
+    local num
+    num=$(gh api "repos/$REPO_OWNER/$REPO_NAME/milestones?state=all&per_page=100" \
+          --jq ".[] | select(.title == \"$title\") | .number" 2>/dev/null | head -1)
+    if [ -z "$num" ]; then
+        num=$(gh api "repos/$REPO_OWNER/$REPO_NAME/milestones" \
+              -X POST -f "title=$title" --jq '.number' 2>/dev/null)
+    fi
+    echo "$num"
+}
+
+# Assign all PRs in JSON file $1, and their linked closing issues, to milestone $2.
+assign_prs_to_milestone() {
+    local json_path="$1" milestone_num="$2"
+    python3 - "$json_path" "$milestone_num" "$REPO_OWNER" "$REPO_NAME" <<'PYEOF'
+import json, subprocess, sys
+json_path, milestone_num, owner, repo = sys.argv[1:5]
+with open(json_path) as f:
+    prs = json.load(f)
+seen = set()
+for pr in prs:
+    for num in ([pr['number']]
+                + [i['number'] for i in pr.get('closingIssuesReferences', {}).get('nodes', [])]):
+        if num not in seen:
+            seen.add(num)
+            subprocess.run(
+                ['gh', 'api', f'repos/{owner}/{repo}/issues/{num}',
+                 '-X', 'PATCH', '-F', f'milestone={milestone_num}'],
+                capture_output=True, check=False)
+PYEOF
+}
+
+# Create milestone $1 if it does not already exist (queries ?state=all for idempotency).
+create_milestone_if_absent() {
+    local title="$1"
+    if [ $DRY_RUN -eq 1 ]; then
+        printf '[DRY-RUN] Create milestone "%s" (if absent)\n' "$title"
+        return
+    fi
+    local exists
+    exists=$(gh api "repos/$REPO_OWNER/$REPO_NAME/milestones?state=all&per_page=100" \
+             --jq ".[] | select(.title == \"$title\") | .number" 2>/dev/null | head -1)
+    if [ -z "$exists" ]; then
+        gh api "repos/$REPO_OWNER/$REPO_NAME/milestones" -X POST -f "title=$title" >/dev/null \
+            && printf '==> Created milestone "%s"\n' "$title" || true
+    else
+        printf '    (milestone "%s" already exists — skipping)\n' "$title"
+    fi
+}
+
 # ── Preflight ────────────────────────────────────────────────────────────────
 command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is not installed. See https://cli.github.com/"
 gh auth status >/dev/null 2>&1 || die "Not authenticated with GitHub CLI. Run 'gh auth login'."
 
 DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q '.defaultBranchRef.name' 2>/dev/null) \
     || die "Failed to detect default branch via 'gh repo view'."
+
+_REPO_NWO=$(gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null) \
+    || die "Failed to detect repo name via 'gh repo view'."
+REPO_OWNER="${_REPO_NWO%%/*}"
+REPO_NAME="${_REPO_NWO##*/}"
 
 if [ $DRY_RUN -eq 0 ] && [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
     die "Working tree is dirty. Commit or stash changes first."
@@ -333,21 +479,28 @@ if [ $DRY_RUN -eq 0 ]; then
     [[ $REPLY =~ ^[Yy][Ee][Ss]$ ]] || die "Cancelled by user."
 fi
 
-# ── Collect merged PRs for release notes ─────────────────────────────────────
+# ── Collect merged PRs (with linked issues) for release notes ─────────────────
 LAST_TAG=$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || echo "")
-if [ -n "$LAST_TAG" ]; then
-    LAST_DATE=$(git -C "$ROOT" log -1 --format=%aI "$LAST_TAG")
-    SEARCH_FILTER="merged:>$LAST_DATE"
-else
-    SEARCH_FILTER="is:merged"
-fi
+SINCE=""
+[ -n "$LAST_TAG" ] && SINCE=$(git -C "$ROOT" log -1 --format=%aI "$LAST_TAG")
 TMPJSON=$(mktemp)
 trap 'rm -f "$TMPJSON"' EXIT
 
-echo "Collecting merged PRs..."
-gh pr list --state merged --base "$BRANCH" --limit 500 --search "$SEARCH_FILTER" \
-    --json number,title,labels > "$TMPJSON" 2>/dev/null || echo "[]" > "$TMPJSON"
+echo "Collecting merged PRs with linked issues..."
+collect_prs_with_issues "$BRANCH" "$SINCE" "$TMPJSON"
 DATE=$(date +%Y-%m-%d)
+
+# ── Milestone: create/get VERSION and assign collected PRs + issues ────────────
+if [ $DRY_RUN -eq 1 ]; then
+    _PR_COUNT=$(python3 -c "import json; print(len(json.load(open('$TMPJSON'))))" 2>/dev/null || echo "?")
+    printf '[DRY-RUN] Create/update milestone "%s"\n' "$VERSION"
+    printf '[DRY-RUN] Assign %s PRs (and linked issues) to milestone "%s"\n' "$_PR_COUNT" "$VERSION"
+    _MILESTONE_NUM=0
+else
+    printf '==> Managing milestone "%s"\n' "$VERSION"
+    _MILESTONE_NUM=$(get_or_create_milestone "$VERSION")
+    assign_prs_to_milestone "$TMPJSON" "$_MILESTONE_NUM"
+fi
 
 # ── Execute ──────────────────────────────────────────────────────────────────
 if [ "$BUMP" = "patch" ]; then
@@ -372,6 +525,10 @@ if [ "$BUMP" = "patch" ]; then
     run git -C "$ROOT" commit -m "Prepare for $MAINT_NEXT"
 
     run git -C "$ROOT" push origin "$BRANCH" "$TAG"
+
+    do_action "Close milestone \"$VERSION\"" \
+        bash -c "gh api repos/$REPO_OWNER/$REPO_NAME/milestones/$_MILESTONE_NUM -X PATCH -f state=closed >/dev/null"
+    create_milestone_if_absent "${MAINT_NEXT%-SNAPSHOT}"
 
 else
     # major / minor: cut release branch FIRST so the release commit lives there, not on $DEFAULT_BRANCH.
@@ -418,6 +575,12 @@ else
     run git -C "$ROOT" commit -m "Prepare for $MAIN_NEXT"
 
     run git -C "$ROOT" push origin "$DEFAULT_BRANCH" "$MAINT_BRANCH" "$TAG"
+
+    do_action "Close milestone \"$VERSION\"" \
+        bash -c "gh api repos/$REPO_OWNER/$REPO_NAME/milestones/$_MILESTONE_NUM -X PATCH -f state=closed >/dev/null"
+    create_milestone_if_absent "${MAINT_NEXT%-SNAPSHOT}"
+    create_milestone_if_absent "${MAIN_NEXT%-SNAPSHOT}"
+
 fi
 
 echo ""
