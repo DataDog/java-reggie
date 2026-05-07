@@ -1707,6 +1707,18 @@ public class RecursiveDescentBytecodeGenerator {
         // C-01: For self-referencing groups write partial-open sentinel before calling child.
         // This lets \N inside the group resolve to zero-length match on the first entry.
         if (PatternAnalyzer.hasSelfReferencingBackref(node)) {
+          // Save prior groups[startIndex]/groups[endIndex] so they can be restored on child
+          // failure.
+          // Slot 7 = prior start, slot 8 = prior end. (Slots 0-6 hold
+          // this/input/pos/end/groups/depth/result.)
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, startIndex);
+          mv.visitInsn(IALOAD);
+          mv.visitVarInsn(ISTORE, 7); // prior start
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, endIndex);
+          mv.visitInsn(IALOAD);
+          mv.visitVarInsn(ISTORE, 8); // prior end
           // groups[startIndex] = pos
           mv.visitVarInsn(ALOAD, 4); // groups
           BytecodeUtil.pushInt(mv, startIndex);
@@ -1736,7 +1748,19 @@ public class RecursiveDescentBytecodeGenerator {
         Label childMatched = new Label();
         mv.visitJumpInsn(IF_ICMPNE, childMatched);
 
-        // Child failed: return -1 immediately without setting groups
+        // Child failed: restore the partial-open sentinel writes (if any) so we leave groups
+        // unchanged on -1 return. Without this, an enclosing quantifier/alternation that retries
+        // would observe the sentinel from this failed attempt.
+        if (PatternAnalyzer.hasSelfReferencingBackref(node)) {
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, startIndex);
+          mv.visitVarInsn(ILOAD, 7); // prior start
+          mv.visitInsn(IASTORE);
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, endIndex);
+          mv.visitVarInsn(ILOAD, 8); // prior end
+          mv.visitInsn(IASTORE);
+        }
         mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
 
@@ -2105,12 +2129,13 @@ public class RecursiveDescentBytecodeGenerator {
 
     /**
      * Extract the trailing optional backref quantifier from a concat or single node, if present.
-     * Returns the QuantifierNode if the node ends with Quant(Backref, min=0), otherwise null.
+     * Returns the QuantifierNode if the node ends with a greedy Quant(Backref, min=0, max=1) (i.e.,
+     * exactly {@code \1?}), otherwise null.
      */
     private QuantifierNode extractTrailingOptionalBackref(RegexNode node) {
       if (node instanceof QuantifierNode) {
         QuantifierNode q = (QuantifierNode) node;
-        if (q.min == 0 && q.child instanceof BackreferenceNode) {
+        if (q.min == 0 && q.max == 1 && q.greedy && q.child instanceof BackreferenceNode) {
           return q;
         }
         return null;
@@ -2123,7 +2148,7 @@ public class RecursiveDescentBytecodeGenerator {
         RegexNode last = concat.children.get(concat.children.size() - 1);
         if (last instanceof QuantifierNode) {
           QuantifierNode q = (QuantifierNode) last;
-          if (q.min == 0 && q.child instanceof BackreferenceNode) {
+          if (q.min == 0 && q.max == 1 && q.greedy && q.child instanceof BackreferenceNode) {
             return q;
           }
         }

@@ -3256,7 +3256,8 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitAssertion(AssertionNode node) {
-      return false;
+      // Recurse into the assertion's sub-pattern so backrefs inside lookahead/lookbehind are found.
+      return node.subPattern != null && node.subPattern.accept(this);
     }
 
     @Override
@@ -3667,7 +3668,8 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitAssertion(AssertionNode node) {
-      return false;
+      // Recurse into the assertion's sub-pattern so backrefs inside lookahead/lookbehind are found.
+      return node.subPattern != null && node.subPattern.accept(this);
     }
 
     @Override
