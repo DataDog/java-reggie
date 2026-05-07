@@ -86,7 +86,7 @@ public class TestBackrefQuantifiers {
   }
 
   @Test
-  void testSelfReferencialBackref() {
+  void testSelfReferentialBackref() {
     RuntimeCompiler.clearCache();
     ReggieMatcher m = Reggie.compile("^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$");
 
