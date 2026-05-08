@@ -170,5 +170,10 @@ public class HybridMatcher extends ReggieMatcher {
       int e = delegate.end(name);
       return e >= 0 ? e + offset : -1;
     }
+
+    @Override
+    public boolean hasNamedGroups() {
+      return delegate.hasNamedGroups();
+    }
   }
 }

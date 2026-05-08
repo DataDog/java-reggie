@@ -238,4 +238,14 @@ public class NamedGroupCorrectnessTest {
     assertTrue(result.hasNamedGroups());
     assertEquals("hello", result.group("word"));
   }
+
+  @Test
+  public void testHasNamedGroups_quantifiedNamedGroup_hybridPath() {
+    // quantified capturing group triggers hybrid DFA+NFA path
+    ReggieMatcher m = RuntimeCompiler.compile("(?<x>a)+");
+    MatchResult result = m.findMatch("aaa");
+    assertNotNull(result);
+    assertTrue(result.hasNamedGroups());
+    assertNotNull(result.group("x"));
+  }
 }
