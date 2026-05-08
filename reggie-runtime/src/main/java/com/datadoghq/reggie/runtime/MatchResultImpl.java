@@ -15,23 +15,21 @@
  */
 package com.datadoghq.reggie.runtime;
 
-import java.util.Map;
-
 /**
  * Immutable implementation of {@link MatchResult}.
  *
  * <p>Design: - Minimal allocation: one object + two int arrays - O(1) group access - Immutable and
- * thread-safe - Cache-friendly layout
+ * thread-safe - Cache-friendly layout. Named-group support is provided by the subclass {@link
+ * NamedMatchResultImpl}.
  *
  * <p>Group index semantics: - Group 0: entire match - Group 1..n: capturing groups - Value -1 means
  * group didn't participate in the match
  */
-public final class MatchResultImpl implements NamedGroupResult {
+public class MatchResultImpl implements MatchResult {
   private final String input;
   private final int[] starts; // starts[0] = match, starts[1..n] = groups
   private final int[] ends; // ends[0] = match, ends[1..n] = groups
   private final int groupCount;
-  private final Map<String, Integer> nameIndex;
 
   /**
    * Creates a new match result.
@@ -42,21 +40,10 @@ public final class MatchResultImpl implements NamedGroupResult {
    * @param groupCount number of capturing groups (not including group 0)
    */
   public MatchResultImpl(String input, int[] starts, int[] ends, int groupCount) {
-    this(input, starts, ends, groupCount, null);
-  }
-
-  /**
-   * Creates a new match result with optional named group support.
-   *
-   * @param nameIndex name-to-index map for named groups, or {@code null} if not applicable
-   */
-  public MatchResultImpl(
-      String input, int[] starts, int[] ends, int groupCount, Map<String, Integer> nameIndex) {
     this.input = input;
     this.starts = starts;
     this.ends = ends;
     this.groupCount = groupCount;
-    this.nameIndex = nameIndex;
   }
 
   @Override
@@ -110,20 +97,6 @@ public final class MatchResultImpl implements NamedGroupResult {
       throw new IndexOutOfBoundsException("No group " + group);
     }
     return ends[group];
-  }
-
-  @Override
-  public boolean hasNamedGroups() {
-    return nameIndex != null && !nameIndex.isEmpty();
-  }
-
-  @Override
-  public String group(String name) {
-    Integer idx = nameIndex != null ? nameIndex.get(name) : null;
-    if (idx == null) {
-      throw new IllegalArgumentException("No group with name <" + name + ">");
-    }
-    return group(idx);
   }
 
   @Override

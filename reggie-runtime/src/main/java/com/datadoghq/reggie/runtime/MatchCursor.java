@@ -71,6 +71,12 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
     if (tailAppended || input == null) {
       return null;
     }
+    if (peekedValid) {
+      lastMatch = peeked;
+      peeked = null;
+      peekedValid = false;
+      return lastMatch;
+    }
     if (searchPos > input.length()) {
       return null;
     }
@@ -123,6 +129,9 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
       sb.append(input, appendPos, input.length());
     }
     tailAppended = true;
+    lastMatch = null;
+    peeked = null;
+    peekedValid = false;
     return sb;
   }
 
@@ -182,7 +191,7 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
       starts[i] = m.start(i);
       ends[i] = m.end(i);
     }
-    return new MatchResultImpl(input, starts, ends, gc, nameIndex);
+    return new NamedMatchResultImpl(input, starts, ends, gc, nameIndex);
   }
 
   // Expands $0, $1, $2, ${name} backreferences from replacement into sb.
@@ -200,11 +209,16 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
       if (next >= '0' && next <= '9') {
         int groupNum = next - '0';
         i++;
-        // consume additional digits
+        // Greedily consume digits while accumulated number stays within groupCount
+        // (JDK appendReplacement semantics: stop before a digit that would exceed groupCount)
         while (i + 1 < len
             && replacement.charAt(i + 1) >= '0'
             && replacement.charAt(i + 1) <= '9') {
-          groupNum = groupNum * 10 + (replacement.charAt(i + 1) - '0');
+          int next2 = groupNum * 10 + (replacement.charAt(i + 1) - '0');
+          if (next2 > m.groupCount()) {
+            break;
+          }
+          groupNum = next2;
           i++;
         }
         if (groupNum > m.groupCount()) {

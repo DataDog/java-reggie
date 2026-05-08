@@ -198,6 +198,7 @@ public class MatchCursorTest {
                 return sb.toString();
               }));
     }
+    ready.await();
     start.countDown();
     pool.shutdown();
     for (Future<String> f : futures) {
