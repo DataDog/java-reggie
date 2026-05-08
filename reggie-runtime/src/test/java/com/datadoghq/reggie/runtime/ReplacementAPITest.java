@@ -133,7 +133,8 @@ public class ReplacementAPITest {
     ReggieMatcher matcher = RuntimeCompiler.compile(",");
     String[] parts = matcher.split("a,b,");
 
-    assertArrayEquals(new String[] {"a", "b", ""}, parts, "Should handle delimiter at end");
+    // split(String) has limit=0 semantics: trailing empty strings are discarded.
+    assertArrayEquals(new String[] {"a", "b"}, parts, "Should discard trailing empty string");
   }
 
   @Test

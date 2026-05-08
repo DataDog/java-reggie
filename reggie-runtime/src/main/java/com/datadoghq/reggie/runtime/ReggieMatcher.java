@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Function;
 
 /**
@@ -260,11 +261,7 @@ public abstract class ReggieMatcher {
       result.append(replacement);
       lastEnd = bounds[1];
 
-      // Advance (handle zero-width matches)
-      pos = bounds[1];
-      if (bounds[0] == bounds[1]) {
-        pos++; // Prevent infinite loop on zero-width matches
-      }
+      pos = advancePos(bounds[0], bounds[1]);
     } while (pos <= input.length() && findBoundsFrom(input, pos, bounds));
 
     result.append(input, lastEnd, input.length());
@@ -295,18 +292,82 @@ public abstract class ReggieMatcher {
   /**
    * Splits the input string around matches of the pattern.
    *
+   * <p>Equivalent to {@code split(input, 0)}: all parts are returned with trailing empty strings
+   * discarded, matching the behaviour of {@link java.util.regex.Pattern#split(CharSequence)}.
+   *
    * @param input the input string
    * @return array of strings split around matches
+   * @throws NullPointerException if input is null
    */
   public String[] split(String input) {
+    return split(input, 0);
+  }
+
+  /**
+   * Splits the input string around matches of the pattern.
+   *
+   * <p>The {@code limit} parameter controls the number of parts returned and whether trailing empty
+   * strings are discarded, matching the semantics of {@link
+   * java.util.regex.Pattern#split(CharSequence, int)}:
+   *
+   * <ul>
+   *   <li>{@code limit > 0} — at most {@code limit} parts; the last part contains the remainder of
+   *       the string; trailing empty strings are retained.
+   *   <li>{@code limit < 0} — all parts; trailing empty strings are retained.
+   *   <li>{@code limit = 0} — all parts; trailing empty strings are discarded.
+   * </ul>
+   *
+   * @param input the input string
+   * @param limit controls the number of parts as described above
+   * @return array of strings split around matches
+   * @throws NullPointerException if input is null
+   */
+  public String[] split(String input, int limit) {
+    Objects.requireNonNull(input);
     List<String> parts = new ArrayList<>();
     int lastEnd = 0;
+    int pos = 0;
 
-    for (MatchResult match : findAll(input)) {
+    while (pos <= input.length()) {
+      // Early termination: we have limit - 1 parts, remainder becomes the last part.
+      if (limit > 0 && parts.size() == limit - 1) {
+        break;
+      }
+
+      MatchResult match = findMatchFrom(input, pos);
+      if (match == null) {
+        break;
+      }
+
+      // JDK 8+ behaviour: skip a zero-width match at the very start of the string.
+      if (lastEnd == 0 && match.start() == 0 && match.start() == match.end()) {
+        pos = 1;
+        continue;
+      }
+
       parts.add(input.substring(lastEnd, match.start()));
       lastEnd = match.end();
+
+      // Advance past zero-width match to prevent an infinite loop.
+      pos = advancePos(match.start(), match.end());
     }
-    parts.add(input.substring(lastEnd));
+
+    // No splits: return the whole input as a single-element array (matches JDK behaviour).
+    if (lastEnd == 0) {
+      return new String[] {input};
+    }
+
+    if (limit <= 0 || parts.size() < limit) {
+      parts.add(input.substring(lastEnd));
+    }
+
+    if (limit == 0) {
+      int size = parts.size();
+      while (size > 0 && parts.get(size - 1).isEmpty()) {
+        size--;
+      }
+      return parts.subList(0, size).toArray(new String[0]);
+    }
 
     return parts.toArray(new String[0]);
   }
@@ -329,14 +390,18 @@ public abstract class ReggieMatcher {
 
       results.add(match);
 
-      // Advance (handle zero-width matches)
-      pos = match.end();
-      if (match.start() == match.end()) {
-        pos++; // Prevent infinite loop on zero-width matches
-      }
+      pos = advancePos(match.start(), match.end());
     }
 
     return results;
+  }
+
+  /**
+   * Returns the next scan position after a match, advancing by one extra character for zero-width
+   * matches to prevent an infinite loop.
+   */
+  private static int advancePos(int matchStart, int matchEnd) {
+    return matchEnd + (matchStart == matchEnd ? 1 : 0);
   }
 
   /**
