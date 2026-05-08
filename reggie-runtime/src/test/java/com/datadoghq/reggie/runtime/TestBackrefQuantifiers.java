@@ -19,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 /**
  * Tests for backreferences with variable quantifiers. These patterns require backtracking support.
@@ -86,13 +85,8 @@ public class TestBackrefQuantifiers {
     assertEquals("a", r3.group(2));
   }
 
-  /**
-   * Self-referencing backreferences are a known limitation. Run with
-   * -Dreggie.test.knownFailures=true to enable.
-   */
   @Test
-  @EnabledIfSystemProperty(named = "reggie.test.knownFailures", matches = "true")
-  void testSelfReferencialBackref() {
+  void testSelfReferentialBackref() {
     RuntimeCompiler.clearCache();
     ReggieMatcher m = Reggie.compile("^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$");
 
@@ -106,5 +100,32 @@ public class TestBackrefQuantifiers {
 
     MatchResult r3 = m.match("aaaaaa");
     assertNotNull(r3, "Should match 'aaaaaa'");
+  }
+
+  // Regression tests for non-self-referencing quantifier patterns.
+  // These assert captured group content to catch silent groups[] overwrites of completed groups.
+
+  @Test
+  void testNonSelfRefQuantifiedGroup_capturePreserved() {
+    // (a){3} - group 1 should reflect the last iteration: 'a'
+    RuntimeCompiler.clearCache();
+    ReggieMatcher m = Reggie.compile("^(a){3}(b)$");
+    MatchResult r = m.match("aaab");
+    assertNotNull(r, "Should match 'aaab'");
+    assertEquals("a", r.group(1), "group(1) should be 'a' (last iteration)");
+    assertEquals("b", r.group(2), "group(2) must not be overwritten by quantifier loop");
+  }
+
+  @Test
+  void testNonSelfRefQuantifiedGroup_followingGroupNotOverwritten() {
+    // Ensures the partial-open write in the quantifier loop does NOT apply to non-self-ref groups,
+    // so a completed earlier group is not silently reset to -1.
+    RuntimeCompiler.clearCache();
+    ReggieMatcher m = Reggie.compile("^(x)(a){2}(y)$");
+    MatchResult r = m.match("xaay");
+    assertNotNull(r, "Should match 'xaay'");
+    assertEquals("x", r.group(1), "group(1) must not be overwritten");
+    assertEquals("a", r.group(2), "group(2) should be last iteration of (a){2}");
+    assertEquals("y", r.group(3), "group(3) must not be overwritten");
   }
 }
