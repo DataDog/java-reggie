@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Function;
 
 /**
@@ -295,18 +296,87 @@ public abstract class ReggieMatcher {
   /**
    * Splits the input string around matches of the pattern.
    *
+   * <p>Equivalent to {@code split(input, 0)}: all parts are returned with trailing empty strings
+   * discarded, matching the behaviour of {@link java.util.regex.Pattern#split(CharSequence)}.
+   *
    * @param input the input string
    * @return array of strings split around matches
+   * @throws NullPointerException if input is null
    */
   public String[] split(String input) {
+    return split(input, 0);
+  }
+
+  /**
+   * Splits the input string around matches of the pattern.
+   *
+   * <p>The {@code limit} parameter controls the number of parts returned and whether trailing empty
+   * strings are discarded, matching the semantics of {@link
+   * java.util.regex.Pattern#split(CharSequence, int)}:
+   *
+   * <ul>
+   *   <li>{@code limit > 0} — at most {@code limit} parts; the last part contains the remainder of
+   *       the string; trailing empty strings are retained.
+   *   <li>{@code limit < 0} — all parts; trailing empty strings are retained.
+   *   <li>{@code limit = 0} — all parts; trailing empty strings are discarded.
+   * </ul>
+   *
+   * @param input the input string
+   * @param limit controls the number of parts as described above
+   * @return array of strings split around matches
+   * @throws NullPointerException if input is null
+   */
+  public String[] split(String input, int limit) {
+    Objects.requireNonNull(input);
     List<String> parts = new ArrayList<>();
     int lastEnd = 0;
+    int pos = 0;
 
-    for (MatchResult match : findAll(input)) {
+    while (pos <= input.length()) {
+      // Early termination: we have limit - 1 parts, remainder becomes the last part.
+      if (limit > 0 && parts.size() == limit - 1) {
+        break;
+      }
+
+      MatchResult match = findMatchFrom(input, pos);
+      if (match == null) {
+        break;
+      }
+
+      // JDK 8+ behaviour: skip a zero-width match at the very start of the string.
+      if (lastEnd == 0 && match.start() == 0 && match.start() == match.end()) {
+        pos = 1;
+        continue;
+      }
+
       parts.add(input.substring(lastEnd, match.start()));
       lastEnd = match.end();
+
+      // Advance past zero-width match to prevent an infinite loop.
+      pos = match.end();
+      if (match.start() == match.end()) {
+        pos++;
+      }
     }
-    parts.add(input.substring(lastEnd));
+
+    // No splits: return the whole input as a single-element array (matches JDK behaviour).
+    if (lastEnd == 0) {
+      return new String[] {input};
+    }
+
+    // Add the remaining segment when the limit allows it.
+    if (limit <= 0 || parts.size() < limit) {
+      parts.add(input.substring(lastEnd));
+    }
+
+    // Discard trailing empty strings when limit = 0.
+    if (limit == 0) {
+      int size = parts.size();
+      while (size > 0 && parts.get(size - 1).isEmpty()) {
+        size--;
+      }
+      return parts.subList(0, size).toArray(new String[0]);
+    }
 
     return parts.toArray(new String[0]);
   }
