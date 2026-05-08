@@ -57,7 +57,6 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
-import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -144,7 +143,7 @@ public class RuntimeCompiler {
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
-      Map<String, Integer> nameMap = Collections.unmodifiableMap(parser.getGroupNameMap());
+      Map<String, Integer> nameMap = parser.getGroupNameMap();
 
       // 2. Check if pattern requires recursive descent (context-free features)
       // Do this early to avoid unnecessary NFA building
