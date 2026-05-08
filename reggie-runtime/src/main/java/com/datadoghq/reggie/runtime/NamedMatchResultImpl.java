@@ -27,11 +27,7 @@ final class NamedMatchResultImpl extends MatchResultImpl implements NamedGroupRe
   private final Map<String, Integer> nameIndex;
 
   NamedMatchResultImpl(
-      String input,
-      int[] starts,
-      int[] ends,
-      int groupCount,
-      Map<String, Integer> nameIndex) {
+      String input, int[] starts, int[] ends, int groupCount, Map<String, Integer> nameIndex) {
     super(input, starts, ends, groupCount);
     this.nameIndex = Objects.requireNonNull(nameIndex, "nameIndex");
   }
