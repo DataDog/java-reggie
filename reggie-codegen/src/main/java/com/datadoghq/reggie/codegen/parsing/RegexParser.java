@@ -64,7 +64,9 @@ public class RegexParser {
    *     the pattern contains no named groups or {@code parse} has not yet been called
    */
   public Map<String, Integer> getGroupNameMap() {
-    return groupNameMap != null ? Collections.unmodifiableMap(groupNameMap) : Collections.emptyMap();
+    return groupNameMap != null
+        ? Collections.unmodifiableMap(groupNameMap)
+        : Collections.emptyMap();
   }
 
   // Parsing methods

@@ -507,7 +507,8 @@ public class ReggieMatcherBytecodeGenerator {
    * Generate constructor: public XxxMatcher() { super(pattern); } Optionally initializes NFA state
    * for NFA-based strategies.
    */
-  private void generateConstructor(ClassWriter cw, boolean needsNFAState, NFA nfa, Map<String, Integer> nameMap) {
+  private void generateConstructor(
+      ClassWriter cw, boolean needsNFAState, NFA nfa, Map<String, Integer> nameMap) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
     mv.visitCode();
 
@@ -548,14 +549,30 @@ public class ReggieMatcherBytecodeGenerator {
         mv.visitVarInsn(ALOAD, 1);
         mv.visitLdcInsn(entry.getKey());
         mv.visitLdcInsn(entry.getValue());
-        mv.visitMethodInsn(INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/util/HashMap", "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", false);
+        mv.visitMethodInsn(
+            INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+        mv.visitMethodInsn(
+            INVOKEVIRTUAL,
+            "java/util/HashMap",
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            false);
         mv.visitInsn(POP);
       }
       mv.visitVarInsn(ALOAD, 0);
       mv.visitVarInsn(ALOAD, 1);
-      mv.visitMethodInsn(INVOKESTATIC, "java/util/Collections", "unmodifiableMap", "(Ljava/util/Map;)Ljava/util/Map;", false);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/ReggieMatcher", "setNameToIndex", "(Ljava/util/Map;)V", false);
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "java/util/Collections",
+          "unmodifiableMap",
+          "(Ljava/util/Map;)Ljava/util/Map;",
+          false);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "setNameToIndex",
+          "(Ljava/util/Map;)V",
+          false);
     }
 
     mv.visitInsn(RETURN);
