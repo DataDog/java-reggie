@@ -416,6 +416,32 @@ public class MatchCursorTest {
         () -> cursor.appendReplacement(new StringBuilder(), "foo$"));
   }
 
+  // 31. hasNext() after findNext() preserves lastMatch for appendReplacement
+  @Test
+  void testHasNextAfterFindNextPreservesLastMatch() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("a1b2");
+    MatchResult first = cursor.findNext();
+    assertNotNull(first);
+    assertEquals("1", first.group());
+    assertTrue(cursor.hasNext()); // peeks "2" but must not corrupt lastMatch
+    StringBuilder sb = new StringBuilder();
+    cursor.appendReplacement(sb, "[X]"); // must replace "1", not "2"
+    cursor.appendTail(sb);
+    assertEquals("a[X]b2", sb.toString());
+  }
+
+  // 32. Unterminated named replacement throws IllegalArgumentException
+  @Test
+  void testUnterminatedNamedReferenceThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<user>[a-z]+)@(?<domain>[a-z]+)");
+    MatchCursor cursor = m.cursor("alice@example");
+    cursor.findNext();
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> cursor.appendReplacement(new StringBuilder(), "${user"));
+  }
+
   // 28. Full streaming pipeline end-to-end
   @Test
   void testFullStreamingPipeline() {

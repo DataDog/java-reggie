@@ -157,7 +157,9 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
   @Override
   public boolean hasNext() {
     if (!peekedValid) {
+      MatchResult savedLastMatch = lastMatch;
       MatchResult next = findNext();
+      lastMatch = savedLastMatch;
       if (next != null) {
         peeked = next;
         peekedValid = true;
@@ -237,8 +239,7 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
       } else if (next == '{') {
         int end = replacement.indexOf('}', i + 2);
         if (end < 0) {
-          sb.append(c);
-          continue;
+          throw new IllegalArgumentException("Named group reference is missing closing '}'");
         }
         String name = replacement.substring(i + 2, end);
         i = end;
