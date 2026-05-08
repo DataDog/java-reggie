@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -231,7 +232,7 @@ public class NamedGroupCorrectnessTest {
 
   @Test
   public void testHasNamedGroups_directMatchResultImplConstruction() {
-    java.util.Map<String, Integer> names = java.util.Map.of("word", 1);
+    Map<String, Integer> names = Map.of("word", 1);
     MatchResultImpl result =
         new MatchResultImpl("hello", new int[] {0, 0}, new int[] {5, 5}, 1, names);
     assertTrue(result.hasNamedGroups());
