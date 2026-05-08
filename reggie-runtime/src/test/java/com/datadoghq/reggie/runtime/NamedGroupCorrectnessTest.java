@@ -228,4 +228,13 @@ public class NamedGroupCorrectnessTest {
     assertNotNull(result);
     assertFalse(result.hasNamedGroups());
   }
+
+  @Test
+  public void testHasNamedGroups_directMatchResultImplConstruction() {
+    java.util.Map<String, Integer> names = java.util.Map.of("word", 1);
+    MatchResultImpl result =
+        new MatchResultImpl("hello", new int[] {0, 0}, new int[] {5, 5}, 1, names);
+    assertTrue(result.hasNamedGroups());
+    assertEquals("hello", result.group("word"));
+  }
 }

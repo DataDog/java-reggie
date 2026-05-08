@@ -70,6 +70,11 @@ public class MatchResultImpl implements MatchResult {
   }
 
   @Override
+  public boolean hasNamedGroups() {
+    return !nameToIndex.isEmpty();
+  }
+
+  @Override
   public int start() {
     return starts[0];
   }
