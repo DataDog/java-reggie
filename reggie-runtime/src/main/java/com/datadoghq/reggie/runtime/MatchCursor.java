@@ -15,7 +15,9 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import java.util.ArrayDeque;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -251,11 +253,16 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
   }
 
   // Parses (?<name>...) and (?'name'...) in the pattern, returning name→group-index map.
+  // Handles branch-reset groups (?|...) by resetting groupIndex for each alternative and
+  // advancing to the max across all alternatives, matching RegexParser.parseBranchReset().
   // Returns EMPTY_NAME_INDEX when the pattern has no named groups.
   private static Map<String, Integer> parseNamedGroups(String pattern) {
     Map<String, Integer> map = new HashMap<>();
     int groupIndex = 0;
+    int depth = 0;
     int len = pattern.length();
+    // Each entry: {savedGroupIndex, maxGroupIndex, branchResetDepth}
+    Deque<int[]> branchResetStack = new ArrayDeque<>();
     for (int i = 0; i < len; i++) {
       char c = pattern.charAt(i);
       if (c == '\\') {
@@ -278,10 +285,35 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
         }
         continue;
       }
+      if (c == ')') {
+        if (!branchResetStack.isEmpty() && branchResetStack.peek()[2] == depth) {
+          // Exiting a branch-reset group: take the max groupIndex across all alternatives
+          int[] ctx = branchResetStack.pop();
+          groupIndex = Math.max(ctx[1], groupIndex);
+        }
+        depth--;
+        continue;
+      }
+      if (c == '|') {
+        if (!branchResetStack.isEmpty() && branchResetStack.peek()[2] == depth) {
+          // Alternative boundary inside branch-reset: update max, reset to saved base
+          int[] ctx = branchResetStack.peek();
+          ctx[1] = Math.max(ctx[1], groupIndex);
+          groupIndex = ctx[0];
+        }
+        continue;
+      }
       if (c == '(') {
+        depth++;
         if (i + 1 < len && pattern.charAt(i + 1) == '?') {
           if (i + 2 < len) {
             char delim = pattern.charAt(i + 2);
+            if (delim == '|') {
+              // Branch-reset group: push {savedGroupIndex, maxGroupIndex, thisDepth}
+              branchResetStack.push(new int[] {groupIndex, groupIndex, depth});
+              i += 2; // skip past '?|'
+              continue;
+            }
             if (delim == '<' || delim == '\'') {
               char close = delim == '<' ? '>' : '\'';
               int nameEnd = pattern.indexOf(close, i + 3);
