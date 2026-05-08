@@ -39,12 +39,16 @@ public class BackreferenceBenchmark {
   private Pattern jdkRepeatedWord;
   private Pattern jdkHtmlTag;
   private Pattern jdkMultipleBackref;
+  private Pattern jdkSelfRefRepeated;
+  private Pattern jdkSelfRefFourGroups;
 
   // Reggie patterns
   private ReggieMatcher reggieSimpleBackref;
   private ReggieMatcher reggieRepeatedWord;
   private ReggieMatcher reggieHtmlTag;
   private ReggieMatcher reggieMultipleBackref;
+  private ReggieMatcher reggieSelfRefRepeated;
+  private ReggieMatcher reggieSelfRefFourGroups;
 
   // Test data
   private static final String SIMPLE_MATCH = "aa"; // matches (a)\1
@@ -55,6 +59,9 @@ public class BackreferenceBenchmark {
   private static final String HTML_TAG_NO_MATCH = "<div>content</span>"; // doesn't match
   private static final String MULTIPLE_BACKREF_MATCH = "abab"; // matches (\w)(\w)\1\2
   private static final String MULTIPLE_BACKREF_NO_MATCH = "abcd"; // doesn't match
+  private static final String SELF_REF_MATCH_4 = "aaaa"; // matches (a\1?){4} and 4-group variant
+  private static final String SELF_REF_MATCH_6 = "aaaaaa"; // matches 4-group variant
+  private static final String SELF_REF_NO_MATCH = "aaa"; // doesn't match either
 
   @Setup
   public void setup() {
@@ -63,12 +70,16 @@ public class BackreferenceBenchmark {
     jdkRepeatedWord = Pattern.compile("\\b(\\w+)\\s+\\1\\b");
     jdkHtmlTag = Pattern.compile("<(\\w+)>.*</\\1>");
     jdkMultipleBackref = Pattern.compile("(\\w)(\\w)\\1\\2");
+    jdkSelfRefRepeated = Pattern.compile("^(a\\1?){4}$");
+    jdkSelfRefFourGroups = Pattern.compile("^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$");
 
     // Reggie patterns
     reggieSimpleBackref = RuntimeCompiler.compile("(a)\\1");
     reggieRepeatedWord = RuntimeCompiler.compile("\\b(\\w+)\\s+\\1\\b");
     reggieHtmlTag = RuntimeCompiler.compile("<(\\w+)>.*</\\1>");
     reggieMultipleBackref = RuntimeCompiler.compile("(\\w)(\\w)\\1\\2");
+    reggieSelfRefRepeated = RuntimeCompiler.compile("^(a\\1?){4}$");
+    reggieSelfRefFourGroups = RuntimeCompiler.compile("^(a\\1?)(a\\1?)(a\\2?)(a\\3?)$");
   }
 
   // Simple backreference benchmarks
@@ -153,5 +164,57 @@ public class BackreferenceBenchmark {
   @Benchmark
   public boolean jdkMultipleBackrefNoMatch() {
     return jdkMultipleBackref.matcher(MULTIPLE_BACKREF_NO_MATCH).matches();
+  }
+
+  // Self-referencing backreference benchmarks: ^(a\1?){4}$
+  @Benchmark
+  public boolean reggieSelfRefRepeatedMatch() {
+    return reggieSelfRefRepeated.matches(SELF_REF_MATCH_4);
+  }
+
+  @Benchmark
+  public boolean jdkSelfRefRepeatedMatch() {
+    return jdkSelfRefRepeated.matcher(SELF_REF_MATCH_4).matches();
+  }
+
+  @Benchmark
+  public boolean reggieSelfRefRepeatedNoMatch() {
+    return reggieSelfRefRepeated.matches(SELF_REF_NO_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkSelfRefRepeatedNoMatch() {
+    return jdkSelfRefRepeated.matcher(SELF_REF_NO_MATCH).matches();
+  }
+
+  // Self-referencing backreference benchmarks: ^(a\1?)(a\1?)(a\2?)(a\3?)$
+  @Benchmark
+  public boolean reggieSelfRefFourGroupsMatch4() {
+    return reggieSelfRefFourGroups.matches(SELF_REF_MATCH_4);
+  }
+
+  @Benchmark
+  public boolean jdkSelfRefFourGroupsMatch4() {
+    return jdkSelfRefFourGroups.matcher(SELF_REF_MATCH_4).matches();
+  }
+
+  @Benchmark
+  public boolean reggieSelfRefFourGroupsMatch6() {
+    return reggieSelfRefFourGroups.matches(SELF_REF_MATCH_6);
+  }
+
+  @Benchmark
+  public boolean jdkSelfRefFourGroupsMatch6() {
+    return jdkSelfRefFourGroups.matcher(SELF_REF_MATCH_6).matches();
+  }
+
+  @Benchmark
+  public boolean reggieSelfRefFourGroupsNoMatch() {
+    return reggieSelfRefFourGroups.matches(SELF_REF_NO_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkSelfRefFourGroupsNoMatch() {
+    return jdkSelfRefFourGroups.matcher(SELF_REF_NO_MATCH).matches();
   }
 }

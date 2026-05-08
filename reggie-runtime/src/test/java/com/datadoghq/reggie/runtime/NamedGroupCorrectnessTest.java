@@ -148,6 +148,50 @@ public class NamedGroupCorrectnessTest {
   }
 
   @Test
+  public void testGroupByName_singleGroup() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<word>\\w+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertEquals("hello", result.group("word"));
+  }
+
+  @Test
+  public void testGroupByName_multipleGroups() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<first>\\w+)-(?<second>\\w+)");
+    MatchResult result = m.match("foo-bar");
+    assertNotNull(result);
+    assertEquals("foo", result.group("first"));
+    assertEquals("bar", result.group("second"));
+  }
+
+  @Test
+  public void testStartEndByName() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<word>\\w+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertEquals(result.start(1), result.start("word"));
+    assertEquals(result.end(1), result.end("word"));
+  }
+
+  @Test
+  public void testGroupByName_unknownName_throwsIllegalArgumentException() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<word>\\w+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertThrows(IllegalArgumentException.class, () -> result.group("missing"));
+    assertThrows(IllegalArgumentException.class, () -> result.start("missing"));
+    assertThrows(IllegalArgumentException.class, () -> result.end("missing"));
+  }
+
+  @Test
+  public void testGroupByName_singleQuoteSyntax() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?'word'\\w+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertEquals("hello", result.group("word"));
+  }
+
+  @Test
   public void testComplexPattern() {
     // Pattern: (?<protocol>\w+)://(?<domain>[\w.]+)(?<path>/\w+)?
     // URL pattern with named groups

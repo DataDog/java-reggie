@@ -83,7 +83,7 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
     return m.find(start) ? toMatchResult(input, m) : null;
   }
 
-  private static MatchResult toMatchResult(String input, java.util.regex.Matcher m) {
+  private MatchResult toMatchResult(String input, java.util.regex.Matcher m) {
     int gc = m.groupCount();
     int[] starts = new int[gc + 1];
     int[] ends = new int[gc + 1];
@@ -93,6 +93,6 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
       starts[i] = m.start(i);
       ends[i] = m.end(i);
     }
-    return new MatchResultImpl(input, starts, ends, gc);
+    return new MatchResultImpl(input, starts, ends, gc, javaPattern.namedGroups());
   }
 }

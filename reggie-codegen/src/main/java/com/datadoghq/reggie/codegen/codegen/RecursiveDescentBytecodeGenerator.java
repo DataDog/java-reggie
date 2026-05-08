@@ -17,11 +17,14 @@ package com.datadoghq.reggie.codegen.codegen;
 
 import static org.objectweb.asm.Opcodes.*;
 
+import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.ast.*;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.objectweb.asm.ClassWriter;
@@ -1546,6 +1549,10 @@ public class RecursiveDescentBytecodeGenerator {
     private final ClassWriter cw;
     private final MethodVisitor mv;
     private final String className;
+    // Slot holding the depth parameter in the currently-generated method.
+    // Stays 5 for normal methods; set to 2 by generateConcatWithBacktracking,
+    // which repurposes slot 5 as currentPos and the now-dead pos slot (2) for depth.
+    private int depthSlot = 5;
 
     public ParserMethodGenerator(ClassWriter cw, MethodVisitor mv, String className) {
       this.cw = cw;
@@ -1696,6 +1703,34 @@ public class RecursiveDescentBytecodeGenerator {
         // Capturing group: record start/end positions
         int startIndex = node.groupNumber * 2;
         int endIndex = node.groupNumber * 2 + 1;
+        boolean selfReferencingBackref = PatternAnalyzer.hasSelfReferencingBackref(node);
+
+        // C-01: For self-referencing groups write partial-open sentinel before calling child.
+        // This lets \N inside the group resolve to zero-length match on the first entry.
+        if (selfReferencingBackref) {
+          // Save prior groups[startIndex]/groups[endIndex] so they can be restored on child
+          // failure.
+          // Slot 7 = prior start, slot 8 = prior end. (Slots 0-6 hold
+          // this/input/pos/end/groups/depth/result.)
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, startIndex);
+          mv.visitInsn(IALOAD);
+          mv.visitVarInsn(ISTORE, 7); // prior start
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, endIndex);
+          mv.visitInsn(IALOAD);
+          mv.visitVarInsn(ISTORE, 8); // prior end
+          // groups[startIndex] = pos
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, startIndex);
+          mv.visitVarInsn(ILOAD, 2); // pos
+          mv.visitInsn(IASTORE);
+          // groups[endIndex] = -1  (partial-open sentinel)
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, endIndex);
+          mv.visitInsn(ICONST_M1);
+          mv.visitInsn(IASTORE);
+        }
 
         // Call child parser
         mv.visitVarInsn(ALOAD, 0); // this
@@ -1714,7 +1749,19 @@ public class RecursiveDescentBytecodeGenerator {
         Label childMatched = new Label();
         mv.visitJumpInsn(IF_ICMPNE, childMatched);
 
-        // Child failed: return -1 immediately without setting groups
+        // Child failed: restore the partial-open sentinel writes (if any) so we leave groups
+        // unchanged on -1 return. Without this, an enclosing quantifier/alternation that retries
+        // would observe the sentinel from this failed attempt.
+        if (selfReferencingBackref) {
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, startIndex);
+          mv.visitVarInsn(ILOAD, 7); // prior start
+          mv.visitInsn(IASTORE);
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, endIndex);
+          mv.visitVarInsn(ILOAD, 8); // prior end
+          mv.visitInsn(IASTORE);
+        }
         mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
 
@@ -1777,7 +1824,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitLabel(minLoopStart);
         // if (matchCount >= min) goto minLoopEnd
         mv.visitVarInsn(ILOAD, 7);
-        com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt(mv, node.min);
+        BytecodeUtil.pushInt(mv, node.min);
         mv.visitJumpInsn(IF_ICMPGE, minLoopEnd);
 
         // Try to match child
@@ -1820,7 +1867,7 @@ public class RecursiveDescentBytecodeGenerator {
       // Note: max=-1 means unbounded in the AST
       if (node.max != -1 && node.max != Integer.MAX_VALUE) {
         mv.visitVarInsn(ILOAD, 7);
-        com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt(mv, node.max);
+        BytecodeUtil.pushInt(mv, node.max);
         mv.visitJumpInsn(IF_ICMPGE, greedyLoopEnd);
       }
 
@@ -2023,9 +2070,49 @@ public class RecursiveDescentBytecodeGenerator {
         return q.min != q.max && (q.max == -1 || q.max > 1);
       }
       if (node instanceof GroupNode) {
-        return containsBacktrackingQuantifier(((GroupNode) node).child);
+        GroupNode g = (GroupNode) node;
+        // A GroupNode whose child concat has a trailing optional backref needs backtracking
+        // at the outer concat level (e.g. (a\1?) where \1 could match variable-length).
+        // Only detect this for non-self-referencing groups (self-ref groups are handled by
+        // partial-open sentinel and always return a fixed length).
+        if (g.groupNumber > 0 && !PatternAnalyzer.hasSelfReferencingBackref(g)) {
+          if (extractTrailingOptionalBackref(g.child) != null) {
+            return true;
+          }
+        }
+        return containsBacktrackingQuantifier(g.child);
       }
       return false;
+    }
+
+    /**
+     * Extract the trailing optional backref quantifier from a concat or single node, if present.
+     * Returns the QuantifierNode if the node ends with a greedy Quant(Backref, min=0, max=1) (i.e.,
+     * exactly {@code \1?}), otherwise null.
+     */
+    private QuantifierNode extractTrailingOptionalBackref(RegexNode node) {
+      if (node instanceof QuantifierNode) {
+        QuantifierNode q = (QuantifierNode) node;
+        if (q.min == 0 && q.max == 1 && q.greedy && q.child instanceof BackreferenceNode) {
+          return q;
+        }
+        return null;
+      }
+      if (node instanceof ConcatNode) {
+        ConcatNode concat = (ConcatNode) node;
+        if (concat.children.isEmpty()) {
+          return null;
+        }
+        RegexNode last = concat.children.get(concat.children.size() - 1);
+        if (last instanceof QuantifierNode) {
+          QuantifierNode q = (QuantifierNode) last;
+          if (q.min == 0 && q.max == 1 && q.greedy && q.child instanceof BackreferenceNode) {
+            return q;
+          }
+        }
+        return null;
+      }
+      return null;
     }
 
     /**
@@ -2071,7 +2158,8 @@ public class RecursiveDescentBytecodeGenerator {
      */
     private void generateConcatWithBacktracking(ConcatNode node, int backtrackChildIndex) {
       // Local variable allocation:
-      // slot 5: currentPos
+      // slot 2: depth (repurposed from pos — pos is dead once moved to slot 5)
+      // slot 5: currentPos (repurposed from depth parameter)
       // slot 6: savedGroups (int[])
       // slot 7: quantifierStartPos
       // slot 8: maxMatches (greedy match count)
@@ -2081,9 +2169,14 @@ public class RecursiveDescentBytecodeGenerator {
       // slot 14: greedyIterations (BacktrackConfig limit tracking)
       // slot 15: backtrackIterations (BacktrackConfig limit tracking)
 
-      // Initialize currentPos
-      mv.visitVarInsn(ILOAD, 2); // currentPos = pos
-      mv.visitVarInsn(ISTORE, 5);
+      // Preserve depth before repurposing slot 5 as currentPos.
+      // Push pos then depth in order; store depth into the now-dead pos slot (2),
+      // then store pos into slot 5 (currentPos = pos).
+      mv.visitVarInsn(ILOAD, 2); // pos
+      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ISTORE, 2); // depth → slot 2 (pos slot repurposed)
+      mv.visitVarInsn(ISTORE, 5); // slot 5 = currentPos (= original pos)
+      depthSlot = 2;
 
       // Process children before the backtracking point
       for (int i = 0; i < backtrackChildIndex; i++) {
@@ -2097,7 +2190,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 5); // currentPos
         mv.visitVarInsn(ILOAD, 3); // end
         mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, 5); // depth
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
         mv.visitMethodInsn(
             INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
         mv.visitVarInsn(ISTORE, 5); // currentPos = result
@@ -2140,7 +2233,28 @@ public class RecursiveDescentBytecodeGenerator {
       }
 
       if (quantNode == null) {
-        // Not a quantifier, fall back to simple concat
+        // Check if the child is a GroupNode with a trailing optional backref.
+        // e.g. (a\1?) where the group can match "a" or "aa" depending on \1.
+        // Generate two-path backtracking: try full group first, then mandatory-only.
+        if (greedyChild instanceof GroupNode) {
+          GroupNode backtrackGroup = (GroupNode) greedyChild;
+          QuantifierNode trailingOpt = extractTrailingOptionalBackref(backtrackGroup.child);
+          if (trailingOpt != null) {
+            // Emit a local fail label that returns -1
+            Label localFail = new Label();
+            generateGroupWithOptionalBacktracking(
+                node, backtrackChildIndex, backtrackGroup, 11, 6, 7, localFail);
+            // On success, slot 5 (currentPos) is up-to-date; return it
+            mv.visitVarInsn(ILOAD, 5);
+            mv.visitInsn(IRETURN);
+            // Emit the fail path
+            mv.visitLabel(localFail);
+            mv.visitInsn(ICONST_M1);
+            mv.visitInsn(IRETURN);
+            return;
+          }
+        }
+        // Not a quantifier and not a handled group type, fall back to simple concat
         generateSimpleConcat(node, backtrackChildIndex);
         return;
       }
@@ -2192,7 +2306,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5); // currentPos
       mv.visitVarInsn(ILOAD, 3); // end
       mv.visitVarInsn(ALOAD, 4); // groups
-      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, quantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, 11); // result in slot 11
@@ -2316,7 +2430,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5);
       mv.visitVarInsn(ILOAD, 3);
       mv.visitVarInsn(ALOAD, 4);
-      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, quantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, 11);
@@ -2397,7 +2511,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5); // depth
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2427,7 +2541,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2501,7 +2615,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 5);
         mv.visitVarInsn(ILOAD, 3);
         mv.visitVarInsn(ALOAD, 4);
-        mv.visitVarInsn(ILOAD, 5);
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
         mv.visitMethodInsn(
             INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
         mv.visitVarInsn(ISTORE, 5);
@@ -2524,7 +2638,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(INVOKESPECIAL, className, method, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
           mv.visitVarInsn(ILOAD, 5);
@@ -2580,7 +2694,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5);
       mv.visitVarInsn(ILOAD, 3);
       mv.visitVarInsn(ALOAD, 4);
-      mv.visitVarInsn(ILOAD, 5);
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, nestedQuantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, RESULT_SLOT);
@@ -2668,7 +2782,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5);
       mv.visitVarInsn(ILOAD, 3);
       mv.visitVarInsn(ALOAD, 4);
-      mv.visitVarInsn(ILOAD, 5);
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
       mv.visitMethodInsn(
           INVOKESPECIAL, className, nestedQuantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, RESULT_SLOT);
@@ -2723,7 +2837,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2751,7 +2865,7 @@ public class RecursiveDescentBytecodeGenerator {
           mv.visitVarInsn(ILOAD, 5);
           mv.visitVarInsn(ILOAD, 3);
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ILOAD, depthSlot); // depth
           mv.visitMethodInsn(
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
@@ -2804,6 +2918,228 @@ public class RecursiveDescentBytecodeGenerator {
       return null;
     }
 
+    /**
+     * Generate backtracking for a GroupNode that has a trailing optional backref. Tries the full
+     * group first (greedy); if the remaining concat children fail, retries with only the mandatory
+     * prefix of the group (everything before the trailing optional backref). Recursively applies
+     * the same logic for subsequent groups in the concat that also have trailing optional backrefs.
+     *
+     * <p>Uses slots already reserved by generateConcatWithBacktracking: 5=currentPos,
+     * 6=savedGroups, 7=quantifierStartPos (position before the group). Allocates one extra slot via
+     * {@code extraSlotBase} for the child result, and higher slots via {@code extraSlotBase+1} for
+     * deeper recursion.
+     *
+     * <p>On overall failure, jumps to {@code overallFailLabel} (caller is responsible for emitting
+     * any code at that label). On success, falls through with currentPos (slot 5) updated.
+     *
+     * @param node The outer ConcatNode
+     * @param fromIndex Index of the GroupNode in node.children (first group to backtrack)
+     * @param backtrackGroup The GroupNode at fromIndex
+     * @param extraSlotBase Base for extra local variable slots (11 at the first level)
+     * @param savedGroupsSlot Slot holding the saved groups snapshot to restore on backtrack
+     * @param savedPosSlot Slot holding the saved position snapshot to restore on backtrack
+     * @param overallFailLabel Label to jump to when both greedy and mandatory attempts fail
+     */
+    private void generateGroupWithOptionalBacktracking(
+        ConcatNode node,
+        int fromIndex,
+        GroupNode backtrackGroup,
+        int extraSlotBase,
+        int savedGroupsSlot,
+        int savedPosSlot,
+        Label overallFailLabel) {
+
+      int resultSlot = extraSlotBase; // temp result from group call
+
+      // Build the "mandatory-only" parser node for this group.
+      RegexNode mandatoryChild;
+      if (backtrackGroup.child instanceof ConcatNode) {
+        ConcatNode innerConcat = (ConcatNode) backtrackGroup.child;
+        List<RegexNode> mandatoryChildren =
+            innerConcat.children.subList(0, innerConcat.children.size() - 1);
+        if (mandatoryChildren.isEmpty()) {
+          mandatoryChild = new LiteralNode((char) 0); // epsilon
+        } else if (mandatoryChildren.size() == 1) {
+          mandatoryChild = mandatoryChildren.get(0);
+        } else {
+          mandatoryChild = new ConcatNode(new ArrayList<>(mandatoryChildren));
+        }
+      } else {
+        mandatoryChild = new LiteralNode((char) 0); // epsilon
+      }
+
+      generateParserMethod(cw, className, backtrackGroup);
+      String fullGroupMethod = getMethodNameForNode(backtrackGroup);
+      generateParserMethod(cw, className, mandatoryChild);
+      String mandatoryMethod = getMethodNameForNode(mandatoryChild);
+
+      int captureGroupNumber = backtrackGroup.groupNumber;
+
+      Label tryMandatory = new Label();
+      Label restFailed = new Label();
+
+      // ── Attempt 1: full group (greedy) ──────────────────────────────────────
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, 5); // currentPos
+      mv.visitVarInsn(ILOAD, 3); // end
+      mv.visitVarInsn(ALOAD, 4); // groups
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
+      mv.visitMethodInsn(
+          INVOKESPECIAL, className, fullGroupMethod, "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, resultSlot);
+
+      mv.visitVarInsn(ILOAD, resultSlot);
+      mv.visitInsn(ICONST_M1);
+      // If full group failed, skip to mandatory-only attempt
+      mv.visitJumpInsn(IF_ICMPEQ, tryMandatory);
+
+      // Full group succeeded: update currentPos
+      mv.visitVarInsn(ILOAD, resultSlot);
+      mv.visitVarInsn(ISTORE, 5);
+
+      // Try remaining children (with recursive backtracking if needed)
+      // On failure, jump to restFailed; on success, fall through
+      generateRemainingWithBacktracking(node, fromIndex + 1, restFailed, extraSlotBase + 1);
+
+      // All remaining children succeeded with full group result: fall through (success)
+      // Jump past Attempt 2
+      Label doneSuccess = new Label();
+      mv.visitJumpInsn(GOTO, doneSuccess);
+
+      // ── Attempt 2: mandatory-only group ─────────────────────────────────────
+      // Reached when: (a) full group succeeded but remaining children failed, OR
+      //               (b) full group itself failed
+      mv.visitLabel(restFailed);
+      mv.visitLabel(tryMandatory);
+
+      // Restore position and groups to BEFORE this group
+      generateGroupArrayRestore(savedGroupsSlot, 4);
+      mv.visitVarInsn(ILOAD, savedPosSlot);
+      mv.visitVarInsn(ISTORE, 5);
+
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, 5); // currentPos
+      mv.visitVarInsn(ILOAD, 3); // end
+      mv.visitVarInsn(ALOAD, 4); // groups
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
+      mv.visitMethodInsn(
+          INVOKESPECIAL, className, mandatoryMethod, "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, resultSlot);
+
+      mv.visitVarInsn(ILOAD, resultSlot);
+      mv.visitInsn(ICONST_M1);
+      Label mandatoryOk = new Label();
+      mv.visitJumpInsn(IF_ICMPNE, mandatoryOk);
+      // Mandatory also failed: jump to overall fail
+      mv.visitJumpInsn(GOTO, overallFailLabel);
+      mv.visitLabel(mandatoryOk);
+
+      // Set group capture with mandatory result
+      if (captureGroupNumber > 0) {
+        mv.visitVarInsn(ALOAD, 4);
+        BytecodeUtil.pushInt(mv, captureGroupNumber * 2);
+        mv.visitVarInsn(ILOAD, savedPosSlot); // start = before this group
+        mv.visitInsn(IASTORE);
+        mv.visitVarInsn(ALOAD, 4);
+        BytecodeUtil.pushInt(mv, captureGroupNumber * 2 + 1);
+        mv.visitVarInsn(ILOAD, resultSlot); // end = after mandatory match
+        mv.visitInsn(IASTORE);
+      }
+
+      mv.visitVarInsn(ILOAD, resultSlot);
+      mv.visitVarInsn(ISTORE, 5);
+
+      // Try remaining children after mandatory match (with backtracking if needed)
+      // On failure, jump to overall fail; on success, fall through
+      generateRemainingWithBacktracking(node, fromIndex + 1, overallFailLabel, extraSlotBase + 1);
+
+      mv.visitLabel(doneSuccess);
+      // Success: slot 5 (currentPos) is already updated; caller falls through here
+    }
+
+    /**
+     * Generate code for the remaining concat children starting at {@code fromIndex}. If any
+     * remaining child is a GroupNode with a trailing optional backref, applies {@link
+     * #generateGroupWithOptionalBacktracking} recursively; otherwise falls through to simple
+     * sequential matching.
+     *
+     * <p>On failure jumps to {@code failLabel}; success falls through.
+     *
+     * @param node The outer ConcatNode
+     * @param fromIndex First child index to process
+     * @param failLabel Label to jump to if the whole remaining section fails
+     * @param extraSlotBase Slot base for this level's temporaries
+     */
+    private void generateRemainingWithBacktracking(
+        ConcatNode node, int fromIndex, Label failLabel, int extraSlotBase) {
+
+      // Find the first child at or after fromIndex that needs group-optional backtracking
+      int nextBacktrackIdx = -1;
+      GroupNode nextBacktrackGroup = null;
+      for (int i = fromIndex; i < node.children.size(); i++) {
+        RegexNode child = node.children.get(i);
+        if (child instanceof GroupNode) {
+          GroupNode g = (GroupNode) child;
+          if (g.groupNumber > 0
+              && !PatternAnalyzer.hasSelfReferencingBackref(g)
+              && extractTrailingOptionalBackref(g.child) != null) {
+            nextBacktrackIdx = i;
+            nextBacktrackGroup = g;
+            break;
+          }
+        }
+      }
+
+      // Process simple sequential children before the next backtracking group
+      int limit = (nextBacktrackIdx == -1) ? node.children.size() : nextBacktrackIdx;
+      for (int i = fromIndex; i < limit; i++) {
+        RegexNode child = node.children.get(i);
+        generateParserMethod(cw, className, child);
+        String childMethod = getMethodNameForNode(child);
+        Label childOk = new Label();
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 5);
+        mv.visitVarInsn(ILOAD, 3);
+        mv.visitVarInsn(ALOAD, 4);
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
+        mv.visitMethodInsn(
+            INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
+        mv.visitVarInsn(ISTORE, 5);
+        mv.visitVarInsn(ILOAD, 5);
+        mv.visitInsn(ICONST_M1);
+        mv.visitJumpInsn(IF_ICMPNE, childOk);
+        mv.visitJumpInsn(GOTO, failLabel);
+        mv.visitLabel(childOk);
+      }
+
+      if (nextBacktrackIdx == -1) {
+        // No more backtracking groups; all sequential children done → fall through (success)
+        return;
+      }
+
+      // Save pos and groups before the next backtracking group
+      int savedPosSlot = extraSlotBase;
+      int savedGroupsSlot = extraSlotBase + 1;
+      mv.visitVarInsn(ILOAD, 5);
+      mv.visitVarInsn(ISTORE, savedPosSlot);
+      generateGroupArraySave(4, savedGroupsSlot);
+
+      // Recursively handle this group and the rest.
+      // On failure, jump to failLabel; on success, fall through.
+      generateGroupWithOptionalBacktracking(
+          node,
+          nextBacktrackIdx,
+          nextBacktrackGroup,
+          extraSlotBase + 2,
+          savedGroupsSlot,
+          savedPosSlot,
+          failLabel);
+      // generateGroupWithOptionalBacktracking falls through on success.
+    }
+
     /** Generate simple concat code when node is not a quantifier. */
     private void generateSimpleConcat(ConcatNode node, int startIndex) {
       for (int i = startIndex; i < node.children.size(); i++) {
@@ -2816,7 +3152,7 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 5); // currentPos
         mv.visitVarInsn(ILOAD, 3); // end
         mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, 5); // depth
+        mv.visitVarInsn(ILOAD, depthSlot); // depth
         mv.visitMethodInsn(
             INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
         mv.visitVarInsn(ISTORE, 5);
@@ -2947,20 +3283,34 @@ public class RecursiveDescentBytecodeGenerator {
 
       // Check if group has been captured
       // PCRE semantics: An uncaptured backreference matches an empty string (0 chars)
-      // This enables self-referencing patterns like (a\1?){4}
+      // C-03: Also match empty string when group is in partial-open state
+      // (groups[startIndex] >= 0 AND groups[endIndex] == -1), which means we are
+      // currently inside that group's first iteration (self-referencing backref).
       Label groupCaptured = new Label();
       mv.visitVarInsn(ALOAD, 4); // groups
-      com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt(mv, startIndex);
+      BytecodeUtil.pushInt(mv, startIndex);
       mv.visitInsn(IALOAD);
       mv.visitInsn(ICONST_M1);
       mv.visitJumpInsn(IF_ICMPNE, groupCaptured);
 
-      // Group not captured - match empty string (return pos unchanged)
-      // This allows self-referencing backreferences to work on first iteration
+      // groups[startIndex] == -1: group not captured at all - match empty string
       mv.visitVarInsn(ILOAD, 2); // pos
       mv.visitInsn(IRETURN);
 
       mv.visitLabel(groupCaptured);
+      // groups[startIndex] >= 0: check whether this is partial-open (endIndex == -1)
+      {
+        Label notPartialOpen = new Label();
+        mv.visitVarInsn(ALOAD, 4); // groups
+        BytecodeUtil.pushInt(mv, endIndex);
+        mv.visitInsn(IALOAD);
+        mv.visitInsn(ICONST_M1);
+        mv.visitJumpInsn(IF_ICMPNE, notPartialOpen);
+        // partial-open sentinel: return pos (zero-length match)
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(notPartialOpen);
+      }
 
       // Get group boundaries
       // int groupStart = groups[startIndex];

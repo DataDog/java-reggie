@@ -16,7 +16,6 @@
 package com.datadoghq.reggie.runtime;
 
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * Extension of {@link MatchResultImpl} that implements {@link NamedGroupResult}. Only instantiated
@@ -24,25 +23,8 @@ import java.util.Objects;
  */
 final class NamedMatchResultImpl extends MatchResultImpl implements NamedGroupResult {
 
-  private final Map<String, Integer> nameIndex;
-
   NamedMatchResultImpl(
       String input, int[] starts, int[] ends, int groupCount, Map<String, Integer> nameIndex) {
-    super(input, starts, ends, groupCount);
-    this.nameIndex = Objects.requireNonNull(nameIndex, "nameIndex");
-  }
-
-  @Override
-  public boolean hasNamedGroups() {
-    return !nameIndex.isEmpty();
-  }
-
-  @Override
-  public String group(String name) {
-    Integer idx = nameIndex.get(name);
-    if (idx == null) {
-      throw new IllegalArgumentException("No group with name <" + name + ">");
-    }
-    return group(idx);
+    super(input, starts, ends, groupCount, nameIndex);
   }
 }

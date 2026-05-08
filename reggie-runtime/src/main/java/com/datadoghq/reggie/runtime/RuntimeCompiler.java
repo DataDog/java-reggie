@@ -57,6 +57,7 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -142,6 +143,7 @@ public class RuntimeCompiler {
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
+      Map<String, Integer> nameMap = parser.getGroupNameMap();
 
       // 2. Check if pattern requires recursive descent (context-free features)
       // Do this early to avoid unnecessary NFA building
@@ -170,7 +172,9 @@ public class RuntimeCompiler {
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
-        return compileHybrid(pattern, ast, nfa, analyzer, result, caseInsensitive);
+        ReggieMatcher hybrid = compileHybrid(pattern, ast, nfa, analyzer, result, caseInsensitive);
+        hybrid.setNameToIndex(nameMap);
+        return hybrid;
       }
 
       // 5. Compute structural hash for level 2 cache lookup
@@ -182,27 +186,35 @@ public class RuntimeCompiler {
       // 6. Check structural cache (level 2)
       Class<? extends ReggieMatcher> matcherClass = STRUCTURE_CACHE.get(structHash);
 
+      ReggieMatcher matcher;
       if (matcherClass != null) {
         // Cache hit: Reuse existing class, instantiate with current pattern
-        return instantiateFromClass(matcherClass, pattern);
+        matcher = instantiateFromClass(matcherClass, pattern);
+      } else {
+        // 7. Cache miss: Generate bytecode and define hidden class
+        byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
+
+        MethodHandles.Lookup hiddenLookup =
+            LOOKUP.defineHiddenClass(
+                bytecode,
+                true, // initialize immediately
+                MethodHandles.Lookup.ClassOption.NESTMATE);
+
+        matcherClass = hiddenLookup.lookupClass().asSubclass(ReggieMatcher.class);
+
+        // 8. Cache the generated class for future patterns with same structure
+        STRUCTURE_CACHE.put(structHash, matcherClass);
+
+        matcher = instantiateFromClass(matcherClass, pattern);
       }
 
-      // 7. Cache miss: Generate bytecode and define hidden class
-      byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
+      // 9. Inject name map and wrap for named group support
+      if (!nameMap.isEmpty()) {
+        matcher.setNameToIndex(nameMap);
+        matcher = new NameEnrichingMatcher(matcher);
+      }
 
-      MethodHandles.Lookup hiddenLookup =
-          LOOKUP.defineHiddenClass(
-              bytecode,
-              true, // initialize immediately
-              MethodHandles.Lookup.ClassOption.NESTMATE);
-
-      matcherClass = hiddenLookup.lookupClass().asSubclass(ReggieMatcher.class);
-
-      // 8. Cache the generated class for future patterns with same structure
-      STRUCTURE_CACHE.put(structHash, matcherClass);
-
-      // 9. Instantiate and return matcher
-      return instantiateFromClass(matcherClass, pattern);
+      return matcher;
 
     } catch (PatternSyntaxException e) {
       // Re-throw PatternSyntaxException as-is

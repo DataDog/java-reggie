@@ -16,23 +16,12 @@
 package com.datadoghq.reggie.runtime;
 
 /**
- * Extension of {@link MatchResult} for results that support named capture groups.
+ * Marker interface for {@link MatchResult} instances returned by {@link MatchCursor} when the
+ * pattern contains named capturing groups.
  *
- * <p>Use {@link MatchResult#hasNamedGroups()} to check at runtime whether a result supports this
- * interface before casting.
+ * <p>All {@code MatchResult} instances support {@link MatchResult#group(String)}, {@link
+ * MatchResult#start(String)}, and {@link MatchResult#end(String)}, but the default implementations
+ * throw {@link IllegalArgumentException} when the pattern has no named groups. Instances of this
+ * type are guaranteed to carry a populated name-to-index mapping so those calls succeed.
  */
-public interface NamedGroupResult extends MatchResult {
-  /**
-   * Returns the captured group by name.
-   *
-   * @param name the group name
-   * @return the captured string, or null if the group didn't participate in the match
-   * @throws IllegalArgumentException if no group with the given name exists
-   */
-  String group(String name);
-
-  @Override
-  default boolean hasNamedGroups() {
-    return true;
-  }
-}
+public interface NamedGroupResult extends MatchResult {}
