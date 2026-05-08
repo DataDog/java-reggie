@@ -383,20 +383,20 @@ public class MyBytecodeGenerator implements BytecodeGenerator {
 
 ## Critical Rules
 
-### Must Follow Before Commit
+### Must Follow Before Commit and Push
 
-**CRITICAL**: Run `./gradlew spotlessApply` before EVERY commit to format code and add license headers.
+**CRITICAL**: Run `./gradlew spotlessApply` before EVERY commit AND before EVERY push to format code and add license headers. Pushing without running spotlessApply first will cause CI failures.
 
-- ✅ **Format code**: `./gradlew spotlessApply` (REQUIRED before commit)
+- ✅ **Format code**: `./gradlew spotlessApply` (REQUIRED before commit AND push)
 - ✅ All tests pass: `./gradlew build`
 - ✅ No failing tests (even if skipped)
 - ✅ Code has tests
 - ✅ Coverage maintained or improved: `./gradlew jacocoVerify`
 - ✅ Both RuntimeCompiler and ReggieMatcherBytecodeGenerator stay in sync
 
-**Pre-commit checklist**:
+**Pre-push checklist**:
 ```bash
-# 1. Format all code (REQUIRED)
+# 1. Format all code (REQUIRED before commit AND push)
 ./gradlew spotlessApply
 
 # 2. Verify build passes
@@ -408,6 +408,9 @@ public class MyBytecodeGenerator implements BytecodeGenerator {
 # 4. Commit
 git add .
 git commit -m "Your message"
+
+# 5. Push
+git push
 ```
 
 ### Bytecode Generation Dual-Path Rule
