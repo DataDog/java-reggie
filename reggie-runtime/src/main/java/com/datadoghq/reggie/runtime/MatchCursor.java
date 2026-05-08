@@ -109,9 +109,6 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
     expandReplacement(sb, replacement, lastMatch);
     appendPos = lastMatch.end();
     lastMatch = null;
-    // Clear lookahead buffer so hasNext() re-advances after appendReplacement.
-    peeked = null;
-    peekedValid = false;
     return this;
   }
 
@@ -173,10 +170,10 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
     if (!hasNext()) {
       throw new NoSuchElementException();
     }
-    MatchResult result = peeked;
+    lastMatch = peeked;
     peeked = null;
     peekedValid = false;
-    return result;
+    return lastMatch;
   }
 
   // Wraps a MatchResult to support named group lookup via nameIndex.

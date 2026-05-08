@@ -442,6 +442,35 @@ public class MatchCursorTest {
         () -> cursor.appendReplacement(new StringBuilder(), "${user"));
   }
 
+  // 33. hasNext() peek does not lose next match when appendReplacement follows
+  @Test
+  void testHasNextPeekedMatchNotLostAfterAppendReplacement() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("a1b2c3");
+    MatchResult first = cursor.findNext();
+    assertEquals("1", first.group());
+    assertTrue(cursor.hasNext()); // peeks "2"
+    StringBuilder sb = new StringBuilder();
+    cursor.appendReplacement(sb, "[X]");
+    MatchResult second = cursor.findNext(); // must drain peeked "2", not skip to "3"
+    assertNotNull(second);
+    assertEquals("2", second.group());
+  }
+
+  // 34. next() makes the returned match active for appendReplacement
+  @Test
+  void testNextMakesMatchActiveForReplacement() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("a1b2");
+    StringBuilder sb = new StringBuilder();
+    while (cursor.hasNext()) {
+      cursor.next(); // sets lastMatch
+      cursor.appendReplacement(sb, "[X]");
+    }
+    cursor.appendTail(sb);
+    assertEquals("a[X]b[X]", sb.toString());
+  }
+
   // 28. Full streaming pipeline end-to-end
   @Test
   void testFullStreamingPipeline() {
