@@ -206,9 +206,12 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
         sb.append(replacement.charAt(++i));
         continue;
       }
-      if (c != '$' || i + 1 >= len) {
+      if (c != '$') {
         sb.append(c);
         continue;
+      }
+      if (i + 1 >= len) {
+        throw new IllegalArgumentException("Illegal group reference: $ at end of replacement");
       }
       char next = replacement.charAt(i + 1);
       if (next >= '0' && next <= '9') {

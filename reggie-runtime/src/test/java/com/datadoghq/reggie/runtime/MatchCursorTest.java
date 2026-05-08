@@ -405,6 +405,17 @@ public class MatchCursorTest {
         IllegalArgumentException.class, () -> cursor.appendReplacement(new StringBuilder(), "x\\"));
   }
 
+  // 30. Trailing $ in replacement throws IllegalArgumentException
+  @Test
+  void testTrailingDollarThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    cursor.findNext();
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> cursor.appendReplacement(new StringBuilder(), "foo$"));
+  }
+
   // 28. Full streaming pipeline end-to-end
   @Test
   void testFullStreamingPipeline() {
