@@ -47,6 +47,7 @@ import com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import java.util.Map;
 import org.objectweb.asm.*;
 
 /**
@@ -71,6 +72,7 @@ public class ReggieMatcherBytecodeGenerator {
     // 1. Parse pattern to AST
     RegexParser parser = new RegexParser();
     RegexNode ast = parser.parse(pattern);
+    Map<String, Integer> nameMap = parser.getGroupNameMap();
 
     // 2. Build NFA using Thompson construction
     ThompsonBuilder nfaBuilder = new ThompsonBuilder();
@@ -117,7 +119,7 @@ public class ReggieMatcherBytecodeGenerator {
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
             || strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD;
-    generateConstructor(cw, needsNFAState, nfa);
+    generateConstructor(cw, needsNFAState, nfa, nameMap);
 
     // Generate methods based on strategy
     switch (strategy) {
@@ -505,7 +507,7 @@ public class ReggieMatcherBytecodeGenerator {
    * Generate constructor: public XxxMatcher() { super(pattern); } Optionally initializes NFA state
    * for NFA-based strategies.
    */
-  private void generateConstructor(ClassWriter cw, boolean needsNFAState, NFA nfa) {
+  private void generateConstructor(ClassWriter cw, boolean needsNFAState, NFA nfa, Map<String, Integer> nameMap) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
     mv.visitCode();
 
@@ -534,6 +536,26 @@ public class ReggieMatcherBytecodeGenerator {
           "initNFAState",
           "(II)V",
           false);
+    }
+
+    if (!nameMap.isEmpty()) {
+      // Build a HashMap with the named-group entries and call this.setNameToIndex(unmodifiableMap)
+      mv.visitTypeInsn(NEW, "java/util/HashMap");
+      mv.visitInsn(DUP);
+      mv.visitMethodInsn(INVOKESPECIAL, "java/util/HashMap", "<init>", "()V", false);
+      mv.visitVarInsn(ASTORE, 1);
+      for (Map.Entry<String, Integer> entry : nameMap.entrySet()) {
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitLdcInsn(entry.getKey());
+        mv.visitLdcInsn(entry.getValue());
+        mv.visitMethodInsn(INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/util/HashMap", "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", false);
+        mv.visitInsn(POP);
+      }
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKESTATIC, "java/util/Collections", "unmodifiableMap", "(Ljava/util/Map;)Ljava/util/Map;", false);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/ReggieMatcher", "setNameToIndex", "(Ljava/util/Map;)V", false);
     }
 
     mv.visitInsn(RETURN);

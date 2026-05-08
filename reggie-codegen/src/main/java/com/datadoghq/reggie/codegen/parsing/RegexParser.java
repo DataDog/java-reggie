@@ -18,6 +18,7 @@ package com.datadoghq.reggie.codegen.parsing;
 import com.datadoghq.reggie.codegen.ast.*;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,7 +64,7 @@ public class RegexParser {
    *     the pattern contains no named groups or {@code parse} has not yet been called
    */
   public Map<String, Integer> getGroupNameMap() {
-    return groupNameMap != null ? groupNameMap : java.util.Collections.emptyMap();
+    return groupNameMap != null ? Collections.unmodifiableMap(groupNameMap) : Collections.emptyMap();
   }
 
   // Parsing methods
