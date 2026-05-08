@@ -38,9 +38,9 @@ public abstract class ReggieMatcher {
   protected final String pattern;
 
   // injected by RuntimeCompiler after instantiation
-  Map<String, Integer> nameToIndex = Collections.emptyMap();
+  protected Map<String, Integer> nameToIndex = Collections.emptyMap();
 
-  void setNameToIndex(Map<String, Integer> map) {
+  protected void setNameToIndex(Map<String, Integer> map) {
     this.nameToIndex = map;
   }
 
