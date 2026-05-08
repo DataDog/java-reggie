@@ -15,6 +15,8 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import java.util.Map;
+
 /**
  * Wraps a ReggieMatcher to enrich MatchResult returns with named group support. Used by
  * RuntimeCompiler for non-hybrid matchers when the pattern contains named capture groups.
@@ -75,9 +77,78 @@ final class NameEnrichingMatcher extends ReggieMatcher {
   }
 
   private MatchResult enrich(MatchResult r) {
+    if (r == null) {
+      return null;
+    }
     if (r instanceof MatchResultImpl) {
       return ((MatchResultImpl) r).withNames(nameToIndex);
     }
-    return r;
+    return new NamedDelegate(r, nameToIndex);
+  }
+
+  private static final class NamedDelegate implements MatchResult {
+    private final MatchResult base;
+    private final Map<String, Integer> nameToIndex;
+
+    NamedDelegate(MatchResult base, Map<String, Integer> nameToIndex) {
+      this.base = base;
+      this.nameToIndex = nameToIndex;
+    }
+
+    @Override
+    public int start() {
+      return base.start();
+    }
+
+    @Override
+    public int end() {
+      return base.end();
+    }
+
+    @Override
+    public String group() {
+      return base.group();
+    }
+
+    @Override
+    public int groupCount() {
+      return base.groupCount();
+    }
+
+    @Override
+    public String group(int group) {
+      return base.group(group);
+    }
+
+    @Override
+    public int start(int group) {
+      return base.start(group);
+    }
+
+    @Override
+    public int end(int group) {
+      return base.end(group);
+    }
+
+    @Override
+    public String group(String name) {
+      Integer idx = nameToIndex.get(name);
+      if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
+      return base.group(idx);
+    }
+
+    @Override
+    public int start(String name) {
+      Integer idx = nameToIndex.get(name);
+      if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
+      return base.start(idx);
+    }
+
+    @Override
+    public int end(String name) {
+      Integer idx = nameToIndex.get(name);
+      if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
+      return base.end(idx);
+    }
   }
 }
