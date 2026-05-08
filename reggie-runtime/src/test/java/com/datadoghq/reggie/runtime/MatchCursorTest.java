@@ -355,8 +355,7 @@ public class MatchCursorTest {
     MatchCursor cursor = m.cursor("42");
     cursor.findNext();
     assertThrows(
-        IllegalArgumentException.class,
-        () -> cursor.appendReplacement(new StringBuilder(), "$x"));
+        IllegalArgumentException.class, () -> cursor.appendReplacement(new StringBuilder(), "$x"));
   }
 
   // 26. cursor(null) throws NullPointerException
@@ -372,6 +371,38 @@ public class MatchCursorTest {
     ReggieMatcher m = RuntimeCompiler.compile("\\d+");
     MatchCursor cursor = m.cursor("42");
     assertThrows(NullPointerException.class, () -> cursor.reset(null));
+  }
+
+  // 29. Backslash quoting: \$0 emits literal $0, \\ emits literal \
+  @Test
+  void testBackslashEscapingInReplacement() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    cursor.findNext();
+    StringBuilder sb = new StringBuilder();
+    cursor.appendReplacement(sb, "\\$0");
+    cursor.appendTail(sb);
+    assertEquals("$0", sb.toString());
+  }
+
+  @Test
+  void testBackslashEscapingLiteralBackslash() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    cursor.findNext();
+    StringBuilder sb = new StringBuilder();
+    cursor.appendReplacement(sb, "\\\\");
+    cursor.appendTail(sb);
+    assertEquals("\\", sb.toString());
+  }
+
+  @Test
+  void testTrailingBackslashThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    cursor.findNext();
+    assertThrows(
+        IllegalArgumentException.class, () -> cursor.appendReplacement(new StringBuilder(), "x\\"));
   }
 
   // 28. Full streaming pipeline end-to-end

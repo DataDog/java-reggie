@@ -192,12 +192,20 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
   }
 
   // Expands $0, $1, $2, ${name} backreferences from replacement into sb.
-  // Follows java.util.regex.Matcher semantics: throws IndexOutOfBoundsException for
-  // out-of-range numeric groups, and IllegalArgumentException for unknown named groups.
+  // Follows java.util.regex.Matcher semantics: \\ emits a literal backslash, \$ emits a literal
+  // dollar sign, throws IndexOutOfBoundsException for out-of-range numeric groups, and
+  // IllegalArgumentException for unknown named groups or a trailing backslash.
   private void expandReplacement(StringBuilder sb, String replacement, MatchResult m) {
     int len = replacement.length();
     for (int i = 0; i < len; i++) {
       char c = replacement.charAt(i);
+      if (c == '\\') {
+        if (i + 1 >= len) {
+          throw new IllegalArgumentException("character to be escaped is missing");
+        }
+        sb.append(replacement.charAt(++i));
+        continue;
+      }
       if (c != '$' || i + 1 >= len) {
         sb.append(c);
         continue;
