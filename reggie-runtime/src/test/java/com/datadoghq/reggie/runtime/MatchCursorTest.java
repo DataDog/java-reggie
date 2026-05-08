@@ -227,6 +227,17 @@ public class MatchCursorTest {
     assertThrows(IllegalStateException.class, () -> cursor.appendReplacement(sb, "z"));
   }
 
+  // 36. findNext() returning null clears active match — appendReplacement() must throw
+  @Test
+  void testAppendReplacementAfterFindNextNull() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    cursor.findNext(); // returns "42", sets lastMatch
+    assertNull(cursor.findNext()); // exhausted — must clear lastMatch
+    assertThrows(
+        IllegalStateException.class, () -> cursor.appendReplacement(new StringBuilder(), "X"));
+  }
+
   // 15. appendTail called twice → IllegalStateException on second call
   @Test
   void testAppendTailTwiceThrows() {

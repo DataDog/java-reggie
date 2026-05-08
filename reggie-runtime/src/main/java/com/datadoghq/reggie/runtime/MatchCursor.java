@@ -74,10 +74,12 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
       return lastMatch;
     }
     if (searchPos > input.length()) {
+      lastMatch = null;
       return null;
     }
     MatchResult m = matcher.findMatchFrom(input, searchPos);
     if (m == null) {
+      lastMatch = null;
       return null;
     }
     if (!nameIndex.isEmpty()) {
