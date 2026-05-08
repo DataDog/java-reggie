@@ -261,11 +261,7 @@ public abstract class ReggieMatcher {
       result.append(replacement);
       lastEnd = bounds[1];
 
-      // Advance (handle zero-width matches)
-      pos = bounds[1];
-      if (bounds[0] == bounds[1]) {
-        pos++; // Prevent infinite loop on zero-width matches
-      }
+      pos = advancePos(bounds[0], bounds[1]);
     } while (pos <= input.length() && findBoundsFrom(input, pos, bounds));
 
     result.append(input, lastEnd, input.length());
@@ -353,10 +349,7 @@ public abstract class ReggieMatcher {
       lastEnd = match.end();
 
       // Advance past zero-width match to prevent an infinite loop.
-      pos = match.end();
-      if (match.start() == match.end()) {
-        pos++;
-      }
+      pos = advancePos(match.start(), match.end());
     }
 
     // No splits: return the whole input as a single-element array (matches JDK behaviour).
@@ -364,12 +357,10 @@ public abstract class ReggieMatcher {
       return new String[] {input};
     }
 
-    // Add the remaining segment when the limit allows it.
     if (limit <= 0 || parts.size() < limit) {
       parts.add(input.substring(lastEnd));
     }
 
-    // Discard trailing empty strings when limit = 0.
     if (limit == 0) {
       int size = parts.size();
       while (size > 0 && parts.get(size - 1).isEmpty()) {
@@ -399,14 +390,18 @@ public abstract class ReggieMatcher {
 
       results.add(match);
 
-      // Advance (handle zero-width matches)
-      pos = match.end();
-      if (match.start() == match.end()) {
-        pos++; // Prevent infinite loop on zero-width matches
-      }
+      pos = advancePos(match.start(), match.end());
     }
 
     return results;
+  }
+
+  /**
+   * Returns the next scan position after a match, advancing by one extra character for zero-width
+   * matches to prevent an infinite loop.
+   */
+  private static int advancePos(int matchStart, int matchEnd) {
+    return matchEnd + (matchStart == matchEnd ? 1 : 0);
   }
 
   /**
