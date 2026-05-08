@@ -288,7 +288,47 @@ public class MatchCursorTest {
     assertEquals("9", r.group());
   }
 
-  // 20. Full streaming pipeline end-to-end
+  // 20. hasNext()/next() basic iteration
+  @Test
+  void testHasNextNextIteration() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("a1b2c3");
+    List<String> groups = new ArrayList<>();
+    while (cursor.hasNext()) {
+      groups.add(cursor.next().group());
+    }
+    assertEquals(List.of("1", "2", "3"), groups);
+    assertFalse(cursor.hasNext());
+  }
+
+  // 21. hasNext() then findNext() consumes peeked buffer — no skip
+  @Test
+  void testHasNextThenFindNextNoDuplicate() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("1 2");
+    assertTrue(cursor.hasNext());
+    MatchResult r = cursor.findNext();
+    assertNotNull(r);
+    assertEquals("1", r.group()); // must not skip to "2"
+    assertEquals("2", cursor.findNext().group());
+    assertNull(cursor.findNext());
+  }
+
+  // 22. mix hasNext()/next() with appendReplacement — peeked buffer cleared correctly
+  @Test
+  void testHasNextMixedWithAppendReplacement() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("a1b2c3");
+    StringBuilder sb = new StringBuilder();
+    while (cursor.hasNext()) {
+      cursor.findNext(); // consume peeked into lastMatch
+      cursor.appendReplacement(sb, "[$0]");
+    }
+    cursor.appendTail(sb);
+    assertEquals("a[1]b[2]c[3]", sb.toString());
+  }
+
+  // 24. Full streaming pipeline end-to-end
   @Test
   void testFullStreamingPipeline() {
     ReggieMatcher m = RuntimeCompiler.compile("(\\w+)@(\\w+)\\.(\\w+)");

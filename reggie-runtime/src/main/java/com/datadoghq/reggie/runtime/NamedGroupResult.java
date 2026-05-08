@@ -24,4 +24,9 @@ package com.datadoghq.reggie.runtime;
  * throw {@link IllegalArgumentException} when the pattern has no named groups. Instances of this
  * type are guaranteed to carry a populated name-to-index mapping so those calls succeed.
  */
-public interface NamedGroupResult extends MatchResult {}
+public interface NamedGroupResult extends MatchResult {
+  @Override
+  default boolean hasNamedGroups() {
+    return true;
+  }
+}

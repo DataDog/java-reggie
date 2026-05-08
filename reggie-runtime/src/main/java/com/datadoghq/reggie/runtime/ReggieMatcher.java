@@ -452,6 +452,7 @@ public abstract class ReggieMatcher {
 
   /** Creates a new MatchCursor for streaming replacement over the given input. */
   public MatchCursor cursor(String input) {
+    Objects.requireNonNull(input, "input");
     return new MatchCursor(this, input);
   }
 
