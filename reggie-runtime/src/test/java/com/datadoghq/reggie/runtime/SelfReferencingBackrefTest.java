@@ -83,6 +83,18 @@ class SelfReferencingBackrefTest {
   }
 
   @Test
+  void selfRefGroupPlus_capturePreservedAfterGreedyFail() {
+    // Regression: unbounded greedy loop over a self-referencing group must not clobber
+    // the last successful capture when the next iteration fails.
+    // ^(a\1?)+$ on "a": one iteration succeeds (group(1)="a"), then the greedy loop
+    // attempts a second iteration which fails; group(1) must still be "a".
+    ReggieMatcher m = Reggie.compile("^(a\\1?)+$");
+    MatchResult r = m.match("a");
+    assertNotNull(r, "^(a\\1?)+$ must match 'a'");
+    assertEquals("a", r.group(1), "group(1) must be 'a' after failed greedy iteration");
+  }
+
+  @Test
   void perIterationCapture_alternationBranchWithSelfRef() {
     // Alternation branch contains a self-referencing backref; verify per-iteration update
     // is applied when the matched branch includes the self-ref.

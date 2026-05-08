@@ -1805,25 +1805,6 @@ public class RecursiveDescentBytecodeGenerator {
       generateParserMethod(cw, className, node.child);
       String childMethod = getMethodNameForNode(node.child);
 
-      // C-02: Determine if the child is a self-referencing capturing group.
-      // If so, emit per-iteration partial-write (groups[start]=currentPos, groups[end]=-1)
-      // at the top of each loop body before calling the child method.
-      final int selfRefStartIndex;
-      final int selfRefEndIndex;
-      if (node.child instanceof GroupNode) {
-        GroupNode childGroup = (GroupNode) node.child;
-        if (childGroup.groupNumber > 0 && PatternAnalyzer.hasSelfReferencingBackref(childGroup)) {
-          selfRefStartIndex = childGroup.groupNumber * 2;
-          selfRefEndIndex = childGroup.groupNumber * 2 + 1;
-        } else {
-          selfRefStartIndex = -1;
-          selfRefEndIndex = -1;
-        }
-      } else {
-        selfRefStartIndex = -1;
-        selfRefEndIndex = -1;
-      }
-
       // Quantifier matching strategy:
       // - Greedy: match min required, then as many as possible up to max
       // - Non-greedy: match min required, then return immediately (prefer minimum)
@@ -1845,18 +1826,6 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 7);
         BytecodeUtil.pushInt(mv, node.min);
         mv.visitJumpInsn(IF_ICMPGE, minLoopEnd);
-
-        // C-02: per-iteration partial-open write for self-referencing group
-        if (selfRefStartIndex >= 0) {
-          mv.visitVarInsn(ALOAD, 4); // groups
-          BytecodeUtil.pushInt(mv, selfRefStartIndex);
-          mv.visitVarInsn(ILOAD, 6); // currentPos
-          mv.visitInsn(IASTORE);
-          mv.visitVarInsn(ALOAD, 4); // groups
-          BytecodeUtil.pushInt(mv, selfRefEndIndex);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IASTORE);
-        }
 
         // Try to match child
         mv.visitVarInsn(ALOAD, 0); // this
@@ -1900,18 +1869,6 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 7);
         BytecodeUtil.pushInt(mv, node.max);
         mv.visitJumpInsn(IF_ICMPGE, greedyLoopEnd);
-      }
-
-      // C-02: per-iteration partial-open write for self-referencing group
-      if (selfRefStartIndex >= 0) {
-        mv.visitVarInsn(ALOAD, 4); // groups
-        BytecodeUtil.pushInt(mv, selfRefStartIndex);
-        mv.visitVarInsn(ILOAD, 6); // currentPos
-        mv.visitInsn(IASTORE);
-        mv.visitVarInsn(ALOAD, 4); // groups
-        BytecodeUtil.pushInt(mv, selfRefEndIndex);
-        mv.visitInsn(ICONST_M1);
-        mv.visitInsn(IASTORE);
       }
 
       // Try to match child
