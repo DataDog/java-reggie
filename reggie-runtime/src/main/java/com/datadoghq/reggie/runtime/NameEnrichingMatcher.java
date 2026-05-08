@@ -132,6 +132,7 @@ final class NameEnrichingMatcher extends ReggieMatcher {
 
     @Override
     public String group(String name) {
+      if (name == null) throw new IllegalArgumentException("group name must not be null");
       Integer idx = nameToIndex.get(name);
       if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
       return base.group(idx);
@@ -139,6 +140,7 @@ final class NameEnrichingMatcher extends ReggieMatcher {
 
     @Override
     public int start(String name) {
+      if (name == null) throw new IllegalArgumentException("group name must not be null");
       Integer idx = nameToIndex.get(name);
       if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
       return base.start(idx);
@@ -146,6 +148,7 @@ final class NameEnrichingMatcher extends ReggieMatcher {
 
     @Override
     public int end(String name) {
+      if (name == null) throw new IllegalArgumentException("group name must not be null");
       Integer idx = nameToIndex.get(name);
       if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
       return base.end(idx);

@@ -122,6 +122,7 @@ public final class MatchResultImpl implements MatchResult {
   }
 
   private int resolveIndex(String name) {
+    if (name == null) throw new IllegalArgumentException("group name must not be null");
     Integer idx = nameToIndex.get(name);
     if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
     return idx;
