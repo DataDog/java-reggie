@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased]
+
 ## [0.2.0] - 2026-05-08
 
 - #48 feat: support self-referencing backreferences in RECURSIVE_DESCENT
