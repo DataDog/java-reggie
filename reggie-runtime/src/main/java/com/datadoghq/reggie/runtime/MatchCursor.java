@@ -47,7 +47,7 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
 
   MatchCursor(ReggieMatcher matcher, String input) {
     this.matcher = matcher;
-    this.input = input;
+    this.input = Objects.requireNonNull(input, "input");
     this.nameIndex = matcher.nameToIndex;
   }
 

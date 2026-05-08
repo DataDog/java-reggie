@@ -328,7 +328,53 @@ public class MatchCursorTest {
     assertEquals("a[1]b[2]c[3]", sb.toString());
   }
 
-  // 24. Full streaming pipeline end-to-end
+  // 23. hasNext() is idempotent — calling it twice must not skip a match
+  @Test
+  void testHasNextIsIdempotent() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    assertTrue(cursor.hasNext());
+    assertTrue(cursor.hasNext()); // must not skip the match
+    assertEquals("42", cursor.next().group());
+    assertFalse(cursor.hasNext());
+  }
+
+  // 24. next() after exhaustion throws NoSuchElementException
+  @Test
+  void testNextAfterExhaustionThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("no digits");
+    assertFalse(cursor.hasNext());
+    assertThrows(java.util.NoSuchElementException.class, cursor::next);
+  }
+
+  // 25. Illegal group reference in replacement throws IllegalArgumentException
+  @Test
+  void testIllegalGroupReferenceThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    cursor.findNext();
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> cursor.appendReplacement(new StringBuilder(), "$x"));
+  }
+
+  // 26. cursor(null) throws NullPointerException
+  @Test
+  void testCursorNullInputThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    assertThrows(NullPointerException.class, () -> m.cursor(null));
+  }
+
+  // 27. reset(null) throws NullPointerException
+  @Test
+  void testResetNullInputThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    assertThrows(NullPointerException.class, () -> cursor.reset(null));
+  }
+
+  // 28. Full streaming pipeline end-to-end
   @Test
   void testFullStreamingPipeline() {
     ReggieMatcher m = RuntimeCompiler.compile("(\\w+)@(\\w+)\\.(\\w+)");
