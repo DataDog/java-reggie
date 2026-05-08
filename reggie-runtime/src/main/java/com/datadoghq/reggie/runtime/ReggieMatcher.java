@@ -16,7 +16,9 @@
 package com.datadoghq.reggie.runtime;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
 
@@ -35,6 +37,13 @@ import java.util.function.Function;
  */
 public abstract class ReggieMatcher {
   protected final String pattern;
+
+  // injected by RuntimeCompiler after instantiation
+  protected Map<String, Integer> nameToIndex = Collections.emptyMap();
+
+  protected void setNameToIndex(Map<String, Integer> map) {
+    this.nameToIndex = map;
+  }
 
   // Reusable NFA state for allocation-free matching
   // These fields are initialized lazily by NFA-based matchers

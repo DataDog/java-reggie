@@ -47,12 +47,10 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult match(String input) {
-    // Use DFA to verify match
     if (!dfaMatcher.matches(input)) {
       return null;
     }
-    // Use NFA for group extraction
-    return nfaMatcher.match(input);
+    return enrich(nfaMatcher.match(input));
   }
 
   @Override
@@ -62,13 +60,10 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
-    // Use DFA to verify bounded match
-    MatchResult dfaResult = dfaMatcher.matchBounded(input, start, end);
-    if (dfaResult == null) {
+    if (!dfaMatcher.matchesBounded(input, start, end)) {
       return null;
     }
-    // Use NFA for group extraction on bounded region
-    return nfaMatcher.matchBounded(input, start, end);
+    return enrich(nfaMatcher.matchBounded(input, start, end));
   }
 
   @Override
@@ -78,22 +73,25 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult findMatchFrom(String input, int start) {
-    // Use DFA to find match boundaries quickly
     MatchResult dfaResult = dfaMatcher.findMatchFrom(input, start);
     if (dfaResult == null) {
       return null;
     }
 
-    // Extract substring and run NFA for group positions
     String matched = input.substring(dfaResult.start(), dfaResult.end());
     MatchResult nfaResult = nfaMatcher.match(matched);
     if (nfaResult == null) {
-      // Shouldn't happen - DFA found a match but NFA didn't
       return dfaResult;
     }
 
-    // Adjust NFA group positions by matchStart offset
-    return new OffsetMatchResult(input, nfaResult, dfaResult.start());
+    return new OffsetMatchResult(input, enrich(nfaResult), dfaResult.start());
+  }
+
+  private MatchResult enrich(MatchResult r) {
+    if (!nameToIndex.isEmpty() && r instanceof MatchResultImpl) {
+      return ((MatchResultImpl) r).withNames(nameToIndex);
+    }
+    return r;
   }
 
   /**
@@ -151,6 +149,26 @@ public class HybridMatcher extends ReggieMatcher {
     @Override
     public int groupCount() {
       return delegate.groupCount();
+    }
+
+    @Override
+    public String group(String name) {
+      int s = delegate.start(name);
+      int e = delegate.end(name);
+      if (s < 0 || e < 0) return null;
+      return input.substring(s + offset, e + offset);
+    }
+
+    @Override
+    public int start(String name) {
+      int s = delegate.start(name);
+      return s >= 0 ? s + offset : -1;
+    }
+
+    @Override
+    public int end(String name) {
+      int e = delegate.end(name);
+      return e >= 0 ? e + offset : -1;
     }
   }
 }

@@ -18,6 +18,7 @@ package com.datadoghq.reggie.codegen.parsing;
 import com.datadoghq.reggie.codegen.ast.*;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,18 @@ public class RegexParser {
     }
 
     return result;
+  }
+
+  /**
+   * Returns the named capture group map built during the last {@link #parse} call.
+   *
+   * @return an unmodifiable map from group name to 1-based capture group index, or an empty map if
+   *     the pattern contains no named groups or {@code parse} has not yet been called
+   */
+  public Map<String, Integer> getGroupNameMap() {
+    return groupNameMap != null
+        ? Collections.unmodifiableMap(groupNameMap)
+        : Collections.emptyMap();
   }
 
   // Parsing methods

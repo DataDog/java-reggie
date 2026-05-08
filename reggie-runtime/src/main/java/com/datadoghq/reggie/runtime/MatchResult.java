@@ -52,4 +52,37 @@ public interface MatchResult {
    * @return the end index, or -1 if the group didn't match
    */
   int end(int group);
+
+  /**
+   * Returns the captured string for the named group.
+   *
+   * @param name the group name
+   * @return the captured string, or null if the group didn't participate
+   * @throws IllegalArgumentException if no group with the given name exists
+   */
+  default String group(String name) {
+    throw new IllegalArgumentException("No group with name: " + name);
+  }
+
+  /**
+   * Returns the start index of the named group.
+   *
+   * @param name the group name
+   * @return the start index, or -1 if the group didn't participate
+   * @throws IllegalArgumentException if no group with the given name exists
+   */
+  default int start(String name) {
+    throw new IllegalArgumentException("No group with name: " + name);
+  }
+
+  /**
+   * Returns the end index of the named group.
+   *
+   * @param name the group name
+   * @return the end index, or -1 if the group didn't participate
+   * @throws IllegalArgumentException if no group with the given name exists
+   */
+  default int end(String name) {
+    throw new IllegalArgumentException("No group with name: " + name);
+  }
 }
