@@ -376,6 +376,11 @@ public abstract class ReggieMatcher {
     return result.toString();
   }
 
+  /** Creates a new MatchCursor for streaming replacement over the given input. */
+  public MatchCursor cursor(String input) {
+    return new MatchCursor(this, input);
+  }
+
   /**
    * Gets the pattern string this matcher was generated for.
    *

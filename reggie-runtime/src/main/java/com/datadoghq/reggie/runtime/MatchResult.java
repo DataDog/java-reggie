@@ -52,4 +52,12 @@ public interface MatchResult {
    * @return the end index, or -1 if the group didn't match
    */
   int end(int group);
+
+  /**
+   * Returns {@code true} if this result supports named group lookup via {@link
+   * NamedGroupResult#group(String)}.
+   */
+  default boolean hasNamedGroups() {
+    return false;
+  }
 }
