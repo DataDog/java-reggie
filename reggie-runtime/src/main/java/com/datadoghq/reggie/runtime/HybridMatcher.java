@@ -50,12 +50,7 @@ public class HybridMatcher extends ReggieMatcher {
     if (!dfaMatcher.matches(input)) {
       return null;
     }
-    MatchResult r = nfaMatcher.match(input);
-    if (r == null) return null;
-    if (!nameToIndex.isEmpty() && r instanceof MatchResultImpl) {
-      return ((MatchResultImpl) r).withNames(nameToIndex);
-    }
-    return r;
+    return enrich(nfaMatcher.match(input));
   }
 
   @Override
@@ -65,15 +60,10 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
-    if (dfaMatcher.matchBounded(input, start, end) == null) {
+    if (!dfaMatcher.matchesBounded(input, start, end)) {
       return null;
     }
-    MatchResult r = nfaMatcher.matchBounded(input, start, end);
-    if (r == null) return null;
-    if (!nameToIndex.isEmpty() && r instanceof MatchResultImpl) {
-      return ((MatchResultImpl) r).withNames(nameToIndex);
-    }
-    return r;
+    return enrich(nfaMatcher.matchBounded(input, start, end));
   }
 
   @Override
@@ -94,10 +84,14 @@ public class HybridMatcher extends ReggieMatcher {
       return dfaResult;
     }
 
-    if (!nameToIndex.isEmpty() && nfaResult instanceof MatchResultImpl) {
-      nfaResult = ((MatchResultImpl) nfaResult).withNames(nameToIndex);
+    return new OffsetMatchResult(input, enrich(nfaResult), dfaResult.start());
+  }
+
+  private MatchResult enrich(MatchResult r) {
+    if (!nameToIndex.isEmpty() && r instanceof MatchResultImpl) {
+      return ((MatchResultImpl) r).withNames(nameToIndex);
     }
-    return new OffsetMatchResult(input, nfaResult, dfaResult.start());
+    return r;
   }
 
   /**

@@ -121,18 +121,20 @@ public final class MatchResultImpl implements MatchResult {
     return ends[group];
   }
 
-  @Override
-  public String group(String name) {
+  private int resolveIndex(String name) {
     Integer idx = nameToIndex.get(name);
     if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
-    return group(idx);
+    return idx;
+  }
+
+  @Override
+  public String group(String name) {
+    return group(resolveIndex(name));
   }
 
   @Override
   public int start(String name) {
-    Integer idx = nameToIndex.get(name);
-    if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
-    // Mirror group(int): return -1 when the group didn't participate
+    int idx = resolveIndex(name);
     int s = starts[idx];
     int e = ends[idx];
     return (s == -1 || e == -1) ? -1 : s;
@@ -140,9 +142,7 @@ public final class MatchResultImpl implements MatchResult {
 
   @Override
   public int end(String name) {
-    Integer idx = nameToIndex.get(name);
-    if (idx == null) throw new IllegalArgumentException("No group with name: " + name);
-    return ends[idx];
+    return ends[resolveIndex(name)];
   }
 
   @Override

@@ -168,7 +168,6 @@ public class RuntimeCompiler {
       // 3.5. Fall back to java.util.regex for patterns with known engine bugs
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
-        // JavaRegexFallbackMatcher extracts names via Pattern.namedGroups() internally
         return new JavaRegexFallbackMatcher(pattern, fallbackReason);
       }
 

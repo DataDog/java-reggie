@@ -37,7 +37,7 @@ import java.util.function.Function;
 public abstract class ReggieMatcher {
   protected final String pattern;
 
-  // Named group name → capture group index (set by RuntimeCompiler after instantiation)
+  // injected by RuntimeCompiler after instantiation
   Map<String, Integer> nameToIndex = Collections.emptyMap();
 
   void setNameToIndex(Map<String, Integer> map) {
