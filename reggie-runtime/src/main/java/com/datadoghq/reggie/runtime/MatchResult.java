@@ -85,4 +85,9 @@ public interface MatchResult {
   default int end(String name) {
     throw new IllegalArgumentException("No group with name: " + name);
   }
+
+  /** Returns {@code true} if this result carries a populated named-group map. */
+  default boolean hasNamedGroups() {
+    return false;
+  }
 }

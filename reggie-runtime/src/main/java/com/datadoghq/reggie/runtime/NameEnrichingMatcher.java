@@ -86,7 +86,7 @@ final class NameEnrichingMatcher extends ReggieMatcher {
     return new NamedDelegate(r, nameToIndex);
   }
 
-  private static final class NamedDelegate implements MatchResult {
+  private static final class NamedDelegate implements NamedGroupResult {
     private final MatchResult base;
     private final Map<String, Integer> nameToIndex;
 

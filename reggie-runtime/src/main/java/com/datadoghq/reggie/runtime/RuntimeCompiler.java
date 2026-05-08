@@ -167,7 +167,11 @@ public class RuntimeCompiler {
       // 3.5. Fall back to java.util.regex for patterns with known engine bugs
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
-        return new JavaRegexFallbackMatcher(pattern, fallbackReason);
+        ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, fallbackReason);
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
       }
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)

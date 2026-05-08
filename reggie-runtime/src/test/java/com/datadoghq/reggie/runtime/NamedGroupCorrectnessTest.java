@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -203,5 +204,48 @@ public class NamedGroupCorrectnessTest {
     assertEquals("https", result.group(1), "Group 1 (protocol) should be 'https'");
     assertEquals("example.com", result.group(2), "Group 2 (domain) should be 'example.com'");
     assertEquals("/path", result.group(3), "Group 3 (path) should be '/path'");
+  }
+
+  @Test
+  public void testHasNamedGroups_matchReturnsTrue() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<word>[a-z]+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertTrue(result.hasNamedGroups());
+  }
+
+  @Test
+  public void testHasNamedGroups_findMatchReturnsTrue() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<word>[a-z]+)");
+    MatchResult result = m.findMatch("123 hello");
+    assertNotNull(result);
+    assertTrue(result.hasNamedGroups());
+  }
+
+  @Test
+  public void testHasNamedGroups_noNamedGroupsReturnsFalse() {
+    ReggieMatcher m = RuntimeCompiler.compile("([a-z]+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertFalse(result.hasNamedGroups());
+  }
+
+  @Test
+  public void testHasNamedGroups_directMatchResultImplConstruction() {
+    Map<String, Integer> names = Map.of("word", 1);
+    MatchResultImpl result =
+        new MatchResultImpl("hello", new int[] {0, 0}, new int[] {5, 5}, 1, names);
+    assertTrue(result.hasNamedGroups());
+    assertEquals("hello", result.group("word"));
+  }
+
+  @Test
+  public void testHasNamedGroups_quantifiedNamedGroup_hybridPath() {
+    // quantified capturing group triggers hybrid DFA+NFA path
+    ReggieMatcher m = RuntimeCompiler.compile("(?<x>a)+");
+    MatchResult result = m.findMatch("aaa");
+    assertNotNull(result);
+    assertTrue(result.hasNamedGroups());
+    assertNotNull(result.group("x"));
   }
 }

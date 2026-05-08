@@ -22,12 +22,13 @@ import java.util.Map;
  * Immutable implementation of {@link MatchResult}.
  *
  * <p>Design: - Minimal allocation: one object + two int arrays - O(1) group access - Immutable and
- * thread-safe - Cache-friendly layout
+ * thread-safe - Cache-friendly layout. Named-group support is provided via the optional {@code
+ * nameToIndex} constructor argument.
  *
  * <p>Group index semantics: - Group 0: entire match - Group 1..n: capturing groups - Value -1 means
  * group didn't participate in the match
  */
-public final class MatchResultImpl implements MatchResult {
+public class MatchResultImpl implements MatchResult {
   private final String input;
   private final int[] starts; // starts[0] = match, starts[1..n] = groups
   private final int[] ends; // ends[0] = match, ends[1..n] = groups
@@ -65,7 +66,12 @@ public final class MatchResultImpl implements MatchResult {
   }
 
   MatchResultImpl withNames(Map<String, Integer> names) {
-    return new MatchResultImpl(input, starts, ends, groupCount, names);
+    return new NamedMatchResultImpl(input, starts, ends, groupCount, names);
+  }
+
+  @Override
+  public boolean hasNamedGroups() {
+    return !nameToIndex.isEmpty();
   }
 
   @Override

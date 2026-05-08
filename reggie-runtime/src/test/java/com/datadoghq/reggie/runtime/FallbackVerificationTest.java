@@ -74,4 +74,16 @@ class FallbackVerificationTest {
     assertTrue(m.find("[value]")); // was incorrectly false before fallback
     assertFalse(m.find("value"));
   }
+
+  // Named groups via fallback matcher: hasNamedGroups() must return true
+  @Test
+  void namedGroupFallbackHasNamedGroupsTrue() {
+    // alternation inside lookbehind triggers fallback; named group present
+    ReggieMatcher m = Reggie.compile("(?<=a|b)(?<x>c)");
+    assertTrue(m instanceof JavaRegexFallbackMatcher);
+    MatchResult r = m.findMatch("ac");
+    assertNotNull(r);
+    assertTrue(r.hasNamedGroups());
+    assertEquals("c", r.group("x"));
+  }
 }
