@@ -247,9 +247,6 @@ public final class MatchCursor implements Iterator<MatchResult>, AutoCloseable {
         }
         String val = m.group(groupIdx);
         if (val != null) sb.append(val);
-      } else if (next == '$') {
-        sb.append('$');
-        i++;
       } else {
         throw new IllegalArgumentException("Illegal group reference near index " + i);
       }

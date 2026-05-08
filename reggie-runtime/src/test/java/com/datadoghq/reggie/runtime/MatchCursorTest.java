@@ -406,6 +406,16 @@ public class MatchCursorTest {
   }
 
   // 30. Trailing $ in replacement throws IllegalArgumentException
+  // 35. $$ in replacement throws IllegalArgumentException (use \$ for literal dollar)
+  @Test
+  void testDoubleDollarThrows() {
+    ReggieMatcher m = RuntimeCompiler.compile("\\d+");
+    MatchCursor cursor = m.cursor("42");
+    cursor.findNext();
+    assertThrows(
+        IllegalArgumentException.class, () -> cursor.appendReplacement(new StringBuilder(), "$$"));
+  }
+
   @Test
   void testTrailingDollarThrows() {
     ReggieMatcher m = RuntimeCompiler.compile("\\d+");

@@ -204,4 +204,28 @@ public class NamedGroupCorrectnessTest {
     assertEquals("example.com", result.group(2), "Group 2 (domain) should be 'example.com'");
     assertEquals("/path", result.group(3), "Group 3 (path) should be '/path'");
   }
+
+  @Test
+  public void testHasNamedGroups_matchReturnsTrue() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<word>[a-z]+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertTrue(result.hasNamedGroups());
+  }
+
+  @Test
+  public void testHasNamedGroups_findMatchReturnsTrue() {
+    ReggieMatcher m = RuntimeCompiler.compile("(?<word>[a-z]+)");
+    MatchResult result = m.findMatch("123 hello");
+    assertNotNull(result);
+    assertTrue(result.hasNamedGroups());
+  }
+
+  @Test
+  public void testHasNamedGroups_noNamedGroupsReturnsFalse() {
+    ReggieMatcher m = RuntimeCompiler.compile("([a-z]+)");
+    MatchResult result = m.match("hello");
+    assertNotNull(result);
+    assertFalse(result.hasNamedGroups());
+  }
 }

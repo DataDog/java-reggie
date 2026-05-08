@@ -66,7 +66,7 @@ public class MatchResultImpl implements MatchResult {
   }
 
   MatchResultImpl withNames(Map<String, Integer> names) {
-    return new MatchResultImpl(input, starts, ends, groupCount, names);
+    return new NamedMatchResultImpl(input, starts, ends, groupCount, names);
   }
 
   @Override
