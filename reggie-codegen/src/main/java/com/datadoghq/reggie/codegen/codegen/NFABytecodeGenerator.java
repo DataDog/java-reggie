@@ -5312,13 +5312,13 @@ public class NFABytecodeGenerator {
       }
     }
 
-    // Don't inline if closure contains assertion states (they need runtime checking)
+    // Don't inline if closure contains assertion or anchor states (they need runtime checking)
     if (!followThroughAssertions) {
       for (Integer stateId : completeClosure) {
         NFA.NFAState state =
             nfa.getStates().stream().filter(s -> s.id == stateId).findFirst().orElse(null);
-        if (state != null && state.assertionType != null) {
-          return false; // Can't inline - need runtime assertion checking
+        if (state != null && (state.assertionType != null || state.anchor != null)) {
+          return false; // Can't inline - need runtime assertion/anchor checking
         }
       }
     }
