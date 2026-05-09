@@ -11,6 +11,9 @@ This tutorial shows you how to use Reggie's runtime pattern compilation for **dy
   - [Step 2: Basic Pattern Compilation](#step-2-basic-pattern-compilation)
   - [Step 3: Cache Management](#step-3-cache-management)
   - [Step 4: Error Handling](#step-4-error-handling)
+  - [Step 5: Match Results and Named Groups](#step-5-match-results-and-named-groups)
+  - [Step 6: Splitting Input](#step-6-splitting-input)
+  - [Step 7: Streaming Replacement](#step-7-streaming-replacement)
 - [Real-World Examples](#real-world-examples)
 - [Best Practices](#best-practices)
 - [Performance Optimization](#performance-optimization)
@@ -312,6 +315,127 @@ ReggieMatcher spaced = Reggie.compile("a{ 3, 5 }");  // Same as a{3,5}
 assertTrue(spaced.matches("aaaa"));
 ```
 
+### Step 5: Match Results and Named Groups
+
+`match()` tests the entire input and returns a `MatchResult` (or `null` on no match). `findMatch()` finds the first occurrence anywhere in the string. Both give you access to the full match text and any captured groups.
+
+```java
+import com.datadoghq.reggie.runtime.MatchResult;
+
+ReggieMatcher dated = Reggie.compile("(\\d{4})-(\\d{2})-(\\d{2})");
+
+// Entire-string match
+MatchResult r = dated.match("2026-05-08");
+if (r != null) {
+    System.out.println(r.group());    // "2026-05-08" — entire match
+    System.out.println(r.group(1));   // "2026"
+    System.out.println(r.group(2));   // "05"
+    System.out.println(r.group(3));   // "08"
+    System.out.println(r.start(1));   // 0
+    System.out.println(r.end(1));     // 4
+}
+
+// First-occurrence search
+MatchResult first = dated.findMatch("On 2026-05-08 and 2026-05-09");
+System.out.println(first.group());  // "2026-05-08"
+```
+
+#### Named Groups
+
+Use `(?<name>...)` (or `(?'name'...)`) to name capturing groups, then retrieve them by name:
+
+```java
+ReggieMatcher m = Reggie.compile("(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})");
+MatchResult r = m.match("2026-05-08");
+
+System.out.println(r.group("year"));   // "2026"
+System.out.println(r.group("month"));  // "05"
+System.out.println(r.group("day"));    // "08"
+System.out.println(r.start("year"));   // 0
+System.out.println(r.end("year"));     // 4
+```
+
+A group that did not participate in the match returns `null` from `group(name)` and `-1` from `start(name)` / `end(name)`. Passing an unknown or `null` name throws `IllegalArgumentException`.
+
+### Step 6: Splitting Input
+
+`split(String input)` splits around each match, discarding trailing empty strings. The `split(String input, int limit)` overload mirrors `java.util.regex.Pattern.split(input, limit)` exactly:
+
+```java
+ReggieMatcher comma = Reggie.compile(",");
+
+// No limit (default): trailing empty strings discarded
+String[] parts = comma.split("a,b,c,");         // ["a", "b", "c"]
+
+// limit > 0: at most limit parts; last part is the unparsed remainder
+String[] two = comma.split("a,b,c,d", 2);       // ["a", "b,c,d"]
+
+// limit < 0: all parts, trailing empty strings retained
+String[] all = comma.split("a,b,", -1);         // ["a", "b", ""]
+
+// limit = 0: explicit default, trailing empty strings discarded
+String[] zero = comma.split("a,b,", 0);         // ["a", "b"]
+```
+
+### Step 7: Streaming Replacement
+
+`MatchCursor` is a stateful streaming cursor — the Reggie equivalent of JDK's `Matcher.appendReplacement()` / `appendTail()`. Create one with `matcher.cursor(input)`, advance through matches with `findNext()`, and call `appendReplacement()` / `appendTail()` to build the result:
+
+```java
+import com.datadoghq.reggie.runtime.MatchCursor;
+import com.datadoghq.reggie.runtime.MatchResult;
+
+ReggieMatcher m = Reggie.compile("(\\w+)@(\\w+)");
+String input = "alice@example and bob@test";
+StringBuilder sb = new StringBuilder();
+
+try (MatchCursor cursor = m.cursor(input)) {
+    MatchResult r;
+    while ((r = cursor.findNext()) != null) {
+        cursor.appendReplacement(sb, "$2/$1");
+    }
+    cursor.appendTail(sb);
+}
+System.out.println(sb);  // "example/alice and test/bob"
+```
+
+#### Replacement Syntax
+
+| Token | Meaning |
+|-------|---------|
+| `$0` | entire match |
+| `$1`, `$2`, … | numbered capture groups |
+| `${name}` | named capture groups |
+| `\$` | literal `$` |
+| `\\` | literal `\` |
+
+#### Iterator API
+
+`MatchCursor` implements `Iterator<MatchResult>`, so you can use `hasNext()` / `next()` or `forEachRemaining()`:
+
+```java
+try (MatchCursor cursor = m.cursor("alice@example and bob@test")) {
+    cursor.forEachRemaining(r -> System.out.println(r.group()));
+}
+```
+
+#### Reusing a Cursor
+
+`reset(String newInput)` repoints the cursor at new input without allocating a new object:
+
+```java
+MatchCursor cursor = m.cursor("alice@example");
+// ... process first input ...
+cursor.reset("bob@test");  // reuse on different input
+// ... process second input ...
+```
+
+#### Error Conditions
+
+- `appendReplacement` before `findNext` throws `IllegalStateException`
+- Calling `appendTail` a second time throws `IllegalStateException`
+- Unknown or malformed group reference in the replacement string throws `IllegalArgumentException`
+
 ## Real-World Examples
 
 ### Example 1: User Search Feature
@@ -456,56 +580,23 @@ public class DataExtractor {
     public List<Contact> extractContacts(String text) {
         List<Contact> contacts = new ArrayList<>();
 
-        // Split text into potential contact blocks
-        String[] blocks = text.split("\\n\\n");
+        for (String block : text.split("\\n\\n")) {
+            MatchResult emailMatch = EMAIL.findMatch(block);
+            MatchResult phoneMatch = PHONE.findMatch(block);
+            MatchResult urlMatch   = URL.findMatch(block);
 
-        for (String block : blocks) {
+            if (emailMatch == null && phoneMatch == null && urlMatch == null) {
+                continue;
+            }
             Contact contact = new Contact();
-            boolean hasData = false;
-
-            // Extract email
-            if (EMAIL.find(block)) {
-                // Note: Can't extract actual match yet (capturing groups not implemented)
-                // Would need to use findFrom and substring for now
-                contact.email = extractEmail(block);
-                hasData = true;
-            }
-
-            // Extract phone
-            if (PHONE.find(block)) {
-                contact.phone = extractPhone(block);
-                hasData = true;
-            }
-
-            // Extract URL
-            if (URL.find(block)) {
-                contact.website = extractURL(block);
-                hasData = true;
-            }
-
-            if (hasData) {
-                contacts.add(contact);
-            }
+            if (emailMatch != null) contact.email   = emailMatch.group();
+            if (phoneMatch != null) contact.phone   = phoneMatch.group();
+            if (urlMatch   != null) contact.website = urlMatch.group();
+            contacts.add(contact);
         }
 
         return contacts;
     }
-
-    private String extractEmail(String text) {
-        int pos = EMAIL.findFrom(text, 0);
-        if (pos < 0) return null;
-
-        // Manual extraction until capturing groups are implemented
-        StringBuilder email = new StringBuilder();
-        for (int i = pos; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (Character.isWhitespace(c)) break;
-            email.append(c);
-        }
-        return email.toString();
-    }
-
-    // Similar for extractPhone and extractURL...
 }
 ```
 
@@ -1002,6 +1093,10 @@ for (int i = 0; i < 100; i++) {
 | First-use cost | 5-10ms | 1-2ms |
 | Caching | Automatic | Manual |
 | ReDoS protection | ✅ Yes | ❌ No |
+| Capturing groups | ✅ Yes (`MatchResult`) | ✅ Yes (`Matcher`) |
+| Named groups | ✅ Yes (`group(String)`) | ✅ Yes (`group(String)`) |
+| Streaming replacement | ✅ Yes (`MatchCursor`) | ✅ Yes (`Matcher`) |
+| Split with limit | ✅ Yes | ✅ Yes |
 
 ---
 

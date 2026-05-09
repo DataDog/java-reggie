@@ -240,6 +240,25 @@ ensure_unreleased_changelog() {
     fi
 }
 
+# Write the CHANGELOG.md body for VERSION to a file.
+# Args: $1 = version, $2 = output file
+write_changelog_notes() {
+    python3 - "$ROOT/CHANGELOG.md" "$1" "$2" <<'PYEOF'
+import sys, re
+changelog_path, version, notes_file = sys.argv[1:4]
+try:
+    with open(changelog_path) as f:
+        content = f.read()
+    pattern = r'## \[' + re.escape(version) + r'\][^\n]*\n\n(.*?)(?=\n## \[|\Z)'
+    m = re.search(pattern, content, re.DOTALL)
+    notes = m.group(1).strip() if m else ''
+    with open(notes_file, 'w') as nf:
+        nf.write(notes)
+except Exception:
+    open(notes_file, 'w').close()
+PYEOF
+}
+
 # ── GraphQL / milestone helpers ──────────────────────────────────────────────
 
 # Collect merged PRs (with closingIssuesReferences) via GitHub GraphQL API.
@@ -484,7 +503,8 @@ LAST_TAG=$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || echo "")
 SINCE=""
 [ -n "$LAST_TAG" ] && SINCE=$(git -C "$ROOT" log -1 --format=%aI "$LAST_TAG")
 TMPJSON=$(mktemp)
-trap 'rm -f "$TMPJSON"' EXIT
+NOTES_FILE=$(mktemp)
+trap 'rm -f "$TMPJSON" "$NOTES_FILE"' EXIT
 
 echo "Collecting merged PRs with linked issues..."
 collect_prs_with_issues "$BRANCH" "$SINCE" "$TMPJSON"
@@ -525,6 +545,10 @@ if [ "$BUMP" = "patch" ]; then
     run git -C "$ROOT" commit -m "Prepare for $MAINT_NEXT"
 
     run git -C "$ROOT" push origin "$BRANCH" "$TAG"
+
+    write_changelog_notes "$VERSION" "$NOTES_FILE"
+    do_action "Create GitHub release $TAG" \
+        gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --repo "$REPO_OWNER/$REPO_NAME"
 
     do_action "Close milestone \"$VERSION\"" \
         bash -c "gh api repos/$REPO_OWNER/$REPO_NAME/milestones/$_MILESTONE_NUM -X PATCH -f state=closed >/dev/null"
@@ -575,6 +599,10 @@ else
     run git -C "$ROOT" commit -m "Prepare for $MAIN_NEXT"
 
     run git -C "$ROOT" push origin "$DEFAULT_BRANCH" "$MAINT_BRANCH" "$TAG"
+
+    write_changelog_notes "$VERSION" "$NOTES_FILE"
+    do_action "Create GitHub release $TAG" \
+        gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" --repo "$REPO_OWNER/$REPO_NAME"
 
     do_action "Close milestone \"$VERSION\"" \
         bash -c "gh api repos/$REPO_OWNER/$REPO_NAME/milestones/$_MILESTONE_NUM -X PATCH -f state=closed >/dev/null"

@@ -225,7 +225,17 @@ public abstract class AdvancedPatterns implements ReggiePatterns {
     // Backreferences for matching repeated words
     @RegexPattern("\\b(\\w+)\\s+\\1\\b")
     public abstract ReggieMatcher repeatedWord();
+
+    // Recursive patterns: (?R) = recurse entire pattern, (?1) = recurse group 1
+    // Balanced parentheses
+    @RegexPattern("\\((?:[^()]|(?R))*\\)")
+    public abstract ReggieMatcher balanced();
+
+    // Palindrome (self-referencing backreference inside recursion)
+    @RegexPattern("^((.)(?1)\\2|.?)$")
+    public abstract ReggieMatcher palindrome();
 }
+```
 
 ### Step 3: Build and Generate Code
 
@@ -338,6 +348,80 @@ public class Validator {
 }
 ```
 
+#### Extracting Match Details
+
+`matches()` and `find()` return `boolean`. When you need the matched text or captured groups, use `match()` or `findMatch()`, which return a `MatchResult`:
+
+```java
+import com.datadoghq.reggie.runtime.MatchResult;
+
+// match() — entire-string match with group access
+MatchResult r = patterns.phone().match("123-456-7890");
+if (r != null) {
+    System.out.println(r.group());   // "123-456-7890"
+}
+
+// findMatch() — first occurrence in a longer string
+MatchResult found = patterns.email().findMatch("Contact: user@example.com");
+if (found != null) {
+    System.out.println(found.group());  // "user@example.com"
+}
+```
+
+#### Named Groups in Compile-Time Patterns
+
+Patterns may include named groups (`(?<name>...)`). The same `MatchResult` API gives you access to them by name:
+
+```java
+public abstract class LogPatterns implements ReggiePatterns {
+
+    @RegexPattern("(?<ip>\\d{1,3}(?:\\.\\d{1,3}){3}):(?<port>\\d+)")
+    public abstract ReggieMatcher addressPort();
+}
+
+// Usage:
+MatchResult r = PATTERNS.addressPort().findMatch("Connected from 192.168.1.1:8080");
+if (r != null) {
+    System.out.println(r.group("ip"));    // "192.168.1.1"
+    System.out.println(r.group("port"));  // "8080"
+}
+```
+
+#### Split with Limit
+
+`split(String input, int limit)` mirrors `java.util.regex.Pattern.split(input, limit)`:
+
+```java
+@RegexPattern(",\\s*")
+public abstract ReggieMatcher csv();
+
+// limit > 0: at most limit parts
+String[] two = PATTERNS.csv().split("a, b, c, d", 2);  // ["a", "b, c, d"]
+
+// limit < 0: retain trailing empty strings
+String[] all = PATTERNS.csv().split("a, b,", -1);       // ["a", "b", ""]
+
+// default (limit = 0): discard trailing empty strings
+String[] def = PATTERNS.csv().split("a, b,");            // ["a", "b"]
+```
+
+#### Streaming Replacement
+
+`cursor(String input)` returns a `MatchCursor` for incremental match-and-replace. See [the Runtime Tutorial's Step 7](TUTORIAL-RUNTIME.md#step-7-streaming-replacement) for full details; the API is identical for compile-time patterns.
+
+```java
+import com.datadoghq.reggie.runtime.MatchCursor;
+
+StringBuilder sb = new StringBuilder();
+try (MatchCursor cursor = PATTERNS.phone().cursor(input)) {
+    MatchResult r;
+    while ((r = cursor.findNext()) != null) {
+        cursor.appendReplacement(sb, "***-***-****");
+    }
+    cursor.appendTail(sb);
+}
+```
+
 #### Singleton Pattern (Recommended)
 
 For best performance, create a singleton instance:
@@ -447,11 +531,10 @@ public class LogAnalyzer {
     public LogEntry parseLine(String line) {
         LogEntry entry = new LogEntry();
 
-        // Extract IP address
-        int ipPos = PATTERNS.ipAddress().findFrom(line, 0);
-        if (ipPos >= 0) {
-            // Extract IP (note: capturing groups not yet supported)
-            // For now, you'd need to extract manually
+        // Extract IP address using MatchResult
+        MatchResult ipMatch = PATTERNS.ipAddress().findMatch(line);
+        if (ipMatch != null) {
+            entry.setIp(ipMatch.group());
         }
 
         // Check for errors
