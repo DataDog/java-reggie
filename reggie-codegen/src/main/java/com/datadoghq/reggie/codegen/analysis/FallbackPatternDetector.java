@@ -53,15 +53,6 @@ public final class FallbackPatternDetector {
     Visitor v = new Visitor();
     ast.accept(v);
 
-    // Bug 1: multiple backrefs to same group — broken in NFA and variable-capture-backref paths
-    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
-        || strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF) {
-      for (Map.Entry<Integer, Integer> e : v.backrefCounts.entrySet()) {
-        if (e.getValue() >= 2) {
-          return "multiple backreferences to group " + e.getKey() + " in NFA mode";
-        }
-      }
-    }
     // Bug 2: lookahead inside a quantified group
     if (v.lookaheadInQuantifier) {
       return "lookahead inside quantified group";

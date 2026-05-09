@@ -3749,17 +3749,20 @@ public class NFABytecodeGenerator {
         break;
       }
 
-      // Follow epsilon transitions (skip empty transitions to non-assertion states)
+      // Follow epsilon transitions (skip semantically-significant states)
       if (!current.getEpsilonTransitions().isEmpty()) {
-        boolean foundNonAssertion = false;
+        boolean foundPlainEpsilon = false;
         for (NFA.NFAState target : current.getEpsilonTransitions()) {
-          if (target.assertionType == null) {
+          // Stop at assertion states and backref states: following through them would
+          // stitch together literals that are not actually adjacent in the input,
+          // producing a false "required" multi-char literal sequence.
+          if (target.assertionType == null && target.backrefCheck == null) {
             current = target;
-            foundNonAssertion = true;
+            foundPlainEpsilon = true;
             break;
           }
         }
-        if (!foundNonAssertion) break;
+        if (!foundPlainEpsilon) break;
         continue;
       }
 
