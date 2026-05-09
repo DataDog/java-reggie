@@ -684,11 +684,11 @@ public class RuntimeCompiler {
           nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchBoundedMethod(
               cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
-          nfaGen.generateFindLongestMatchEndMethod(
-              cw, "com/datadoghq/reggie/runtime/" + className); // Helper for greedy optimization
           nfaGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-          nfaGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          // Do not override findBoundsFrom: the base-class default delegates to findMatchFrom,
+          // which preserves backref group semantics. findLongestMatchEnd runs without group
+          // tracking and would skip backrefCheck states, producing incorrect bounds.
           break;
         }
       case OPTIMIZED_NFA:

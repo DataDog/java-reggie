@@ -337,7 +337,9 @@ public class ReggieMatcherBytecodeGenerator {
           nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
-          nfaGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+          // Do not override findBoundsFrom: the base-class default delegates to findMatchFrom,
+          // which preserves backref group semantics. findLongestMatchEnd runs without group
+          // tracking and would skip backrefCheck states, producing incorrect bounds.
           break;
         }
       case OPTIMIZED_NFA_WITH_LOOKAROUND:
