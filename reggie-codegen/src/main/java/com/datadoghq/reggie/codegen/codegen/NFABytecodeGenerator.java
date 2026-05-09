@@ -1885,11 +1885,12 @@ public class NFABytecodeGenerator {
       int posVar,
       LocalVariableAllocator allocator,
       EpsilonClosureSlots preAllocSlots) {
-    // Check if NFA has assertions - if so, use runtime closure
-    boolean hasAssertions = nfa.getStates().stream().anyMatch(s -> s.assertionType != null);
+    // Check if NFA has assertions or anchors - if so, use runtime closure
+    boolean hasAssertions =
+        nfa.getStates().stream().anyMatch(s -> s.assertionType != null || s.anchor != null);
 
     if (hasAssertions) {
-      // Assertions require runtime checks, use standard closure with pre-allocated slots
+      // Assertions/anchors require runtime checks, use standard closure with pre-allocated slots
       generateEpsilonClosure(mv, statesVar, inputVar, posVar, allocator, preAllocSlots);
       return;
     }
@@ -2117,6 +2118,84 @@ public class NFABytecodeGenerator {
           // No group tracking in this context (-1, -1)
           generateAssertionCheck(
               mv, state, inputVar, posVar, statesVar, worklistVar, stateIdVar, -1, -1, allocator);
+        } else if (state.anchor != null) {
+          // Inline position guard: only follow epsilon transitions if anchor passes
+          Label anchorPassed = new Label();
+          switch (state.anchor) {
+            case START:
+            case STRING_START:
+              // pos == 0
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitJumpInsn(IFNE, worklistLoop);
+              break;
+            case START_MULTILINE:
+              // pos == 0 || input.charAt(pos-1) == '\n'
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitJumpInsn(IFEQ, anchorPassed);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(ISUB);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+              pushInt(mv, '\n');
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            case END:
+            case STRING_END_ABSOLUTE:
+              // pos == input.length()
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            case STRING_END:
+              // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(ISUB);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+              pushInt(mv, '\n');
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            case END_MULTILINE:
+              // pos == input.length() || input.charAt(pos) == '\n'
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+              pushInt(mv, '\n');
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            default:
+              // Other anchor types (e.g. WORD_BOUNDARY): treat as always passing
+              break;
+          }
+          mv.visitLabel(anchorPassed);
+          // Anchor passed - add epsilon targets normally
+          for (NFA.NFAState target : state.getEpsilonTransitions()) {
+            Label alreadyVisited = new Label();
+            checkStateInSetConst(mv, statesVar, target.id, allocator);
+            mv.visitJumpInsn(IFNE, alreadyVisited);
+            addStateToSet(mv, statesVar, target.id, allocator);
+            mv.visitVarInsn(ALOAD, worklistVar);
+            mv.visitVarInsn(ILOAD, worklistSizeVar);
+            pushInt(mv, target.id);
+            mv.visitInsn(IASTORE);
+            mv.visitIincInsn(worklistSizeVar, 1);
+            mv.visitLabel(alreadyVisited);
+          }
         } else {
           // No assertion - add epsilon targets normally
           for (NFA.NFAState target : state.getEpsilonTransitions()) {
@@ -5233,13 +5312,13 @@ public class NFABytecodeGenerator {
       }
     }
 
-    // Don't inline if closure contains assertion states (they need runtime checking)
+    // Don't inline if closure contains assertion or anchor states (they need runtime checking)
     if (!followThroughAssertions) {
       for (Integer stateId : completeClosure) {
         NFA.NFAState state =
             nfa.getStates().stream().filter(s -> s.id == stateId).findFirst().orElse(null);
-        if (state != null && state.assertionType != null) {
-          return false; // Can't inline - need runtime assertion checking
+        if (state != null && (state.assertionType != null || state.anchor != null)) {
+          return false; // Can't inline - need runtime assertion/anchor checking
         }
       }
     }
@@ -6824,14 +6903,15 @@ public class NFABytecodeGenerator {
     addStateToSetVar(mv, processedVar, stateIdVar);
 
     // Generate switch for O(log N) state lookup
-    // Collect all states that need processing (have groups, backrefs, assertions, or epsilon
-    // transitions)
+    // Collect all states that need processing (have groups, backrefs, assertions, anchors, or
+    // epsilon transitions)
     List<NFA.NFAState> statesToProcess = new ArrayList<>();
     for (NFA.NFAState state : nfa.getStates()) {
       if (state.enterGroup != null
           || state.exitGroup != null
           || state.backrefCheck != null
           || state.assertionType != null
+          || state.anchor != null
           || !state.getEpsilonTransitions().isEmpty()) {
         statesToProcess.add(state);
       }
@@ -6969,6 +7049,92 @@ public class NFABytecodeGenerator {
               groupStartsVar,
               groupEndsVar,
               allocator);
+        } else if (state.anchor != null) {
+          // Inline position guard: only follow epsilon transitions if anchor passes
+          Label anchorPassedWG = new Label();
+          switch (state.anchor) {
+            case START:
+            case STRING_START:
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitJumpInsn(IFNE, worklistLoop);
+              break;
+            case START_MULTILINE:
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitJumpInsn(IFEQ, anchorPassedWG);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(ISUB);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+              pushInt(mv, '\n');
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            case END:
+            case STRING_END_ABSOLUTE:
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            case STRING_END:
+              // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(ISUB);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+              pushInt(mv, '\n');
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            case END_MULTILINE:
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitVarInsn(ILOAD, posVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+              pushInt(mv, '\n');
+              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              break;
+            default:
+              // Other anchor types (e.g. WORD_BOUNDARY): treat as always passing
+              break;
+          }
+          mv.visitLabel(anchorPassedWG);
+          // Anchor passed - follow epsilon transitions
+          for (NFA.NFAState target : state.getEpsilonTransitions()) {
+            Label alreadyVisitedA = new Label();
+            checkStateInSetConst(mv, statesVar, target.id, allocator);
+            mv.visitJumpInsn(IFNE, alreadyVisitedA);
+            addStateToSet(mv, statesVar, target.id, allocator);
+            mv.visitVarInsn(ALOAD, worklistVar);
+            mv.visitVarInsn(ILOAD, worklistSizeVar);
+            pushInt(mv, target.id);
+            mv.visitInsn(IASTORE);
+            mv.visitIincInsn(worklistSizeVar, 1);
+            mv.visitLabel(alreadyVisitedA);
+            // Per-config tracking for POSIX last-match semantics (same as normal epsilon path)
+            if (usePosixLastMatch && configGroupStartsVar >= 0) {
+              int groupCount = nfa.getGroupCount();
+              generateCopyConfigArray(mv, configGroupStartsVar, stateIdVar, target.id, groupCount);
+              generateCopyConfigArray(mv, configGroupEndsVar, stateIdVar, target.id, groupCount);
+            }
+            if (usePosixLastMatch && parentStateMapVar >= 0) {
+              mv.visitVarInsn(ALOAD, parentStateMapVar);
+              pushInt(mv, target.id);
+              mv.visitVarInsn(ILOAD, stateIdVar);
+              mv.visitInsn(IASTORE);
+            }
+          }
         } else if (!state.getEpsilonTransitions().isEmpty()) {
           for (NFA.NFAState target : state.getEpsilonTransitions()) {
             Label alreadyVisited = new Label();

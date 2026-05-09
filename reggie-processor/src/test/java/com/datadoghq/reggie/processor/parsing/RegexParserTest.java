@@ -168,6 +168,42 @@ class RegexParserTest {
   }
 
   @Test
+  void testInlineMultilineFlagInsideCapturingGroupPropagatesToAnchor() throws Exception {
+    // \n((?m)^b) - (?m) inside capturing group should propagate multiline=true to the ^ anchor
+    RegexNode node = parser.parse("\n((?m)^b)");
+    assertTrue(node instanceof ConcatNode);
+    ConcatNode concat = (ConcatNode) node;
+    // Second child is the capturing group
+    assertTrue(concat.children.get(1) instanceof GroupNode);
+    GroupNode group = (GroupNode) concat.children.get(1);
+    assertTrue(group.capturing);
+    // Group body is a concat of the anchor and 'b'
+    assertTrue(group.child instanceof ConcatNode);
+    ConcatNode groupBody = (ConcatNode) group.child;
+    assertTrue(groupBody.children.get(0) instanceof AnchorNode);
+    AnchorNode anchor = (AnchorNode) groupBody.children.get(0);
+    assertEquals(AnchorNode.Type.START, anchor.type);
+    assertTrue(anchor.multiline, "(?m) inside capturing group must set multiline=true on ^");
+  }
+
+  @Test
+  void testInlineMultilineFlagInsideCapturingGroupPropagatesToEndAnchor() throws Exception {
+    // ((?m)b$) - (?m) inside capturing group should propagate multiline=true to the $ anchor
+    RegexNode node = parser.parse("((?m)b$)");
+    assertTrue(node instanceof GroupNode);
+    GroupNode group = (GroupNode) node;
+    assertTrue(group.capturing);
+    assertTrue(group.child instanceof ConcatNode);
+    ConcatNode groupBody = (ConcatNode) group.child;
+    // Last child should be the $ anchor
+    RegexNode lastChild = groupBody.children.get(groupBody.children.size() - 1);
+    assertTrue(lastChild instanceof AnchorNode);
+    AnchorNode anchor = (AnchorNode) lastChild;
+    assertEquals(AnchorNode.Type.END, anchor.type);
+    assertTrue(anchor.multiline, "(?m) inside capturing group must set multiline=true on $");
+  }
+
+  @Test
   void testBackreference() throws Exception {
     RegexNode node = parser.parse("(a)\\1");
     assertTrue(node instanceof ConcatNode);

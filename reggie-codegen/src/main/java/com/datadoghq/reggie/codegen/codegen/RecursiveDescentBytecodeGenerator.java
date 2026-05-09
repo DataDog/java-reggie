@@ -3173,8 +3173,33 @@ public class RecursiveDescentBytecodeGenerator {
     @Override
     public Void visitAnchor(AnchorNode node) {
       // Anchors: check position constraints
-      if (node.type == AnchorNode.Type.START || node.type == AnchorNode.Type.STRING_START) {
-        // ^ or \A: must be at start of input
+      if (node.type == AnchorNode.Type.START && node.multiline) {
+        // ^  in multiline mode: must be at start of input or after '\n'
+        // if (pos == 0 || input.charAt(pos-1) == '\n') pass; else return -1;
+        // S: []
+        Label atLineStart = new Label();
+        mv.visitVarInsn(ILOAD, 2); // pos
+        // S: [I]
+        mv.visitJumpInsn(IFEQ, atLineStart); // if pos == 0 goto pass
+        // S: []
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        // S: [C]
+        mv.visitIntInsn(BIPUSH, '\n');
+        // S: [C, I]
+        mv.visitJumpInsn(IF_ICMPEQ, atLineStart); // if charAt(pos-1) == '\n' goto pass
+        // S: []
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(atLineStart);
+        // S: []
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(IRETURN);
+      } else if (node.type == AnchorNode.Type.START || node.type == AnchorNode.Type.STRING_START) {
+        // ^ (non-multiline) or \A: must be at start of input
         // if (pos != 0) return -1;
         // S: []
         mv.visitVarInsn(ILOAD, 2); // pos
@@ -3191,27 +3216,58 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2);
         // S: [I]
         mv.visitInsn(IRETURN);
-      } else if (node.type == AnchorNode.Type.END
-          || node.type == AnchorNode.Type.STRING_END
-          || node.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
-        // $ or \Z or \z: must be at end of input
-        // if (pos != end) return -1;
-        // S: []
+      } else if (node.type == AnchorNode.Type.END && node.multiline) {
+        // $ in multiline mode: must be at end of input or before a '\n'
+        Label atLineEnd = new Label();
         mv.visitVarInsn(ILOAD, 2); // pos
-        // S: [I]
         mv.visitVarInsn(ILOAD, 3); // end
-        // S: [I, I]
-        Label atEnd = new Label();
-        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
-        // S: []
+        mv.visitJumpInsn(IF_ICMPEQ, atLineEnd); // if pos == end goto pass
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\n');
+        mv.visitJumpInsn(IF_ICMPEQ, atLineEnd); // if charAt(pos) == '\n' goto pass
         mv.visitInsn(ICONST_M1);
-        // S: [I]
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(atLineEnd);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(IRETURN);
+      } else if (node.type == AnchorNode.Type.STRING_END) {
+        // \Z: matches at end of input OR one position before a terminal '\n'
+        Label atEnd = new Label();
+        Label failLabel = new Label();
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd); // if pos == end → pass
+        // Check pos == end-1 && input.charAt(pos) == '\n'
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB); // end - 1
+        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if pos != end-1 → fail
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if charAt(pos) != '\n' → fail
+        mv.visitJumpInsn(GOTO, atEnd);
+        mv.visitLabel(failLabel);
+        mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
         mv.visitLabel(atEnd);
-        // S: []
-        // Return same position
         mv.visitVarInsn(ILOAD, 2);
-        // S: [I]
+        mv.visitInsn(IRETURN);
+      } else if (node.type == AnchorNode.Type.END
+          || node.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
+        // $ (non-multiline) or \z: must be at end of input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        Label atEnd = new Label();
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(atEnd);
+        mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       }
 

@@ -353,6 +353,70 @@ public class InlineModifiersTest {
     assertFalse(m.find("abc\nx"), "Should NOT find before newline without (?m)");
   }
 
+  @Test
+  public void testMultiline_InlineInCapturingGroup_StartAnchor() {
+    ReggieMatcher m = Reggie.compile("\n((?m)^b)");
+    MatchResult result = m.findMatch("a\nb\n");
+    assertNotNull(result, "Pattern \\n((?m)^b) must match \"a\\nb\\n\"");
+    assertEquals("b", result.group(1), "Group 1 must capture \"b\"");
+  }
+
+  @Test
+  public void testMultiline_InlineInGroup_StartAnchor_NoNewline() {
+    ReggieMatcher m = Reggie.compile("\n((?m)^b)");
+    assertNull(m.findMatch("ab"));
+    assertNull(m.findMatch("a b"));
+  }
+
+  @Test
+  public void testMultiline_InlineInGroup_BothAnchors() {
+    ReggieMatcher m = Reggie.compile("((?m)^hello$)");
+    MatchResult result = m.findMatch("first\nhello\nlast");
+    assertNotNull(result);
+    assertEquals("hello", result.group(1));
+  }
+
+  @Test
+  public void testMultiline_InlineInGroup_PicksCorrectLine() {
+    ReggieMatcher m = Reggie.compile("\n((?m)^target)");
+    MatchResult result = m.findMatch("first\ntarget\nlast");
+    assertNotNull(result);
+    assertEquals("target", result.group(1));
+  }
+
+  @Test
+  public void testNonMultiline_CaretInGroup_DoesNotMatchAfterNewline() {
+    ReggieMatcher m = Reggie.compile("(^b)");
+    assertNull(m.findMatch("a\nb"));
+    MatchResult atStart = m.findMatch("b");
+    assertNotNull(atStart);
+    assertEquals("b", atStart.group(1));
+  }
+
+  @Test
+  public void testMultiline_InlineInCapturingGroup_EndAnchor() {
+    ReggieMatcher m = Reggie.compile("((?m)hello$)");
+    MatchResult result = m.findMatch("hello\nworld");
+    assertNotNull(result, "Pattern ((?m)hello$) must match \"hello\\nworld\"");
+    assertEquals("hello", result.group(1), "Group 1 must capture \"hello\"");
+  }
+
+  @Test
+  public void testMultiline_InlineInCapturingGroup_EndAnchor_NoMatch() {
+    ReggieMatcher m = Reggie.compile("((?m)hello$)");
+    assertNull(m.findMatch("helloworld"), "No match when 'hello' not at line end");
+    assertNull(
+        m.findMatch("helloworldx\nhelloworldy"), "No match when 'hello' mid-word on every line");
+  }
+
+  @Test
+  public void testCombinedMultilineCaseInsensitive() {
+    ReggieMatcher m = Reggie.compile("(?im)^hello");
+    MatchResult result = m.findMatch("first\nHELLO\nlast");
+    assertNotNull(result, "(?im)^hello must match 'HELLO' after newline");
+    assertEquals("HELLO", result.group(0), "Must match case-insensitively");
+  }
+
   // ==================== Dotall Mode Tests ====================
 
   @Test
