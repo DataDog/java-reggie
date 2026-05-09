@@ -3232,10 +3232,34 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitLabel(atLineEnd);
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
+      } else if (node.type == AnchorNode.Type.STRING_END) {
+        // \Z: matches at end of input OR one position before a terminal '\n'
+        Label atEnd = new Label();
+        Label failLabel = new Label();
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd); // if pos == end → pass
+        // Check pos == end-1 && input.charAt(pos) == '\n'
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB); // end - 1
+        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if pos != end-1 → fail
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if charAt(pos) != '\n' → fail
+        mv.visitJumpInsn(GOTO, atEnd);
+        mv.visitLabel(failLabel);
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(atEnd);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(IRETURN);
       } else if (node.type == AnchorNode.Type.END
-          || node.type == AnchorNode.Type.STRING_END
           || node.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
-        // $ (non-multiline) or \Z or \z: must be at end of input
+        // $ (non-multiline) or \z: must be at end of input
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
         Label atEnd = new Label();

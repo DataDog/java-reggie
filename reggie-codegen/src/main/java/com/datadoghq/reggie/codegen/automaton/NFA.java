@@ -167,7 +167,10 @@ public final class NFA {
 
   /**
    * Check if a multiline start anchor is REQUIRED to match this pattern. Returns true only if ALL
-   * paths to character transitions go through a START_MULTILINE anchor.
+   * paths to character transitions go through a {@code START_MULTILINE}, {@code START}, or {@code
+   * STRING_START} anchor. {@code START} and {@code STRING_START} are treated as sufficient barriers
+   * because a pattern anchored at the absolute start of input is trivially also anchored at a line
+   * start, so the same find()-position optimization applies.
    *
    * <p>This is used to optimize find() operations - we can skip positions not following '\n' only
    * when all paths require the multiline anchor.

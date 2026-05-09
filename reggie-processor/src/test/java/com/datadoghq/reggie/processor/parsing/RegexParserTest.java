@@ -168,7 +168,7 @@ class RegexParserTest {
   }
 
   @Test
-  void testInlineMultilineFlagInsideCapturingGroupPropagatestoAnchor() throws Exception {
+  void testInlineMultilineFlagInsideCapturingGroupPropagatesToAnchor() throws Exception {
     // \n((?m)^b) - (?m) inside capturing group should propagate multiline=true to the ^ anchor
     RegexNode node = parser.parse("\n((?m)^b)");
     assertTrue(node instanceof ConcatNode);
@@ -187,7 +187,7 @@ class RegexParserTest {
   }
 
   @Test
-  void testInlineMultilineFlagInsideCapturingGroupPropagatestoEndAnchor() throws Exception {
+  void testInlineMultilineFlagInsideCapturingGroupPropagatesToEndAnchor() throws Exception {
     // ((?m)b$) - (?m) inside capturing group should propagate multiline=true to the $ anchor
     RegexNode node = parser.parse("((?m)b$)");
     assertTrue(node instanceof GroupNode);
