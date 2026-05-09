@@ -48,9 +48,9 @@ class MultiBackrefCorrectnessTest {
         m instanceof JavaRegexFallbackMatcher, "native engine must handle multiple backrefs");
   }
 
-  // T-03: double backref with literal separator
+  // T-03: single backref to group 1 in a two-group pattern with literal separator
   @Test
-  void doubleBackrefLiteralSeparator() {
+  void singleBackrefTwoGroupLiteralSeparator() {
     ReggieMatcher m = Reggie.compile("(\\w+)=(\\w+)=\\1");
     assertTrue(m.find("foo=bar=foo"), "group 1 repeats after the second =");
     assertFalse(m.find("foo=bar=baz"), "neither group repeats");

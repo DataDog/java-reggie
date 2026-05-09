@@ -29,9 +29,7 @@ import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Detects regex patterns that trigger known correctness bugs in the reggie engine. When a bug is
@@ -119,7 +117,6 @@ public final class FallbackPatternDetector {
   }
 
   private static final class Visitor implements RegexVisitor<Void> {
-    final Map<Integer, Integer> backrefCounts = new HashMap<>();
     boolean lookaheadInQuantifier = false;
     boolean lookbehindBeforeUnbounded = false;
     boolean alternationInLookbehind = false;
@@ -188,7 +185,6 @@ public final class FallbackPatternDetector {
 
     @Override
     public Void visitBackreference(BackreferenceNode node) {
-      backrefCounts.merge(node.groupNumber, 1, Integer::sum);
       return null;
     }
 

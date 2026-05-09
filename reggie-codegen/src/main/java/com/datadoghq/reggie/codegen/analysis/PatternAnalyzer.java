@@ -2138,6 +2138,22 @@ public class PatternAnalyzer {
     if (node instanceof BackreferenceNode) {
       return ((BackreferenceNode) node).groupNumber == groupNumber;
     }
+    if (node instanceof GroupNode) {
+      return containsBackrefToGroup(((GroupNode) node).child, groupNumber);
+    }
+    if (node instanceof AssertionNode) {
+      return containsBackrefToGroup(((AssertionNode) node).subPattern, groupNumber);
+    }
+    if (node instanceof ConditionalNode) {
+      ConditionalNode cn = (ConditionalNode) node;
+      return containsBackrefToGroup(cn.thenBranch, groupNumber)
+          || (cn.elseBranch != null && containsBackrefToGroup(cn.elseBranch, groupNumber));
+    }
+    if (node instanceof BranchResetNode) {
+      for (RegexNode alt : ((BranchResetNode) node).alternatives) {
+        if (containsBackrefToGroup(alt, groupNumber)) return true;
+      }
+    }
     if (node instanceof QuantifierNode) {
       return containsBackrefToGroup(((QuantifierNode) node).child, groupNumber);
     }
