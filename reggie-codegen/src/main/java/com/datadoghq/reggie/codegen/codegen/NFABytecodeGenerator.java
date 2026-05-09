@@ -206,6 +206,8 @@ public class NFABytecodeGenerator {
   protected final boolean hasStringStartAnchor; // Pattern has \A (absolute string start)
   protected final boolean
       hasBackrefToLookaheadCapture; // Backref references capture inside lookahead
+  protected final boolean
+      skipLiteralOptimization; // When true, suppress extractLongestRequiredLiteral in findFrom
 
   // Compile-time decision: use BitSet for ≤64 states, SparseSet otherwise
   private final boolean useBitSet;
@@ -265,6 +267,26 @@ public class NFABytecodeGenerator {
       PatternAnalyzer.LookaheadGreedySuffixInfo lookaheadGreedyInfo,
       boolean usePosixLastMatch,
       boolean caseInsensitive) {
+    this(
+        nfa,
+        hybridInfo,
+        literalLookaheadInfo,
+        requiredLiterals,
+        lookaheadGreedyInfo,
+        usePosixLastMatch,
+        caseInsensitive,
+        false);
+  }
+
+  public NFABytecodeGenerator(
+      NFA nfa,
+      PatternAnalyzer.HybridDFALookaheadInfo hybridInfo,
+      LiteralLookaheadPatternInfo literalLookaheadInfo,
+      java.util.Set<Character> requiredLiterals,
+      PatternAnalyzer.LookaheadGreedySuffixInfo lookaheadGreedyInfo,
+      boolean usePosixLastMatch,
+      boolean caseInsensitive,
+      boolean skipLiteralOptimization) {
     this.nfa = nfa;
     this.hybridInfo = hybridInfo;
     this.literalLookaheadInfo = literalLookaheadInfo;
@@ -276,6 +298,7 @@ public class NFABytecodeGenerator {
     this.requiresStartAnchor = nfa.requiresStartAnchor();
     this.hasStringStartAnchor = nfa.hasStringStartAnchor();
     this.hasBackrefToLookaheadCapture = nfa.hasBackrefToLookaheadCapture();
+    this.skipLiteralOptimization = skipLiteralOptimization;
     this.stateCount = nfa.getStates().size();
     // Phase 2B/2C: Strategy selection based on state count
     // ≤64 states: single long (best performance, 8 bytes)
@@ -2710,14 +2733,19 @@ public class NFABytecodeGenerator {
     // IMPORTANT: Skip indexOf optimization for anchored patterns - they must try position 0 first
 
     // Try to extract multi-character literal first (Tier 1 optimization)
-    String longestLiteral = extractLongestRequiredLiteral(nfa);
+    String longestLiteral = skipLiteralOptimization ? null : extractLongestRequiredLiteral(nfa);
 
     // Skip indexOf optimization for:
     // 1. Patterns that require start anchor (^ or \A) - indexOf would skip position 0
     // 2. Patterns with backrefs to lookahead captures - lookahead needs to match from
     //    earlier position, indexOf would skip to where the literal suffix appears
+    // 3. skipLiteralOptimization=true (e.g. OPTIMIZED_NFA_WITH_BACKREFS) - the required literal
+    //    appears after a variable-length prefix so indexOf would skip valid start positions
     boolean skipIndexOfOptimization =
-        requiresStartAnchor || hasStringStartAnchor || hasBackrefToLookaheadCapture;
+        requiresStartAnchor
+            || hasStringStartAnchor
+            || hasBackrefToLookaheadCapture
+            || skipLiteralOptimization;
 
     if (!skipIndexOfOptimization && longestLiteral != null && longestLiteral.length() >= 3) {
       // Use multi-character indexOf for better performance
@@ -3749,17 +3777,20 @@ public class NFABytecodeGenerator {
         break;
       }
 
-      // Follow epsilon transitions (skip empty transitions to non-assertion states)
+      // Follow epsilon transitions (skip semantically-significant states)
       if (!current.getEpsilonTransitions().isEmpty()) {
-        boolean foundNonAssertion = false;
+        boolean foundPlainEpsilon = false;
         for (NFA.NFAState target : current.getEpsilonTransitions()) {
-          if (target.assertionType == null) {
+          // Stop at assertion states and backref states: following through them would
+          // stitch together literals that are not actually adjacent in the input,
+          // producing a false "required" multi-char literal sequence.
+          if (target.assertionType == null && target.backrefCheck == null) {
             current = target;
-            foundNonAssertion = true;
+            foundPlainEpsilon = true;
             break;
           }
         }
-        if (!foundNonAssertion) break;
+        if (!foundPlainEpsilon) break;
         continue;
       }
 
@@ -6987,6 +7018,67 @@ public class NFABytecodeGenerator {
 
     mv.visitJumpInsn(GOTO, worklistLoop);
     mv.visitLabel(worklistEnd);
+  }
+
+  /**
+   * Generates matchesBounded(CharSequence,int,int) delegating to matchBounded(String,int,int).
+   * Required so generated classes satisfy the abstract ReggieMatcher contract.
+   */
+  public void generateMatchesBoundedMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className.replace('.', '/'),
+        "matchBounded",
+        "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
+    Label isNull = new Label();
+    mv.visitJumpInsn(IFNULL, isNull);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(isNull);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Generates matchBounded(CharSequence,int,int) delegating to matchBounded(String,int,int).
+   * Required so generated classes satisfy the abstract ReggieMatcher contract.
+   */
+  public void generateMatchBoundedCharSequenceMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC,
+            "matchBounded",
+            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+            null,
+            null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className.replace('.', '/'),
+        "matchBounded",
+        "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
   }
 
   /**

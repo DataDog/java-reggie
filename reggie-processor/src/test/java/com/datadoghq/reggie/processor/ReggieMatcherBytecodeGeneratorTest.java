@@ -464,12 +464,8 @@ class ReggieMatcherBytecodeGeneratorTest {
   @Test
   void testFallbackPatternsRejected() {
     // Patterns with known engine bugs must fail at build time, not produce buggy bytecode.
-    assertThrows(
-        UnsupportedOperationException.class,
-        () ->
-            new ReggieMatcherBytecodeGenerator(
-                    "test.generated", "TripleRepeat", "(\\w+)\\s+\\1\\s+\\1")
-                .generate());
+    // Note: multiple-backref patterns (e.g. (\w+)\s+\1\s+\1) are now handled natively
+    // and no longer rejected.
     assertThrows(
         UnsupportedOperationException.class,
         () ->

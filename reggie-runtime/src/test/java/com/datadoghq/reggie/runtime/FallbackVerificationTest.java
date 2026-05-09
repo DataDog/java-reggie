@@ -29,13 +29,12 @@ class FallbackVerificationTest {
     RuntimeCompiler.clearCache();
   }
 
-  // Bug 1: multiple backrefs to same group in NFA mode
+  // Bug 1: multiple backrefs to same group — now handled natively
   @Test
   void tripleBackrefNoFalsePositive() {
     ReggieMatcher m = Reggie.compile("(\\w+)\\s+\\1\\s+\\1");
-    assertTrue(m instanceof JavaRegexFallbackMatcher);
     assertTrue(m.find("go go go"));
-    assertFalse(m.find("go go stop")); // was incorrectly true before fallback
+    assertFalse(m.find("go go stop"));
   }
 
   // Bug 2: lookahead inside quantified group

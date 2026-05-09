@@ -141,7 +141,7 @@ Reggie achieves **21x speedup** over JDK's `Pattern` and **50x speedup** over RE
 
 ### Performance by Category
 
-Latest results from January 2026 benchmark report:
+Latest results from May 2026 benchmark report:
 
 | Category | vs JDK | vs RE2J | Notes |
 |----------|--------|---------|-------|
@@ -149,7 +149,8 @@ Latest results from January 2026 benchmark report:
 | Find Operations | **7.9x** | **38.2x** | Pattern searching |
 | Group Extraction | **15.0x** | **257.5x** | Capturing groups |
 | State Explosion | **389x** | **59.1x** | Catastrophic backtracking patterns (ReDoS immunity) |
-| Backreferences | **25.6x** | n/a | RE2J doesn't support backrefs |
+| Backreferences (single) | **25.6x** | n/a | RE2J doesn't support backrefs |
+| Backreferences (multi, same group) | **51–58x** | n/a | Native since #27; previously fell back to JDK |
 | Assertions | **9.1x** | n/a | Lookahead/lookbehind (RE2J doesn't support) |
 | Split Operations | **1.6–6.3x** | **3.6–8.0x** | `split(input, limit)`; positive limit triggers early-termination path |
 

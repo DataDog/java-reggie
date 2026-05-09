@@ -628,9 +628,17 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.SPECIALIZED_BACKREFERENCE, null, backrefInfo, false, requiredLiterals);
       }
-      // Fall back to generic NFA with backreferences
+      // Fall back to generic NFA with backreferences.
+      // Do NOT pass requiredLiterals here: the indexOf optimization in findFrom assumes the
+      // required literal appears at position 0 of a match, but for NFA-with-backrefs patterns
+      // the literal typically appears after a variable-length prefix, so the optimization
+      // would skip valid start positions and produce false negatives.
       return new MatchingStrategyResult(
-          MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS, null, null, false, requiredLiterals);
+          MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+          null,
+          null,
+          false,
+          java.util.Collections.emptySet());
     }
 
     // Check for OnePass eligibility (highest priority for patterns with groups)
@@ -2093,6 +2101,14 @@ public class PatternAnalyzer {
     List<RegexNode> prefix = new ArrayList<>(children.subList(startIdx, groupIdx));
     List<RegexNode> suffix = new ArrayList<>(children.subList(backrefIdx + 1, endIdx));
 
+    // If the suffix contains another backreference to the same group, the VARIABLE_CAPTURE_BACKREF
+    // strategy cannot handle it correctly — fall through to OPTIMIZED_NFA_WITH_BACKREFS.
+    for (RegexNode node : suffix) {
+      if (containsBackrefToGroup(node, capturingGroup.groupNumber)) {
+        return null;
+      }
+    }
+
     return new VariableCaptureBackrefInfo(
         prefix,
         capturingGroup.groupNumber,
@@ -2116,6 +2132,42 @@ public class PatternAnalyzer {
   /** Check if a quantifier allows variable length (*, +, ?, {n,m} where n != m). */
   private boolean isVariableLengthQuantifier(QuantifierNode quant) {
     return quant.min != quant.max || quant.max < 0;
+  }
+
+  private boolean containsBackrefToGroup(RegexNode node, int groupNumber) {
+    if (node instanceof BackreferenceNode) {
+      return ((BackreferenceNode) node).groupNumber == groupNumber;
+    }
+    if (node instanceof GroupNode) {
+      return containsBackrefToGroup(((GroupNode) node).child, groupNumber);
+    }
+    if (node instanceof AssertionNode) {
+      return containsBackrefToGroup(((AssertionNode) node).subPattern, groupNumber);
+    }
+    if (node instanceof ConditionalNode) {
+      ConditionalNode cn = (ConditionalNode) node;
+      return containsBackrefToGroup(cn.thenBranch, groupNumber)
+          || (cn.elseBranch != null && containsBackrefToGroup(cn.elseBranch, groupNumber));
+    }
+    if (node instanceof BranchResetNode) {
+      for (RegexNode alt : ((BranchResetNode) node).alternatives) {
+        if (containsBackrefToGroup(alt, groupNumber)) return true;
+      }
+    }
+    if (node instanceof QuantifierNode) {
+      return containsBackrefToGroup(((QuantifierNode) node).child, groupNumber);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (containsBackrefToGroup(child, groupNumber)) return true;
+      }
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsBackrefToGroup(alt, groupNumber)) return true;
+      }
+    }
+    return false;
   }
 
   /** Helper class for separator extraction. */

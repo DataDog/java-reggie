@@ -316,26 +316,55 @@ public class ReggieMatcherBytecodeGenerator {
         break;
 
       case OPTIMIZED_NFA_WITH_BACKREFS:
+        {
+          // Disable the longest-literal indexOf optimization: for NFA-with-backrefs patterns the
+          // required literal appears after a variable-length prefix, so indexOf would skip valid
+          // start positions and produce false negatives.
+          NFABytecodeGenerator nfaGen =
+              new NFABytecodeGenerator(
+                  nfa,
+                  null,
+                  null,
+                  result.requiredLiterals,
+                  result.lookaheadGreedyInfo,
+                  false,
+                  caseInsensitive,
+                  true);
+          nfaGen.generateMatchesMethod(cw, getJavaClassName());
+          nfaGen.generateFindMethod(cw, getJavaClassName());
+          nfaGen.generateFindFromMethod(cw, getJavaClassName());
+          nfaGen.generateMatchMethod(cw, getJavaClassName());
+          nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
+          nfaGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+          nfaGen.generateMatchBoundedCharSequenceMethod(cw, getJavaClassName());
+          nfaGen.generateFindMatchMethod(cw, getJavaClassName());
+          nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
+          // Do not override findBoundsFrom: the base-class default delegates to findMatchFrom,
+          // which preserves backref group semantics. findLongestMatchEnd runs without group
+          // tracking and would skip backrefCheck states, producing incorrect bounds.
+          break;
+        }
       case OPTIMIZED_NFA_WITH_LOOKAROUND:
-        // Fall back to NFA for complex patterns
-        NFABytecodeGenerator nfaGen =
-            new NFABytecodeGenerator(
-                nfa,
-                null,
-                null,
-                result.requiredLiterals,
-                result.lookaheadGreedyInfo,
-                false,
-                caseInsensitive);
-        nfaGen.generateMatchesMethod(cw, getJavaClassName());
-        nfaGen.generateFindMethod(cw, getJavaClassName());
-        nfaGen.generateFindFromMethod(cw, getJavaClassName());
-        nfaGen.generateMatchMethod(cw, getJavaClassName());
-        nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
-        nfaGen.generateFindMatchMethod(cw, getJavaClassName());
-        nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
-        nfaGen.generateFindBoundsFromMethod(cw, getJavaClassName());
-        break;
+        {
+          NFABytecodeGenerator nfaGen =
+              new NFABytecodeGenerator(
+                  nfa,
+                  null,
+                  null,
+                  result.requiredLiterals,
+                  result.lookaheadGreedyInfo,
+                  false,
+                  caseInsensitive);
+          nfaGen.generateMatchesMethod(cw, getJavaClassName());
+          nfaGen.generateFindMethod(cw, getJavaClassName());
+          nfaGen.generateFindFromMethod(cw, getJavaClassName());
+          nfaGen.generateMatchMethod(cw, getJavaClassName());
+          nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
+          nfaGen.generateFindMatchMethod(cw, getJavaClassName());
+          nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
+          nfaGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+          break;
+        }
 
       case SPECIALIZED_LITERAL_ALTERNATION:
         PatternAnalyzer.LiteralAlternationInfo literalAltInfo =
