@@ -335,6 +335,8 @@ public class ReggieMatcherBytecodeGenerator {
           nfaGen.generateFindFromMethod(cw, getJavaClassName());
           nfaGen.generateMatchMethod(cw, getJavaClassName());
           nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
+          nfaGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+          nfaGen.generateMatchBoundedCharSequenceMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
           // Do not override findBoundsFrom: the base-class default delegates to findMatchFrom,

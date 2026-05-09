@@ -7021,6 +7021,67 @@ public class NFABytecodeGenerator {
   }
 
   /**
+   * Generates matchesBounded(CharSequence,int,int) delegating to matchBounded(String,int,int).
+   * Required so generated classes satisfy the abstract ReggieMatcher contract.
+   */
+  public void generateMatchesBoundedMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className.replace('.', '/'),
+        "matchBounded",
+        "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
+    Label isNull = new Label();
+    mv.visitJumpInsn(IFNULL, isNull);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(isNull);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Generates matchBounded(CharSequence,int,int) delegating to matchBounded(String,int,int).
+   * Required so generated classes satisfy the abstract ReggieMatcher contract.
+   */
+  public void generateMatchBoundedCharSequenceMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC,
+            "matchBounded",
+            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+            null,
+            null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className.replace('.', '/'),
+        "matchBounded",
+        "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
    * Generates findMatch() method that returns MatchResult with group information. Delegates to
    * findMatchFrom(input, 0).
    *

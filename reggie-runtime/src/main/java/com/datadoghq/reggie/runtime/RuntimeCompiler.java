@@ -684,6 +684,9 @@ public class RuntimeCompiler {
           nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchBoundedMethod(
               cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
+          nfaGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchBoundedCharSequenceMethod(
+              cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           // Do not override findBoundsFrom: the base-class default delegates to findMatchFrom,
