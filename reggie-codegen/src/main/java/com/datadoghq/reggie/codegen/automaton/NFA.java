@@ -162,36 +162,46 @@ public final class NFA {
    * requiresStartAnchor() returns true.
    */
   public boolean requiresStartAnchor() {
-    // BFS to find states with character transitions reachable without going through anchor
-    Set<NFAState> reachableWithoutAnchor = new HashSet<>();
-    Queue<NFAState> queue = new LinkedList<>();
-    queue.add(startState);
-    reachableWithoutAnchor.add(startState);
+    return requiresAnchorOnAllPaths(AnchorType.START, AnchorType.STRING_START);
+  }
 
+  /**
+   * Check if a multiline start anchor is REQUIRED to match this pattern. Returns true only if ALL
+   * paths to character transitions go through a START_MULTILINE anchor.
+   *
+   * <p>This is used to optimize find() operations - we can skip positions not following '\n' only
+   * when all paths require the multiline anchor.
+   */
+  public boolean requiresMultilineStartAnchor() {
+    boolean hasMultilineAnchor =
+        states.stream().anyMatch(s -> s.anchor == AnchorType.START_MULTILINE);
+    if (!hasMultilineAnchor) {
+      return false;
+    }
+    return requiresAnchorOnAllPaths(
+        AnchorType.START_MULTILINE, AnchorType.START, AnchorType.STRING_START);
+  }
+
+  private boolean requiresAnchorOnAllPaths(AnchorType... barriers) {
+    Set<AnchorType> barrierSet = EnumSet.copyOf(Arrays.asList(barriers));
+    Set<NFAState> visited = new HashSet<>();
+    Queue<NFAState> queue = new ArrayDeque<>();
+    queue.add(startState);
+    visited.add(startState);
     while (!queue.isEmpty()) {
       NFAState state = queue.poll();
-
-      // If this state has an anchor, don't follow its transitions
-      // (paths through this state require the anchor)
-      if (state.anchor == AnchorType.START || state.anchor == AnchorType.STRING_START) {
+      if (barrierSet.contains(state.anchor)) {
         continue;
       }
-
-      // If this state has character transitions, we can match without anchor
       if (!state.getTransitions().isEmpty()) {
         return false;
       }
-
-      // Follow epsilon transitions (but not through anchor states)
       for (NFAState next : state.getEpsilonTransitions()) {
-        if (!reachableWithoutAnchor.contains(next)) {
-          reachableWithoutAnchor.add(next);
+        if (visited.add(next)) {
           queue.add(next);
         }
       }
     }
-
-    // Couldn't find any character transitions reachable without going through an anchor
     return true;
   }
 
