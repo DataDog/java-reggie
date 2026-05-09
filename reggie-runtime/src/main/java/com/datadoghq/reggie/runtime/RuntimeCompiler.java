@@ -666,30 +666,56 @@ public class RuntimeCompiler {
         hybridGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
-      case OPTIMIZED_NFA:
       case OPTIMIZED_NFA_WITH_BACKREFS:
+        {
+          NFABytecodeGenerator nfaGen =
+              new NFABytecodeGenerator(
+                  nfa,
+                  null,
+                  null,
+                  result.requiredLiterals,
+                  result.lookaheadGreedyInfo,
+                  result.usePosixLastMatch,
+                  caseInsensitive,
+                  true);
+          nfaGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchBoundedMethod(
+              cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
+          nfaGen.generateFindLongestMatchEndMethod(
+              cw, "com/datadoghq/reggie/runtime/" + className); // Helper for greedy optimization
+          nfaGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          break;
+        }
+      case OPTIMIZED_NFA:
       case OPTIMIZED_NFA_WITH_LOOKAROUND:
-        NFABytecodeGenerator nfaGen =
-            new NFABytecodeGenerator(
-                nfa,
-                null,
-                null,
-                result.requiredLiterals,
-                result.lookaheadGreedyInfo,
-                result.usePosixLastMatch,
-                caseInsensitive);
-        nfaGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        nfaGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        nfaGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        nfaGen.generateMatchBoundedMethod(
-            cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
-        nfaGen.generateFindLongestMatchEndMethod(
-            cw, "com/datadoghq/reggie/runtime/" + className); // Helper for greedy optimization
-        nfaGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        nfaGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        nfaGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        break;
+        {
+          NFABytecodeGenerator nfaGen =
+              new NFABytecodeGenerator(
+                  nfa,
+                  null,
+                  null,
+                  result.requiredLiterals,
+                  result.lookaheadGreedyInfo,
+                  result.usePosixLastMatch,
+                  caseInsensitive);
+          nfaGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchBoundedMethod(
+              cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
+          nfaGen.generateFindLongestMatchEndMethod(
+              cw, "com/datadoghq/reggie/runtime/" + className); // Helper for greedy optimization
+          nfaGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          break;
+        }
 
       case RECURSIVE_DESCENT:
         // Context-free patterns: subroutines, conditionals, branch reset
