@@ -48,6 +48,7 @@ public class LookbehindAlternationTest {
   public void positiveLookbehindAlternation_noMatchWhenPrecursorAbsent() {
     ReggieMatcher m = Reggie.compile("(?<=a|b)c");
     assertFalse(m.find("xc"), "'xc': 'c' not preceded by 'a' or 'b' must not match");
+    assertFalse(m.find("xca"), "'xca': 'c' at index 1 is preceded by 'x', not 'a' or 'b'");
   }
 
   @Test
@@ -113,6 +114,7 @@ public class LookbehindAlternationTest {
     ReggieMatcher m = Reggie.compile("(?<=ab|cd)x");
     assertFalse(m.find("efx"), "'efx': 'x' not preceded by 'ab' or 'cd' must not match");
     assertFalse(m.find("acx"), "'acx': partial overlap must not match");
+    assertFalse(m.find("xbx"), "'xbx': 'x' preceded by 'xb', not 'ab' or 'cd'");
   }
 
   @Test

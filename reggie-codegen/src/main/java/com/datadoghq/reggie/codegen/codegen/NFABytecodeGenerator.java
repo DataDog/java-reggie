@@ -3578,7 +3578,8 @@ public class NFABytecodeGenerator {
       // Check if we can use lightweight simulation for tiny sub-NFAs
       int subNFASize = countReachableStates(assertionState.assertionStartState);
 
-      if (subNFASize <= 6
+      if (!isLookbehind
+          && subNFASize <= 6
           && tryLightweightSimulation(
               mv,
               assertionState,
@@ -3587,7 +3588,6 @@ public class NFABytecodeGenerator {
               isPositive,
               assertionFailed,
               assertionPassed,
-              isLookbehind,
               allocator)) {
         // Lightweight simulation succeeded
         mv.visitLabel(assertionPassed);
@@ -3904,7 +3904,6 @@ public class NFABytecodeGenerator {
       boolean isPositive,
       Label assertionFailed,
       Label assertionPassed,
-      boolean isLookbehind,
       LocalVariableAllocator allocator) {
     // Try to detect .*[CharClass] pattern (most common in password validation)
     CharSet targetCharSet =

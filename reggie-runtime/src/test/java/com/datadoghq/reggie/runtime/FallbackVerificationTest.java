@@ -76,7 +76,7 @@ class FallbackVerificationTest {
 
   // Named groups: hasNamedGroups() must return true for native engine too
   @Test
-  void namedGroupFallbackHasNamedGroupsTrue() {
+  void namedGroupInLookbehind_nativeEngineSupportsGroupAccess() {
     // Bug 4 fixed: alternation inside lookbehind is now handled natively
     ReggieMatcher m = Reggie.compile("(?<=a|b)(?<x>c)");
     assertFalse(m instanceof JavaRegexFallbackMatcher);
