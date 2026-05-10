@@ -2106,13 +2106,13 @@ public class DFAUnrolledBytecodeGenerator {
 
     // Generate code for start state
     mv.visitLabel(stateLabels.get(dfa.getStartState()));
-    generateBoundedStateCode(mv, dfa.getStartState(), stateLabels, 4, 3);
+    generateBoundedStateCode(mv, dfa.getStartState(), stateLabels, 4, 3, 2);
 
     // Generate code for all other states
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state == dfa.getStartState()) continue;
       mv.visitLabel(stateLabels.get(state));
-      generateBoundedStateCode(mv, state, stateLabels, 4, 3);
+      generateBoundedStateCode(mv, state, stateLabels, 4, 3, 2);
     }
 
     mv.visitMaxs(0, 0);
@@ -2243,14 +2243,15 @@ public class DFAUnrolledBytecodeGenerator {
       DFA.DFAState state,
       Map<DFA.DFAState, Label> stateLabels,
       int posVar,
-      int endVar) {
+      int endVar,
+      int startVar) {
     Label endOfRegion = new Label();
     Label assertionFailed = new Label();
 
     // Generate assertion checks first (before consuming character)
     if (!state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        generateBoundedAssertionCheck(mv, assertion, posVar, endVar, assertionFailed);
+        generateBoundedAssertionCheck(mv, assertion, posVar, endVar, startVar, assertionFailed);
       }
     }
 
@@ -2309,7 +2310,12 @@ public class DFAUnrolledBytecodeGenerator {
    * end boundary.
    */
   private void generateBoundedAssertionCheck(
-      MethodVisitor mv, AssertionCheck assertion, int posVar, int endVar, Label assertionFailed) {
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int posVar,
+      int endVar,
+      int startVar,
+      Label assertionFailed) {
     if (assertion.isLookahead()) {
       if (assertion.isLiteral) {
         String literal = assertion.literal;
@@ -2388,9 +2394,10 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitVarInsn(ISTORE, checkPosVar);
 
       mv.visitVarInsn(ILOAD, checkPosVar);
+      mv.visitVarInsn(ILOAD, startVar);
       Label boundsOk = new Label();
       Label assertionPassed = new Label();
-      mv.visitJumpInsn(IFGE, boundsOk);
+      mv.visitJumpInsn(IF_ICMPGE, boundsOk);
 
       if (assertion.isPositive()) {
         mv.visitJumpInsn(GOTO, assertionFailed);
@@ -2748,7 +2755,7 @@ public class DFAUnrolledBytecodeGenerator {
         String literal = assertion.literal;
         boolean positive = assertion.isPositive();
 
-        Label assertionPassed = positive ? new Label() : assertionFailed;
+        Label assertionPassed = new Label();
 
         // Check bounds for entire literal
         for (int i = 0; i < literal.length(); i++) {
@@ -2788,14 +2795,14 @@ public class DFAUnrolledBytecodeGenerator {
         if (!positive) {
           // All chars matched - negative assertion fails
           mv.visitJumpInsn(GOTO, assertionFailed);
-          mv.visitLabel(assertionPassed);
         }
+        mv.visitLabel(assertionPassed);
       } else {
         // charSets lookahead: slot 11 for ch (slots 9/10 reserved for lookbehind)
         boolean positive = assertion.isPositive();
         int chVar = 11;
         Label mismatch = new Label();
-        Label assertionPassed = positive ? new Label() : assertionFailed;
+        Label assertionPassed = new Label();
 
         for (int i = 0; i < assertion.charSets.size(); i++) {
           // Bounds check: if (pos + i >= len) goto assertionFailed/Passed
