@@ -55,13 +55,13 @@ class FallbackVerificationTest {
     assertFalse(m.find("abc"));
   }
 
-  // Bug 4: alternation inside lookbehind
+  // Bug 4 (fixed): alternation inside lookbehind — now handled natively
   @Test
   void alternationInsideLookbehind() {
     ReggieMatcher m = Reggie.compile("(?<=a|b)c");
-    assertTrue(m instanceof JavaRegexFallbackMatcher);
+    assertFalse(m instanceof JavaRegexFallbackMatcher);
     assertTrue(m.find("ac"));
-    assertTrue(m.find("bc")); // was incorrectly false before fallback
+    assertTrue(m.find("bc"));
     assertFalse(m.find("xc"));
   }
 
@@ -74,12 +74,12 @@ class FallbackVerificationTest {
     assertFalse(m.find("value"));
   }
 
-  // Named groups via fallback matcher: hasNamedGroups() must return true
+  // Named groups: hasNamedGroups() must return true for native engine too
   @Test
   void namedGroupFallbackHasNamedGroupsTrue() {
-    // alternation inside lookbehind triggers fallback; named group present
+    // Bug 4 fixed: alternation inside lookbehind is now handled natively
     ReggieMatcher m = Reggie.compile("(?<=a|b)(?<x>c)");
-    assertTrue(m instanceof JavaRegexFallbackMatcher);
+    assertFalse(m instanceof JavaRegexFallbackMatcher);
     MatchResult r = m.findMatch("ac");
     assertNotNull(r);
     assertTrue(r.hasNamedGroups());

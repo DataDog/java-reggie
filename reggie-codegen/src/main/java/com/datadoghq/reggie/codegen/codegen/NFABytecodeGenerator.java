@@ -3696,6 +3696,10 @@ public class NFABytecodeGenerator {
     while (visited.add(current)) {
       // Check for epsilon transitions (skip empty transitions)
       if (!current.getEpsilonTransitions().isEmpty()) {
+        // Multiple epsilon transitions indicate alternation — not a simple literal
+        if (current.getEpsilonTransitions().size() > 1) {
+          return null;
+        }
         // Follow epsilon if it leads to non-assertion state
         boolean foundNonAssertion = false;
         for (NFA.NFAState target : current.getEpsilonTransitions()) {
@@ -3779,6 +3783,10 @@ public class NFABytecodeGenerator {
 
       // Follow epsilon transitions (skip semantically-significant states)
       if (!current.getEpsilonTransitions().isEmpty()) {
+        // Multiple epsilon transitions indicate alternation — not a simple literal
+        if (current.getEpsilonTransitions().size() > 1) {
+          return null;
+        }
         boolean foundPlainEpsilon = false;
         for (NFA.NFAState target : current.getEpsilonTransitions()) {
           // Stop at assertion states and backref states: following through them would
@@ -5625,6 +5633,8 @@ public class NFABytecodeGenerator {
     queue.add(start);
     reachable.add(start);
 
+    CharSet acceptCharSet = null; // accumulates union of all accept-state charsets
+
     // BFS to find all reachable states
     while (!queue.isEmpty()) {
       NFA.NFAState current = queue.poll();
@@ -5635,7 +5645,8 @@ public class NFABytecodeGenerator {
         if (acceptStates.contains(trans.target)) {
           // Check if this is a specific charset (not "any char" which includes ANY_EXCEPT_NEWLINE)
           if (!trans.chars.isAnyChar()) {
-            return trans.chars;
+            acceptCharSet =
+                (acceptCharSet == null) ? trans.chars : acceptCharSet.union(trans.chars);
           }
         }
 
@@ -5652,7 +5663,7 @@ public class NFABytecodeGenerator {
       }
     }
 
-    return null;
+    return acceptCharSet;
   }
 
   /**

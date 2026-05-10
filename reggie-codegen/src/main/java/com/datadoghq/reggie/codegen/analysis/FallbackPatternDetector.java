@@ -59,10 +59,6 @@ public final class FallbackPatternDetector {
     if (v.lookbehindBeforeUnbounded) {
       return "lookbehind followed by unbounded quantifier";
     }
-    // Bug 4: alternation inside lookbehind
-    if (v.alternationInLookbehind) {
-      return "alternation inside lookbehind";
-    }
     // Bug 5: lookbehind and lookahead used together (sandwich / interaction)
     if (v.hasLookbehind && v.hasLookahead) {
       return "lookbehind and lookahead combined";
@@ -100,26 +96,9 @@ public final class FallbackPatternDetector {
     return false;
   }
 
-  /** Returns true if {@code node} is or directly contains an AlternationNode. */
-  private static boolean containsDirectAlternation(RegexNode node) {
-    if (node instanceof AlternationNode) {
-      return true;
-    }
-    if (node instanceof GroupNode) {
-      return ((GroupNode) node).child instanceof AlternationNode;
-    }
-    if (node instanceof ConcatNode) {
-      for (RegexNode c : ((ConcatNode) node).children) {
-        if (c instanceof AlternationNode) return true;
-      }
-    }
-    return false;
-  }
-
   private static final class Visitor implements RegexVisitor<Void> {
     boolean lookaheadInQuantifier = false;
     boolean lookbehindBeforeUnbounded = false;
-    boolean alternationInLookbehind = false;
     boolean hasLookahead = false;
     boolean hasLookbehind = false;
 
@@ -130,9 +109,6 @@ public final class FallbackPatternDetector {
       }
       if (isLookbehind(node.type)) {
         hasLookbehind = true;
-        if (containsDirectAlternation(node.subPattern)) {
-          alternationInLookbehind = true;
-        }
       }
       node.subPattern.accept(this);
       return null;
