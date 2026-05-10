@@ -656,10 +656,13 @@ public class SubsetConstructor {
               "Complex assertion patterns not yet supported in DFA mode");
         }
 
-        // Attach to epsilon targets
-        for (NFA.NFAState target : state.getEpsilonTransitions()) {
-          map.computeIfAbsent(target, k -> new ArrayList<>()).add(check);
-        }
+        // Attach the assertion to the assertion NFA state itself so it fires only
+        // in DFA states whose NFA closure directly contains this assertion state.
+        // Attaching to epsilon targets would cause the assertion to re-fire in
+        // later DFA states when those targets remain in the closure (e.g. via a
+        // loop back), which is incorrect for both lookahead and lookbehind after
+        // unbounded quantifiers.
+        map.computeIfAbsent(state, k -> new ArrayList<>()).add(check);
       }
     }
 

@@ -90,10 +90,38 @@ class LookbehindVariantsTest {
 
   @Test
   void lookbehindFollowedByQuantifier() {
-    // unbounded quantifier after lookbehind now falls back to java.util.regex
     ReggieMatcher m = Reggie.compile("(?<=\\d)[a-z]+");
     assertTrue(m.find("3abc"));
     assertFalse(m.find("3"));
+    assertFalse(m.find("abc"));
+  }
+
+  @Test
+  void lookbehindFollowedByStarQuantifier() {
+    ReggieMatcher m = Reggie.compile("(?<=\\d)[a-z]*");
+    assertTrue(m.find("3abc"));
+    assertFalse(m.find("abc"));
+  }
+
+  @Test
+  void lookbehindFollowedByOpenEndedRangeQuantifier() {
+    ReggieMatcher m = Reggie.compile("(?<=\\d)[a-z]{2,}");
+    assertTrue(m.find("3abc"));
+    assertFalse(m.find("3a"));
+    assertFalse(m.find("abc"));
+  }
+
+  @Test
+  void charSetLookbehindFollowedByPlusQuantifier() {
+    ReggieMatcher m = Reggie.compile("(?<=[0-9])[a-z]+");
+    assertTrue(m.find("3abc"));
+    assertFalse(m.find("abc"));
+  }
+
+  @Test
+  void charSetLookbehindFollowedByStarQuantifier() {
+    ReggieMatcher m = Reggie.compile("(?<=[0-9])[a-z]*");
+    assertTrue(m.find("3abc"));
     assertFalse(m.find("abc"));
   }
 
