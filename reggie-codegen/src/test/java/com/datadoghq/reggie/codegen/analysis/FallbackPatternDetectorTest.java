@@ -55,11 +55,11 @@ class FallbackPatternDetectorTest {
     assertNotNull(detect("(?:(?=a)b)+"));
   }
 
-  // ── Bug-4 regression: alternation inside lookbehind must still trigger fallback ────────────
+  // ── Bug-4 removed: alternation inside lookbehind must NOT trigger fallback ─────────────────
 
   @Test
-  void alternationInLookbehindTriggersFallback() throws Exception {
-    assertNotNull(detect("(?<=a|b)c"));
+  void alternationInLookbehindNoFallback() throws Exception {
+    assertNull(detect("(?<=a|b)c"));
   }
 
   // ── Bug-5 regression: combined lookbehind + lookahead must still trigger fallback ──────────

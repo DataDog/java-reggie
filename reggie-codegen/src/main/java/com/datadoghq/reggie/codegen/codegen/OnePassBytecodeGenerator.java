@@ -98,7 +98,7 @@ public class OnePassBytecodeGenerator {
   public OnePassBytecodeGenerator(NFA nfa) {
     this.nfa = nfa;
     this.groupCount = nfa.getGroupCount();
-    this.hasMultilineStart = nfa.hasMultilineStartAnchor();
+    this.hasMultilineStart = nfa.requiresMultilineStartAnchor();
     this.hasStartAnchor = nfa.hasStartAnchor();
     this.hasStringStartAnchor = nfa.hasStringStartAnchor();
     this.hasEndAnchor = nfa.hasEndAnchor();

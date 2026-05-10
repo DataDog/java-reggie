@@ -464,12 +464,13 @@ class ReggieMatcherBytecodeGeneratorTest {
   @Test
   void testFallbackPatternsRejected() {
     // Patterns with known engine bugs must fail at build time, not produce buggy bytecode.
-    // Note: multiple-backref patterns (e.g. (\w+)\s+\1\s+\1) are now handled natively
-    // and no longer rejected.
+    // Note: multiple-backref patterns and alternation-in-lookbehind are now handled natively.
+    // Bug 3: lookbehind before unbounded quantifier still requires fallback.
     assertThrows(
         UnsupportedOperationException.class,
         () ->
-            new ReggieMatcherBytecodeGenerator("test.generated", "AltLookbehind", "(?<=a|b)c")
+            new ReggieMatcherBytecodeGenerator(
+                    "test.generated", "LookbehindUnbounded", "(?<=\\d)[a-z]+")
                 .generate());
   }
 
