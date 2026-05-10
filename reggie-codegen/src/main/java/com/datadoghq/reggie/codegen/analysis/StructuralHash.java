@@ -116,8 +116,11 @@ public final class StructuralHash {
       // Group action count (affects bytecode for group tracking)
       hash = 31 * hash + state.groupActions.size();
 
-      // Assertion check count (affects bytecode for assertion validation)
+      // Assertion checks — include type to distinguish positive from negative assertions
       hash = 31 * hash + state.assertionChecks.size();
+      for (var ac : state.assertionChecks) {
+        hash = 31 * hash + ac.type.hashCode();
+      }
 
       // Include character sets - critical for case sensitivity
       for (var entry : state.transitions.entrySet()) {

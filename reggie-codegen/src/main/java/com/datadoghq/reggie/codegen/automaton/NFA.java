@@ -299,6 +299,9 @@ public final class NFA {
       // Include group markers
       hash = 31 * hash + (state.enterGroup != null ? state.enterGroup + 1 : 0);
       hash = 31 * hash + (state.exitGroup != null ? state.exitGroup + 1 : 0);
+
+      // Assertion type distinguishes (?<=...) from (?<!...) — must not collide
+      hash = 31 * hash + (state.assertionType != null ? state.assertionType.hashCode() : 0);
     }
 
     return hash;

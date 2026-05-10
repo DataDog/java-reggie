@@ -99,11 +99,26 @@ class LookbehindVariantsTest {
 
   @Test
   void lookbehindWithAlternation() {
-    // alternation in lookbehind falls back to java.util.regex — both branches work
     ReggieMatcher m = Reggie.compile("(?<=a|b)c");
     assertTrue(m.find("ac"));
     assertTrue(m.find("bc"));
     assertFalse(m.find("xc"));
+  }
+
+  @Test
+  void negativeLookbehindWithAlternation() {
+    ReggieMatcher m = Reggie.compile("(?<!a|b)c");
+    assertFalse(m.find("ac"));
+    assertFalse(m.find("bc"));
+    assertTrue(m.find("xc"));
+  }
+
+  @Test
+  void lookbehindWithTwoCharAlternation() {
+    ReggieMatcher m = Reggie.compile("(?<=ab|cd)x");
+    assertTrue(m.find("abx"));
+    assertTrue(m.find("cdx"));
+    assertFalse(m.find("efx"));
   }
 
   @Test
@@ -178,5 +193,17 @@ class LookbehindVariantsTest {
     assertTrue(m.find("ax"));
     assertTrue(m.find("3x"));
     assertFalse(m.find("gx"));
+  }
+
+  // ── Regression: issue #30 — only first alternative in lookbehind was checked ──
+
+  @Test
+  void lookbehindAlternationAllBranchesChecked() {
+    // Exact reproduction from issue #30: (?<=a|b)c must match for both alternatives
+    ReggieMatcher m = Reggie.compile("(?<=a|b)c");
+    assertFalse(m instanceof JavaRegexFallbackMatcher, "must be handled natively");
+    assertTrue(m.find("ac"), "first alternative");
+    assertTrue(m.find("bc"), "second alternative — was incorrectly false before fix");
+    assertFalse(m.find("xc"), "no matching predecessor");
   }
 }
