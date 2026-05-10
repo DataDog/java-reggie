@@ -2482,7 +2482,7 @@ public class DFAUnrolledBytecodeGenerator {
    *
    *     // Greedy DFA scan: track last accepting position
    *     int pos = matchStart;
-   *     int lastAcceptingPos = matchStart;
+   *     int lastAcceptingPos = -1;
    *     int len = input.length();
    *
    *     // Unrolled DFA states
@@ -2495,7 +2495,7 @@ public class DFAUnrolledBytecodeGenerator {
    *         // ... transitions and dead state handling ...
    *
    *     SCAN_COMPLETE:
-   *     if (lastAcceptingPos == matchStart) return false;  // No match
+   *     if (lastAcceptingPos < 0) return false;  // No match
    *
    *     // Store bounds (zero allocation)
    *     bounds[0] = matchStart;
@@ -2537,8 +2537,8 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ILOAD, 4);
     mv.visitVarInsn(ISTORE, 5); // pos
 
-    // int lastAcceptingPos = matchStart; (no match yet)
-    mv.visitVarInsn(ILOAD, 4);
+    // int lastAcceptingPos = -1; (no match yet; -1 is sentinel for "no accepting state visited")
+    mv.visitInsn(ICONST_M1);
     mv.visitVarInsn(ISTORE, 6); // lastAcceptingPos
 
     // int len = input.length();
@@ -2571,11 +2571,10 @@ public class DFAUnrolledBytecodeGenerator {
 
     mv.visitLabel(scanComplete);
 
-    // if (lastAcceptingPos == matchStart) return false; (no match found)
+    // if (lastAcceptingPos < 0) return false; (no match found; also handles zero-width matches)
     Label hasMatch = new Label();
     mv.visitVarInsn(ILOAD, 6);
-    mv.visitVarInsn(ILOAD, 4);
-    mv.visitJumpInsn(IF_ICMPNE, hasMatch);
+    mv.visitJumpInsn(IFGE, hasMatch);
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
     mv.visitLabel(hasMatch);
@@ -2614,6 +2613,13 @@ public class DFAUnrolledBytecodeGenerator {
    */
   private Set<DFA.DFAState> computeSkippableAcceptingStates() {
     Set<DFA.DFAState> skippable = new HashSet<>();
+
+    // When the start state is accepting the DFA can match zero-width strings. In that case,
+    // every accepting state (including loop states) must update lastAcceptingPos so that
+    // progress past the initial position is recorded correctly.
+    if (dfa.getStartState().accepting) {
+      return skippable;
+    }
 
     // First, compute incoming edges for all states
     Map<DFA.DFAState, Set<DFA.DFAState>> incomingEdges = new HashMap<>();
