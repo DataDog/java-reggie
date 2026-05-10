@@ -29,7 +29,6 @@ import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
-import java.util.List;
 
 /**
  * Detects regex patterns that trigger known correctness bugs in the reggie engine. When a bug is
@@ -54,10 +53,6 @@ public final class FallbackPatternDetector {
     // Bug 2: lookahead inside a quantified group
     if (v.lookaheadInQuantifier) {
       return "lookahead inside quantified group";
-    }
-    // Bug 3: lookbehind immediately followed by unbounded quantifier
-    if (v.lookbehindBeforeUnbounded) {
-      return "lookbehind followed by unbounded quantifier";
     }
     // Bug 4: alternation inside lookbehind
     if (v.alternationInLookbehind) {
@@ -118,7 +113,6 @@ public final class FallbackPatternDetector {
 
   private static final class Visitor implements RegexVisitor<Void> {
     boolean lookaheadInQuantifier = false;
-    boolean lookbehindBeforeUnbounded = false;
     boolean alternationInLookbehind = false;
     boolean hasLookahead = false;
     boolean hasLookbehind = false;
@@ -149,21 +143,7 @@ public final class FallbackPatternDetector {
 
     @Override
     public Void visitConcat(ConcatNode node) {
-      List<RegexNode> ch = node.children;
-      for (int i = 0; i < ch.size() - 1; i++) {
-        if (ch.get(i) instanceof AssertionNode) {
-          AssertionNode a = (AssertionNode) ch.get(i);
-          // Detects direct adjacency only: (?<=\d)[a-z]+
-          // A quantifier wrapped inside a group is not detected here.
-          if (isLookbehind(a.type) && ch.get(i + 1) instanceof QuantifierNode) {
-            QuantifierNode q = (QuantifierNode) ch.get(i + 1);
-            if (q.max == -1 || q.max == Integer.MAX_VALUE) {
-              lookbehindBeforeUnbounded = true;
-            }
-          }
-        }
-      }
-      for (RegexNode c : ch) {
+      for (RegexNode c : node.children) {
         c.accept(this);
       }
       return null;

@@ -46,11 +46,11 @@ class FallbackVerificationTest {
     assertFalse(m.find("abc"));
   }
 
-  // Bug 3: lookbehind followed by unbounded quantifier
+  // Bug 3: lookbehind followed by unbounded quantifier — fixed, no longer falls back
   @Test
   void lookbehindUnboundedQuantifier() {
     ReggieMatcher m = Reggie.compile("(?<=\\d)[a-z]+");
-    assertTrue(m instanceof JavaRegexFallbackMatcher);
+    assertFalse(m instanceof JavaRegexFallbackMatcher);
     assertTrue(m.find("3abc"));
     assertFalse(m.find("abc"));
   }

@@ -35,7 +35,7 @@ import java.util.function.Function;
  * }
  * }</pre>
  */
-public abstract class ReggieMatcher {
+public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   protected final String pattern;
 
   // injected by RuntimeCompiler after instantiation
