@@ -417,7 +417,7 @@ public class PatternAnalyzer {
         // However, when a lookahead appears inside a capturing group, the DFA path
         // uses match(substring) for group extraction which breaks lookaheads that
         // need to inspect characters beyond the match boundary. Route to NFA instead.
-        if (!ignoreGroupCount && hasLookaheadInsideCapturingGroup(ast)) {
+        if (hasLookaheadInsideCapturingGroup(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
               null,
@@ -1037,7 +1037,7 @@ public class PatternAnalyzer {
       RegexNode last = concat.children.get(concat.children.size() - 1);
       if (last instanceof QuantifierNode) {
         QuantifierNode quant = (QuantifierNode) last;
-        if (quant.min == 0 && quant.max > 0 && quant.greedy) {
+        if (quant.min == 0 && quant.max == 1 && quant.greedy) {
           return getNodeCharSet(quant.child);
         }
       }

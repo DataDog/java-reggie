@@ -3108,7 +3108,8 @@ public class RecursiveDescentBytecodeGenerator {
           GroupNode g = (GroupNode) child;
           if (g.groupNumber > 0
               && !PatternAnalyzer.hasSelfReferencingBackref(g)
-              && extractTrailingOptionalBackref(g.child) != null) {
+              && (extractTrailingOptionalBackref(g.child) != null
+                  || hasTrailingOptionalQuantifier(g.child))) {
             nextBacktrackIdx = i;
             nextBacktrackGroup = g;
             break;
