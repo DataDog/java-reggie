@@ -994,8 +994,9 @@ public class PatternAnalyzer {
     for (int i = 0; i < concat.children.size() - 1; i++) {
       CharSet greedyCharSet = getGreedyGroupCharSet(concat.children.get(i));
       if (greedyCharSet != null) {
-        // Found a greedy group - check if it overlaps with the next element
-        CharSet nextFirstCharSet = getFirstCharSet(concat.children.get(i + 1));
+        // Found a greedy group - check if it overlaps with the suffix, looking through
+        // nullable nodes (e.g. -? in ([1-9]?)-?\d+ can be skipped when [1-9] gives back).
+        CharSet nextFirstCharSet = getSuffixFirstCharSetSkippingNullable(concat, i + 1);
         if (nextFirstCharSet == null || greedyCharSet.intersects(nextFirstCharSet)) {
           // Overlap detected (or can't determine) - needs backtracking
           return true;
@@ -1112,6 +1113,43 @@ public class PatternAnalyzer {
       return result;
     }
     return null; // Unknown node type - be conservative
+  }
+
+  private boolean isNullable(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      return ((QuantifierNode) node).min == 0;
+    }
+    if (node instanceof GroupNode) {
+      return isNullable(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (!isNullable(child)) return false;
+      }
+      return true;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (isNullable(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  private CharSet getSuffixFirstCharSetSkippingNullable(ConcatNode concat, int fromIndex) {
+    CharSet result = CharSet.empty();
+    for (int j = fromIndex; j < concat.children.size(); j++) {
+      CharSet firstChars = getFirstCharSet(concat.children.get(j));
+      if (firstChars == null) {
+        return null;
+      }
+      result = result.union(firstChars);
+      if (!isNullable(concat.children.get(j))) {
+        break;
+      }
+    }
+    return result.isEmpty() ? null : result;
   }
 
   /** Check if node contains a capturing group with a greedy quantifier. */
