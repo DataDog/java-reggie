@@ -92,6 +92,22 @@ public class LookaheadGroupCaptureTest {
     assertEquals("a", mr.group(2), "Group 2 should capture 'a' from second alternative");
   }
 
+  @Test
+  public void testLookaheadNestedAlternationGroupCapture() {
+    // Pattern (\.\d\d((?=0)|\d(?=\d))) on "1.875000282":
+    //   Group 1: the outer capturing group (\.\d\d((?=0)|\d(?=\d)))
+    //   Group 2: the inner alternation group ((?=0)|\d(?=\d))
+    // The second alternative \d(?=\d) matches "5" and the lookahead confirms "5" is followed by "0"
+    ReggieMatcher m = Reggie.compile("(\\.\\d\\d((?=0)|\\d(?=\\d)))");
+    MatchResult mr = m.findMatch("1.875000282");
+
+    assertNotNull(mr, "Should find match");
+    assertEquals(".875", mr.group(0), "Full match should be '.875'");
+    assertEquals(2, mr.groupCount(), "Should have 2 capturing groups");
+    assertEquals(".875", mr.group(1), "Group 1 should capture '.875'");
+    assertEquals("5", mr.group(2), "Group 2 should capture '5' from \\d(?=\\d) branch");
+  }
+
   // TODO: This test is disabled due to a known limitation in DFA-based assertion handling.
   // In pattern "(?=(a))ab|c", the lookahead assertion is at the DFA start state and
   // affects ALL transitions, not just the 'a' transition. When assertion fails on 'c',
