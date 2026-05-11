@@ -413,7 +413,19 @@ public class PatternAnalyzer {
         SubsetConstructor constructor = new SubsetConstructor();
         DFA dfa = constructor.buildDFAWithAssertions(nfa);
 
-        // Success! Assertions are simple literals, use DFA
+        // Success! Assertions are simple literals, use DFA.
+        // However, when a lookahead appears inside a capturing group, the DFA path
+        // uses match(substring) for group extraction which breaks lookaheads that
+        // need to inspect characters beyond the match boundary. Route to NFA instead.
+        if (!ignoreGroupCount && hasLookaheadInsideCapturingGroup(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              lookaheadGreedyInfo);
+        }
         int stateCount = dfa.getStateCount();
         if (stateCount < 20) {
           return new MatchingStrategyResult(
@@ -789,6 +801,45 @@ public class PatternAnalyzer {
     return node.accept(detector);
   }
 
+  // DFA path uses match(substring) for group extraction, cutting lookahead context at the boundary.
+  private boolean hasLookaheadInsideCapturingGroup(RegexNode node) {
+    return hasLookaheadInsideCapturingGroupHelper(node, false);
+  }
+
+  private boolean hasLookaheadInsideCapturingGroupHelper(RegexNode node, boolean insideCapturing) {
+    if (node instanceof AssertionNode) {
+      AssertionNode a = (AssertionNode) node;
+      // Only positive/negative lookaheads matter (not lookbehinds)
+      if ((a.type == AssertionNode.Type.POSITIVE_LOOKAHEAD
+              || a.type == AssertionNode.Type.NEGATIVE_LOOKAHEAD)
+          && insideCapturing) {
+        return true;
+      }
+      return hasLookaheadInsideCapturingGroupHelper(a.subPattern, insideCapturing);
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      boolean nowInCapturing = insideCapturing || g.capturing;
+      return hasLookaheadInsideCapturingGroupHelper(g.child, nowInCapturing);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasLookaheadInsideCapturingGroupHelper(child, insideCapturing)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasLookaheadInsideCapturingGroupHelper(alt, insideCapturing)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return hasLookaheadInsideCapturingGroupHelper(((QuantifierNode) node).child, insideCapturing);
+    }
+    return false;
+  }
+
   /**
    * Check if any backref references a capturing group defined inside a lookahead assertion. This
    * requires falling back to NFA-based matching since DFA can't track groups.
@@ -965,16 +1016,33 @@ public class PatternAnalyzer {
       return null;
     }
     GroupNode group = (GroupNode) node;
-    if (!group.capturing || !(group.child instanceof QuantifierNode)) {
+    if (!group.capturing) {
       return null;
     }
-    QuantifierNode quant = (QuantifierNode) group.child;
-    // Check if quantifier is greedy and variable (min != max)
-    if (!quant.greedy || quant.min == quant.max) {
-      return null;
+    // Direct quantifier child: (x*)
+    if (group.child instanceof QuantifierNode) {
+      QuantifierNode quant = (QuantifierNode) group.child;
+      if (!quant.greedy || quant.min == quant.max) {
+        return null;
+      }
+      return getNodeCharSet(quant.child);
     }
-    // Extract CharSet from the quantifier's child
-    return getNodeCharSet(quant.child);
+    // ConcatNode child: inspect its last element for a trailing optional greedy quantifier
+    // e.g., (\.\d\d[1-9]?) where the last element [1-9]? is an optional greedy quantifier
+    if (group.child instanceof ConcatNode) {
+      ConcatNode concat = (ConcatNode) group.child;
+      if (concat.children.isEmpty()) {
+        return null;
+      }
+      RegexNode last = concat.children.get(concat.children.size() - 1);
+      if (last instanceof QuantifierNode) {
+        QuantifierNode quant = (QuantifierNode) last;
+        if (quant.min == 0 && quant.max > 0 && quant.greedy) {
+          return getNodeCharSet(quant.child);
+        }
+      }
+    }
+    return null;
   }
 
   /** Get the CharSet that a node can match. Returns null if the CharSet cannot be determined. */
