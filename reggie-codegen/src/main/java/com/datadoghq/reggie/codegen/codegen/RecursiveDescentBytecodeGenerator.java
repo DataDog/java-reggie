@@ -2631,6 +2631,34 @@ public class RecursiveDescentBytecodeGenerator {
       QuantifierNode nestedQuantNode = extractQuantifier(nestedChild);
 
       if (nestedQuantNode == null) {
+        // Apply two-path backtracking when a non-quantified GroupNode has a trailing optional
+        // quantifier. Reuse slotBase+0..1 (unused in this path) for pos/groups snapshot.
+        if (nestedChild instanceof GroupNode) {
+          GroupNode nestedGroup = (GroupNode) nestedChild;
+          if (hasTrailingOptionalQuantifier(nestedGroup.child)) {
+            int savedPosBefore = slotBase;
+            int savedGroupsBefore = slotBase + 1;
+            mv.visitVarInsn(ILOAD, 5);
+            mv.visitVarInsn(ISTORE, savedPosBefore);
+            generateGroupArraySave(4, savedGroupsBefore);
+            Label localFail = new Label();
+            Label successDone = new Label();
+            generateGroupWithOptionalBacktracking(
+                node,
+                nestedIndex,
+                nestedGroup,
+                slotBase + 2,
+                savedGroupsBefore,
+                savedPosBefore,
+                localFail);
+            mv.visitJumpInsn(GOTO, successDone);
+            mv.visitLabel(localFail);
+            mv.visitIincInsn(outerTryMatchCountSlot, outerBacktrackDelta);
+            mv.visitJumpInsn(GOTO, outerBacktrackLoop);
+            mv.visitLabel(successDone);
+            return;
+          }
+        }
         // Not a quantifier - process normally and continue
         generateParserMethod(cw, className, nestedChild);
         String childMethod = getMethodNameForNode(nestedChild);
