@@ -2079,8 +2079,32 @@ public class RecursiveDescentBytecodeGenerator {
           if (extractTrailingOptionalBackref(g.child) != null) {
             return true;
           }
+          // Trailing optional greedy quantifier changes the group boundary, requiring
+          // the same two-path backtracking as a trailing optional backref.
+          if (hasTrailingOptionalQuantifier(g.child)) {
+            return true;
+          }
         }
         return containsBacktrackingQuantifier(g.child);
+      }
+      return false;
+    }
+
+    private boolean hasTrailingOptionalQuantifier(RegexNode node) {
+      if (node instanceof QuantifierNode) {
+        QuantifierNode q = (QuantifierNode) node;
+        return q.min == 0 && q.max == 1 && q.greedy;
+      }
+      if (node instanceof ConcatNode) {
+        ConcatNode concat = (ConcatNode) node;
+        if (concat.children.isEmpty()) {
+          return false;
+        }
+        RegexNode last = concat.children.get(concat.children.size() - 1);
+        if (last instanceof QuantifierNode) {
+          QuantifierNode q = (QuantifierNode) last;
+          return q.min == 0 && q.max == 1 && q.greedy;
+        }
       }
       return false;
     }
@@ -2233,13 +2257,13 @@ public class RecursiveDescentBytecodeGenerator {
       }
 
       if (quantNode == null) {
-        // Check if the child is a GroupNode with a trailing optional backref.
-        // e.g. (a\1?) where the group can match "a" or "aa" depending on \1.
         // Generate two-path backtracking: try full group first, then mandatory-only.
         if (greedyChild instanceof GroupNode) {
           GroupNode backtrackGroup = (GroupNode) greedyChild;
           QuantifierNode trailingOpt = extractTrailingOptionalBackref(backtrackGroup.child);
-          if (trailingOpt != null) {
+          boolean needsTwoPathBacktrack =
+              trailingOpt != null || hasTrailingOptionalQuantifier(backtrackGroup.child);
+          if (needsTwoPathBacktrack) {
             // Emit a local fail label that returns -1
             Label localFail = new Label();
             generateGroupWithOptionalBacktracking(
@@ -2607,6 +2631,34 @@ public class RecursiveDescentBytecodeGenerator {
       QuantifierNode nestedQuantNode = extractQuantifier(nestedChild);
 
       if (nestedQuantNode == null) {
+        // Apply two-path backtracking when a non-quantified GroupNode has a trailing optional
+        // quantifier. Reuse slotBase+0..1 (unused in this path) for pos/groups snapshot.
+        if (nestedChild instanceof GroupNode) {
+          GroupNode nestedGroup = (GroupNode) nestedChild;
+          if (hasTrailingOptionalQuantifier(nestedGroup.child)) {
+            int savedPosBefore = slotBase;
+            int savedGroupsBefore = slotBase + 1;
+            mv.visitVarInsn(ILOAD, 5);
+            mv.visitVarInsn(ISTORE, savedPosBefore);
+            generateGroupArraySave(4, savedGroupsBefore);
+            Label localFail = new Label();
+            Label successDone = new Label();
+            generateGroupWithOptionalBacktracking(
+                node,
+                nestedIndex,
+                nestedGroup,
+                slotBase + 2,
+                savedGroupsBefore,
+                savedPosBefore,
+                localFail);
+            mv.visitJumpInsn(GOTO, successDone);
+            mv.visitLabel(localFail);
+            mv.visitIincInsn(outerTryMatchCountSlot, outerBacktrackDelta);
+            mv.visitJumpInsn(GOTO, outerBacktrackLoop);
+            mv.visitLabel(successDone);
+            return;
+          }
+        }
         // Not a quantifier - process normally and continue
         generateParserMethod(cw, className, nestedChild);
         String childMethod = getMethodNameForNode(nestedChild);
@@ -3084,7 +3136,8 @@ public class RecursiveDescentBytecodeGenerator {
           GroupNode g = (GroupNode) child;
           if (g.groupNumber > 0
               && !PatternAnalyzer.hasSelfReferencingBackref(g)
-              && extractTrailingOptionalBackref(g.child) != null) {
+              && (extractTrailingOptionalBackref(g.child) != null
+                  || hasTrailingOptionalQuantifier(g.child))) {
             nextBacktrackIdx = i;
             nextBacktrackGroup = g;
             break;
