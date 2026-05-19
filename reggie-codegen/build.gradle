@@ -10,9 +10,9 @@ dependencies {
     api project(':reggie-annotations')
 
     // ASM for bytecode generation
-    implementation 'org.ow2.asm:asm:9.9.1'
-    implementation 'org.ow2.asm:asm-commons:9.9.1'
-    implementation 'org.ow2.asm:asm-util:9.9.1'
+    implementation 'org.ow2.asm:asm:9.10'
+    implementation 'org.ow2.asm:asm-commons:9.10'
+    implementation 'org.ow2.asm:asm-util:9.10'
 
     testImplementation 'org.junit.jupiter:junit-jupiter:6.0.3'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
