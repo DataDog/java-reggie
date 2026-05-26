@@ -7,6 +7,64 @@ by what the smallest repro suggests is the underlying bug.
 
 ## A. Lazy quantifier silently treated as greedy (highest priority)
 
+**Status:** investigated, fix deferred — requires architectural choice.
+
+### Root cause
+
+`RecursiveDescentBytecodeGenerator.visitQuantifier` ignores the
+`!greedy` flag for quantifiers that are NOT inside a concat with a
+following sibling. The comment at line ~1858 makes the choice
+explicit: *"For non-greedy quantifiers, the preference for fewer
+matches is handled by `generateConcatWithBacktracking` when followed
+by more pattern elements. When standalone or at the end of a
+pattern, always match max."* That's the bug — at the end of a
+concat or at the root, the lazy preference is silently dropped.
+
+The shapes that hit this:
+
+- **Lazy at root**: `.??`, `a*?`, `(?:a)??` — visitQuantifier runs as
+  the outermost parser, returns greedy max.
+- **Lazy at end of concat with no later sibling**: `X.??`, `X.*?` —
+  `visitConcat` checks `for (i = 0; i < children.size() - 1; i++)`,
+  so the trailing child is never considered for backtracking.
+
+### Why a one-line fix doesn't work
+
+A naive "match min only when `!greedy`" fix in `visitQuantifier`
+makes `find()` correct but breaks `matches()`. `matches()` calls the
+same parser and checks `result == length`. With lazy returning min,
+patterns like `.??` against `"b"` would return matches=false; JDK
+returns true (its engine backtracks to extend the lazy match until
+the whole input is consumed).
+
+`concat-with-backtracking` already does the right thing — it starts
+lazy at min and extends on failure — but only when the lazy
+quantifier has siblings AFTER it. For trailing/root lazy, there's
+no sibling to drive the failure-triggered extension.
+
+### Design options (none implemented yet)
+
+1. **Two-method emission**: emit `parse_X_greedy` (current) and
+   `parse_X_lazy` (min only) for each quantifier. `find()` calls the
+   lazy variant when the quantifier is at root or end-of-concat;
+   `matches()` always calls greedy. Cascades through recursive
+   parser dispatch.
+2. **Anchored-matches transform**: at codegen time, model
+   `matches()` as `^pattern\z`. The trailing `\z` becomes a sibling
+   to the lazy quantifier, so concat-with-backtracking kicks in and
+   does the lazy expansion. Cleanest semantically; small surface
+   change; needs care with grouping.
+3. **Instance flag**: add a `preferLazy` field to the matcher,
+   toggled by `find()`/`matches()`. `visitQuantifier` emits a
+   runtime branch on the field for lazy quantifiers. Smallest code
+   change; adds one branch per lazy quantifier match.
+
+Recommend **option 2** (anchored-matches transform) — it doesn't
+duplicate methods or add runtime branches, and it brings Reggie's
+matches() semantics closer to JDK's mental model.
+
+### Repros (unchanged from below; kept for context)
+
 The most common category. `*?`, `+?`, `??`, `{n,m}?` produce a
 greedy match in Reggie while JDK produces the lazy one.
 

@@ -86,6 +86,25 @@ public class BoundedQuantifierRegressionTest {
     expectFindMatch(regex, "1234567890", 0, 10);
   }
 
+  // --- Counted quantifier with min == 0 -------------------------------------------------
+
+  @Test
+  void countedQuantifier_minZero_allowsZeroReps() {
+    // Cat C from fuzz triage: {n,m} with n=0 was missing the "skip the whole quantifier"
+    // ε-bypass in ThompsonBuilder.buildCountedQuantifier, so `[ab]c{0,3}` against "a" failed
+    // and so did anything of the form `prefix X{0,N}` against a prefix-only input.
+    expectFindMatch("[^c]c{0,3}", "b", 0, 1);
+    expectFindMatch("[ab]c{0,3}", "a", 0, 1);
+    expectFindMatch("[ab]c{0,3}", "b", 0, 1);
+    expectFindMatch("[ab]c{0,3}", "ac", 0, 2);
+    expectFindMatch("[ab]c{0,3}", "accc", 0, 4);
+    expectFindMatch("c{0,3}", "", 0, 0);
+    expectFindMatch("c{0,3}", "c", 0, 1);
+    expectFindMatch("c{0,3}", "cccc", 0, 3);
+    expectFindMatch("a[^c]c{0,3}", "ab", 0, 2);
+    expectFindMatch("a[^c]c{0,3}", "ab1", 0, 2);
+  }
+
   @Test
   void multiRangePrefixed_atVariousBounds() {
     // {5,1}-bound below the DFA_UNROLLED→DFA_SWITCH threshold still goes through DFA_UNROLLED
