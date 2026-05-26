@@ -19,6 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.integration.fuzz.FuzzRunner;
 import com.datadoghq.reggie.integration.fuzz.RegexFuzzOracle.Finding;
+import com.datadoghq.reggie.integration.fuzz.RegexFuzzShrinker;
+import com.datadoghq.reggie.integration.fuzz.RegexFuzzShrinker.Shrunk;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -52,14 +56,41 @@ public class AlgorithmicFuzzTest {
     FuzzRunner.Report report = new FuzzRunner().run(cfg);
     System.out.println("[algorithmic-fuzz] " + report.summary());
 
-    // Print the first several findings for triage. Cap to keep CI logs sane.
-    int printed = 0;
+    // Shrink each finding and dedupe by (shrunk pattern, shrunk input, kind). Raw findings are
+    // often 30-char patterns reproducing the same underlying bug at different sizes; shrinking
+    // collapses them to a handful of unique minimal repros that can be triaged directly.
+    RegexFuzzShrinker shrinker = new RegexFuzzShrinker();
+    Map<String, Shrunk> uniqueShrunk = new LinkedHashMap<>();
+    int shrunk = 0;
+    int shrinkLimit = Math.min(report.findings.size(), 80); // bound CPU on enormous reports
     for (Finding f : report.findings) {
-      if (printed >= 30) {
-        System.out.println("[algorithmic-fuzz] ... and " + (report.findings.size() - 30) + " more");
+      if (shrunk >= shrinkLimit) break;
+      Shrunk s = shrinker.shrink(f);
+      String key = s.findingKind + "||" + s.pattern + "||" + s.input;
+      uniqueShrunk.putIfAbsent(key, s);
+      shrunk++;
+    }
+    System.out.println(
+        "[algorithmic-fuzz] shrunk "
+            + shrunk
+            + " findings -> "
+            + uniqueShrunk.size()
+            + " unique minimal repros");
+
+    int printed = 0;
+    for (Shrunk s : uniqueShrunk.values()) {
+      if (printed >= 40) {
+        System.out.println(
+            "[algorithmic-fuzz] ... and " + (uniqueShrunk.size() - 40) + " more unique repros");
         break;
       }
-      System.out.println("[algorithmic-fuzz] " + f);
+      System.out.println(
+          "[algorithmic-fuzz-repro] "
+              + s.findingKind
+              + ": pattern="
+              + s.pattern
+              + " input="
+              + s.input);
       printed++;
     }
 
