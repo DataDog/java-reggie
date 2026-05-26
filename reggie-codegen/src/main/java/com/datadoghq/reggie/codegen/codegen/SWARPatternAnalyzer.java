@@ -85,7 +85,12 @@ public final class SWARPatternAnalyzer {
       return new HexDigitOptimization();
     }
 
-    // Case 4: Multi-range patterns
+    // Case 4: Multi-range patterns. MultiRangeOptimization only emits correct bytecode for the
+    // two hand-written shapes [a-zA-Z] and [a-zA-Z0-9]; for any other combination it silently
+    // falls back to a single-range scan over the first range, which causes find() to miss
+    // matches that start with characters from the dropped ranges (e.g. `[-_0-9]` finds only
+    // `-`). Until the general multi-range search is implemented, only opt in for the supported
+    // shapes here.
     List<CharSet.Range> ranges = charset.getRanges();
     if (!negated && ranges.size() >= 2 && ranges.size() <= 4) {
       // Calculate total coverage
@@ -107,7 +112,10 @@ public final class SWARPatternAnalyzer {
           rangeArray[i * 2] = ranges.get(i).start;
           rangeArray[i * 2 + 1] = ranges.get(i).end;
         }
-        return new MultiRangeOptimization(rangeArray);
+        if (isSupportedMultiRangeShape(rangeArray)) {
+          return new MultiRangeOptimization(rangeArray);
+        }
+        // Fall through to literal-set case 5 below; otherwise return null at the end.
       }
     }
 
@@ -133,6 +141,39 @@ public final class SWARPatternAnalyzer {
 
     // Default: no optimization, use existing charAt() logic
     return null;
+  }
+
+  /**
+   * Returns true when the multi-range layout matches one of the two shapes that {@link
+   * com.datadoghq.reggie.codegen.codegen.swar.MultiRangeOptimization} actually emits correct
+   * bytecode for: {@code [a-zA-Z]} and {@code [a-zA-Z0-9]} / {@code [0-9a-zA-Z]}. Any other shape
+   * falls into the generator's first-range-only fallback and silently misses matches.
+   */
+  private static boolean isSupportedMultiRangeShape(char[] ranges) {
+    if (ranges.length == 4) {
+      // [a-zA-Z]
+      return ranges[0] == 'a' && ranges[1] == 'z' && ranges[2] == 'A' && ranges[3] == 'Z';
+    }
+    if (ranges.length == 6) {
+      // [0-9a-zA-Z]
+      boolean variant1 =
+          ranges[0] == '0'
+              && ranges[1] == '9'
+              && ranges[2] == 'a'
+              && ranges[3] == 'z'
+              && ranges[4] == 'A'
+              && ranges[5] == 'Z';
+      // [a-zA-Z0-9]
+      boolean variant2 =
+          ranges[0] == 'a'
+              && ranges[1] == 'z'
+              && ranges[2] == 'A'
+              && ranges[3] == 'Z'
+              && ranges[4] == '0'
+              && ranges[5] == '9';
+      return variant1 || variant2;
+    }
+    return false;
   }
 
   /** Check if the charset matches hex digits [0-9a-fA-F]. */

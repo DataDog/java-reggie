@@ -1618,9 +1618,16 @@ public class StatelessLoopBytecodeGenerator {
 
     // Compute matchEnd based on pattern type
     if (info.type == StatelessPatternInfo.PatternType.SINGLE_QUANTIFIER) {
-      // For simple quantifier, find where the character class stops matching
+      // For simple quantifier, find where the character class stops matching, capped at
+      // info.maxReps when a finite upper bound exists. Without this cap the greedy scan
+      // would consume every charset-matching character past the quantifier's upper bound,
+      // making {5}, {5,7}, {5,99} all behave like {5,}. The cap mirrors the bound check
+      // already enforced in findFrom / findBoundsFrom for this pattern shape.
       // matchEnd = matchStart;
-      // while (matchEnd < input.length() && charsetMatches(input.charAt(matchEnd))) matchEnd++;
+      // while (matchEnd < input.length()
+      //        && (maxReps < 0 || matchEnd - matchStart < maxReps)
+      //        && charsetMatches(input.charAt(matchEnd)))
+      //   matchEnd++;
 
       mv.visitVarInsn(ILOAD, matchStartVar);
       mv.visitVarInsn(ISTORE, matchEndVar);
@@ -1634,6 +1641,15 @@ public class StatelessLoopBytecodeGenerator {
       mv.visitVarInsn(ALOAD, inputVar);
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
       mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+
+      // Enforce upper bound: if maxReps > 0 and (matchEnd - matchStart) >= maxReps, break.
+      if (info.maxReps > 0) {
+        mv.visitVarInsn(ILOAD, matchEndVar);
+        mv.visitVarInsn(ILOAD, matchStartVar);
+        mv.visitInsn(ISUB);
+        pushInt(mv, info.maxReps);
+        mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+      }
 
       // char c = input.charAt(matchEnd);
       mv.visitVarInsn(ALOAD, inputVar);
