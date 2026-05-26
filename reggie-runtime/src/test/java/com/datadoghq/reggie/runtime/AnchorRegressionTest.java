@@ -96,6 +96,17 @@ public class AnchorRegressionTest {
   }
 
   @Test
+  void stringStartAnchorInOneAlternative_doesNotSkipOtherBranchPositions() {
+    // Cat F from fuzz triage: the find()-loop optimization used to read
+    // `hasStringStartAnchor` (any \A anywhere) instead of `requiresStartAnchor` (all paths
+    // need \A). For patterns like `]\A|b` where only one branch has \A, the optimization was
+    // returning -1 at non-zero positions, masking the always-position-valid branch.
+    expectFindMatch("]\\A|b", "cb", 1, 2);
+    expectFindMatch("]\\A|b", "b", 0, 1);
+    expectFindMatch("_{1}(\\A)|_", "-_", 1, 2);
+  }
+
+  @Test
   void mixedStartAndEndAnchorAlternatives() {
     expectFindMatch("^a|b$", "abc", 0, 1);
     expectFindMatch("^a|b$", "ab", 0, 1);

@@ -86,18 +86,22 @@ the broader findings.
 
 ## B. Empty/zero-width match handling
 
-| Pattern | Input | Kind |
-|---|---|---|
-| `b{0,3}[c]{0}` | `""` | find: jdk=true, reggie=false |
-| `c{3}()\|$` | `""` | first-match span differs |
-| `1?$` | `""` | first-match span differs |
-| `$c?` | `""` | first-match span differs |
-| `([^a]{2}\z\|){1}` | `""` | first-match span differs |
-| `1{0}(c{0}\|]{4})\|-?.{3}` | `_-0` | first-match span differs |
+**Status:** mostly resolved by the Cat C fix (zero-reps ε-bypass).
+After the fix, all of the following pass: `b{0,3}[c]{0}`,
+`c{3}()|$`, `1?$`, `$c?`, `([^a]{2}\z|){1}`. The shared root cause
+was the quantifier with `min=0` not exposing the empty-match path
+through the surrounding alternation/concat — the same bug fixed in
+category C.
 
-Patterns that *can* match zero-width report different match starts
-between Reggie and JDK. Often related to anchor placement or
-zero-width-only alternation branches.
+The remaining repro `1{0}(c{0}|]{4})|-?.{3}` against `_-0` is a
+different problem: JDK picks the first alternation branch that can
+match (NFA-style leftmost-first preference), Reggie picks whichever
+branch matches the longest (DFA-style leftmost-longest). This is
+alternation-order semantics — JDK/Perl prefers the textually first
+alternative, but a classical DFA doesn't preserve that ordering. A
+correct fix needs DFA ranking, a tagged-NFA execution, or branch
+priority tracking through subset construction. Left as a known
+divergence — separate effort.
 
 ## C. Negated character class against single char
 
@@ -114,41 +118,75 @@ plus zero-allowed upper bound combination changes the strategy.
 
 ## D. Self-referencing backreference in alternation
 
+**Status:** accepted divergence.
+
 | Pattern | Input | Kind |
 |---|---|---|
 | `a\|(\1\1){1}` | `""` | matches differs, find differs |
 | `[a]?(\1{2}){2}\|b` | `""` | find differs |
 | `(.{3}a{1}_{3})?\1` | `""` | find differs |
 
-JDK rejects these as semantically meaningless (the backref refers to
-a group that hasn't matched yet), Reggie evaluates them. Already
-covered by a recent PR for related cases but corner-shapes remain.
+The pattern `\1` referring to group 1 from within group 1's own body
+is semantically pathological — the group hasn't been captured yet,
+so what does the backref match? PCRE/Perl say "the empty string"
+(Reggie's behavior), JDK rejects the path entirely. Neither is
+objectively wrong.
+
+The fuzz generator can produce these because its grammar allows a
+backref to any open group, including the one currently being built.
+Real-world patterns very rarely write `(\1...)` style self-loops;
+the fix-vs-divergence tradeoff is not worth chasing in this pass.
+Documenting as a known JDK divergence so the fuzz triage can stop
+chasing variants of this shape.
+
+If we ever want JDK-strict matches() semantics here, the right fix
+is in the parser: reject `\n` where `n` refers to a group that
+encloses the backref site. The fuzz generator's `groupsInScope`
+counter already excludes the currently-being-built group; adding
+the same check in `RegexParser` would close the gap.
 
 ## E. Quantified zero-width anchors
+
+**Status:** not yet fixed.
 
 | Pattern | Input | Kind |
 |---|---|---|
 | `\A{3,4}?(a\|[1a]+)` | (multiple) | span differs |
 | `\A{3,6}\|...` | (multiple) | span differs |
 | `\Z+b\|...` | (multiple) | span differs |
-| `_{1}(\A)\|_` | `-_` | find differs |
 
 Anchors quantified with `{n,m}` should still be zero-width — JDK
-respects this. Reggie's NFA construction may be expanding `\A{3,4}`
-to "3-4 anchor states" and getting confused by the surrounding
-alternation.
+respects this. Reggie's Thompson builder calls
+`buildCountedQuantifier`, which generates `n` separate copies of
+the child fragment. For an anchor child, this creates `n` anchor
+states in sequence, all of which must hold simultaneously at the
+same position — fine semantically, but the surrounding NFA wiring
+produces different ε-paths that diverge from JDK's behavior when
+combined with alternation siblings.
+
+Fix idea: at parse or NFA-build time, collapse `Quantifier(anchor,
+n, m, _)` to a single anchor node. Since the anchor is zero-width,
+matching it 1 to ∞ times is equivalent to matching it once.
 
 ## F. Anchor inside character class context / interior
 
-| Pattern | Input | Kind |
-|---|---|---|
-| `\Z.[a]{1}\|_-` | `_a` | find differs |
-| `]\A\|b` | `cb` | find differs |
-| `\Z]{4}` (in alt) | varies | matches/find differs |
+**Status:** mostly fixed by the
+`hasStringStartAnchor → requiresStartAnchor` change in the
+find()-loop optimization (DFAUnrolled + DFASwitch).
 
-`\A` / `\Z` placed inside an alternation branch where they aren't at
-the start/end of the branch. Related to the anchor-aware DFA fix in
-`95f71ec` but a few cases still slip through.
+After that fix `]\A|b` and `_{1}(\A)|_` find at the right positions.
+The previous code special-cased `hasStringStartAnchor` (set whenever
+*any* `\A` exists, regardless of whether all branches require it),
+which made `find()` short-circuit at non-zero positions and so masked
+the branches without `\A`. The corrected condition uses
+`requiresStartAnchor`, which already treats `\A` as a barrier in the
+all-paths analysis.
+
+The earlier `_{1}(\A)|_` finding is now passing. The `\Z.[a]{1}|_-`
+case is the alternation-order preference problem from category B and
+is tracked there. Remaining variants in this category involve `\Z`
+in interior positions — extend the per-state anchor handling in
+SubsetConstructor when needed.
 
 ## Suggested execution order
 

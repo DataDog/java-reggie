@@ -710,10 +710,12 @@ public class DFASwitchBytecodeGenerator {
     mv.visitVarInsn(ILOAD, lenVar);
     mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
 
-    // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors
-    // Use requiresStartAnchor (not hasStartAnchor) to handle alternations like (^foo|bar)
-    // where one branch has anchor but pattern can still match at any position via other branch
-    if (requiresStartAnchor || hasStringStartAnchor) {
+    // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors.
+    // {@link NFA#requiresStartAnchor()} treats both START (^) and STRING_START (\A) as barriers,
+    // so it returns true only when ALL paths to a useful target go through one of them. Or-ing
+    // in {@code hasStringStartAnchor} on top short-circuits on patterns like `]\A|b` where only
+    // one branch has \A but the other can still match anywhere.
+    if (requiresStartAnchor) {
       // Non-multiline ^ or \A: Only try position 0
       // if (tryPos != 0) return -1;
       Label validPosition = new Label();

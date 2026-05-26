@@ -90,10 +90,13 @@ public final class RandomRegexGenerator {
       sb.append(anchor());
     } else if (depth > 0 && kind < 90) {
       // Group: capturing 70% of the time, non-capturing 30%.
+      // Children inside the group can reference outer groups (groupsInScope) but NOT this
+      // group itself — a backref to a group that encloses the backref site is semantically
+      // pathological (the group hasn't captured yet), and JDK / Reggie disagree on its
+      // meaning. The fuzz oracle treats this as accepted divergence; stop generating it.
       boolean capturing = rnd.nextInt(10) < 7;
       sb.append(capturing ? "(" : "(?:");
-      int beforeChildGroups = groupsInScope + (capturing ? 1 : 0);
-      int after = genAlt(sb, depth - 1, beforeChildGroups);
+      int after = genAlt(sb, depth - 1, groupsInScope);
       sb.append(')');
       // A capturing group adds one to the count from the caller's perspective.
       groupsInScope = capturing ? Math.max(groupsInScope + 1, after) : after;
