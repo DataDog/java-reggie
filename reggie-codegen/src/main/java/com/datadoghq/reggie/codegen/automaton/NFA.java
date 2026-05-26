@@ -199,6 +199,12 @@ public final class NFA {
       if (!state.getTransitions().isEmpty()) {
         return false;
       }
+      // If accept is reachable without crossing the barrier (e.g. via END anchor for bare `$`),
+      // the pattern can match at positions other than the start, so the find()-loop "only try
+      // tryPos == 0" optimization is unsound.
+      if (acceptStates.contains(state)) {
+        return false;
+      }
       for (NFAState next : state.getEpsilonTransitions()) {
         if (visited.add(next)) {
           queue.add(next);

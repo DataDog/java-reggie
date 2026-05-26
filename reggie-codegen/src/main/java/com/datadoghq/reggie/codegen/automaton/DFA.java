@@ -166,18 +166,36 @@ public final class DFA {
     public final DFAState target;
     public final List<TagOperation> tagOps; // Tag operations to perform on this transition
 
+    /**
+     * Anchor preconditions that must hold at the *source* position (before consuming a character).
+     * Empty = unconditional. Populated when the contributing NFA path crosses a START-class anchor
+     * (START / STRING_START / START_MULTILINE) before consuming. Codegen emits a position guard.
+     */
+    public final EnumSet<NFA.AnchorType> entryGuard;
+
     public DFATransition(DFAState target) {
-      this(target, Collections.emptyList());
+      this(target, Collections.emptyList(), EnumSet.noneOf(NFA.AnchorType.class));
     }
 
     public DFATransition(DFAState target, List<TagOperation> tagOps) {
+      this(target, tagOps, EnumSet.noneOf(NFA.AnchorType.class));
+    }
+
+    public DFATransition(
+        DFAState target, List<TagOperation> tagOps, EnumSet<NFA.AnchorType> entryGuard) {
       this.target = target;
       this.tagOps = tagOps;
+      this.entryGuard = entryGuard;
     }
 
     @Override
     public String toString() {
-      return "Transition{target=" + target.id + ", tags=" + tagOps.size() + "}";
+      return "Transition{target="
+          + target.id
+          + ", tags="
+          + tagOps.size()
+          + (entryGuard.isEmpty() ? "" : ", guard=" + entryGuard)
+          + "}";
     }
   }
 
@@ -190,6 +208,16 @@ public final class DFA {
     public final List<AssertionCheck>
         assertionChecks; // Assertions to check in this state (prototype)
     public final List<GroupAction> groupActions; // Group capture actions when entering this state
+
+    /**
+     * Anchor preconditions that must hold *at the current input position* for this state to be
+     * considered accepting. Empty = unconditional (existing {@link #accepting} flag semantics).
+     * Populated when the only paths to an NFA accept state cross END-class anchors (END /
+     * STRING_END / STRING_END_ABSOLUTE / END_MULTILINE) or START-class anchors (START /
+     * STRING_START / START_MULTILINE). Codegen emits the corresponding position check before
+     * accepting.
+     */
+    public final EnumSet<NFA.AnchorType> acceptanceAnchorConditions;
 
     public DFAState(int id, Set<NFA.NFAState> nfaStates, boolean accepting) {
       this(id, nfaStates, accepting, new ArrayList<>(), new ArrayList<>());
@@ -209,11 +237,28 @@ public final class DFA {
         boolean accepting,
         List<AssertionCheck> assertionChecks,
         List<GroupAction> groupActions) {
+      this(
+          id,
+          nfaStates,
+          accepting,
+          assertionChecks,
+          groupActions,
+          EnumSet.noneOf(NFA.AnchorType.class));
+    }
+
+    public DFAState(
+        int id,
+        Set<NFA.NFAState> nfaStates,
+        boolean accepting,
+        List<AssertionCheck> assertionChecks,
+        List<GroupAction> groupActions,
+        EnumSet<NFA.AnchorType> acceptanceAnchorConditions) {
       this.id = id;
       this.nfaStates = nfaStates;
       this.accepting = accepting;
       this.assertionChecks = assertionChecks;
       this.groupActions = groupActions;
+      this.acceptanceAnchorConditions = acceptanceAnchorConditions;
       this.transitions = new LinkedHashMap<>();
     }
 
@@ -223,6 +268,14 @@ public final class DFA {
 
     public void addTransition(CharSet chars, DFAState target, List<TagOperation> tagOps) {
       transitions.put(chars, new DFATransition(target, tagOps));
+    }
+
+    public void addTransition(
+        CharSet chars,
+        DFAState target,
+        List<TagOperation> tagOps,
+        EnumSet<NFA.AnchorType> entryGuard) {
+      transitions.put(chars, new DFATransition(target, tagOps, entryGuard));
     }
 
     @Override
