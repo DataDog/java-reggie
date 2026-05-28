@@ -283,19 +283,6 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
 
-    // Per-state acceptance check before the char read: handles STRING_END (`\Z`) which can be
-    // satisfied at pos == length - 1 (before a final newline) — Java's matches() treats the
-    // trailing newline as a terminator for `\Z`. END_MULTILINE intentionally is NOT handled
-    // here because matches() requires the whole input to be consumed; `(?m)^abc$` does not
-    // match "abc\n".
-    if (state.accepting && state.acceptanceAnchorConditions.contains(NFA.AnchorType.STRING_END)) {
-      Label notTerminator = new Label();
-      emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, notTerminator);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(IRETURN);
-      mv.visitLabel(notTerminator);
-    }
-
     // if (pos >= input.length()) goto endOfInput
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ALOAD, 1);
@@ -1525,17 +1512,27 @@ public class DFAUnrolledBytecodeGenerator {
     for (DFA.DFAState state : dfa.getAllStates()) {
       mv.visitLabel(stateLabels.get(state));
 
-      // If this is an accepting state, save current position and tags
+      // If this is an accepting state, save current position and tags (gated on anchor
+      // conditions — e.g. a state accepting only at ^ must not record mid-input positions).
       if (state.accepting) {
-        // longestPos = pos;
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestPosVar);
-
-        // savedTags = tags.clone();
-        mv.visitVarInsn(ALOAD, tagsVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
-        mv.visitTypeInsn(CHECKCAST, "[I");
-        mv.visitVarInsn(ASTORE, savedTagsVar);
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestPosVar);
+          mv.visitVarInsn(ALOAD, tagsVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
+          mv.visitTypeInsn(CHECKCAST, "[I");
+          mv.visitVarInsn(ASTORE, savedTagsVar);
+        } else {
+          Label skipSave = new Label();
+          emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipSave);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestPosVar);
+          mv.visitVarInsn(ALOAD, tagsVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
+          mv.visitTypeInsn(CHECKCAST, "[I");
+          mv.visitVarInsn(ASTORE, savedTagsVar);
+          mv.visitLabel(skipSave);
+        }
       }
 
       // Check if we've reached end of input
@@ -1905,10 +1902,18 @@ public class DFAUnrolledBytecodeGenerator {
     }
 
     // If this is an accepting state, record current position (after assertions pass).
+    // Per-state acceptance conditions must be satisfied before recording the position.
     if (state.accepting) {
-      // longestMatchEnd = pos;
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ISTORE, longestMatchEndVar);
+      if (state.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+      } else {
+        Label skipRecord = new Label();
+        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecord);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+        mv.visitLabel(skipRecord);
+      }
     }
 
     // if (pos >= input.length()) goto endOfInput
@@ -3266,9 +3271,8 @@ public class DFAUnrolledBytecodeGenerator {
   private void emitSingleAnchorCheck(
       MethodVisitor mv, NFA.AnchorType anchor, int posVar, Label failed, InputAccess access) {
     switch (anchor) {
-      case END:
       case STRING_END_ABSOLUTE:
-        // if (pos != end) goto failed
+        // \z — strict end: if (pos != end) goto failed
         mv.visitVarInsn(ILOAD, posVar);
         access.loadLength.run();
         mv.visitJumpInsn(IF_ICMPNE, failed);
@@ -3279,6 +3283,10 @@ public class DFAUnrolledBytecodeGenerator {
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitJumpInsn(IFNE, failed);
         break;
+      case END:
+      // $ (non-multiline) — same semantics as \Z: matches at end OR before final '\n'.
+      // Java's $ is NOT strict: Pattern.compile("x$").matcher("x\n").find() == true.
+      // Fall through to STRING_END.
       case STRING_END:
         {
           // OK iff pos == end OR (pos == end - 1 AND charAt(pos) == '\n')

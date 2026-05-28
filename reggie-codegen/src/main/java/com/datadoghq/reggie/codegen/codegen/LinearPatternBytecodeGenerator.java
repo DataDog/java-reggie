@@ -622,11 +622,25 @@ public class LinearPatternBytecodeGenerator {
         mv.visitJumpInsn(IFNE, ctx.failLabel);
         break;
       case END:
-        // if (pos != len) fail;
-        mv.visitVarInsn(ILOAD, ctx.posVar);
-        mv.visitVarInsn(ILOAD, ctx.lenVar);
-        mv.visitJumpInsn(IF_ICMPNE, ctx.failLabel);
-        break;
+        {
+          // $ (non-multiline): same as \Z — pos == len OR (pos == len-1 AND charAt(pos) == '\n')
+          Label endPassLabel = new Label();
+          mv.visitVarInsn(ILOAD, ctx.posVar);
+          mv.visitVarInsn(ILOAD, ctx.lenVar);
+          mv.visitJumpInsn(IF_ICMPEQ, endPassLabel);
+          mv.visitVarInsn(ILOAD, ctx.posVar);
+          mv.visitVarInsn(ILOAD, ctx.lenVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitJumpInsn(IF_ICMPNE, ctx.failLabel);
+          mv.visitVarInsn(ALOAD, ctx.inputVar);
+          mv.visitVarInsn(ILOAD, ctx.posVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          BytecodeUtil.pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, ctx.failLabel);
+          mv.visitLabel(endPassLabel);
+          break;
+        }
       case START_MULTILINE:
         // if (pos != 0 && (pos == 0 || input.charAt(pos-1) != '\n')) fail;
         // Simplified: if (pos == 0 || input.charAt(pos-1) == '\n') pass; else fail;

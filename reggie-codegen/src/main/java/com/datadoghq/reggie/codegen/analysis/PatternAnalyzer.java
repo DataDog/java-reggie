@@ -720,6 +720,34 @@ public class PatternAnalyzer {
         // Build DFA with tag computation enabled for Tagged DFA
         DFA dfa = constructor.buildDFA(nfa, true);
 
+        if (dfa.isAnchorConditionDiluted()) {
+          MatchingStrategyResult r =
+              new MatchingStrategyResult(
+                  MatchingStrategy.OPTIMIZED_NFA,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+          r.anchorConditionDiluted = true;
+          return r;
+        }
+
+        if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+          MatchingStrategyResult r =
+              new MatchingStrategyResult(
+                  MatchingStrategy.OPTIMIZED_NFA,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+          r.alternationPriorityConflict = true;
+          return r;
+        }
+
         // DFA with groups: choose strategy based on state count
         int stateCount = dfa.getStateCount();
         if (stateCount < 20) {
@@ -771,6 +799,27 @@ public class PatternAnalyzer {
       SubsetConstructor constructor = new SubsetConstructor();
       DFA dfa = constructor.buildDFA(nfa);
 
+      if (dfa.isAnchorConditionDiluted()) {
+        MatchingStrategyResult r =
+            new MatchingStrategyResult(
+                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+        r.anchorConditionDiluted = true;
+        return r;
+      }
+
+      // Alternation priority: Java NFA semantics pick the first alternative that matches at a
+      // position; DFA semantics pick the longest match. When the pattern has explicit alternation
+      // AND the DFA has an unconditionally-accepting state that has further outgoing transitions,
+      // the DFA will return a longer match than the NFA would for the same position — violating
+      // Java regex semantics. Flag for caller to route to JDK fallback.
+      if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+        MatchingStrategyResult r =
+            new MatchingStrategyResult(
+                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+        r.alternationPriorityConflict = true;
+        return r;
+      }
+
       // Choose DFA strategy based on state count
       int stateCount = dfa.getStateCount();
       if (stateCount < 20) {
@@ -794,6 +843,43 @@ public class PatternAnalyzer {
   private boolean hasBackreferences(RegexNode node) {
     BackrefDetector detector = new BackrefDetector();
     return node.accept(detector);
+  }
+
+  private boolean containsAlternation(RegexNode node) {
+    if (node instanceof AlternationNode) return true;
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (containsAlternation(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) return containsAlternation(((GroupNode) node).child);
+    if (node instanceof QuantifierNode) return containsAlternation(((QuantifierNode) node).child);
+    return false;
+  }
+
+  private boolean dfaHasAcceptingStateWithTransitions(DFA dfa) {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (state.accepting && !state.transitions.isEmpty()) {
+        // Unconditional acceptance with outgoing transitions: DFA longest-match
+        // will advance past the zero-width match point.
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          return true;
+        }
+        // START-class anchor acceptance with outgoing transitions: at position 0
+        // (where ^/\A fire) the DFA can still advance via transitions, diverging
+        // from NFA first-alternative semantics. END-class anchors are safe because
+        // transitions cannot fire at end-of-input.
+        for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+          if (a == NFA.AnchorType.START
+              || a == NFA.AnchorType.STRING_START
+              || a == NFA.AnchorType.START_MULTILINE) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   private boolean hasLookaround(RegexNode node) {
@@ -1772,6 +1858,24 @@ public class PatternAnalyzer {
         lookaheadGreedyInfo; // Phase 2: lookahead+greedy+suffix pattern info
     public final boolean
         usePosixLastMatch; // Use POSIX last-match semantics for groups in quantifiers
+
+    /**
+     * True when the DFA construction detected an anchor-condition dilution: alternation branches
+     * with differing positional-anchor requirements contributed to the same partition slice (or
+     * accept site), and the intersection logic collapsed those requirements to unconditional. The
+     * built DFA is structurally valid but semantically incorrect for such patterns; callers should
+     * route to a correct fallback engine (e.g. {@code JavaRegexFallbackMatcher}) rather than using
+     * the DFA.
+     */
+    public boolean anchorConditionDiluted;
+
+    /**
+     * True when the pattern has alternation and the DFA has an unconditionally-accepting state with
+     * further outgoing transitions. In this case the DFA uses longest-match semantics but Java NFA
+     * semantics require first-alternative preference. Callers should route to a correct fallback
+     * engine (e.g. {@code JavaRegexFallbackMatcher}) rather than using the DFA.
+     */
+    public boolean alternationPriorityConflict;
 
     public MatchingStrategyResult(MatchingStrategy strategy, DFA dfa) {
       this(strategy, dfa, null, false, java.util.Collections.emptySet(), null, false);
@@ -5130,6 +5234,27 @@ public class PatternAnalyzer {
     // Reject patterns with capturing groups - this strategy doesn't support group tracking
     if (groupCounter[0] > 0) {
       return null;
+    }
+
+    // Reject when an optional element could greedily consume a character required by a later
+    // element. Example: c?c — the optional consumes the only 'c', leaving none for the required
+    // literal. The generator has no backtracking, so it would incorrectly return no-match.
+    for (int i = 0; i < elements.size() - 1; i++) {
+      if (!(elements.get(i) instanceof BoundedOptionalElement)) continue;
+      char optCh = ((BoundedOptionalElement) elements.get(i)).literal;
+      for (int j = i + 1; j < elements.size(); j++) {
+        BoundedElement next = elements.get(j);
+        if (next instanceof BoundedLiteralElement
+            && ((BoundedLiteralElement) next).literal == optCh) {
+          return null;
+        }
+        if (next instanceof BoundedQuantifierElement) {
+          BoundedQuantifierElement qe = (BoundedQuantifierElement) next;
+          if (qe.min >= 1 && (qe.charset.contains(optCh) != qe.negated)) {
+            return null;
+          }
+        }
+      }
     }
 
     return new BoundedQuantifierInfo(elements, minLen, maxLen, groupCounter[0]);

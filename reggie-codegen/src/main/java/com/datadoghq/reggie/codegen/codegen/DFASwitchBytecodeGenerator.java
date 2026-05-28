@@ -2285,8 +2285,8 @@ public class DFASwitchBytecodeGenerator {
     int invoke = charSequence ? INVOKEINTERFACE : INVOKEVIRTUAL;
     boolean isIface = charSequence;
     switch (anchor) {
-      case END:
       case STRING_END_ABSOLUTE:
+        // \z — strict end only
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ALOAD, 1);
         mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
@@ -2297,8 +2297,12 @@ public class DFASwitchBytecodeGenerator {
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitJumpInsn(IFNE, failed);
         break;
+      case END:
+      // $ (non-multiline) matches at end OR before final '\n' — same as \Z.
+      // Fall through to STRING_END.
       case STRING_END:
         {
+          // OK iff pos == end OR (pos == end - 1 AND charAt(pos) == '\n')
           Label ok = new Label();
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitVarInsn(ALOAD, 1);

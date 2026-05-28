@@ -141,6 +141,21 @@ public class AnchorRegressionTest {
     expectFindNone(regex, "1.5");
   }
 
+  // --- $ before trailing newline (Java: $ matches at end OR before final '\n') --------
+
+  @Test
+  void dollarMatchesBeforeTrailingNewline() {
+    // In Java, $ (non-multiline) is semantically identical to \Z: matches at end of
+    // string OR immediately before a single trailing '\n'.
+    expectFindMatch("c$", "c\n", 0, 1);
+    expectFindMatch(".$", "b\n", 0, 1);
+    expectFindMatch("a?$", "\n", 0, 0);
+    expectFindMatch("$", "c\n", 1, 1);
+    expectFindMatch("$", "\n", 0, 0);
+    expectFindMatch("Z{1}|$", "\n", 0, 0);
+    expectFindMatch("[c]*(?:[_]?-)$", "-\n", 0, 1);
+  }
+
   // --- \A / \Z / \z ---------------------------------------------------------------------
 
   @Test
@@ -153,7 +168,83 @@ public class AnchorRegressionTest {
     expectFindMatch("\\z", "ax", 2, 2);
   }
 
+  // --- Cat E/F residual: anchor-condition dilution in DFA subset construction -----------
+
+  @Test
+  void anchorConditionDilution_zStringEndBeforeConsumer_alternatedWithUnanchored() {
+    // \Z.[a]{1}|_-  on "_a": branch 1 has \Z anchor, branch 2 has none;
+    // mergeWeakest dropped the anchor, causing DFA to accept incorrectly.
+    expectFindNone("\\Z.[a]{1}|_-", "_a");
+  }
+
+  @Test
+  void anchorConditionDilution_disjointAcceptConditions_quantifiedGroup() {
+    // [ca]{2}(Z?^|\Z) on "cab": the accept states inside the group have disjoint
+    // conditions ({START_MULTILINE} vs {STRING_END}); intersection collapsed to
+    // unconditional, accepting after the two-char prefix.
+    expectFindNone("[ca]{2}(Z?^|\\Z)", "cab");
+  }
+
+  @Test
+  void anchorConditionDilution_zStringEndStar_alternatedWithLiteralSuffix() {
+    // \Z[1]*|1]  on "1": JDK finds empty match at [1,1) (only the \Z branch matches,
+    // zero-width at end), Reggie was greedily matching the `1` via the diluted path.
+    expectFindMatch("\\Z[1]*|1]", "1", 1, 1);
+  }
+
+  @Test
+  void anchorConditionDilution_zeroMinQuantifierWithStartAnchor_alternation() {
+    // (1{0,}^|]{2}) on "1": JDK finds zero-width match at [0,0) (the ^ branch fires
+    // at pos 0), Reggie was consuming the `1` via the diluted path.
+    expectFindMatch("(1{0,}^|]{2})", "1", 0, 0);
+  }
+
+  // --- matches() vs \Z before trailing newline ------------------------------------------
+
+  @Test
+  void stringEndMatchesMode_doesNotConsumeTrailingNewline() {
+    // matches() requires the FULL input to be consumed. \Z can accept before the final '\n'
+    // for find(), but in matches() mode the trailing '\n' is NOT consumed by \Z, so the
+    // full input "abc\n" is not covered and matches() must return false.
+    expectMatchesFalse("abc\\Z", "abc\n");
+    expectMatchesFalse(".*abc\\Z", "abc\n");
+    expectMatchesFalse("[^1]\\Z|-", "a\n");
+    // Absolute end anchor \z behaves the same (it never admits the trailing '\n')
+    expectMatchesFalse("abc\\z", "abc\n");
+    // Without trailing '\n', \Z and \z both accept normally
+    expectMatchesTrue("abc\\Z", "abc");
+    expectMatchesTrue("[^1]\\Z|-", "a");
+    expectMatchesTrue("[^1]\\Z|-", "-");
+    // When the pattern CONSUMES the '\n' (e.g., [^1] matches '\n'), \Z at absolute end → true
+    expectMatchesTrue("[^1]\\Z", "\n");
+    expectMatchesTrue("[^1]\\Z|-", "\n");
+  }
+
   // --- Helpers --------------------------------------------------------------------------
+
+  private static void expectMatchesTrue(String regex, String input) {
+    Pattern jdk = Pattern.compile(regex);
+    if (!jdk.matcher(input).matches()) {
+      throw new IllegalArgumentException(
+          "Test premise wrong: JDK matches('" + input + "') for /" + regex + "/ returned false");
+    }
+    ReggieMatcher m = Reggie.compile(regex);
+    org.junit.jupiter.api.Assertions.assertTrue(
+        m.matches(input),
+        () -> "Reggie matches('" + input + "') for /" + regex + "/ should be true");
+  }
+
+  private static void expectMatchesFalse(String regex, String input) {
+    Pattern jdk = Pattern.compile(regex);
+    if (jdk.matcher(input).matches()) {
+      throw new IllegalArgumentException(
+          "Test premise wrong: JDK matches('" + input + "') for /" + regex + "/ returned true");
+    }
+    ReggieMatcher m = Reggie.compile(regex);
+    org.junit.jupiter.api.Assertions.assertFalse(
+        m.matches(input),
+        () -> "Reggie matches('" + input + "') for /" + regex + "/ should be false");
+  }
 
   private static void expectFindMatch(String regex, String input, int start, int end) {
     Pattern jdk = Pattern.compile(regex);

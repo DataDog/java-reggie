@@ -44,11 +44,11 @@ public class AlgorithmicFuzzTest {
   private static final long BASE_SEED = 0xC0DEFEED_DEADBEEFL;
 
   @Test
-  @Timeout(value = 120, unit = TimeUnit.SECONDS)
+  @Timeout(value = 300, unit = TimeUnit.SECONDS)
   public void smokeFuzz_smallDeterministicSweep() {
     FuzzRunner.Config cfg = new FuzzRunner.Config();
     cfg.seed = BASE_SEED;
-    cfg.patternCount = sizedPatternCount(500);
+    cfg.patternCount = sizedPatternCount(2000);
     cfg.inputsPerPattern = 8;
     cfg.patternDepth = 3;
     cfg.inputMaxLength = 12;
@@ -94,10 +94,10 @@ public class AlgorithmicFuzzTest {
       printed++;
     }
 
-    // Backstop: if the divergence count blows up beyond a generous ceiling, fail. This is a
-    // regression-detection guard, not a quality target — tighten the threshold as bugs are
-    // fixed and confirmed.
-    int ceiling = (int) (cfg.patternCount * cfg.inputsPerPattern * 0.25);
+    // Backstop: if the divergence count blows up beyond a ceiling, fail. This is a
+    // regression-detection guard, not a quality target — tightened from 25% to 10% after
+    // Cat E/F anchor-condition-dilution fixes were confirmed.
+    int ceiling = (int) (cfg.patternCount * cfg.inputsPerPattern * 0.10);
     assertTrue(
         report.findings.size() < ceiling,
         "Fuzz produced "

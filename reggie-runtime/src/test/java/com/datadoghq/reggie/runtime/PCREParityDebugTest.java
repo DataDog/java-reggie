@@ -122,13 +122,12 @@ public class PCREParityDebugTest {
 
   @Test
   void testOptionalQuantifiedGroup() {
-    // Pattern (a+|b){0,1} on "AB" (case insensitive implied by test?)
-    // Actually this should fail on "AB" because no case insensitivity
+    // Pattern (a+|b){0,1} — finds first match in "ab"
+    // find() should match "a" via the a+ branch (first alternative, one occurrence)
     ReggieMatcher m = Reggie.compile("(a+|b){0,1}");
-    MatchResult r = m.match("ab"); // Use lowercase
+    MatchResult r = m.findMatch("ab");
 
-    // {0,1} means 0 or 1 match - could match empty or "a"
-    // Greedy should match "a"
+    // Greedy {0,1} tries 1 occurrence first; a+ matches "a"
     assertNotNull(r);
     System.out.println("Group 0: '" + r.group(0) + "'");
     System.out.println("Group 1: '" + r.group(1) + "'");

@@ -78,8 +78,10 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<String, ReggieMatcher> PATTERN_CACHE =
       new ConcurrentHashMap<>();
 
-  // Level 2: Structural hash → generated class (deduplication for similar patterns)
-  private static final ConcurrentHashMap<Integer, Class<? extends ReggieMatcher>> STRUCTURE_CACHE =
+  // Level 2: Structural hash → generated class (deduplication for similar patterns).
+  // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
+  // sets; an int key was observed to cause structural-cache false-hits with wrong match semantics.
+  private static final ConcurrentHashMap<Long, Class<? extends ReggieMatcher>> STRUCTURE_CACHE =
       new ConcurrentHashMap<>();
 
   // Lookup for hidden class definition (Java 21+)
@@ -165,6 +167,24 @@ public class RuntimeCompiler {
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
 
       // 3.5. Fall back to java.util.regex for patterns with known engine bugs
+      if (result.anchorConditionDiluted) {
+        ReggieMatcher fallback =
+            new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in DFA construction");
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
+      }
+      if (result.alternationPriorityConflict) {
+        ReggieMatcher fallback =
+            new JavaRegexFallbackMatcher(
+                pattern,
+                "alternation priority conflict: DFA longest-match vs NFA first-alternative");
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
+      }
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
         ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, fallbackReason);
@@ -181,8 +201,8 @@ public class RuntimeCompiler {
         return hybrid;
       }
 
-      // 5. Compute structural hash for level 2 cache lookup
-      int structHash =
+      // 5. Compute structural hash for level 2 cache lookup (64-bit key)
+      long structHash =
           (nfa != null)
               ? StructuralHash.compute(result, nfa, caseInsensitive)
               : StructuralHash.computeWithoutGroupCount(result);

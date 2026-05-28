@@ -69,9 +69,13 @@ public final class FallbackPatternDetector {
       return "anchor inside quantifier: ${n}, \\z{n}, etc.";
     }
 
-    // Lazy (non-greedy) quantifiers routed to RECURSIVE_DESCENT lack proper backtracking,
-    // causing incorrect matches() and find() results when the quantifier has following siblings
-    // or is in an alternation context.
+    // RECURSIVE_DESCENT uses a greedy-first descent parser with limited backtracking (quantifiers
+    // followed by fixed suffixes). It does NOT implement general alternation backtracking: when an
+    // alternation's first branch partially matches but the following context fails, the parser
+    // cannot retry a different branch. Lazy quantifiers expose this because they interact heavily
+    // with alternation (e.g. a|ab matches "ab" requires the engine to try both branches). Until
+    // the generator is extended with full continuation-passing backtracking, lazy patterns route
+    // to java.util.regex which handles them correctly.
     if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT && v.hasLazyQuantifier) {
       return "lazy quantifier in recursive-descent: requires backtracking semantics";
     }
@@ -83,6 +87,15 @@ public final class FallbackPatternDetector {
             || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT)
         && hasCrossAlternativeBackref(ast)) {
       return "cross-alternative backref: group captured in one branch, used in another";
+    }
+
+    // Parallel NFA simulation uses shared group arrays across all active paths. When a backref
+    // \N references a group that can capture the empty string (nullable), the greedy path may
+    // record a non-zero groupLen while the empty-capture path needs groupLen=0. The shared
+    // array records the wrong value, causing the backref check to fail or spuriously succeed.
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
+        && hasNullableBackrefGroup(ast)) {
+      return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
     return null;
@@ -161,6 +174,73 @@ public final class FallbackPatternDetector {
     } else if (node instanceof QuantifierNode) {
       collectBackrefsInSubtree(((QuantifierNode) node).child, backrefs);
     }
+  }
+
+  /**
+   * Returns true if any backref \N references a group whose content is nullable (can match the
+   * empty string). In parallel NFA simulation, when such a group exists, the shared group-capture
+   * arrays may be overwritten by the greedy (non-empty) path before the empty-capture path's
+   * backref check runs, causing the check to use the wrong capture span.
+   */
+  private static boolean hasNullableBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    for (int groupNum : backrefNums) {
+      if (isGroupNullable(ast, groupNum)) return true;
+    }
+    return false;
+  }
+
+  /** Walk the AST to find the capturing group with the given number and test nullability. */
+  private static boolean isGroupNullable(RegexNode node, int groupNum) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && g.groupNumber == groupNum) {
+        return subtreeIsNullable(g.child);
+      }
+      return isGroupNullable(g.child, groupNum);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (isGroupNullable(c, groupNum)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (isGroupNullable(a, groupNum)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return isGroupNullable(((QuantifierNode) node).child, groupNum);
+    }
+    return false;
+  }
+
+  /** Returns true if the subtree can match the empty string (zero characters). */
+  private static boolean subtreeIsNullable(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      return ((QuantifierNode) node).min == 0 || subtreeIsNullable(((QuantifierNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (!subtreeIsNullable(c)) return false;
+      }
+      return true;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (subtreeIsNullable(a)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return subtreeIsNullable(((GroupNode) node).child);
+    }
+    // AnchorNode is zero-width (nullable); LiteralNode and CharClassNode are not.
+    return node instanceof AnchorNode;
   }
 
   private static boolean isLookahead(AssertionNode.Type t) {

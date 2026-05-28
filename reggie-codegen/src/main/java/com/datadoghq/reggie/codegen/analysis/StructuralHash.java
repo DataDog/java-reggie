@@ -17,6 +17,7 @@ package com.datadoghq.reggie.codegen.analysis;
 
 import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import java.util.EnumSet;
 
 /**
  * Computes structural hash for pattern analysis results to enable bytecode caching.
@@ -27,6 +28,17 @@ import com.datadoghq.reggie.codegen.automaton.NFA;
  *
  * <p>The hash does NOT include: - Pattern string (generated identifiers) - Class names or UUIDs
  * (generated identifiers)
+ *
+ * <p><b>Implementation note on hash width</b>: all public methods return {@code long} (64-bit). The
+ * Level-2 structural cache key must be 64-bit to make birthday collisions essentially impossible
+ * for realistic pattern sets (~10 k patterns → P_collision ≈ 2.7 × 10⁻⁹). Using an {@code int} key
+ * was observed to cause silent misidentification of structurally distinct patterns as cache hits,
+ * producing wrong match results.
+ *
+ * <p><b>Implementation note on enum hashing</b>: all enum values are hashed via {@link
+ * Enum#ordinal()} rather than {@link Object#hashCode()} because {@code hashCode()} delegates to
+ * {@code System.identityHashCode()}, which is not guaranteed to be non-zero. A zero identity hash
+ * makes a non-empty {@link EnumSet} indistinguishable from an empty one.
  */
 public final class StructuralHash {
 
@@ -40,44 +52,59 @@ public final class StructuralHash {
    * @param result Analysis result containing strategy and DFA
    * @param nfa NFA containing group count
    * @param caseInsensitive Whether backreferences use case-insensitive comparison
-   * @return Hash code representing the structural equivalence class
+   * @return 64-bit hash representing the structural equivalence class
    */
-  public static int compute(
+  public static long compute(
       PatternAnalyzer.MatchingStrategyResult result, NFA nfa, boolean caseInsensitive) {
-    int hash = 17;
+    long hash = 17L;
 
-    // Strategy is the primary discriminator
-    hash = 31 * hash + result.strategy.hashCode();
+    hash = 31L * hash + result.strategy.ordinal();
+    hash = 31L * hash + nfa.getGroupCount();
+    hash = 31L * hash + (result.useTaggedDFA ? 1 : 0);
+    hash = 31L * hash + (result.usePosixLastMatch ? 1 : 0);
+    hash = 31L * hash + (caseInsensitive ? 1 : 0);
 
-    // Group count affects bytecode structure (memory allocation, array sizes)
-    hash = 31 * hash + nfa.getGroupCount();
+    // Each anchor type is a separate bit so that patterns differing only in which
+    // anchor they use always produce different hashes.
+    hash = 31L * hash + (nfa.hasEndAnchor() ? 1 : 0); // $
+    hash = 31L * hash + (nfa.hasStartAnchor() ? 1 : 0); // ^
+    hash = 31L * hash + (nfa.hasStringEndAbsoluteAnchor() ? 1 : 0); // \z
+    hash = 31L * hash + (nfa.hasStringEndAnchor() ? 1 : 0); // \Z
+    hash = 31L * hash + (nfa.hasStringStartAnchor() ? 1 : 0); // \A
+    hash = 31L * hash + (nfa.hasMultilineStartAnchor() ? 1 : 0); // ^ in (?m)
+    hash = 31L * hash + (nfa.hasMultilineEndAnchor() ? 1 : 0); // $ in (?m)
 
-    // Feature flags affect code generation
-    hash = 31 * hash + (result.useTaggedDFA ? 1 : 0);
-    hash = 31 * hash + (result.usePosixLastMatch ? 1 : 0);
-
-    // Case-insensitive backreference comparison affects bytecode generation
-    hash = 31 * hash + (caseInsensitive ? 1 : 0);
-
-    // Anchor types affect bytecode (different end-of-string semantics)
-    // \z (STRING_END_ABSOLUTE) matches only at absolute end
-    // \Z (STRING_END) matches at end or before final newline
-    hash = 31 * hash + (nfa.hasStringEndAbsoluteAnchor() ? 1 : 0);
-    hash = 31 * hash + (nfa.hasStringEndAnchor() ? 1 : 0);
-    hash = 31 * hash + (nfa.hasStringStartAnchor() ? 1 : 0);
-
-    // DFA content hash (if applicable)
     if (result.dfa != null) {
-      hash = 31 * hash + computeDFATopologyHash(result.dfa);
+      hash = 31L * hash + computeDFATopologyHash(result.dfa);
     }
 
-    // NFA content hash - includes character sets which are critical for
-    // distinguishing patterns with different case-sensitivity
-    hash = 31 * hash + nfa.contentHashCode();
+    hash = 31L * hash + nfa.contentHashCode();
 
-    // PatternInfo provides structural hash including class type
     if (result.patternInfo != null) {
-      hash = 31 * hash + result.patternInfo.structuralHashCode();
+      hash = 31L * hash + result.patternInfo.structuralHashCode();
+    }
+
+    return hash;
+  }
+
+  /**
+   * Compute hash without NFA (for patterns that skip NFA construction, e.g. RECURSIVE_DESCENT).
+   *
+   * @param result Analysis result
+   * @return 64-bit hash representing the structural equivalence class
+   */
+  public static long computeWithoutGroupCount(PatternAnalyzer.MatchingStrategyResult result) {
+    long hash = 17L;
+    hash = 31L * hash + result.strategy.ordinal();
+    hash = 31L * hash + (result.useTaggedDFA ? 1 : 0);
+    hash = 31L * hash + (result.usePosixLastMatch ? 1 : 0);
+
+    if (result.dfa != null) {
+      hash = 31L * hash + computeDFATopologyHash(result.dfa);
+    }
+
+    if (result.patternInfo != null) {
+      hash = 31L * hash + result.patternInfo.structuralHashCode();
     }
 
     return hash;
@@ -86,74 +113,48 @@ public final class StructuralHash {
   /**
    * Compute hash of DFA including topology and content.
    *
-   * <p>Includes: - State count - Transition counts per state - Accept state count - Max out-degree
-   * (transition density) - Character sets on transitions (critical for case-sensitivity)
+   * <p>Includes: state count, transition counts, accept state count, max out-degree, character sets
+   * on transitions, per-state acceptance anchor conditions, per-transition entry guards.
    *
-   * <p>Excludes: - State IDs (generated identifiers)
+   * <p>Excludes: state IDs (generated identifiers).
    */
-  private static int computeDFATopologyHash(DFA dfa) {
-    int hash = 1;
+  private static long computeDFATopologyHash(DFA dfa) {
+    long hash = 1L;
 
-    // State count is a primary structural characteristic
-    hash = 31 * hash + dfa.getStateCount();
+    hash = 31L * hash + dfa.getStateCount();
+    hash = 31L * hash + dfa.getAcceptStates().size();
+    hash = 31L * hash + dfa.getMaxOutDegree();
 
-    // Accept state count
-    hash = 31 * hash + dfa.getAcceptStates().size();
-
-    // Max out-degree (affects code generation strategy: unrolled vs switch vs table)
-    hash = 31 * hash + dfa.getMaxOutDegree();
-
-    // Transition structure including character sets
-    // Character sets MUST be included to distinguish patterns with different
-    // case-sensitivity (e.g., "(ab)c" vs "(a(?i)b)c")
     for (DFA.DFAState state : dfa.getAllStates()) {
-      // Number of outgoing transitions
-      hash = 31 * hash + state.transitions.size();
+      hash = 31L * hash + state.transitions.size();
+      hash = 31L * hash + (state.accepting ? 1 : 0);
 
-      // Accepting state flag
-      hash = 31 * hash + (state.accepting ? 1 : 0);
+      // Acceptance anchor conditions: use ordinal bitmask, not EnumSet.hashCode(), because
+      // System.identityHashCode() can return 0, making {END} look the same as {}.
+      hash = 31L * hash + anchorBitmask(state.acceptanceAnchorConditions);
 
-      // Group action count (affects bytecode for group tracking)
-      hash = 31 * hash + state.groupActions.size();
+      hash = 31L * hash + state.groupActions.size();
 
-      // Assertion checks — include type to distinguish positive from negative assertions
-      hash = 31 * hash + state.assertionChecks.size();
+      hash = 31L * hash + state.assertionChecks.size();
       for (var ac : state.assertionChecks) {
-        hash = 31 * hash + ac.type.hashCode();
+        hash = 31L * hash + ac.type.ordinal();
       }
 
-      // Include character sets - critical for case sensitivity
       for (var entry : state.transitions.entrySet()) {
-        hash = 31 * hash + entry.getKey().hashCode();
+        hash = 31L * hash + entry.getKey().hashCode();
+        hash = 31L * hash + anchorBitmask(entry.getValue().entryGuard);
       }
     }
 
     return hash;
   }
 
-  /**
-   * Computes a stable hash for a pattern analysis result.
-   *
-   * <p>This is a convenience method for testing and debugging that doesn't require an NFA. For
-   * production use, prefer compute(result, nfa) which includes group count.
-   *
-   * @param result Analysis result
-   * @return Hash code (less accurate without group count)
-   */
-  public static int computeWithoutGroupCount(PatternAnalyzer.MatchingStrategyResult result) {
-    int hash = 17;
-    hash = 31 * hash + result.strategy.hashCode();
-    hash = 31 * hash + (result.useTaggedDFA ? 1 : 0);
-    hash = 31 * hash + (result.usePosixLastMatch ? 1 : 0);
-
-    if (result.dfa != null) {
-      hash = 31 * hash + computeDFATopologyHash(result.dfa);
+  /** Stable bitmask over an EnumSet of AnchorType using ordinal() values. */
+  private static int anchorBitmask(EnumSet<NFA.AnchorType> anchors) {
+    int mask = 0;
+    for (NFA.AnchorType a : anchors) {
+      mask |= (1 << a.ordinal());
     }
-
-    if (result.patternInfo != null) {
-      hash = 31 * hash + result.patternInfo.structuralHashCode();
-    }
-
-    return hash;
+    return mask;
   }
 }

@@ -26,6 +26,7 @@ public class SubsetConstructor {
   private Map<Set<NFA.NFAState>, DFA.DFAState> stateCache;
   private List<DFA.DFAState> allStates;
   private int nextStateId;
+  private boolean anchorConditionDiluted;
 
   public DFA buildDFA(NFA nfa) throws StateExplosionException {
     return buildDFA(nfa, false);
@@ -43,6 +44,7 @@ public class SubsetConstructor {
     this.stateCache = new HashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
+    this.anchorConditionDiluted = false;
 
     // Pre-compute anchor-aware epsilon closures for all NFA states. Each entry maps a reachable
     // NFA state to the weakest conjunction of anchors that must hold at the current input
@@ -92,6 +94,7 @@ public class SubsetConstructor {
         Map<NFA.NFAState, EnumSet<NFA.AnchorType>> targetsWithCond = new HashMap<>();
         EnumSet<NFA.AnchorType> transitionGuard = null; // weakest across contributing sources
         boolean transitionHasContributor = false;
+        boolean anyNonEmptySrcCond = false;
         for (NFA.NFAState nfaState : current.nfaStates) {
           EnumSet<NFA.AnchorType> srcCond = currentConditions.get(nfaState);
           if (srcCond == null) continue; // unreachable
@@ -100,6 +103,7 @@ public class SubsetConstructor {
           for (NFA.Transition trans : nfaState.getTransitions()) {
             if (trans.chars.intersects(chars)) {
               transitionHasContributor = true;
+              if (!srcCond.isEmpty()) anyNonEmptySrcCond = true;
               transitionGuard = mergeWeakest(transitionGuard, srcCond);
               // After consuming a char, prior conditions are discharged. The post-consume
               // closure carries its own conditions starting from the transition target.
@@ -115,6 +119,8 @@ public class SubsetConstructor {
 
         if (!transitionHasContributor || targetsWithCond.isEmpty()) continue;
         if (transitionGuard == null) transitionGuard = EnumSet.noneOf(NFA.AnchorType.class);
+        // Anchor dilution: an unconditional contributor erased a non-empty anchor guard.
+        if (transitionGuard.isEmpty() && anyNonEmptySrcCond) anchorConditionDiluted = true;
 
         Set<NFA.NFAState> targets = targetsWithCond.keySet();
 
@@ -161,7 +167,7 @@ public class SubsetConstructor {
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
 
-    return new DFA(start, acceptStates, allStates);
+    return new DFA(start, acceptStates, allStates, anchorConditionDiluted);
   }
 
   /**
@@ -243,6 +249,11 @@ public class SubsetConstructor {
           EnumSet<NFA.AnchorType> merged = EnumSet.copyOf(existing);
           merged.retainAll(propagated);
           if (!merged.equals(existing)) {
+            // Two non-empty but disjoint anchor sets meeting at the same state: their
+            // intersection is empty (unconditional), erasing both anchors.
+            if (merged.isEmpty() && !existing.isEmpty() && !propagated.isEmpty()) {
+              anchorConditionDiluted = true;
+            }
             result.put(target, merged);
             worklist.add(target);
           }
@@ -289,6 +300,9 @@ public class SubsetConstructor {
    * Compute weakest acceptance conditions across all accept NFA states in {@code closure}. Returns
    * an empty set if any accept state is unconditionally reachable; otherwise the weakest
    * single-conjunction condition. Callers treat empty as "unconditionally accepting".
+   *
+   * <p>Side effect: sets {@link #anchorConditionDiluted} when multiple accept states have non-empty
+   * but disjoint conditions whose intersection collapses to empty.
    */
   private EnumSet<NFA.AnchorType> computeAcceptanceConditions(
       Map<NFA.NFAState, EnumSet<NFA.AnchorType>> closure, Set<NFA.NFAState> acceptStates) {
@@ -299,6 +313,11 @@ public class SubsetConstructor {
       if (cond.isEmpty()) return EnumSet.noneOf(NFA.AnchorType.class);
       if (best == null) best = EnumSet.copyOf(cond);
       else best.retainAll(cond);
+    }
+    if (best != null && best.isEmpty()) {
+      // All accept states had non-empty conditions, but they were disjoint — intersection
+      // collapsed to empty (unconditional). The DFA would accept without checking any anchor.
+      anchorConditionDiluted = true;
     }
     return best == null ? EnumSet.noneOf(NFA.AnchorType.class) : best;
   }
@@ -721,6 +740,7 @@ public class SubsetConstructor {
     this.stateCache = new HashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
+    this.anchorConditionDiluted = false;
 
     // Pre-compute anchor-aware epsilon closures
     Map<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> anchoredClosures =
@@ -765,6 +785,7 @@ public class SubsetConstructor {
         Map<NFA.NFAState, EnumSet<NFA.AnchorType>> targetsWithCond = new HashMap<>();
         EnumSet<NFA.AnchorType> transitionGuard = null;
         boolean hasContributor = false;
+        boolean anyNonEmptySrcCond = false;
         for (NFA.NFAState nfaState : current.nfaStates) {
           EnumSet<NFA.AnchorType> srcCond = currentConditions.get(nfaState);
           if (srcCond == null) continue;
@@ -772,6 +793,7 @@ public class SubsetConstructor {
           for (NFA.Transition trans : nfaState.getTransitions()) {
             if (trans.chars.intersects(chars)) {
               hasContributor = true;
+              if (!srcCond.isEmpty()) anyNonEmptySrcCond = true;
               transitionGuard = mergeWeakest(transitionGuard, srcCond);
               for (Map.Entry<NFA.NFAState, EnumSet<NFA.AnchorType>> e :
                   anchoredClosures.get(trans.target).entrySet()) {
@@ -784,6 +806,7 @@ public class SubsetConstructor {
 
         if (!hasContributor || targetsWithCond.isEmpty()) continue;
         if (transitionGuard == null) transitionGuard = EnumSet.noneOf(NFA.AnchorType.class);
+        if (transitionGuard.isEmpty() && anyNonEmptySrcCond) anchorConditionDiluted = true;
 
         Set<NFA.NFAState> targets = targetsWithCond.keySet();
         DFA.DFAState targetState = stateCache.get(targets);
@@ -807,7 +830,7 @@ public class SubsetConstructor {
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
 
-    return new DFA(start, acceptStates, allStates);
+    return new DFA(start, acceptStates, allStates, anchorConditionDiluted);
   }
 
   /** Helper class to hold assertion extraction results. */

@@ -92,7 +92,6 @@ public final class RegexFuzzOracle {
       return Result.skipped(
           "Reggie rejected pattern: " + t.getClass().getSimpleName() + ": " + t.getMessage());
     }
-
     List<Finding> findings = new ArrayList<>();
 
     // matches() — anchored full-input match

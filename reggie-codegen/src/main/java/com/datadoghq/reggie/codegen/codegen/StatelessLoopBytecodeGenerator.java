@@ -259,6 +259,14 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(loopStart);
 
+    // Check upper bound BEFORE consuming: if (maxReps != -1 && count >= maxReps) break.
+    // Must come before pos < len check so that {0} exits immediately without consuming any char.
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -279,14 +287,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
-    }
 
     mv.visitJumpInsn(GOTO, loopStart);
 
@@ -445,6 +445,13 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(innerLoop);
 
+    // Check upper bound before consuming (fixes maxReps=0 case)
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -464,14 +471,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
-    }
 
     mv.visitJumpInsn(GOTO, innerLoop);
 
@@ -748,6 +747,13 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(innerLoop);
 
+    // Check upper bound before consuming (fixes maxReps=0 case)
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -767,14 +773,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
-    }
 
     mv.visitJumpInsn(GOTO, innerLoop);
 
@@ -1252,6 +1250,13 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(innerLoop);
 
+    // Check upper bound before consuming (fixes maxReps=0 case)
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -1271,14 +1276,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
-    }
 
     mv.visitJumpInsn(GOTO, innerLoop);
 
@@ -1636,20 +1633,22 @@ public class StatelessLoopBytecodeGenerator {
       Label loopEnd = new Label();
 
       mv.visitLabel(loopStart);
-      // if (matchEnd >= input.length()) break;
-      mv.visitVarInsn(ILOAD, matchEndVar);
-      mv.visitVarInsn(ALOAD, inputVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
 
-      // Enforce upper bound: if maxReps > 0 and (matchEnd - matchStart) >= maxReps, break.
-      if (info.maxReps > 0) {
+      // Enforce upper bound BEFORE consuming: if maxReps != -1 and (matchEnd - matchStart) >=
+      // maxReps, break.
+      if (info.maxReps != -1) {
         mv.visitVarInsn(ILOAD, matchEndVar);
         mv.visitVarInsn(ILOAD, matchStartVar);
         mv.visitInsn(ISUB);
         pushInt(mv, info.maxReps);
         mv.visitJumpInsn(IF_ICMPGE, loopEnd);
       }
+
+      // if (matchEnd >= input.length()) break;
+      mv.visitVarInsn(ILOAD, matchEndVar);
+      mv.visitVarInsn(ALOAD, inputVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
 
       // char c = input.charAt(matchEnd);
       mv.visitVarInsn(ALOAD, inputVar);

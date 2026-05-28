@@ -26,10 +26,31 @@ public final class DFA {
   private final Set<DFAState> acceptStates;
   private final List<DFAState> allStates;
 
+  /**
+   * True when subset construction detected an anchor-condition dilution: two contributors in the
+   * same partition slice (or two accept states) had differing anchor conditions, and intersection
+   * collapsed them to unconditional. The DFA is structurally valid but may accept inputs that a
+   * correctly-anchored automaton would reject. Callers should route to a non-DFA engine.
+   */
+  private final boolean anchorConditionDiluted;
+
   public DFA(DFAState startState, Set<DFAState> acceptStates, List<DFAState> allStates) {
+    this(startState, acceptStates, allStates, false);
+  }
+
+  public DFA(
+      DFAState startState,
+      Set<DFAState> acceptStates,
+      List<DFAState> allStates,
+      boolean anchorConditionDiluted) {
     this.startState = startState;
     this.acceptStates = acceptStates;
     this.allStates = allStates;
+    this.anchorConditionDiluted = anchorConditionDiluted;
+  }
+
+  public boolean isAnchorConditionDiluted() {
+    return anchorConditionDiluted;
   }
 
   public DFAState getStartState() {

@@ -179,14 +179,18 @@ class ReggieMatcherBytecodeGeneratorTest {
 
   @Test
   void testRecursiveDescentStrategy() throws Exception {
-    Object matcher = compile("\\d+?", "RecursiveMatcher");
+    // \d+? (lazy) routes to JDK fallback: RECURSIVE_DESCENT lacks general alternation
+    // backtracking needed for lazy semantics. Use a quantified-backref pattern instead,
+    // which routes to RECURSIVE_DESCENT via hasQuantifiedBackrefs without lazy quantifiers.
+    Object matcher = compile("(\\d+)\\1{1,2}", "RecursiveMatcher");
     Method matches = matcher.getClass().getMethod("matches", String.class);
     Method find = matcher.getClass().getMethod("find", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "1"));
-    assertTrue((Boolean) matches.invoke(matcher, "5"));
-    assertFalse((Boolean) matches.invoke(matcher, "a"));
+    assertTrue((Boolean) matches.invoke(matcher, "11")); // group="1", backref once
+    assertTrue((Boolean) matches.invoke(matcher, "1111")); // group="11", backref once
+    assertFalse((Boolean) matches.invoke(matcher, "12")); // backref mismatch
+    assertFalse((Boolean) matches.invoke(matcher, "1")); // no room for backref
     assertFalse((Boolean) matches.invoke(matcher, ""));
-    assertTrue((Boolean) find.invoke(matcher, "abc1def"));
+    assertTrue((Boolean) find.invoke(matcher, "x11y"));
     assertFalse((Boolean) find.invoke(matcher, "abc"));
   }
 
