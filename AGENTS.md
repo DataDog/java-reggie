@@ -425,6 +425,28 @@ Verify both:
 ```
 
 ### Structural Hash Rule
+**HARD RULE**: Any time you add or change a field on `DFA.DFAState`, `DFA.DFATransition`, or any
+`PatternInfo` subclass that affects bytecode generation, you MUST also update
+`StructuralHash.java` to include that field in the hash. Failure to do so causes the level-2
+structural cache to return a compiled class built for a different pattern, producing wrong runtime
+results that are extremely hard to debug.
+
+Checklist when touching `DFA.DFAState`, `DFA.DFATransition`, `NFA.NFAState`, or any `PatternInfo`:
+- `DFAState` field added → add it to `computeDFATopologyHash()` state-loop body
+- `DFATransition` field added → add it to `computeDFATopologyHash()` transition-loop body
+- `NFAState` field added → add it to `NFA.contentHashCode()` state-loop body
+- New NFA anchor predicate (`NFA.hasXxx()`) added → add the corresponding flag to `StructuralHash.compute()`
+- `PatternInfo` subclass field added → add it to that class's `structuralHashCode()`
+
+Example — `acceptanceAnchorConditions` and `entryGuard` added post-anchor fix:
+```java
+// DFAState: per-state acceptance anchor conditions
+hash = 31 * hash + state.acceptanceAnchorConditions.hashCode();
+
+// DFATransition: per-transition entry guard
+hash = 31 * hash + entry.getValue().entryGuard.hashCode();
+```
+
 When creating `PatternInfo` subclasses, `structuralHashCode()` MUST include ALL fields affecting bytecode:
 ```java
 public int structuralHashCode() {

@@ -119,25 +119,10 @@ public final class SWARPatternAnalyzer {
       }
     }
 
-    // Case 5: Small literal set (up to 4 discrete characters)
-    // This would be ranges where each range is a single character
-    if (!negated && ranges.size() <= 4 && ranges.size() >= 2) {
-      boolean allSingleChar = true;
-      for (CharSet.Range range : ranges) {
-        if (range.start != range.end || range.start > 0xFF) {
-          allSingleChar = false;
-          break;
-        }
-      }
-
-      if (allSingleChar) {
-        char[] literals = new char[ranges.size()];
-        for (int i = 0; i < ranges.size(); i++) {
-          literals[i] = ranges.get(i).start;
-        }
-        return new LiteralSetOptimization(literals);
-      }
-    }
+    // Case 5: Small literal set — disabled.
+    // LiteralSetOptimization.generateFindNextBytecode only searches for literals[0],
+    // causing find() to miss matches starting with any other literal in the set.
+    // TODO: implement a correct multi-literal scan before re-enabling.
 
     // Default: no optimization, use existing charAt() logic
     return null;

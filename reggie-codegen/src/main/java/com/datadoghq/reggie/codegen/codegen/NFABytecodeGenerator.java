@@ -2140,14 +2140,16 @@ public class NFABytecodeGenerator {
               pushInt(mv, '\n');
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
-            case END:
             case STRING_END_ABSOLUTE:
-              // pos == input.length()
+              // \z: strict pos == input.length()
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
+            case END:
+            // $ (non-multiline): same as \Z — pos == length OR before final '\n'.
+            // Fall through to STRING_END.
             case STRING_END:
               // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
               mv.visitVarInsn(ILOAD, posVar);
@@ -7079,13 +7081,15 @@ public class NFABytecodeGenerator {
               pushInt(mv, '\n');
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
-            case END:
             case STRING_END_ABSOLUTE:
+              // \z: strict pos == input.length()
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
+            case END:
+            // $ (non-multiline): same as \Z. Fall through to STRING_END.
             case STRING_END:
               // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
               mv.visitVarInsn(ILOAD, posVar);
@@ -7307,16 +7311,18 @@ public class NFABytecodeGenerator {
    *     int matchStart = findFrom(input, start);
    *     if (matchStart < 0) return null;
    *
-   *     // Try all possible match lengths to find the longest (greedy)
-   *     int longestEnd = matchStart;
-   *     for (int matchEnd = matchStart + 1; matchEnd <= input.length(); matchEnd++) {
+   *     // Try all possible match lengths to find the longest (greedy).
+   *     // longestEnd starts at matchStart - 1 as a "no match yet" sentinel.
+   *     // matchEnd starts at matchStart to include zero-width matches.
+   *     int longestEnd = matchStart - 1;
+   *     for (int matchEnd = matchStart; matchEnd <= input.length(); matchEnd++) {
    *         MatchResult candidate = matchBounded(input, matchStart, matchEnd);
    *         if (candidate != null) {
    *             longestEnd = matchEnd;
    *         }
    *     }
    *
-   *     if (longestEnd == matchStart) return null;  // No valid match
+   *     if (longestEnd < matchStart) return null;  // No valid match
    *
    *     // Return final result with group information
    *     return matchBounded(input, matchStart, longestEnd);
@@ -7357,14 +7363,14 @@ public class NFABytecodeGenerator {
     mv.visitLabel(found);
 
     // Find longest match end by trying all lengths using matchBounded (zero allocations)
-    // int matchEnd = matchStart + 1;
+    // int matchEnd = matchStart;  — start at matchStart to include zero-width matches
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IADD);
     mv.visitVarInsn(ISTORE, 4); // matchEnd (current try)
 
-    // int longestEnd = matchStart; (no successful match yet)
+    // int longestEnd = matchStart - 1;  — sentinel: no successful match yet
     mv.visitVarInsn(ILOAD, 3);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, 5); // longestEnd
 
     Label loopStart = new Label();
@@ -7404,11 +7410,11 @@ public class NFABytecodeGenerator {
 
     mv.visitLabel(loopEnd);
 
-    // if (longestEnd == matchStart) return null; (no match found)
+    // if (longestEnd < matchStart) return null; (no match found)
     Label hasMatch = new Label();
     mv.visitVarInsn(ILOAD, 5);
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitJumpInsn(IF_ICMPNE, hasMatch);
+    mv.visitJumpInsn(IF_ICMPGE, hasMatch);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
     mv.visitLabel(hasMatch);

@@ -3362,16 +3362,40 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitLabel(atEnd);
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
-      } else if (node.type == AnchorNode.Type.END
-          || node.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
-        // $ (non-multiline) or \z: must be at end of input
+      } else if (node.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
+        // \z: strict end of input only
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
-        Label atEnd = new Label();
-        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        Label atAbsEnd = new Label();
+        mv.visitJumpInsn(IF_ICMPEQ, atAbsEnd);
         mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
-        mv.visitLabel(atEnd);
+        mv.visitLabel(atAbsEnd);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(IRETURN);
+      } else if (node.type == AnchorNode.Type.END) {
+        // $ (non-multiline): same as \Z — pos == end OR (pos == end-1 AND charAt(pos) == '\n')
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        Label dollarOk = new Label();
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        // pos != end: check if pos == end-1 AND charAt(pos) == '\n'
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitVarInsn(ILOAD, 3);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        Label dollarFail = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, dollarFail);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, dollarFail);
+        mv.visitJumpInsn(GOTO, dollarOk);
+        mv.visitLabel(dollarFail);
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(dollarOk);
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       }
@@ -3443,8 +3467,8 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitLabel(endIndexUpperBoundsOk);
 
       // Check if group has been captured
-      // PCRE semantics: An uncaptured backreference matches an empty string (0 chars)
-      // C-03: Also match empty string when group is in partial-open state
+      // JDK semantics: a backref to a group that never participated fails (returns -1).
+      // C-03: Match empty string when group is in partial-open state
       // (groups[startIndex] >= 0 AND groups[endIndex] == -1), which means we are
       // currently inside that group's first iteration (self-referencing backref).
       Label groupCaptured = new Label();
@@ -3454,8 +3478,8 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitInsn(ICONST_M1);
       mv.visitJumpInsn(IF_ICMPNE, groupCaptured);
 
-      // groups[startIndex] == -1: group not captured at all - match empty string
-      mv.visitVarInsn(ILOAD, 2); // pos
+      // groups[startIndex] == -1: group never captured — fail (JDK semantics)
+      mv.visitInsn(ICONST_M1);
       mv.visitInsn(IRETURN);
 
       mv.visitLabel(groupCaptured);

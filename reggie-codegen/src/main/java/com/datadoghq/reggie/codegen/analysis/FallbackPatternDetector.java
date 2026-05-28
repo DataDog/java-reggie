@@ -29,6 +29,9 @@ import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Detects regex patterns that trigger known correctness bugs in the reggie engine. When a bug is
@@ -59,7 +62,105 @@ public final class FallbackPatternDetector {
     if (v.hasLookbehind && v.hasLookahead) {
       return "lookbehind and lookahead combined";
     }
+
+    // Anchor inside a quantifier (e.g. ${2}, \z{n}) creates unusual NFA/DFA shapes that the
+    // current generators don't handle correctly.
+    if (v.hasAnchorInQuantifier) {
+      return "anchor inside quantifier: ${n}, \\z{n}, etc.";
+    }
+
+    // Lazy (non-greedy) quantifiers routed to RECURSIVE_DESCENT lack proper backtracking,
+    // causing incorrect matches() and find() results when the quantifier has following siblings
+    // or is in an alternation context.
+    if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT && v.hasLazyQuantifier) {
+      return "lazy quantifier in recursive-descent: requires backtracking semantics";
+    }
+
+    // Thompson NFA group-state contamination (OPTIMIZED_NFA_WITH_BACKREFS) and RECURSIVE_DESCENT
+    // backtracking limitations: both fail when a backref \N appears in one alternative of an
+    // alternation but group N is defined in a DIFFERENT alternative of the same alternation.
+    if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
+            || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT)
+        && hasCrossAlternativeBackref(ast)) {
+      return "cross-alternative backref: group captured in one branch, used in another";
+    }
+
     return null;
+  }
+
+  /**
+   * Returns true if any AlternationNode in {@code ast} has a backref \N in one alternative where
+   * group N's capturing paren is in a DIFFERENT alternative of that same alternation.
+   */
+  private static boolean hasCrossAlternativeBackref(RegexNode ast) {
+    if (ast instanceof AlternationNode) {
+      AlternationNode alt = (AlternationNode) ast;
+      List<RegexNode> alts = alt.alternatives;
+      @SuppressWarnings("unchecked")
+      Set<Integer>[] groups = new Set[alts.size()];
+      @SuppressWarnings("unchecked")
+      Set<Integer>[] backrefs = new Set[alts.size()];
+      Set<Integer> allGroupsInAlt = new HashSet<>();
+      for (int i = 0; i < alts.size(); i++) {
+        groups[i] = new HashSet<>();
+        backrefs[i] = new HashSet<>();
+        collectGroupsInSubtree(alts.get(i), groups[i]);
+        collectBackrefsInSubtree(alts.get(i), backrefs[i]);
+        allGroupsInAlt.addAll(groups[i]);
+      }
+      for (int i = 0; i < alts.size(); i++) {
+        for (int groupNum : backrefs[i]) {
+          if (!groups[i].contains(groupNum) && allGroupsInAlt.contains(groupNum)) {
+            return true;
+          }
+        }
+      }
+      for (RegexNode alternative : alts) {
+        if (hasCrossAlternativeBackref(alternative)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) ast).children) {
+        if (hasCrossAlternativeBackref(child)) return true;
+      }
+    }
+    if (ast instanceof GroupNode) {
+      return hasCrossAlternativeBackref(((GroupNode) ast).child);
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasCrossAlternativeBackref(((QuantifierNode) ast).child);
+    }
+    return false;
+  }
+
+  private static void collectGroupsInSubtree(RegexNode node, Set<Integer> groups) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing) groups.add(g.groupNumber);
+      collectGroupsInSubtree(g.child, groups);
+    } else if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) collectGroupsInSubtree(c, groups);
+    } else if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) collectGroupsInSubtree(a, groups);
+    } else if (node instanceof QuantifierNode) {
+      collectGroupsInSubtree(((QuantifierNode) node).child, groups);
+    }
+  }
+
+  private static void collectBackrefsInSubtree(RegexNode node, Set<Integer> backrefs) {
+    if (node instanceof BackreferenceNode) {
+      backrefs.add(((BackreferenceNode) node).groupNumber);
+    } else if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) collectBackrefsInSubtree(c, backrefs);
+    } else if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        collectBackrefsInSubtree(a, backrefs);
+    } else if (node instanceof GroupNode) {
+      collectBackrefsInSubtree(((GroupNode) node).child, backrefs);
+    } else if (node instanceof QuantifierNode) {
+      collectBackrefsInSubtree(((QuantifierNode) node).child, backrefs);
+    }
   }
 
   private static boolean isLookahead(AssertionNode.Type t) {
@@ -69,6 +170,22 @@ public final class FallbackPatternDetector {
   private static boolean isLookbehind(AssertionNode.Type t) {
     return t == AssertionNode.Type.POSITIVE_LOOKBEHIND
         || t == AssertionNode.Type.NEGATIVE_LOOKBEHIND;
+  }
+
+  private static boolean containsAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) return true;
+    if (node instanceof GroupNode) return containsAnchor(((GroupNode) node).child);
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (containsAnchor(c)) return true;
+      }
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsAnchor(alt)) return true;
+      }
+    }
+    return false;
   }
 
   /** Returns true if {@code node} is or recursively contains a lookahead AssertionNode. */
@@ -96,6 +213,8 @@ public final class FallbackPatternDetector {
     boolean lookaheadInQuantifier = false;
     boolean hasLookahead = false;
     boolean hasLookbehind = false;
+    boolean hasLazyQuantifier = false;
+    boolean hasAnchorInQuantifier = false;
 
     @Override
     public Void visitAssertion(AssertionNode node) {
@@ -113,6 +232,15 @@ public final class FallbackPatternDetector {
     public Void visitQuantifier(QuantifierNode node) {
       if (containsLookahead(node.child)) {
         lookaheadInQuantifier = true;
+      }
+      if (!node.greedy) {
+        hasLazyQuantifier = true;
+      }
+      if (containsAnchor(node.child) && (node.min != 1 || node.max != 1)) {
+        // Anchor inside a quantifier (other than {1}): the quantifier tries to repeat a
+        // zero-width assertion. This creates unusual NFA/DFA shapes that the current
+        // generators don't handle correctly (e.g. ${2}, ${0,3}, \z{2}).
+        hasAnchorInQuantifier = true;
       }
       node.child.accept(this);
       return null;
