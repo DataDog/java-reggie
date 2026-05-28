@@ -402,10 +402,10 @@ public class QuantifiedGroupBytecodeGenerator {
       mv.visitVarInsn(ISTORE, charVar);
       generateCharSetCheck(mv, info.charSet, charVar, exitLabel, false);
     } else {
-      // Char class
+      // Char class — pass the negation flag so [^x] groups are checked correctly
       int charVar = allocator.allocate();
       mv.visitVarInsn(ISTORE, charVar);
-      generateCharSetCheck(mv, info.charSet, charVar, exitLabel, false);
+      generateCharSetCheck(mv, info.charSet, charVar, exitLabel, info.isNegatedCharSet());
     }
   }
 

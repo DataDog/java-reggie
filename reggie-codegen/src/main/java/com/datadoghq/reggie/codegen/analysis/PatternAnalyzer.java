@@ -734,7 +734,8 @@ public class PatternAnalyzer {
           return r;
         }
 
-        if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+        if ((containsAlternation(ast) || containsOptionalQuantifier(ast))
+            && dfaHasAcceptingStateWithTransitions(dfa)) {
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
@@ -843,6 +844,26 @@ public class PatternAnalyzer {
   private boolean hasBackreferences(RegexNode node) {
     BackrefDetector detector = new BackrefDetector();
     return node.accept(detector);
+  }
+
+  /** Returns true if the AST contains any quantifier with min=0 (optional or star). */
+  private boolean containsOptionalQuantifier(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      if (((QuantifierNode) node).min == 0) return true;
+      return containsOptionalQuantifier(((QuantifierNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children)
+        if (containsOptionalQuantifier(c)) return true;
+      return false;
+    }
+    if (node instanceof GroupNode) return containsOptionalQuantifier(((GroupNode) node).child);
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        if (containsOptionalQuantifier(a)) return true;
+      return false;
+    }
+    return false;
   }
 
   private boolean containsAlternation(RegexNode node) {
@@ -5095,6 +5116,10 @@ public class PatternAnalyzer {
     if (quant.max != -1 && quant.max > 1000) {
       return null; // Too large to optimize
     }
+    // {0} always produces an empty match; specialized generator does not handle max=0 correctly.
+    if (quant.max == 0) {
+      return null;
+    }
 
     if (!(quant.child instanceof CharClassNode)) {
       return null;
@@ -5948,8 +5973,15 @@ public class PatternAnalyzer {
 
       for (RegexNode child : concat.children) {
         if (child instanceof AnchorNode) {
-          // Skip anchors
-          continue;
+          // Skip START-type anchors — they are handled by requiresStartAnchor and do not
+          // affect SPECIALIZED_QUANTIFIED_GROUP semantics.
+          // END-type anchors ($, \Z, \z) make the pattern semantically impossible to match
+          // at non-end positions; the specialized generator is unaware of them, so bail out.
+          AnchorNode anchor = (AnchorNode) child;
+          if (anchor.type == AnchorNode.Type.START || anchor.type == AnchorNode.Type.STRING_START) {
+            continue;
+          }
+          return null; // END / STRING_END / STRING_END_ABSOLUTE / multiline anchors
         } else if (child instanceof QuantifierNode) {
           if (foundQuant != null) {
             // Multiple quantifiers - not a simple pattern
@@ -6018,6 +6050,7 @@ public class PatternAnalyzer {
     String literal = null;
     boolean isAlternation = false;
     CharSet[] alternationCharSets = null;
+    boolean isNegatedCC = false; // negation flag for direct CharClassNode groups
 
     if (groupChild instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) groupChild;
@@ -6030,8 +6063,10 @@ public class PatternAnalyzer {
       literal = String.valueOf(lit.ch);
       charSet = CharSet.of(lit.ch);
     } else if (groupChild instanceof CharClassNode) {
-      // ([a-z])+
-      charSet = ((CharClassNode) groupChild).chars;
+      // ([a-z])+ or ([^b])+
+      CharClassNode ccNode = (CharClassNode) groupChild;
+      charSet = ccNode.chars;
+      isNegatedCC = ccNode.negated;
     } else if (groupChild instanceof AlternationNode) {
       // (a|b)+ or (a+|b)+
       AlternationNode alt = (AlternationNode) groupChild;
@@ -6118,6 +6153,15 @@ public class PatternAnalyzer {
         return null;
       }
 
+      // When the OUTER quantifier is fixed (min==max, e.g. {4}) and the INNER quantifier is
+      // unbounded (like .+), the greedy inner loop consumes ALL remaining chars in the first
+      // outer iteration, leaving none for iterations 2..N (backtracking is needed).
+      // When the outer quantifier is unbounded (e.g. + or *), only one outer iteration fires
+      // on the available chars so the greedy inner loop is correct.
+      if ((innerQuant.max == -1 || innerQuant.max == Integer.MAX_VALUE) && quant.min == quant.max) {
+        return null;
+      }
+
       // Extract charset from inner quantifier's child
       if (innerQuant.child instanceof LiteralNode) {
         charSet = CharSet.of(((LiteralNode) innerQuant.child).ch);
@@ -6169,7 +6213,16 @@ public class PatternAnalyzer {
         charSet,
         literal,
         isAlternation,
-        alternationCharSets);
+        alternationCharSets,
+        false, // hasComplexAlternation
+        null, // alternationMinBounds
+        null, // alternationMaxBounds
+        null, // alternationNegated
+        null, // alternatives
+        false, // hasNestedQuantifier
+        1, // innerMinQuantifier
+        1, // innerMaxQuantifier
+        isNegatedCC); // isNegatedCharSet — propagates [^x] negation correctly
   }
 
   /**

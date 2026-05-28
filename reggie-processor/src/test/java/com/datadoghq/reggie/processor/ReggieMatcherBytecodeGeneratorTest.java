@@ -233,11 +233,13 @@ class ReggieMatcherBytecodeGeneratorTest {
 
   @Test
   void testOptionalGroupBackrefStrategy() throws Exception {
-    Object matcher = compile("^(a)?(b)?\\1\\2$", "OptGroupBackrefMatcher");
+    // Use empty-alt form (a|) instead of (a)? so the group always participates
+    // (the quantified (X)? form now routes to JDK fallback for correct Java backref semantics)
+    Object matcher = compile("^(a|)(b|)\\1\\2$", "OptGroupBackrefMatcher");
     Method matches = matcher.getClass().getMethod("matches", String.class);
-    // Group 1=(a)? and group 2=(b)? are optional; backrefs \1\2 match whatever they captured
     assertTrue((Boolean) matches.invoke(matcher, "abab"));
     assertTrue((Boolean) matches.invoke(matcher, "aa"));
+    assertTrue((Boolean) matches.invoke(matcher, ""));
     assertFalse((Boolean) matches.invoke(matcher, "abba"));
     assertFalse((Boolean) matches.invoke(matcher, "abc"));
   }

@@ -24,20 +24,20 @@ import org.junit.jupiter.api.Test;
  * Tests for OPTIONAL_GROUP_BACKREF strategy. Patterns like (a)?\1 where backreference refers to
  * optional group.
  *
- * <p>PCRE Semantics: - If optional group matched: backref must match captured content - If optional
- * group didn't match: backref matches empty string
+ * <p>Java semantics (verified against JDK): - If optional group matched: backref must match
+ * captured content - If optional group did NOT participate (was skipped): backref FAILS to match
  */
 class OptionalGroupBackrefTest {
 
   @Test
   void testSimpleOptionalBackref() {
     // (a)?\1 - optional 'a', then backref
-    // Matches: "" (group not matched, backref matches empty)
+    // Does NOT match: "" (group didn't participate — \1 fails per Java semantics)
     // Matches: "aa" (group matched 'a', backref matches 'a')
     // Does NOT match: "a" (group matched 'a', backref expects 'a' but only empty remains)
     ReggieMatcher m = Reggie.compile("(a)?\\1");
 
-    assertTrue(m.matches(""), "(a)?\\1 should match '' (empty - group not matched, backref empty)");
+    assertFalse(m.matches(""), "(a)?\\1 should NOT match '' — unmatched group makes \\1 fail");
     assertTrue(m.matches("aa"), "(a)?\\1 should match 'aa' (group='a', backref='a')");
     assertFalse(m.matches("a"), "Should not match 'a' (group='a' but no room for backref)");
     assertFalse(m.matches("ab"), "Should not match 'ab'");
@@ -49,7 +49,7 @@ class OptionalGroupBackrefTest {
     // (x)?\1
     ReggieMatcher m = Reggie.compile("(x)?\\1");
 
-    assertTrue(m.matches(""), "Should match empty string");
+    assertFalse(m.matches(""), "Should NOT match empty string — unmatched group makes \\1 fail");
     assertTrue(m.matches("xx"), "Should match 'xx'");
     assertFalse(m.matches("x"), "Should not match 'x'");
     assertFalse(m.matches("xy"), "Should not match 'xy'");
@@ -58,19 +58,18 @@ class OptionalGroupBackrefTest {
   @Test
   void testMultipleOptionalGroups() {
     // (a)?(b)?\1\2 - two optional groups with backrefs
-    // Pattern matches sequentially: try (a)?, then (b)?, then \1, then \2
-    // Matches: "" (neither matched, both backrefs match empty)
-    // Matches: "aa" (group1='a', group2=unmatched, \1='a', \2=empty)
-    // Matches: "bb" (group1=unmatched, group2='b', \1=empty, \2='b')
+    // Java semantics: when an optional group didn't participate, \N to it FAILS.
     // Matches: "abab" (group1='a', group2='b', \1='a', \2='b')
-    // Does NOT match: "aabb" (group1='a' at 0, group2 fails at 1 since 'a'!='b',
-    //                         \1='a' at 1, \2=empty, pos=2 != len=4)
+    // Does NOT match "" (neither group participated → \1 and \2 fail)
+    // Does NOT match "aa" (group2 unmatched → \2 fails)
+    // Does NOT match "bb" (group1 unmatched → \1 fails)
+    // Does NOT match "aabb"
     ReggieMatcher m = Reggie.compile("(a)?(b)?\\1\\2");
 
-    assertTrue(m.matches(""), "Should match '' (neither group matched)");
-    assertTrue(m.matches("aa"), "Should match 'aa' (first matched, second not)");
-    assertTrue(m.matches("bb"), "Should match 'bb' (first not, second matched)");
-    assertFalse(m.matches("aabb"), "Should NOT match 'aabb' (group2 fails at pos 1)");
+    assertFalse(m.matches(""), "Should NOT match '' (unmatched groups make backrefs fail)");
+    assertFalse(m.matches("aa"), "Should NOT match 'aa' (group2 unmatched → \\2 fails)");
+    assertFalse(m.matches("bb"), "Should NOT match 'bb' (group1 unmatched → \\1 fails)");
+    assertFalse(m.matches("aabb"), "Should NOT match 'aabb'");
     assertTrue(m.matches("abab"), "Should match 'abab' (both matched sequentially)");
     assertFalse(m.matches("a"), "Should not match 'a'");
     assertFalse(m.matches("ab"), "Should not match 'ab'");
@@ -82,7 +81,7 @@ class OptionalGroupBackrefTest {
     // ^(a)?\1$ - anchored
     ReggieMatcher m = Reggie.compile("^(a)?\\1$");
 
-    assertTrue(m.matches(""), "Should match ''");
+    assertFalse(m.matches(""), "Should NOT match '' — unmatched group makes \\1 fail");
     assertTrue(m.matches("aa"), "Should match 'aa'");
     assertFalse(m.matches("a"), "Should not match 'a'");
     assertFalse(m.matches("aaa"), "Should not match 'aaa'");
@@ -94,7 +93,7 @@ class OptionalGroupBackrefTest {
     ReggieMatcher m = Reggie.compile("(a)?\\1");
 
     assertTrue(m.find("xaay"), "Should find 'aa' in 'xaay'");
-    assertTrue(m.find("xy"), "Should find '' in 'xy' (empty match)");
+    assertFalse(m.find("xy"), "Should NOT find in 'xy' — no 'a' so group never matches");
     assertTrue(m.find("aa"), "Should find in 'aa'");
   }
 
@@ -102,7 +101,7 @@ class OptionalGroupBackrefTest {
   void testFindFrom() {
     ReggieMatcher m = Reggie.compile("(a)?\\1");
 
-    // Note: This pattern can match empty string, so it will find at position 0
+    // Note: match at pos=1 ("aa" in "xaay")
     int pos = m.findFrom("xaay", 0);
     assertTrue(pos >= 0, "Should find a match");
   }
@@ -110,17 +109,15 @@ class OptionalGroupBackrefTest {
   @Test
   void testBackrefOrderMatters() {
     // The pattern (a)?(b)?\2\1 has backrefs in different order
-    // Pattern matches: try (a)?, then (b)?, then \2, then \1
-    // This test verifies correct group-to-backref mapping
+    // Java semantics: when an optional group didn't participate, \N to it FAILS.
+    // Matches: "abba" (group1='a', group2='b', \2='b', \1='a')
+    // Does NOT match "" (neither group participated → backrefs fail)
+    // Does NOT match "bb" (group1 unmatched → \1 fails)
     ReggieMatcher m = Reggie.compile("(a)?(b)?\\2\\1");
 
-    assertTrue(m.matches(""), "Should match '' (neither group matched)");
-    // "ba" does NOT match: (a)? fails at 'b', (b)? matches 'b' at pos 0,
-    // then \2 needs 'b' at pos 1 but input[1]='a' → FAIL
+    assertFalse(m.matches(""), "Should NOT match '' (unmatched groups make backrefs fail)");
     assertFalse(m.matches("ba"), "Should NOT match 'ba' (backref \\2 needs 'b' but finds 'a')");
-    // "bb" matches: (a)? fails, (b)? matches 'b', \2='b', \1=empty
-    assertTrue(m.matches("bb"), "Should match 'bb' (group2='b', group1 unmatched)");
-    // "abba" matches: (a)? matches 'a', (b)? matches 'b', \2='b', \1='a'
+    assertFalse(m.matches("bb"), "Should NOT match 'bb' (group1 unmatched → \\1 fails)");
     assertTrue(m.matches("abba"), "Should match 'abba'");
   }
 }

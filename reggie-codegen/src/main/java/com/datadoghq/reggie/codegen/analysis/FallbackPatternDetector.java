@@ -69,6 +69,13 @@ public final class FallbackPatternDetector {
       return "anchor inside quantifier: ${n}, \\z{n}, etc.";
     }
 
+    // END-type anchor ($, \Z) immediately before a char consumer within a concat: Reggie's DFA
+    // prunes consuming transitions from END-conditioned states, missing the valid "$ then consume
+    // final \\n" path that Java regex allows. Route to JDK for correct semantics.
+    if (hasEndAnchorBeforeConsumer(ast)) {
+      return "end-anchor before consumer: $ or \\Z followed by char-consuming element";
+    }
+
     // RECURSIVE_DESCENT uses a greedy-first descent parser with limited backtracking (quantifiers
     // followed by fixed suffixes). It does NOT implement general alternation backtracking: when an
     // alternation's first branch partially matches but the following context fails, the parser
@@ -76,8 +83,14 @@ public final class FallbackPatternDetector {
     // with alternation (e.g. a|ab matches "ab" requires the engine to try both branches). Until
     // the generator is extended with full continuation-passing backtracking, lazy patterns route
     // to java.util.regex which handles them correctly.
-    if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT && v.hasLazyQuantifier) {
-      return "lazy quantifier in recursive-descent: requires backtracking semantics";
+    //
+    // OPTIMIZED_NFA_WITH_BACKREFS findMatchFromMethod always returns the LONGEST match (it tries
+    // all end positions and keeps the maximum). Lazy quantifiers require the SHORTEST match.
+    // Without proper lazy-aware result selection, these patterns produce wrong spans.
+    if ((strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+            || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS)
+        && v.hasLazyQuantifier) {
+      return "lazy quantifier: requires shortest-match semantics not supported by this strategy";
     }
 
     // Thompson NFA group-state contamination (OPTIMIZED_NFA_WITH_BACKREFS) and RECURSIVE_DESCENT
@@ -96,6 +109,17 @@ public final class FallbackPatternDetector {
     if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
         && hasNullableBackrefGroup(ast)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
+    }
+
+    // OptionalGroupBackref generator has a bug in the "group did not participate" path:
+    // it treats \N as vacuously satisfied (matching empty) when the optional group was skipped.
+    // Java semantics: \N to a non-participating group FAILS.
+    // The bug only manifests for (X)? forms where X is non-nullable (the group might not
+    // participate at all). The (X|) empty-alt form always captures something, so no bug there.
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF
+        && hasNonNullableQuantifiedOptionalGroupWithBackref(ast)) {
+      return "optional group backref with non-nullable (X)? form: unmatched group wrongly "
+          + "treated as empty";
     }
 
     return null;
@@ -177,6 +201,48 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if the pattern has a (X)? optional group (not an (X|) empty-alt group) AND a
+   * backref to that group. The (X)? form can result in the group not participating at all; when X
+   * is non-nullable, backref \N to the non-participating group should fail per Java semantics, but
+   * OptionalGroupBackrefBytecodeGenerator incorrectly treats it as empty.
+   */
+  private static boolean hasNonNullableQuantifiedOptionalGroupWithBackref(RegexNode ast) {
+    Set<Integer> backrefs = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefs);
+    if (backrefs.isEmpty()) return false;
+    return hasQuantifiedOptionalGroupForBackref(ast, backrefs);
+  }
+
+  /**
+   * Walk the AST looking for QuantifierNode(min=0,max=1,child=GroupNode(N,...)) where N is in the
+   * backref set and the group content is non-nullable.
+   */
+  private static boolean hasQuantifiedOptionalGroupForBackref(
+      RegexNode node, Set<Integer> backrefs) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.min == 0 && q.max == 1 && q.child instanceof GroupNode) {
+        GroupNode g = (GroupNode) q.child;
+        if (g.capturing && backrefs.contains(g.groupNumber) && !subtreeIsNullable(g.child)) {
+          return true;
+        }
+      }
+      return hasQuantifiedOptionalGroupForBackref(q.child, backrefs);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children)
+        if (hasQuantifiedOptionalGroupForBackref(c, backrefs)) return true;
+    }
+    if (node instanceof GroupNode)
+      return hasQuantifiedOptionalGroupForBackref(((GroupNode) node).child, backrefs);
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        if (hasQuantifiedOptionalGroupForBackref(a, backrefs)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any backref \N references a group whose content is nullable (can match the
    * empty string). In parallel NFA simulation, when such a group exists, the shared group-capture
    * arrays may be overwritten by the greedy (non-empty) path before the empty-capture path's
@@ -241,6 +307,38 @@ public final class FallbackPatternDetector {
     }
     // AnchorNode is zero-width (nullable); LiteralNode and CharClassNode are not.
     return node instanceof AnchorNode;
+  }
+
+  /**
+   * Returns true if the AST contains an END-type anchor ($, \Z, \z) immediately before a
+   * char-consuming element within the same ConcatNode. Such patterns rely on `$` matching "before
+   * final newline" and then the subsequent element consuming that newline — a semantic that
+   * Reggie's DFA cannot express because it prunes consuming transitions from END-conditioned states
+   * without tracking whether the end-char is a newline at runtime.
+   */
+  private static boolean hasEndAnchorBeforeConsumer(RegexNode ast) {
+    if (ast instanceof ConcatNode) {
+      ConcatNode concat = (ConcatNode) ast;
+      for (int i = 0; i < concat.children.size() - 1; i++) {
+        RegexNode child = concat.children.get(i);
+        if (child instanceof AnchorNode) {
+          AnchorNode anchor = (AnchorNode) child;
+          if (anchor.type == AnchorNode.Type.END || anchor.type == AnchorNode.Type.STRING_END) {
+            // Next sibling is a char consumer — this pattern needs JDK
+            return true;
+          }
+        }
+      }
+      for (RegexNode c : concat.children) if (hasEndAnchorBeforeConsumer(c)) return true;
+    }
+    if (ast instanceof GroupNode) return hasEndAnchorBeforeConsumer(((GroupNode) ast).child);
+    if (ast instanceof QuantifierNode)
+      return hasEndAnchorBeforeConsumer(((QuantifierNode) ast).child);
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives)
+        if (hasEndAnchorBeforeConsumer(a)) return true;
+    }
+    return false;
   }
 
   private static boolean isLookahead(AssertionNode.Type t) {

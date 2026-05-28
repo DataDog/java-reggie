@@ -1710,7 +1710,10 @@ public class OptionalGroupBackrefBytecodeGenerator {
             mv.visitJumpInsn(GOTO, backrefEnd);
 
             mv.visitLabel(groupNotMatched);
-            // Group captured empty - backref matches empty (always satisfied)
+            // Group did NOT participate (optional group was skipped entirely).
+            // Java semantics: \N to a non-participating group FAILS — it does not match empty.
+            // We must try the next start position instead of vacuously succeeding.
+            mv.visitJumpInsn(GOTO, tryNextStart);
 
             mv.visitLabel(backrefEnd);
         }
