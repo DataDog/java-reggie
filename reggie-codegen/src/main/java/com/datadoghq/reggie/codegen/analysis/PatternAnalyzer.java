@@ -846,21 +846,57 @@ public class PatternAnalyzer {
     return node.accept(detector);
   }
 
-  /** Returns true if the AST contains any quantifier with min=0 (optional or star). */
+  /**
+   * Returns true if the AST contains an optional quantifier (min=0) INSIDE a capturing group that
+   * is itself in a repeating quantifier (outer + or * or {n,m} with n<m). This is the structural
+   * pattern that causes DFA/NFA divergence: the optional element creates ambiguity within each
+   * group iteration, and the repeating outer loop amplifies it by letting the DFA choose a
+   * different (longer) path across iterations than the JDK NFA would.
+   *
+   * <p>Patterns like (a*b*c*d*e*) are NOT flagged because the group is not inside a repeating
+   * quantifier — there is no loop that could cause the DFA to accumulate extra chars.
+   */
   private boolean containsOptionalQuantifier(RegexNode node) {
+    return hasOptionalInsideRepeatingGroup(node);
+  }
+
+  private boolean hasOptionalInsideRepeatingGroup(RegexNode node) {
     if (node instanceof QuantifierNode) {
-      if (((QuantifierNode) node).min == 0) return true;
-      return containsOptionalQuantifier(((QuantifierNode) node).child);
+      QuantifierNode q = (QuantifierNode) node;
+      // Repeating group: outer quantifier with max>1 and the child is a group
+      if ((q.max == -1 || q.max > 1) && q.min >= 1 && q.child instanceof GroupNode) {
+        if (subtreeContainsOptional(q.child)) return true;
+      }
+      return hasOptionalInsideRepeatingGroup(q.child);
     }
     if (node instanceof ConcatNode) {
       for (RegexNode c : ((ConcatNode) node).children)
-        if (containsOptionalQuantifier(c)) return true;
+        if (hasOptionalInsideRepeatingGroup(c)) return true;
       return false;
     }
-    if (node instanceof GroupNode) return containsOptionalQuantifier(((GroupNode) node).child);
+    if (node instanceof GroupNode) return hasOptionalInsideRepeatingGroup(((GroupNode) node).child);
     if (node instanceof AlternationNode) {
       for (RegexNode a : ((AlternationNode) node).alternatives)
-        if (containsOptionalQuantifier(a)) return true;
+        if (hasOptionalInsideRepeatingGroup(a)) return true;
+      return false;
+    }
+    return false;
+  }
+
+  /** Returns true if the subtree contains any QuantifierNode with min=0. */
+  private static boolean subtreeContainsOptional(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      if (((QuantifierNode) node).min == 0) return true;
+      return subtreeContainsOptional(((QuantifierNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) if (subtreeContainsOptional(c)) return true;
+      return false;
+    }
+    if (node instanceof GroupNode) return subtreeContainsOptional(((GroupNode) node).child);
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        if (subtreeContainsOptional(a)) return true;
       return false;
     }
     return false;
