@@ -1,6 +1,6 @@
 # Reggie feature requirements — grok log-parsing adoption
 
-Context: We're evaluating Reggie 0.3.0-SNAPSHOT as a drop-in replacement for java.util.regex in the grok log-parsing pipeline (logs-processing service, ~16 µs/op on an access-log pattern). Benchmark: GrokModuleBenchmark.parse, baseline 16.4 µs/op (JDK).
+Context: We're evaluating Reggie 0.3.0 as a drop-in replacement for java.util.regex in the grok log-parsing pipeline (logs-processing service, ~16 µs/op on an access-log pattern). Benchmark: GrokModuleBenchmark.parse, baseline 16.4 µs/op (JDK).
 
 ---
 ## P0 — Compile blockers (throw today)
