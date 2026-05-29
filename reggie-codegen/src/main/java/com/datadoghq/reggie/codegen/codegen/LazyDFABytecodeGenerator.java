@@ -37,6 +37,11 @@ public class LazyDFABytecodeGenerator {
   private static final String NFA_STEP = "com/datadoghq/reggie/runtime/NfaStep";
   private static final String ARRAYS = "java/util/Arrays";
 
+  // Mirrors of LazyDFACache sentinels — must stay in sync.
+  private static final int UNCACHED = -1;
+  private static final int DEAD = -2;
+  private static final int FALLBACK = -3;
+
   private final NFA nfa;
   private final int stateCount;
   private final int[][] transitions; // transitions[id] = flat [min, max, target, ...]
@@ -274,17 +279,159 @@ public class LazyDFABytecodeGenerator {
   }
 
   /**
-   * Emits {@code public boolean matches(String input)} delegating to CACHE. Passes {@code this}
-   * directly (the generated class implements {@link NfaStep}).
+   * Emits {@code public boolean matches(String input)} with the hot loop inlined — eliminates the
+   * {@code LazyDFACache.matches()} call frame and exposes the per-character ASCII table read
+   * directly to the JIT for better optimization.
+   *
+   * <p>Equivalent Java:
+   *
+   * <pre>
+   *   public boolean matches(String input) {
+   *     if (input == null) return false;
+   *     LazyDFACache cache = CACHE;
+   *     int dfaState = 0;
+   *     for (int pos = 0, len = input.length(); pos < len; pos++) {
+   *       int c = input.charAt(pos);
+   *       int[] table = cache.asciiTables[dfaState];
+   *       int next = (table != null && c < 128) ? table[c] : LazyDFACache.UNCACHED;
+   *       if (next == LazyDFACache.UNCACHED) next = cache.lookupOrCompute(dfaState, c, this);
+   *       if (next == LazyDFACache.DEAD) return false;
+   *       if (next == LazyDFACache.FALLBACK)
+   *         return cache.nfaFallbackMatch(input, pos, cache.nfaStateSets[dfaState], this);
+   *       dfaState = next;
+   *     }
+   *     return cache.accepting[dfaState];
+   *   }
+   * </pre>
+   *
+   * Variable layout: 0=this, 1=input, 2=cache, 3=dfaState, 4=len, 5=pos, 6=c, 7=table, 8=next
    */
   public void generateMatchesMethod(ClassWriter cw, String className) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
     mv.visitCode();
+
+    // if (input == null) return false
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notNull);
+
+    // LazyDFACache cache = CACHE  (slot 2)
     mv.visitFieldInsn(GETSTATIC, className, "CACHE", "L" + LAZY_CACHE + ";");
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitVarInsn(ALOAD, 0); // this (implements NfaStep)
+    mv.visitVarInsn(ASTORE, 2);
+
+    // int dfaState = 0  (slot 3)
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 3);
+
+    // int len = input.length()  (slot 4)
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, 4);
+
+    // int pos = 0  (slot 5)
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 5);
+
+    Label loopStart = new Label(), loopEnd = new Label();
+    mv.visitLabel(loopStart);
+    // if (pos >= len) break
+    mv.visitVarInsn(ILOAD, 5);
+    mv.visitVarInsn(ILOAD, 4);
+    mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+
+    // int c = input.charAt(pos)  (slot 6)
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 5);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, 6);
+
+    // int[] table = cache.asciiTables[dfaState]  (slot 7)
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitFieldInsn(GETFIELD, LAZY_CACHE, "asciiTables", "[[I");
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitInsn(AALOAD);
+    mv.visitVarInsn(ASTORE, 7);
+
+    // int next = (table != null && c < 128) ? table[c] : UNCACHED  (slot 8)
+    Label slowPath = new Label(), afterTableRead = new Label();
+    mv.visitVarInsn(ALOAD, 7);
+    mv.visitJumpInsn(IFNULL, slowPath); // table == null → slow path
+    mv.visitVarInsn(ILOAD, 6);
+    pushInt(mv, 128);
+    mv.visitJumpInsn(IF_ICMPGE, slowPath); // c >= 128 → slow path
+    mv.visitVarInsn(ALOAD, 7);
+    mv.visitVarInsn(ILOAD, 6);
+    mv.visitInsn(IALOAD); // table[c]
+    mv.visitVarInsn(ISTORE, 8);
+    mv.visitJumpInsn(GOTO, afterTableRead);
+    mv.visitLabel(slowPath);
+    pushInt(mv, UNCACHED);
+    mv.visitVarInsn(ISTORE, 8);
+    mv.visitLabel(afterTableRead);
+
+    // if (next == UNCACHED) next = cache.lookupOrCompute(dfaState, c, this)
+    Label notUncached = new Label();
+    mv.visitVarInsn(ILOAD, 8);
+    pushInt(mv, UNCACHED);
+    mv.visitJumpInsn(IF_ICMPNE, notUncached);
+    mv.visitVarInsn(ALOAD, 2); // cache
+    mv.visitVarInsn(ILOAD, 3); // dfaState
+    mv.visitVarInsn(ILOAD, 6); // c
+    mv.visitVarInsn(ALOAD, 0); // this (NfaStep)
     mv.visitMethodInsn(
-        INVOKEVIRTUAL, LAZY_CACHE, "matches", "(Ljava/lang/String;L" + NFA_STEP + ";)Z", false);
+        INVOKEVIRTUAL, LAZY_CACHE, "lookupOrCompute", "(IIL" + NFA_STEP + ";)I", false);
+    mv.visitVarInsn(ISTORE, 8);
+    mv.visitLabel(notUncached);
+
+    // if (next == DEAD) return false
+    mv.visitVarInsn(ILOAD, 8);
+    pushInt(mv, DEAD);
+    Label notDead = new Label();
+    mv.visitJumpInsn(IF_ICMPNE, notDead);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notDead);
+
+    // if (next == FALLBACK) return cache.nfaFallbackMatch(input, pos, cache.nfaStateSets[dfaState],
+    // this)
+    mv.visitVarInsn(ILOAD, 8);
+    pushInt(mv, FALLBACK);
+    Label notFallback = new Label();
+    mv.visitJumpInsn(IF_ICMPNE, notFallback);
+    mv.visitVarInsn(ALOAD, 2); // cache
+    mv.visitVarInsn(ALOAD, 1); // input
+    mv.visitVarInsn(ILOAD, 5); // pos
+    mv.visitVarInsn(ALOAD, 2); // cache (for nfaStateSets)
+    mv.visitFieldInsn(GETFIELD, LAZY_CACHE, "nfaStateSets", "[[I");
+    mv.visitVarInsn(ILOAD, 3); // dfaState
+    mv.visitInsn(AALOAD); // cache.nfaStateSets[dfaState]
+    mv.visitVarInsn(ALOAD, 0); // this (NfaStep)
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        LAZY_CACHE,
+        "nfaFallbackMatch",
+        "(Ljava/lang/String;I[IL" + NFA_STEP + ";)Z",
+        false);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notFallback);
+
+    // dfaState = next
+    mv.visitVarInsn(ILOAD, 8);
+    mv.visitVarInsn(ISTORE, 3);
+
+    // pos++; goto loopStart
+    mv.visitIincInsn(5, 1);
+    mv.visitJumpInsn(GOTO, loopStart);
+    mv.visitLabel(loopEnd);
+
+    // return cache.accepting[dfaState]
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitFieldInsn(GETFIELD, LAZY_CACHE, "accepting", "[Z");
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitInsn(BALOAD);
     mv.visitInsn(IRETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();

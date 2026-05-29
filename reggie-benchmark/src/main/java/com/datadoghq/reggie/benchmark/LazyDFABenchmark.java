@@ -113,13 +113,10 @@ public class LazyDFABenchmark {
         for (int j = 0; j < 400; j++) sb.append(alpha.charAt(rng.nextInt(alpha.length())));
         matcher.matches(sb.toString());
       }
+      // Fixed always-matching input: measures full 400-char NFA traversal after freeze,
+      // not early rejection on random non-matching strings.
       frozenInputs = new String[500];
-      for (int i = 0; i < frozenInputs.length; i++) {
-        int len = 300 + rng.nextInt(200);
-        StringBuilder sb = new StringBuilder(len);
-        for (int j = 0; j < len; j++) sb.append(alpha.charAt(rng.nextInt(alpha.length())));
-        frozenInputs[i] = sb.toString();
-      }
+      java.util.Arrays.fill(frozenInputs, MATCH_INPUT);
     }
   }
 

@@ -28,9 +28,10 @@ public final class LazyDFACache {
   static final int FALLBACK = -3;
 
   private final ConcurrentHashMap<StateSetKey, Integer> stateIndex;
-  private final int[][] asciiTables; // asciiTables[id] = int[128] or null
-  private final int[][] nfaStateSets; // nfaStateSets[id] = sorted NFA state IDs
-  private final boolean[] accepting;
+  // package-private so the generated class (same package) can inline the hot loop
+  final int[][] asciiTables; // asciiTables[id] = int[128] or null
+  final int[][] nfaStateSets; // nfaStateSets[id] = sorted NFA state IDs
+  final boolean[] accepting;
   private final int[] acceptStateIds;
   private final AtomicInteger nextId;
   private volatile boolean frozen;
@@ -71,7 +72,7 @@ public final class LazyDFACache {
     return accepting[dfaState];
   }
 
-  private int lookupOrCompute(int state, int c, NfaStep nfaStep) {
+  int lookupOrCompute(int state, int c, NfaStep nfaStep) {
     int[] nextSet = nfaStep.apply(nfaStateSets[state], c);
     if (nextSet.length == 0) {
       cacheEntry(state, c, DEAD);
@@ -105,7 +106,7 @@ public final class LazyDFACache {
     return id;
   }
 
-  private void cacheEntry(int state, int c, int value) {
+  void cacheEntry(int state, int c, int value) {
     if (c >= 128) return;
     int[] table = asciiTables[state];
     if (table == null) {
@@ -122,7 +123,7 @@ public final class LazyDFACache {
     }
   }
 
-  private boolean nfaFallbackMatch(String input, int fromPos, int[] nfaSet, NfaStep nfaStep) {
+  boolean nfaFallbackMatch(String input, int fromPos, int[] nfaSet, NfaStep nfaStep) {
     int[] states = nfaStep.apply(nfaSet, input.charAt(fromPos));
     for (int pos = fromPos + 1; pos < input.length(); pos++) {
       if (states.length == 0) return false;
