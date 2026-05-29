@@ -27,7 +27,7 @@ import com.datadoghq.reggie.codegen.analysis.FallbackPatternDetector;
 import com.datadoghq.reggie.codegen.analysis.FixedRepetitionBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.GreedyBacktrackInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
-import com.datadoghq.reggie.codegen.analysis.LinearTemplatePlan;
+import com.datadoghq.reggie.codegen.analysis.LinearTokenSequencePlan;
 import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
@@ -171,9 +171,10 @@ public class RuntimeCompiler {
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
       if (options.capturePolicy() == CapturePolicy.NAMED_ONLY) {
-        ReggieMatcher linearTemplateMatcher = tryCompileLinearTemplate(pattern, ast, nameMap);
-        if (linearTemplateMatcher != null) {
-          return linearTemplateMatcher;
+        ReggieMatcher linearTokenSequenceMatcher =
+            tryCompileLinearTokenSequence(pattern, ast, nameMap);
+        if (linearTokenSequenceMatcher != null) {
+          return linearTokenSequenceMatcher;
         }
         ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
       }
@@ -299,20 +300,20 @@ public class RuntimeCompiler {
     }
   }
 
-  private static ReggieMatcher tryCompileLinearTemplate(
+  private static ReggieMatcher tryCompileLinearTokenSequence(
       String pattern, RegexNode ast, Map<String, Integer> nameMap) {
-    return LinearTemplatePlan.from(PatternCategorizer.categorize(ast))
-        .filter(RuntimeCompiler::isRuntimeExecutableLinearTemplate)
-        .map(plan -> new LinearTemplateMatcher(pattern, plan, countGroups(pattern), nameMap))
+    return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
+        .filter(RuntimeCompiler::isRuntimeExecutableLinearTokenSequence)
+        .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
         .map(NameEnrichingMatcher::new)
         .orElse(null);
   }
 
-  private static boolean isRuntimeExecutableLinearTemplate(LinearTemplatePlan plan) {
+  private static boolean isRuntimeExecutableLinearTokenSequence(LinearTokenSequencePlan plan) {
     for (int i = 0; i < plan.ops().size(); i++) {
-      LinearTemplatePlan.Op op = plan.ops().get(i);
-      if (op.kind() == LinearTemplatePlan.OpKind.ANCHOR) return false;
-      if (op.kind() == LinearTemplatePlan.OpKind.SKIP_ANY && i != plan.ops().size() - 1) {
+      LinearTokenSequencePlan.Op op = plan.ops().get(i);
+      if (op.kind() == LinearTokenSequencePlan.OpKind.ANCHOR) return false;
+      if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY && i != plan.ops().size() - 1) {
         return false;
       }
     }

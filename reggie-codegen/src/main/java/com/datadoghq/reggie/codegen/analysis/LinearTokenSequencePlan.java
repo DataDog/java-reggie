@@ -19,8 +19,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-/** Executable, deterministic plan for a categorized linear-template regex. */
-public record LinearTemplatePlan(List<Op> ops, int groupCount) {
+/** Executable, deterministic plan for a categorized linear-token-sequence regex. */
+public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
 
   public enum OpKind {
     LITERAL,
@@ -69,13 +69,13 @@ public record LinearTemplatePlan(List<Op> ops, int groupCount) {
     }
   }
 
-  public LinearTemplatePlan {
+  public LinearTokenSequencePlan {
     ops = List.copyOf(ops);
   }
 
-  /** Converts categorizer atoms into a closed, executable linear-template plan. */
-  public static Optional<LinearTemplatePlan> from(PatternCategorization categorization) {
-    if (!categorization.isLinearTemplate()) return Optional.empty();
+  /** Converts categorizer atoms into a closed, executable linear-token-sequence plan. */
+  public static Optional<LinearTokenSequencePlan> from(PatternCategorization categorization) {
+    if (!categorization.isLinearTokenSequence()) return Optional.empty();
 
     List<Op> ops = new ArrayList<>();
     List<PatternAtom> atoms = categorization.atoms();
@@ -103,7 +103,7 @@ public record LinearTemplatePlan(List<Op> ops, int groupCount) {
       }
     }
 
-    return Optional.of(new LinearTemplatePlan(ops, maxGroup));
+    return Optional.of(new LinearTokenSequencePlan(ops, maxGroup));
   }
 
   private static Op opFor(PatternAtom atom) {
@@ -145,8 +145,8 @@ public record LinearTemplatePlan(List<Op> ops, int groupCount) {
   private static Op optionalOpFor(PatternAtom atom) {
     PatternCategorization nested =
         new PatternCategorization(
-            PatternCategorization.Category.LINEAR_TEMPLATE, atom.children(), List.of());
-    return LinearTemplatePlan.from(nested).map(plan -> Op.optional(plan.ops())).orElse(null);
+            PatternCategorization.Category.LINEAR_TOKEN_SEQUENCE, atom.children(), List.of());
+    return LinearTokenSequencePlan.from(nested).map(plan -> Op.optional(plan.ops())).orElse(null);
   }
 
   private static boolean isQuotedCapture(List<PatternAtom> atoms, int index) {

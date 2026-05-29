@@ -29,7 +29,7 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 
-class LinearTemplateAccessLogTest {
+class LinearTokenSequenceAccessLogTest {
   private static final ReggieOptions NAMED_ONLY =
       ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build();
 
@@ -70,7 +70,8 @@ class LinearTemplateAccessLogTest {
   }
 
   @Test
-  void routesRealExpandedCommonAccessLogPatternThroughLinearTemplateMatcher() throws Exception {
+  void routesRealExpandedCommonAccessLogPatternThroughLinearTokenSequenceMatcher()
+      throws Exception {
     ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-1.regex"), NAMED_ONLY);
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
@@ -85,11 +86,12 @@ class LinearTemplateAccessLogTest {
     assertEquals("1.1", result.group("grok6"));
     assertEquals("200", result.group("grok7"));
     assertEquals("17888", result.group("grok8"));
-    assertDelegateType(matcher, LinearTemplateMatcher.class);
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
   }
 
   @Test
-  void routesRealExpandedCombinedAccessLogPatternThroughLinearTemplateMatcher() throws Exception {
+  void routesRealExpandedCombinedAccessLogPatternThroughLinearTokenSequenceMatcher()
+      throws Exception {
     ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-2.regex"), NAMED_ONLY);
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
@@ -109,7 +111,7 @@ class LinearTemplateAccessLogTest {
     assertEquals("0.024", result.group("grok13"));
     assertEquals("0.024", result.group("grok14"));
     assertEquals("nginx_access", result.group("grok15"));
-    assertDelegateType(matcher, LinearTemplateMatcher.class);
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
   }
 
   @Test
@@ -132,7 +134,7 @@ class LinearTemplateAccessLogTest {
 
   private static String testResource(String name) throws IOException {
     String path = "/com/datadoghq/reggie/runtime/" + name;
-    try (InputStream stream = LinearTemplateAccessLogTest.class.getResourceAsStream(path)) {
+    try (InputStream stream = LinearTokenSequenceAccessLogTest.class.getResourceAsStream(path)) {
       assertNotNull(stream, path);
       return new String(stream.readAllBytes(), StandardCharsets.UTF_8).trim();
     }

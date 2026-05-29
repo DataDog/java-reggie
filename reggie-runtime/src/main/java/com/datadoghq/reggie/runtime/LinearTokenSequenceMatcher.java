@@ -15,22 +15,25 @@
  */
 package com.datadoghq.reggie.runtime;
 
-import com.datadoghq.reggie.codegen.analysis.LinearTemplatePlan;
+import com.datadoghq.reggie.codegen.analysis.LinearTokenSequencePlan;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Objects;
 
-/** Generic runtime executor for deterministic linear-template plans. */
-final class LinearTemplateMatcher extends ReggieMatcher {
-  private final LinearTemplatePlan plan;
+/** Generic runtime executor for deterministic linear-token-sequence plans. */
+final class LinearTokenSequenceMatcher extends ReggieMatcher {
+  private final LinearTokenSequencePlan plan;
   private final int groupCount;
   private final int[] scratchStarts;
   private final int[] scratchEnds;
   private final int[][] optionalScratchStarts;
   private final int[][] optionalScratchEnds;
 
-  LinearTemplateMatcher(
-      String pattern, LinearTemplatePlan plan, int groupCount, Map<String, Integer> nameToIndex) {
+  LinearTokenSequenceMatcher(
+      String pattern,
+      LinearTokenSequencePlan plan,
+      int groupCount,
+      Map<String, Integer> nameToIndex) {
     super(pattern);
     this.plan = plan;
     this.groupCount = groupCount;
@@ -132,7 +135,7 @@ final class LinearTemplateMatcher extends ReggieMatcher {
   }
 
   private int apply(
-      LinearTemplatePlan.Op op,
+      LinearTokenSequencePlan.Op op,
       String input,
       int pos,
       int[] starts,
@@ -287,7 +290,7 @@ final class LinearTemplateMatcher extends ReggieMatcher {
   }
 
   private int applyOptional(
-      LinearTemplatePlan.Op op,
+      LinearTokenSequencePlan.Op op,
       String input,
       int pos,
       int[] starts,
@@ -317,14 +320,14 @@ final class LinearTemplateMatcher extends ReggieMatcher {
     return next;
   }
 
-  private static int maxOptionalDepth(Iterable<LinearTemplatePlan.Op> ops) {
+  private static int maxOptionalDepth(Iterable<LinearTokenSequencePlan.Op> ops) {
     int max = 0;
-    for (LinearTemplatePlan.Op op : ops) {
+    for (LinearTokenSequencePlan.Op op : ops) {
       int childDepth = maxOptionalDepth(op.children());
       max =
           Math.max(
               max,
-              op.kind() == LinearTemplatePlan.OpKind.OPTIONAL_SEQUENCE
+              op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
                   ? 1 + childDepth
                   : childDepth);
     }

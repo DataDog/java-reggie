@@ -61,7 +61,7 @@ public final class PatternCategorizer {
     return new PatternCategorization(
         onlyLiterals
             ? PatternCategorization.Category.LITERAL_SEQUENCE
-            : PatternCategorization.Category.LINEAR_TEMPLATE,
+            : PatternCategorization.Category.LINEAR_TOKEN_SEQUENCE,
         List.copyOf(collector.atoms),
         List.copyOf(collector.notes));
   }
@@ -177,31 +177,31 @@ public final class PatternCategorizer {
 
     @Override
     public Boolean visitBackreference(BackreferenceNode node) {
-      notes.add("backreference is not linear-template categorizable");
+      notes.add("backreference is not linear-token-sequence categorizable");
       return false;
     }
 
     @Override
     public Boolean visitAssertion(AssertionNode node) {
-      notes.add("lookaround assertion is not linear-template categorizable yet");
+      notes.add("lookaround assertion is not linear-token-sequence categorizable yet");
       return false;
     }
 
     @Override
     public Boolean visitSubroutine(SubroutineNode node) {
-      notes.add("subroutine is not linear-template categorizable");
+      notes.add("subroutine is not linear-token-sequence categorizable");
       return false;
     }
 
     @Override
     public Boolean visitConditional(ConditionalNode node) {
-      notes.add("conditional is not linear-template categorizable");
+      notes.add("conditional is not linear-token-sequence categorizable");
       return false;
     }
 
     @Override
     public Boolean visitBranchReset(BranchResetNode node) {
-      notes.add("branch-reset group is not linear-template categorizable");
+      notes.add("branch-reset group is not linear-token-sequence categorizable");
       return false;
     }
 

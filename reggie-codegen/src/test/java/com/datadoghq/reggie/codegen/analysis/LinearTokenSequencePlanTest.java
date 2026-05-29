@@ -23,33 +23,33 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-class LinearTemplatePlanTest {
+class LinearTokenSequencePlanTest {
 
   @Test
   void buildsPlanWithOriginalCaptureNumbers() throws Exception {
-    LinearTemplatePlan plan = planFor("(?<host>\\S+) (?<status>[+-]?\\d+)");
+    LinearTokenSequencePlan plan = planFor("(?<host>\\S+) (?<status>[+-]?\\d+)");
 
     assertEquals(2, plan.groupCount());
     assertEquals(
         List.of(
-            LinearTemplatePlan.OpKind.CAPTURE_NON_SPACE,
-            LinearTemplatePlan.OpKind.LITERAL,
-            LinearTemplatePlan.OpKind.CAPTURE_SIGNED_INTEGER),
-        plan.ops().stream().map(LinearTemplatePlan.Op::kind).toList());
+            LinearTokenSequencePlan.OpKind.CAPTURE_NON_SPACE,
+            LinearTokenSequencePlan.OpKind.LITERAL,
+            LinearTokenSequencePlan.OpKind.CAPTURE_SIGNED_INTEGER),
+        plan.ops().stream().map(LinearTokenSequencePlan.Op::kind).toList());
     assertEquals(1, plan.ops().get(0).groupNumber());
     assertEquals(2, plan.ops().get(2).groupNumber());
   }
 
   @Test
   void foldsQuotedDelimiterCaptureIntoSinglePlanOp() throws Exception {
-    LinearTemplatePlan plan = planFor("prefix=\"(?<value>[^\"]*)\" suffix");
+    LinearTokenSequencePlan plan = planFor("prefix=\"(?<value>[^\"]*)\" suffix");
 
     assertEquals(
         List.of(
-            LinearTemplatePlan.OpKind.LITERAL,
-            LinearTemplatePlan.OpKind.CAPTURE_QUOTED_UNTIL_DELIMITER,
-            LinearTemplatePlan.OpKind.LITERAL),
-        plan.ops().stream().map(LinearTemplatePlan.Op::kind).toList());
+            LinearTokenSequencePlan.OpKind.LITERAL,
+            LinearTokenSequencePlan.OpKind.CAPTURE_QUOTED_UNTIL_DELIMITER,
+            LinearTokenSequencePlan.OpKind.LITERAL),
+        plan.ops().stream().map(LinearTokenSequencePlan.Op::kind).toList());
     assertEquals("prefix=", plan.ops().get(0).literal());
     assertEquals(1, plan.ops().get(1).groupNumber());
     assertEquals('"', plan.ops().get(1).delimiter());
@@ -60,11 +60,11 @@ class LinearTemplatePlanTest {
   void failsClosedForGeneralRegexCategories() throws Exception {
     PatternCategorization categorization = categorize("(?<word>\\w+)\\s+\\1");
 
-    assertTrue(LinearTemplatePlan.from(categorization).isEmpty());
+    assertTrue(LinearTokenSequencePlan.from(categorization).isEmpty());
   }
 
-  private static LinearTemplatePlan planFor(String pattern) throws Exception {
-    return LinearTemplatePlan.from(categorize(pattern)).orElseThrow();
+  private static LinearTokenSequencePlan planFor(String pattern) throws Exception {
+    return LinearTokenSequencePlan.from(categorize(pattern)).orElseThrow();
   }
 
   private static PatternCategorization categorize(String pattern) throws Exception {

@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.datadoghq.reggie.CapturePolicy;
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
-import com.datadoghq.reggie.codegen.analysis.LinearTemplatePlan;
+import com.datadoghq.reggie.codegen.analysis.LinearTokenSequencePlan;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
@@ -32,10 +32,10 @@ import java.util.Arrays;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-class LinearTemplateMatcherTest {
+class LinearTokenSequenceMatcherTest {
 
   @Test
-  void matchesLinearTemplateAndExtractsCaptureBoundaries() throws Exception {
+  void matchesLinearTokenSequenceAndExtractsCaptureBoundaries() throws Exception {
     ReggieMatcher matcher = matcherFor("host=(?<host>\\S+) status=(?<status>[+-]?\\d+)");
     String input = "host=api.example.com status=200";
 
@@ -79,7 +79,7 @@ class LinearTemplateMatcherTest {
   }
 
   @Test
-  void runtimeCompilerRoutesNamedOnlyLinearTemplates() throws Exception {
+  void runtimeCompilerRoutesNamedOnlyLinearTokenSequences() throws Exception {
     ReggieMatcher matcher =
         Reggie.compile(
             "host=(?<host>\\S+) status=(?<status>[+-]?\\d+)",
@@ -89,7 +89,7 @@ class LinearTemplateMatcherTest {
 
     assertEquals("api.example.com", result.group("host"));
     assertEquals("200", result.group("status"));
-    assertDelegateType(matcher, LinearTemplateMatcher.class);
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
   }
 
   @Test
@@ -119,7 +119,7 @@ class LinearTemplateMatcherTest {
     assertEquals("https://example.com/index.html", result.group("referer"));
     assertEquals("Mozilla/5.0 Test", result.group("agent"));
     assertEquals("nginx_access", result.group("logger"));
-    assertDelegateType(matcher, LinearTemplateMatcher.class);
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
   }
 
   private static final ReggieOptions NAMED_ONLY_OPTIONS =
@@ -136,9 +136,9 @@ class LinearTemplateMatcherTest {
     RegexParser parser = new RegexParser();
     RegexNode ast = parser.parse(pattern);
     Map<String, Integer> names = parser.getGroupNameMap();
-    LinearTemplatePlan plan =
-        LinearTemplatePlan.from(PatternCategorizer.categorize(ast)).orElseThrow();
+    LinearTokenSequencePlan plan =
+        LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElseThrow();
     int groupCount = names.values().stream().mapToInt(Integer::intValue).max().orElse(0);
-    return new LinearTemplateMatcher(pattern, plan, groupCount, names);
+    return new LinearTokenSequenceMatcher(pattern, plan, groupCount, names);
   }
 }

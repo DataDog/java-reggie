@@ -22,8 +22,8 @@ public record PatternCategorization(
     Category category, List<PatternAtom> atoms, List<String> notes) {
 
   public enum Category {
-    /** A deterministic sequence of reusable delimited/log-template atoms. */
-    LINEAR_TEMPLATE,
+    /** A deterministic sequence of reusable token atoms. */
+    LINEAR_TOKEN_SEQUENCE,
 
     /** A pure literal sequence. */
     LITERAL_SEQUENCE,
@@ -32,7 +32,7 @@ public record PatternCategorization(
     GENERAL_REGEX
   }
 
-  public boolean isLinearTemplate() {
-    return category == Category.LINEAR_TEMPLATE || category == Category.LITERAL_SEQUENCE;
+  public boolean isLinearTokenSequence() {
+    return category == Category.LINEAR_TOKEN_SEQUENCE || category == Category.LITERAL_SEQUENCE;
   }
 }

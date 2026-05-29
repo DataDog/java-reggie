@@ -41,7 +41,7 @@ class PatternCategorizerTest {
 
     PatternCategorization categorization = categorize(pattern);
 
-    assertEquals(PatternCategorization.Category.LINEAR_TEMPLATE, categorization.category());
+    assertEquals(PatternCategorization.Category.LINEAR_TOKEN_SEQUENCE, categorization.category());
     assertTrue(categorization.notes().stream().noneMatch(note -> note.contains("grok")));
 
     List<PatternAtom.Kind> capturedKinds =
