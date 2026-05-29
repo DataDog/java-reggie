@@ -66,6 +66,10 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           TAG: ${{ needs.prepare.outputs.version_tag }}
         run: |
-          gh release create "$TAG" \
-            --title "Release $VERSION" \
-            --notes-file /tmp/release-notes.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "Release $TAG already exists, skipping"
+          else
+            gh release create "$TAG" \
+              --title "Release $VERSION" \
+              --notes-file /tmp/release-notes.md
+          fi
