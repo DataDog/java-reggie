@@ -32,6 +32,12 @@ class LazyDFABytecodeGeneratorTest {
     ReggieMatcher lazyMatcher = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
     Pattern jdk = Pattern.compile(LARGE_NFA_PATTERN);
 
+    // Deterministic positive case — exercises the accept path in the generated class.
+    String positive = "ab".repeat(75);
+    assertTrue(jdk.matcher(positive).matches(), "JDK must accept the positive input");
+    assertTrue(lazyMatcher.matches(positive), "LAZY_DFA must accept the positive input");
+
+    // Random corpus — exercises reject paths and correctness across diverse inputs.
     Random rng = new Random(42);
     String alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
     for (int i = 0; i < 500; i++) {
@@ -56,12 +62,15 @@ class LazyDFABytecodeGeneratorTest {
   void testCacheIsSharedAcrossInstances() throws Exception {
     RuntimeCompiler.clearCache();
     ReggieMatcher m1 = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
-    ReggieMatcher m2 = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
-    Field cache1 = m1.getClass().getDeclaredField("CACHE");
-    Field cache2 = m2.getClass().getDeclaredField("CACHE");
-    cache1.setAccessible(true);
-    cache2.setAccessible(true);
-    assertSame(cache1.get(null), cache2.get(null));
+    // Use a distinct cache key to force a new ReggieMatcher instance while reusing the same
+    // generated class from the level-2 structural cache, giving two distinct objects.
+    ReggieMatcher m2 = RuntimeCompiler.cached("alt-key-shared-cache-test", LARGE_NFA_PATTERN);
+    assertNotSame(m1, m2); // different instances
+    assertSame(m1.getClass(), m2.getClass()); // same generated class
+    // static final CACHE is the same object for every instance of the generated class
+    Field f = m1.getClass().getDeclaredField("CACHE");
+    f.setAccessible(true);
+    assertSame(f.get(null), f.get(null));
   }
 
   @Test
