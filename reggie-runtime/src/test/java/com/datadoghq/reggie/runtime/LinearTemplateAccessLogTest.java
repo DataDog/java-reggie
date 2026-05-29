@@ -17,11 +17,16 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.CapturePolicy;
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 
 class LinearTemplateAccessLogTest {
@@ -65,6 +70,49 @@ class LinearTemplateAccessLogTest {
   }
 
   @Test
+  void routesRealExpandedCommonAccessLogPatternThroughLinearTemplateMatcher() throws Exception {
+    ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-1.regex"), NAMED_ONLY);
+    String input =
+        "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
+            + "200 17888";
+
+    MatchResult result = matcher.match(input);
+
+    assertNotNull(result);
+    assertEquals("10.202.82.195", result.group("grok0"));
+    assertEquals("POST", result.group("grok4"));
+    assertEquals("/config?x=y", result.group("grok5"));
+    assertEquals("1.1", result.group("grok6"));
+    assertEquals("200", result.group("grok7"));
+    assertEquals("17888", result.group("grok8"));
+    assertDelegateType(matcher, LinearTemplateMatcher.class);
+  }
+
+  @Test
+  void routesRealExpandedCombinedAccessLogPatternThroughLinearTemplateMatcher() throws Exception {
+    ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-2.regex"), NAMED_ONLY);
+    String input =
+        "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
+            + "200 17888 \"https://example.com/index.html\" \"Mozilla/5.0 Test\" \"-\" "
+            + "\"tracking-id\" 0.024 0.024 . [nginx_access]  [not_the_logger]";
+
+    MatchResult result = matcher.match(input);
+
+    assertNotNull(result);
+    assertEquals("10.202.82.195", result.group("grok0"));
+    assertEquals("POST", result.group("grok4"));
+    assertEquals("/config?x=y", result.group("grok5"));
+    assertEquals("1.1", result.group("grok6"));
+    assertEquals("https://example.com/index.html", result.group("grok9"));
+    assertEquals("Mozilla/5.0 Test", result.group("grok10"));
+    assertEquals("tracking-id", result.group("grok12"));
+    assertEquals("0.024", result.group("grok13"));
+    assertEquals("0.024", result.group("grok14"));
+    assertEquals("nginx_access", result.group("grok15"));
+    assertDelegateType(matcher, LinearTemplateMatcher.class);
+  }
+
+  @Test
   void leavesCallerArraysUnchangedOnNoMatch() {
     ReggieMatcher matcher = Reggie.compile(COMBINED_ACCESS_LOG_PATTERN, NAMED_ONLY);
     int[] starts = new int[17];
@@ -80,5 +128,20 @@ class LinearTemplateAccessLogTest {
 
   private static void assertGroup(String input, int[] starts, int[] ends, int group, String value) {
     assertEquals(value, input.substring(starts[group], ends[group]));
+  }
+
+  private static String testResource(String name) throws IOException {
+    String path = "/com/datadoghq/reggie/runtime/" + name;
+    try (InputStream stream = LinearTemplateAccessLogTest.class.getResourceAsStream(path)) {
+      assertNotNull(stream, path);
+      return new String(stream.readAllBytes(), StandardCharsets.UTF_8).trim();
+    }
+  }
+
+  private static void assertDelegateType(ReggieMatcher matcher, Class<?> expectedType)
+      throws Exception {
+    Field delegate = matcher.getClass().getDeclaredField("delegate");
+    delegate.setAccessible(true);
+    assertEquals(expectedType, delegate.get(matcher).getClass());
   }
 }
