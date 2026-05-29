@@ -68,10 +68,12 @@ class LazyDFABytecodeGeneratorTest {
     ReggieMatcher m2 = RuntimeCompiler.cached("alt-key-shared-cache-test", LARGE_NFA_PATTERN);
     assertNotSame(m1, m2); // different instances
     assertSame(m1.getClass(), m2.getClass()); // same generated class
-    // static final CACHE is the same object for every instance of the generated class
-    Field f = m1.getClass().getDeclaredField("CACHE");
-    f.setAccessible(true);
-    assertSame(f.get(null), f.get(null));
+    // Verify the static CACHE field is the same object across both instances.
+    Field f1 = m1.getClass().getDeclaredField("CACHE");
+    Field f2 = m2.getClass().getDeclaredField("CACHE");
+    f1.setAccessible(true);
+    f2.setAccessible(true);
+    assertSame(f1.get(null), f2.get(null));
   }
 
   @Test

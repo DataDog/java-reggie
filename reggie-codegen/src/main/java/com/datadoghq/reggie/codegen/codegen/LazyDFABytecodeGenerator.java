@@ -329,6 +329,13 @@ public class LazyDFABytecodeGenerator {
    * Variable layout: 0=this, 1=input, 2=cache, 3=dfaState, 4=len, 5=pos, 6=c, 7=table, 8=next
    */
   public void generateMatchesMethod(ClassWriter cw, String className) {
+    if (!className.startsWith("com/datadoghq/reggie/runtime/")) {
+      throw new IllegalArgumentException(
+          "generateMatchesMethod emits GETFIELD on package-private LazyDFACache members; "
+              + "className must be in com/datadoghq/reggie/runtime/ but got: "
+              + className
+              + ". Use generateMatchesDelegatingMethod for classes in other packages.");
+    }
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
     mv.visitCode();
 
