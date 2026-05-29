@@ -19,6 +19,7 @@ import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import org.openjdk.jmh.annotations.*;
 
 /**
@@ -45,6 +46,8 @@ public class LazyDFABenchmark {
   }
 
   private ReggieMatcher lazyMatcher;
+  // JDK baseline — same pattern, same inputs, java.util.regex NFA
+  private Pattern jdkPattern;
   private String[] missInputs;
   private int missIndex;
 
@@ -52,6 +55,7 @@ public class LazyDFABenchmark {
   public void setup() {
     RuntimeCompiler.clearCache();
     lazyMatcher = RuntimeCompiler.compile(PATTERN);
+    jdkPattern = Pattern.compile(PATTERN);
     // Warm up the DFA cache
     for (int i = 0; i < 50; i++) lazyMatcher.matches(MATCH_INPUT);
     // Build diverse miss inputs
@@ -76,6 +80,18 @@ public class LazyDFABenchmark {
   @Benchmark
   public boolean missPath() {
     return lazyMatcher.matches(missInputs[missIndex++ % missInputs.length]);
+  }
+
+  /** JDK baseline — same pattern, fixed matching input, java.util.regex NFA. */
+  @Benchmark
+  public boolean jdkHitBaseline() {
+    return jdkPattern.matcher(MATCH_INPUT).matches();
+  }
+
+  /** JDK baseline — same diverse miss inputs as missPath. */
+  @Benchmark
+  public boolean jdkMissBaseline() {
+    return jdkPattern.matcher(missInputs[missIndex++ % missInputs.length]).matches();
   }
 
   /** Frozen path: cache at cap, all transitions use NFA fallback. */
