@@ -103,7 +103,10 @@ public final class LazyDFACache {
         int[] t = new int[128];
         Arrays.fill(t, UNCACHED);
         t[c] = id;
-        VarHandle.storeStoreFence(); // ensure array writes visible before reference publish
+        VarHandle
+            .storeStoreFence(); // prevents JIT reordering of t[] writes past the asciiTables[state]
+        // write on this thread; stale null reads by other threads safely
+        // fall back to lookupOrCompute
         asciiTables[state] = t;
       } else {
         table[c] = id; // idempotent: same key always → same id

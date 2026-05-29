@@ -60,4 +60,11 @@ class PatternAnalyzerLazyDFATest {
     PatternAnalyzer.MatchingStrategyResult r = analyze("^(?:[a-z][0-9]){200}");
     assertNotEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
   }
+
+  @Test
+  void testDoNotRouteWithBackref() throws Exception {
+    // Pattern with backreference → OPTIMIZED_NFA_WITH_BACKREFS, not LAZY_DFA
+    PatternAnalyzer.MatchingStrategyResult r = analyze("((?:[a-z][0-9]){100})\\1");
+    assertNotEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
+  }
 }
