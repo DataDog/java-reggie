@@ -369,11 +369,15 @@ public class LazyDFABytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, 6);
 
-    // int[] table = cache.asciiTables[dfaState]  (slot 7)
+    // int[] table = (int[]) TABLES_VH.getAcquire(cache.asciiTables, dfaState)  (slot 7)
+    // getAcquire establishes happens-before with the setRelease in LazyDFACache.cacheEntry,
+    // so readers always see a fully-initialized table on all platforms including ARM.
+    mv.visitFieldInsn(GETSTATIC, LAZY_CACHE, "TABLES_VH", "Ljava/lang/invoke/VarHandle;");
     mv.visitVarInsn(ALOAD, 2);
     mv.visitFieldInsn(GETFIELD, LAZY_CACHE, "asciiTables", "[[I");
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitInsn(AALOAD);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, "java/lang/invoke/VarHandle", "getAcquire", "([[II)[I", false);
     mv.visitVarInsn(ASTORE, 7);
 
     // int next = (table != null && c < 128) ? table[c] : UNCACHED  (slot 8)

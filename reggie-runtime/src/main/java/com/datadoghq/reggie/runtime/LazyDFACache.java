@@ -15,12 +15,29 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class LazyDFACache {
+
+  /**
+   * Array-element VarHandle for {@code int[][]} slots. Used to publish newly filled {@code
+   * int[128]} tables with release semantics and to read them with acquire semantics, establishing a
+   * happens-before between the writer (in {@link #cacheEntry}) and any reader (in {@link #matches}
+   * or in the generated inlined hot loop) on all JMM-conformant platforms including ARM.
+   */
+  static final VarHandle TABLES_VH;
+
+  static {
+    try {
+      TABLES_VH = MethodHandles.arrayElementVarHandle(int[][].class);
+    } catch (Exception e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
 
   static final int DEFAULT_CAP = 4096;
   static final int UNCACHED = -1;
@@ -60,7 +77,7 @@ public final class LazyDFACache {
     int dfaState = 0;
     for (int pos = 0; pos < input.length(); pos++) {
       int c = input.charAt(pos);
-      int[] table = asciiTables[dfaState];
+      int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
       int next = (table != null && c < 128) ? table[c] : UNCACHED;
       if (next == UNCACHED) {
         next = lookupOrCompute(dfaState, c, nfaStep);
@@ -113,12 +130,11 @@ public final class LazyDFACache {
       int[] t = new int[128];
       Arrays.fill(t, UNCACHED);
       t[c] = value;
-      // fullFence provides both store-store ordering (prevents reordering of t[] writes past the
-      // asciiTables[state] assignment) and load-load ordering (ensures readers that observe the
-      // non-null reference also see the filled array contents, preventing a stale 0 from being
-      // treated as DFA state 0 on weakly-ordered platforms such as ARM).
-      VarHandle.fullFence();
-      asciiTables[state] = t;
+      // setRelease: all writes to t[] above are visible to any thread that subsequently
+      // observes the non-null slot via getAcquire. This establishes a proper happens-before
+      // edge on weakly-ordered platforms (ARM/RISC-V), preventing a stale 0 from being
+      // treated as DFA state 0.
+      TABLES_VH.setRelease(asciiTables, state, t);
     } else {
       table[c] = value; // idempotent: same key always maps to same value
     }
