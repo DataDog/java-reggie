@@ -15,13 +15,15 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import com.datadoghq.reggie.Reggie;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
-/** Temporary diagnostic for fuzz $ anchor findings. */
-public class AnchorDiagTest {
+/** Regression coverage for fuzz $ anchor findings. */
+class AnchorDiagTest {
   @Test
   void diagNoClearCacheEver() {
     // Verify that $ patterns work correctly even when compiled AFTER many other patterns,
@@ -45,26 +47,7 @@ public class AnchorDiagTest {
       {"a?$", ""}, {".{0}$", ""}, {"${1}", ""}, {"Z{1}|$", ""}, {"0|${1}", ""}
     };
     for (String[] tc : cases) {
-      String pat = tc[0], inp = tc[1];
-      java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pat);
-      java.util.regex.Matcher jm = jdk.matcher(inp);
-      boolean jdkFound = jm.find();
-
-      ReggieMatcher rm = Reggie.compile(pat);
-      MatchResult r = rm.findMatch(inp);
-      boolean reggieFound = r != null;
-
-      boolean ok =
-          (jdkFound == reggieFound)
-              && (!jdkFound || (jm.start() == r.start() && jm.end() == r.end()));
-      System.out.printf(
-          "%s  pat=%-20s inp=%-5s jdk=%s reggie=%s class=%s%n",
-          ok ? "OK  " : "FAIL",
-          pat,
-          "\"" + inp + "\"",
-          jdkFound ? "[" + jm.start() + "," + jm.end() + ")" : "null",
-          reggieFound ? "[" + r.start() + "," + r.end() + ")" : "null",
-          rm.getClass().getSimpleName());
+      assertFindEquivalent(tc[0], tc[1], false);
     }
   }
 
@@ -87,7 +70,13 @@ public class AnchorDiagTest {
   }
 
   static void check(String pat, String inp) {
-    RuntimeCompiler.clearCache();
+    assertFindEquivalent(pat, inp, true);
+  }
+
+  private static void assertFindEquivalent(String pat, String inp, boolean clearCache) {
+    if (clearCache) {
+      RuntimeCompiler.clearCache();
+    }
     Pattern jdk = Pattern.compile(pat);
     Matcher jm = jdk.matcher(inp);
     boolean jdkFound = jm.find();
@@ -96,18 +85,32 @@ public class AnchorDiagTest {
     MatchResult r = rm.findMatch(inp);
     boolean reggieFound = r != null;
 
-    String jdkSpan = jdkFound ? "[" + jm.start() + "," + jm.end() + ")" : "null";
-    String reggieSpan = reggieFound ? "[" + r.start() + "," + r.end() + ")" : "null";
-    boolean ok =
-        (jdkFound == reggieFound)
-            && (!jdkFound || (jm.start() == r.start() && jm.end() == r.end()));
-    System.out.printf(
-        "%s  pat=%-25s inp=%-8s jdk=%-12s reggie=%-12s strategy=%s%n",
-        ok ? "OK  " : "FAIL",
-        pat,
-        "\"" + inp + "\"",
-        jdkSpan,
-        reggieSpan,
-        rm.getClass().getSimpleName());
+    assertEquals(jdkFound, reggieFound, failureMessage(pat, inp, jm, jdkFound, r, rm));
+    if (jdkFound) {
+      assertEquals(jm.start(), r.start(), failureMessage(pat, inp, jm, jdkFound, r, rm));
+      assertEquals(jm.end(), r.end(), failureMessage(pat, inp, jm, jdkFound, r, rm));
+    }
+  }
+
+  private static String failureMessage(
+      String pat, String inp, Matcher jm, boolean jdkFound, MatchResult r, ReggieMatcher rm) {
+    return "pat="
+        + pat
+        + " input=\""
+        + inp
+        + "\" jdk="
+        + span(jm, jdkFound)
+        + " reggie="
+        + span(r)
+        + " strategy="
+        + rm.getClass().getSimpleName();
+  }
+
+  private static String span(Matcher matcher, boolean found) {
+    return found ? "[" + matcher.start() + "," + matcher.end() + ")" : "null";
+  }
+
+  private static String span(MatchResult result) {
+    return result != null ? "[" + result.start() + "," + result.end() + ")" : "null";
   }
 }

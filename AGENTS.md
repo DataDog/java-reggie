@@ -440,11 +440,20 @@ Checklist when touching `DFA.DFAState`, `DFA.DFATransition`, `NFA.NFAState`, or 
 
 Example — `acceptanceAnchorConditions` and `entryGuard` added post-anchor fix:
 ```java
-// DFAState: per-state acceptance anchor conditions
-hash = 31 * hash + state.acceptanceAnchorConditions.hashCode();
+// DFAState: per-state acceptance anchor conditions. Use ordinal-derived bitmasks for
+// anchor EnumSets, not EnumSet.hashCode(), because Enum.hashCode() is identity-based.
+hash = 31 * hash + anchorBitmask(state.acceptanceAnchorConditions);
 
 // DFATransition: per-transition entry guard
-hash = 31 * hash + entry.getValue().entryGuard.hashCode();
+hash = 31 * hash + anchorBitmask(entry.getValue().entryGuard);
+
+private static int anchorBitmask(EnumSet<NFA.AnchorType> anchors) {
+    int mask = 0;
+    for (NFA.AnchorType anchor : anchors) {
+        mask |= (1 << anchor.ordinal());
+    }
+    return mask;
+}
 ```
 
 When creating `PatternInfo` subclasses, `structuralHashCode()` MUST include ALL fields affecting bytecode:
