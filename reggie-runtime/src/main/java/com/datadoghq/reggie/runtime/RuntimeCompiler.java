@@ -851,6 +851,9 @@ public class RuntimeCompiler {
                   result.lookaheadGreedyInfo,
                   result.usePosixLastMatch,
                   caseInsensitive);
+          // String overload of matchBounded called internally by findMatchFrom/findMatch.
+          // Uses a compact stub (no NFA bytecode) to avoid the 64 KB method size limit.
+          lazyGen.generateMatchBoundedStringMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaDelegate.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaDelegate.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaDelegate.generateFindLongestMatchEndMethod(

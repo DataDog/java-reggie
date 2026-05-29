@@ -512,6 +512,10 @@ public class ReggieMatcherBytecodeGenerator {
           lazyGen.generateNfaStepMethod(cw, getJavaClassName());
           lazyGen.generateApplyMethod(cw, getJavaClassName());
           lazyGen.generateMatchesMethod(cw, getJavaClassName());
+          lazyGen.generateMatchMethod(cw, getJavaClassName());
+          // CharSequence abstract methods required by ReggieMatcher.
+          lazyGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+          lazyGen.generateMatchBoundedMethod(cw, getJavaClassName());
           // Remaining methods delegate to the standard NFA generator.
           NFABytecodeGenerator nfaDelegate =
               new NFABytecodeGenerator(
@@ -522,10 +526,10 @@ public class ReggieMatcherBytecodeGenerator {
                   result.lookaheadGreedyInfo,
                   false,
                   caseInsensitive);
+          // String overload of matchBounded called internally by findMatchFrom/findMatch.
+          lazyGen.generateMatchBoundedStringMethod(cw, getJavaClassName());
           nfaDelegate.generateFindMethod(cw, getJavaClassName());
           nfaDelegate.generateFindFromMethod(cw, getJavaClassName());
-          nfaDelegate.generateMatchMethod(cw, getJavaClassName());
-          nfaDelegate.generateMatchBoundedMethod(cw, getJavaClassName());
           nfaDelegate.generateFindLongestMatchEndMethod(cw, getJavaClassName());
           nfaDelegate.generateFindMatchMethod(cw, getJavaClassName());
           nfaDelegate.generateFindMatchFromMethod(cw, getJavaClassName());

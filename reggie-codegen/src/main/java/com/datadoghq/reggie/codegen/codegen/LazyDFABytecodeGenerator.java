@@ -440,6 +440,71 @@ public class LazyDFABytecodeGenerator {
   }
 
   /**
+   * Emits {@code public MatchResult matchBounded(String input, int start, int end)}: compact stub
+   * that extracts the substring, delegates to {@code matches(sub)}, and returns a {@code
+   * MatchResultImpl} with the original input and absolute {@code start}/{@code end} offsets. This
+   * String overload is called internally by the NFA-delegated {@code findMatchFrom} method.
+   * Variable layout: 0=this, 1=input, 2=start, 3=end, 4=sub.
+   */
+  public void generateMatchBoundedStringMethod(ClassWriter cw, String className) {
+    String matchResultImpl = "com/datadoghq/reggie/runtime/MatchResultImpl";
+    String matchResult = "com/datadoghq/reggie/runtime/MatchResult";
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "matchBounded", "(Ljava/lang/String;II)L" + matchResult + ";", null, null);
+    mv.visitCode();
+
+    // String sub = input.substring(start, end)
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", false);
+    mv.visitVarInsn(ASTORE, 4);
+
+    // if (!matches(sub)) return null
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 4);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+    Label matched = new Label();
+    mv.visitJumpInsn(IFNE, matched);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(matched);
+
+    // new MatchResultImpl(input, {start, end}, {start, end}, 0) — absolute offsets
+    mv.visitTypeInsn(NEW, matchResultImpl);
+    mv.visitInsn(DUP);
+    mv.visitVarInsn(ALOAD, 1); // original input
+    mv.visitInsn(ICONST_2);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_2);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, matchResultImpl, "<init>", "(Ljava/lang/String;[I[II)V", false);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
    * Emits {@code public MatchResult match(String input)}: returns a full-input MatchResultImpl if
    * {@code matches(input)} is true, otherwise null. No capturing groups (group-free pattern).
    */
@@ -567,35 +632,34 @@ public class LazyDFABytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(matchedBounded);
 
-    // new MatchResultImpl(sub, new int[]{0, end-start}, new int[]{0, end-start}, 0)
+    // new MatchResultImpl(input.toString(), new int[]{start, end}, new int[]{start, end}, 0)
+    // Use the original input and absolute offsets so result.start(0)==start, result.end(0)==end.
     mv.visitTypeInsn(NEW, matchResultImpl);
     mv.visitInsn(DUP);
-    mv.visitVarInsn(ALOAD, 4); // sub
-    // starts = new int[]{0, end - start}
+    mv.visitVarInsn(ALOAD, 1); // original input (CharSequence)
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    // starts = new int[]{start, end}
     mv.visitInsn(ICONST_2);
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitInsn(DUP);
     mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 2); // start
     mv.visitInsn(IASTORE);
     mv.visitInsn(DUP);
     mv.visitInsn(ICONST_1);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ILOAD, 3); // end
     mv.visitInsn(IASTORE);
-    // ends = new int[]{0, end - start}
+    // ends = new int[]{start, end}
     mv.visitInsn(ICONST_2);
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitInsn(DUP);
     mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 2); // start
     mv.visitInsn(IASTORE);
     mv.visitInsn(DUP);
     mv.visitInsn(ICONST_1);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ILOAD, 3); // end
     mv.visitInsn(IASTORE);
     mv.visitInsn(ICONST_0);
     mv.visitMethodInsn(
