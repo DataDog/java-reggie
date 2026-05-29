@@ -15,8 +15,11 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.runtime.LazyDFACache;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
@@ -86,7 +89,13 @@ public class LazyDFABenchmark {
     return lazyMatcher.matches(MATCH_INPUT);
   }
 
-  /** Cold path: fresh diverse inputs → NFA step + interning on every transition. */
+  /**
+   * Steady-state early-rejection throughput: diverse random inputs that mostly contain characters
+   * outside the pattern alphabet ([ab]). After the first pass over the 1,000-input pool the DEAD
+   * transitions for those characters are cached in the ASCII table, so subsequent calls measure
+   * cached-DEAD lookups rather than cold NFA-step+interning overhead. Use {@code hardMissPath} for
+   * a fair late-failing comparison where both engines traverse the automaton before rejecting.
+   */
   @Benchmark
   public boolean missPath() {
     return lazyMatcher.matches(missInputs[(missIndex++ & 0x7FFF_FFFF) % missInputs.length]);
@@ -145,6 +154,23 @@ public class LazyDFABenchmark {
         StringBuilder sb = new StringBuilder(400);
         for (int j = 0; j < 400; j++) sb.append(alpha.charAt(rng.nextInt(alpha.length())));
         matcher.matches(sb.toString());
+      }
+      // Assert the cache is actually frozen before measuring, so frozenPath truly exercises
+      // the NFA-fallback path and not the normal DFA cache. isFrozen() is package-private,
+      // so we access it via reflection.
+      try {
+        Field cacheField = matcher.getClass().getDeclaredField("CACHE");
+        cacheField.setAccessible(true);
+        LazyDFACache cache = (LazyDFACache) cacheField.get(null);
+        Method isFrozen = LazyDFACache.class.getDeclaredMethod("isFrozen");
+        isFrozen.setAccessible(true);
+        if (!(Boolean) isFrozen.invoke(cache)) {
+          throw new IllegalStateException(
+              "LazyDFACache not frozen after warm-up — frozenPath would measure the wrong path."
+                  + " Increase warm-up iterations or check the pattern's DFA state count.");
+        }
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalStateException("Could not verify frozen state", e);
       }
       // Fixed always-matching input: measures full 400-char NFA traversal after freeze,
       // not early rejection on random non-matching strings.
