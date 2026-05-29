@@ -1,0 +1,137 @@
+/*
+ * Copyright 2026-Present Datadog, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.datadoghq.reggie.runtime;
+
+import java.lang.invoke.VarHandle;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public final class LazyDFACache {
+
+  static final int DEFAULT_CAP = 4096;
+  static final int UNCACHED = -1;
+  static final int DEAD = -2;
+  static final int FALLBACK = -3;
+
+  private final ConcurrentHashMap<StateSetKey, Integer> stateIndex;
+  private final Object[] asciiTables; // asciiTables[id] = int[128] or null
+  private final int[][] nfaStateSets; // nfaStateSets[id] = sorted NFA state IDs
+  private final boolean[] accepting;
+  private final int[] acceptStateIds;
+  private final AtomicInteger nextId;
+  private volatile boolean frozen;
+  private final int cap;
+
+  public LazyDFACache(int[] startStateSet, int[] acceptStateIds) {
+    this(startStateSet, acceptStateIds, DEFAULT_CAP);
+  }
+
+  // package-private for tests
+  LazyDFACache(int[] startStateSet, int[] acceptStateIds, int cap) {
+    this.cap = cap;
+    this.acceptStateIds = acceptStateIds;
+    this.stateIndex = new ConcurrentHashMap<>();
+    this.asciiTables = new Object[cap];
+    this.nfaStateSets = new int[cap][];
+    this.accepting = new boolean[cap];
+    this.nextId = new AtomicInteger(1); // 0 = start state
+    nfaStateSets[0] = startStateSet;
+    accepting[0] = containsAny(startStateSet, acceptStateIds);
+    stateIndex.put(new StateSetKey(startStateSet), 0);
+  }
+
+  public boolean matches(String input, NfaStep nfaStep) {
+    if (input == null) return false;
+    int dfaState = 0;
+    for (int pos = 0; pos < input.length(); pos++) {
+      int c = input.charAt(pos);
+      int[] table = (int[]) asciiTables[dfaState];
+      int next = (table != null && c < 128) ? table[c] : UNCACHED;
+      if (next == UNCACHED) {
+        next = lookupOrCompute(dfaState, c, nfaStep);
+      }
+      if (next == DEAD) return false;
+      if (next == FALLBACK) return nfaFallbackMatch(input, pos, nfaStateSets[dfaState], nfaStep);
+      dfaState = next;
+    }
+    return accepting[dfaState];
+  }
+
+  private int lookupOrCompute(int state, int c, NfaStep nfaStep) {
+    int[] nextSet = nfaStep.apply(nfaStateSets[state], c);
+    if (nextSet.length == 0) return DEAD;
+
+    StateSetKey key = new StateSetKey(nextSet);
+    Integer id = stateIndex.get(key);
+
+    if (id == null && !frozen) {
+      id =
+          stateIndex.computeIfAbsent(
+              key,
+              k -> {
+                int newId = nextId.getAndIncrement();
+                if (newId < cap) {
+                  nfaStateSets[newId] = k.getStates();
+                  accepting[newId] = containsAny(k.getStates(), acceptStateIds);
+                }
+                return newId;
+              });
+      if (id >= cap) {
+        frozen = true;
+        return FALLBACK;
+      }
+    }
+    if (id == null || id >= cap) return FALLBACK;
+
+    if (c < 128) {
+      int[] table = (int[]) asciiTables[state];
+      if (table == null) {
+        int[] t = new int[128];
+        Arrays.fill(t, UNCACHED);
+        t[c] = id;
+        VarHandle.storeStoreFence(); // ensure array writes visible before reference publish
+        asciiTables[state] = t;
+      } else {
+        table[c] = id; // idempotent: same key always → same id
+      }
+    }
+    return id;
+  }
+
+  private boolean nfaFallbackMatch(String input, int fromPos, int[] nfaSet, NfaStep nfaStep) {
+    int[] states = nfaStep.apply(nfaSet, input.charAt(fromPos));
+    for (int pos = fromPos + 1; pos < input.length(); pos++) {
+      if (states.length == 0) return false;
+      states = nfaStep.apply(states, input.charAt(pos));
+    }
+    return states.length > 0 && containsAny(states, acceptStateIds);
+  }
+
+  // package-private for tests
+  boolean isFrozen() {
+    return frozen;
+  }
+
+  private static boolean containsAny(int[] set, int[] targets) {
+    for (int t : targets) {
+      for (int s : set) {
+        if (s == t) return true;
+      }
+    }
+    return false;
+  }
+}
