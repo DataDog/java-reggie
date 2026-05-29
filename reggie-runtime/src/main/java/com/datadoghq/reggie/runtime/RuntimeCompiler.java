@@ -17,7 +17,10 @@ package com.datadoghq.reggie.runtime;
 
 import static org.objectweb.asm.Opcodes.*;
 
+import com.datadoghq.reggie.CapturePolicy;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.BackreferencePatternInfo;
+import com.datadoghq.reggie.codegen.analysis.CaptureProjection;
 import com.datadoghq.reggie.codegen.analysis.ConcatGreedyGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.ConcatQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.FallbackPatternDetector;
@@ -97,7 +100,16 @@ public class RuntimeCompiler {
    * @throws PatternSyntaxException if pattern is invalid
    */
   public static ReggieMatcher compile(String pattern) {
-    return PATTERN_CACHE.computeIfAbsent(pattern, RuntimeCompiler::compileInternal);
+    return compile(pattern, ReggieOptions.DEFAULT);
+  }
+
+  /** Compile pattern with runtime compilation options. */
+  public static ReggieMatcher compile(String pattern, ReggieOptions options) {
+    if (options.capturePolicy() == CapturePolicy.ALL) {
+      return PATTERN_CACHE.computeIfAbsent(pattern, RuntimeCompiler::compileInternal);
+    }
+    String cacheKey = pattern + "\u0000capturePolicy=" + options.capturePolicy();
+    return PATTERN_CACHE.computeIfAbsent(cacheKey, k -> compileInternal(pattern, options));
   }
 
   /**
@@ -110,6 +122,11 @@ public class RuntimeCompiler {
    */
   public static ReggieMatcher cached(String key, String pattern) {
     return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern));
+  }
+
+  /** Compile with explicit cache key and runtime compilation options. */
+  public static ReggieMatcher cached(String key, String pattern, ReggieOptions options) {
+    return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern, options));
   }
 
   /** Clear both pattern and structure caches. */
@@ -142,11 +159,18 @@ public class RuntimeCompiler {
    * cache (level 2) checked here
    */
   private static ReggieMatcher compileInternal(String pattern) {
+    return compileInternal(pattern, ReggieOptions.DEFAULT);
+  }
+
+  private static ReggieMatcher compileInternal(String pattern, ReggieOptions options) {
     try {
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
+      if (options.capturePolicy() == CapturePolicy.NAMED_ONLY) {
+        ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
+      }
 
       // 2. Check if pattern requires recursive descent (context-free features)
       // Do this early to avoid unnecessary NFA building

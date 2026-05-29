@@ -109,6 +109,19 @@ public final class Reggie {
   }
 
   /**
+   * Compile a regex pattern at runtime with explicit options.
+   *
+   * @param pattern the regex pattern string
+   * @param options compilation options
+   * @return compiled matcher instance
+   * @throws java.util.regex.PatternSyntaxException if pattern is invalid
+   * @throws UnsupportedPatternException if pattern uses an unsupported regex construct
+   */
+  public static ReggieMatcher compile(String pattern, ReggieOptions options) {
+    return RuntimeCompiler.compile(pattern, options);
+  }
+
+  /**
    * Compile a regex pattern with an explicit cache key. Useful for user-controlled caching when you
    * want the same compiled matcher for different pattern strings, or need to explicitly manage
    * cache keys.
@@ -128,6 +141,11 @@ public final class Reggie {
    */
   public static ReggieMatcher cached(String key, String pattern) {
     return RuntimeCompiler.cached(key, pattern);
+  }
+
+  /** Compile a regex pattern with an explicit cache key and options. */
+  public static ReggieMatcher cached(String key, String pattern, ReggieOptions options) {
+    return RuntimeCompiler.cached(key, pattern, options);
   }
 
   /**
