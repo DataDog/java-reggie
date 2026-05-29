@@ -17,6 +17,7 @@ package com.datadoghq.reggie.benchmark;
 
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
+import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -79,7 +80,7 @@ public class LazyDFABenchmark {
   /** Cold path: fresh diverse inputs → NFA step + interning on every transition. */
   @Benchmark
   public boolean missPath() {
-    return lazyMatcher.matches(missInputs[missIndex++ % missInputs.length]);
+    return lazyMatcher.matches(missInputs[(missIndex++ & 0x7FFF_FFFF) % missInputs.length]);
   }
 
   /** JDK baseline — same pattern, fixed matching input, java.util.regex NFA. */
@@ -91,7 +92,9 @@ public class LazyDFABenchmark {
   /** JDK baseline — same diverse miss inputs as missPath. */
   @Benchmark
   public boolean jdkMissBaseline() {
-    return jdkPattern.matcher(missInputs[missIndex++ % missInputs.length]).matches();
+    return jdkPattern
+        .matcher(missInputs[(missIndex++ & 0x7FFF_FFFF) % missInputs.length])
+        .matches();
   }
 
   /** Frozen path: cache at cap, all transitions use NFA fallback. */
@@ -116,7 +119,7 @@ public class LazyDFABenchmark {
       // Fixed always-matching input: measures full 400-char NFA traversal after freeze,
       // not early rejection on random non-matching strings.
       frozenInputs = new String[500];
-      java.util.Arrays.fill(frozenInputs, MATCH_INPUT);
+      Arrays.fill(frozenInputs, MATCH_INPUT);
     }
   }
 
