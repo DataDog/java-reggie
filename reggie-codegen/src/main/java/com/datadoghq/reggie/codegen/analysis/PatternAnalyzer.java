@@ -802,16 +802,9 @@ public class PatternAnalyzer {
 
     // Try standard DFA construction (lookaround already handled above)
     MatchingStrategyResult result;
-    // Skip DFA construction entirely for large anchor-free group-free patterns: the LAZY_DFA
-    // promotion below will handle them on-the-fly rather than building a ≥300-state table up front.
-    if (isLazyDFAEligible(nfa, ast)) {
-      result =
-          new MatchingStrategyResult(
-              MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
-    } else
-      try {
-        SubsetConstructor constructor = new SubsetConstructor();
-        DFA dfa = constructor.buildDFA(nfa);
+    try {
+      SubsetConstructor constructor = new SubsetConstructor();
+      DFA dfa = constructor.buildDFA(nfa);
 
       if (dfa.isAnchorConditionDiluted()) {
         MatchingStrategyResult r =
@@ -857,7 +850,7 @@ public class PatternAnalyzer {
       result =
           new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
-      }
+    }
     // Promote large anchor-free group-free NFA patterns to the lazy DFA strategy.
     if (result.strategy == MatchingStrategy.OPTIMIZED_NFA
         && nfa != null

@@ -35,16 +35,12 @@ import org.openjdk.jmh.annotations.*;
 @Fork(1)
 public class LazyDFABenchmark {
 
-  // ≥300 NFA states, no groups/anchors — routes to LAZY_DFA
-  private static final String PATTERN = "(?:[a-z][0-9]){200}";
-  // Positive match: 400-char string of alternating lower+digit
-  private static final String MATCH_INPUT;
-
-  static {
-    StringBuilder sb = new StringBuilder(400);
-    for (int i = 0; i < 200; i++) sb.append((char) ('a' + i % 26)).append((char) ('0' + i % 10));
-    MATCH_INPUT = sb.toString();
-  }
+  // ~685 NFA states, no groups/anchors — DFA state explosion via interleaved a+/b+ alternation
+  // causes StateExplosionException → OPTIMIZED_NFA → LAZY_DFA.
+  // Note: deterministic patterns like (?:[a-z][0-9]){200} now route to DFA_TABLE instead.
+  private static final String PATTERN = "(?:a+b+|b+a+){75}";
+  // Positive match: 75 repetitions of "ab" — each "ab" satisfies one (a+b+) group
+  private static final String MATCH_INPUT = "ab".repeat(75);
 
   private ReggieMatcher lazyMatcher;
   // JDK baseline — same pattern, same inputs, java.util.regex NFA

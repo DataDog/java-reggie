@@ -35,8 +35,10 @@ class PatternAnalyzerLazyDFATest {
 
   @Test
   void testRouteToLazyDFAWhenNFALarge() throws Exception {
-    // (?:[a-z][0-9]){200} has ~800 NFA states, no groups/anchors → LAZY_DFA
-    PatternAnalyzer.MatchingStrategyResult r = analyze("(?:[a-z][0-9]){200}");
+    // (?:a+b+|b+a+){75} has ~685 NFA states, no groups/anchors.
+    // DFA state explosion via interleaved a+/b+ alternation → StateExplosionException
+    // → OPTIMIZED_NFA → isLazyDFAEligible (NFA ≥300, no groups/anchors) → LAZY_DFA.
+    PatternAnalyzer.MatchingStrategyResult r = analyze("(?:a+b+|b+a+){75}");
     assertEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
   }
 
@@ -50,14 +52,14 @@ class PatternAnalyzerLazyDFATest {
   @Test
   void testDoNotRouteWithLookahead() throws Exception {
     // Lookahead → OPTIMIZED_NFA_WITH_LOOKAROUND, not LAZY_DFA
-    PatternAnalyzer.MatchingStrategyResult r = analyze("(?=[a-z])(?:[a-z][0-9]){200}");
+    PatternAnalyzer.MatchingStrategyResult r = analyze("(?=[a-z])(?:a+b+|b+a+){75}");
     assertNotEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
   }
 
   @Test
   void testDoNotRouteWithAnchor() throws Exception {
     // Anchored pattern must not route to LAZY_DFA
-    PatternAnalyzer.MatchingStrategyResult r = analyze("^(?:[a-z][0-9]){200}");
+    PatternAnalyzer.MatchingStrategyResult r = analyze("^(?:a+b+|b+a+){75}");
     assertNotEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
   }
 

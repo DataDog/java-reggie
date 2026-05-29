@@ -25,7 +25,7 @@ import org.junit.jupiter.api.Test;
 
 class LazyDFABytecodeGeneratorTest {
 
-  private static final String LARGE_NFA_PATTERN = "(?:[a-z][0-9]){200}";
+  private static final String LARGE_NFA_PATTERN = "(?:a+b+|b+a+){75}";
 
   @Test
   void testGeneratedClassMatchesNFAForSameInputs() {
@@ -67,8 +67,8 @@ class LazyDFABytecodeGeneratorTest {
   @Test
   void testCacheIsNotSharedAcrossPatterns() throws Exception {
     RuntimeCompiler.clearCache();
-    ReggieMatcher m1 = RuntimeCompiler.compile("(?:[a-z][0-9]){200}");
-    ReggieMatcher m2 = RuntimeCompiler.compile("(?:[a-z][0-9]){201}");
+    ReggieMatcher m1 = RuntimeCompiler.compile("(?:a+b+|b+a+){75}");
+    ReggieMatcher m2 = RuntimeCompiler.compile("(?:a+b+|b+a+){76}");
     Field f1 = m1.getClass().getDeclaredField("CACHE");
     Field f2 = m2.getClass().getDeclaredField("CACHE");
     f1.setAccessible(true);
