@@ -200,7 +200,10 @@ public final class PatternCategorizer {
       if (isSignedDecimalNumber(child)) {
         return PatternAtom.captured(PatternAtom.Kind.SIGNED_DECIMAL_NUMBER, groupNumber, groupName);
       }
-      if (child instanceof AlternationNode) {
+      if (child instanceof AlternationNode alternation) {
+        if (isIpOrHostAlternation(alternation)) {
+          return PatternAtom.captured(PatternAtom.Kind.IP_OR_HOST, groupNumber, groupName);
+        }
         return PatternAtom.captured(PatternAtom.Kind.COMPLEX_ALTERNATION, groupNumber, groupName);
       }
       return null;
@@ -208,6 +211,7 @@ public final class PatternCategorizer {
 
     private static PatternAtom atomForQuantifier(
         QuantifierNode node, int groupNumber, String groupName) {
+      if (!node.greedy) return null;
       RegexNode child = stripNonCapturingGroup(node.child);
       if (node.min == 1 && node.max == -1 && child instanceof CharClassNode charClass) {
         if (charClass.chars.equals(CharSet.WHITESPACE) && charClass.negated) {
@@ -253,6 +257,57 @@ public final class PatternCategorizer {
     private static Character singleNegatedDelimiter(CharClassNode node) {
       if (!node.negated || !node.chars.isSingleChar()) return null;
       return node.chars.getSingleChar();
+    }
+
+    private static boolean isIpOrHostAlternation(AlternationNode node) {
+      boolean hasIpLikeAlternative = false;
+      boolean hasHostLikeAlternative = false;
+      for (RegexNode alternative : node.alternatives) {
+        hasIpLikeAlternative |= isIpLikeAlternative(alternative);
+        hasHostLikeAlternative |= isHostLikeAlternative(alternative);
+      }
+      return hasIpLikeAlternative && hasHostLikeAlternative;
+    }
+
+    private static boolean isIpLikeAlternative(RegexNode node) {
+      if (!(node instanceof ConcatNode concat) || concat.children.size() != 2) return false;
+      RegexNode repeatedOctet = stripNonCapturingGroup(concat.children.get(0));
+      return repeatedOctet instanceof QuantifierNode quantifier
+          && quantifier.min == 3
+          && quantifier.max == 3
+          && stripNonCapturingGroup(quantifier.child) instanceof ConcatNode octetWithDot
+          && octetWithDot.children.size() == 2
+          && isDigitRepeat(octetWithDot.children.get(0), 1, 3)
+          && octetWithDot.children.get(1) instanceof LiteralNode dot
+          && dot.ch == '.'
+          && isDigitRepeat(concat.children.get(1), 1, 3);
+    }
+
+    private static boolean isHostLikeAlternative(RegexNode node) {
+      if (!(node instanceof QuantifierNode quantifier)
+          || quantifier.min != 1
+          || quantifier.max != -1
+          || !(quantifier.child instanceof CharClassNode charClass)
+          || charClass.negated) {
+        return false;
+      }
+      return charClass.chars.contains('a')
+          && charClass.chars.contains('z')
+          && charClass.chars.contains('A')
+          && charClass.chars.contains('Z')
+          && charClass.chars.contains('0')
+          && charClass.chars.contains('9')
+          && charClass.chars.contains('.')
+          && charClass.chars.contains('-');
+    }
+
+    private static boolean isDigitRepeat(RegexNode node, int min, int max) {
+      return node instanceof QuantifierNode quantifier
+          && quantifier.min == min
+          && quantifier.max == max
+          && quantifier.child instanceof CharClassNode charClass
+          && !charClass.negated
+          && charClass.chars.equals(CharSet.DIGIT);
     }
 
     private static boolean isWordBoundaryWordBoundary(RegexNode node) {

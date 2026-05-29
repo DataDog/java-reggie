@@ -51,7 +51,7 @@ class PatternCategorizerTest {
             .toList();
     assertEquals(
         List.of(
-            PatternAtom.Kind.COMPLEX_ALTERNATION,
+            PatternAtom.Kind.IP_OR_HOST,
             PatternAtom.Kind.NON_SPACE_PLUS,
             PatternAtom.Kind.NON_SPACE_PLUS,
             PatternAtom.Kind.UNTIL_DELIMITER,
@@ -87,6 +87,15 @@ class PatternCategorizerTest {
 
     assertEquals(PatternCategorization.Category.GENERAL_REGEX, categorization.category());
     assertTrue(categorization.notes().stream().anyMatch(note -> note.contains("backreference")));
+  }
+
+  @Test
+  void rejectsUnsupportedControlFlowShapes() throws Exception {
+    for (String pattern : List.of("(?<value>\\S+?)-end", "(?=prefix)(?<value>\\S+)")) {
+      PatternCategorization categorization = categorize(pattern);
+
+      assertEquals(PatternCategorization.Category.GENERAL_REGEX, categorization.category());
+    }
   }
 
   private static PatternCategorization categorize(String pattern) throws Exception {
