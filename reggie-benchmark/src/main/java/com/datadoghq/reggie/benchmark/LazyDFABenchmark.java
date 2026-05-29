@@ -47,6 +47,10 @@ public class LazyDFABenchmark {
   private Pattern jdkPattern;
   private String[] missInputs;
   private int missIndex;
+  // Hard-miss inputs: all-[ab] strings that fail late in the pattern,
+  // forcing real NFA/DFA traversal rather than immediate first-char rejection.
+  private String[] hardMissInputs;
+  private int hardMissIndex;
 
   @Setup(Level.Trial)
   public void setup() {
@@ -55,7 +59,7 @@ public class LazyDFABenchmark {
     jdkPattern = Pattern.compile(PATTERN);
     // Warm up the DFA cache
     for (int i = 0; i < 50; i++) lazyMatcher.matches(MATCH_INPUT);
-    // Build diverse miss inputs
+    // Build diverse miss inputs (random chars — tests early-exit behavior)
     Random rng = new Random(12345);
     missInputs = new String[1000];
     String chars = "abcdefghijklmnopqrstuvwxyz0123456789!@#$";
@@ -64,6 +68,15 @@ public class LazyDFABenchmark {
       StringBuilder sb = new StringBuilder(len);
       for (int j = 0; j < len; j++) sb.append(chars.charAt(rng.nextInt(chars.length())));
       missInputs[i] = sb.toString();
+    }
+    // Build hard-miss inputs: all [ab] chars, fail after 60-74 complete groups.
+    // Forces real NFA/DFA traversal before rejection — no early-exit on first char.
+    hardMissInputs = new String[1000];
+    for (int i = 0; i < hardMissInputs.length; i++) {
+      // 60-74 complete (a+b+) groups, then 1-5 trailing 'a's without a closing 'b'.
+      int completeGroups = 60 + (i % 15);
+      int trailingAs = 1 + (i % 5);
+      hardMissInputs[i] = "ab".repeat(completeGroups) + "a".repeat(trailingAs);
     }
   }
 
@@ -90,6 +103,24 @@ public class LazyDFABenchmark {
   public boolean jdkMissBaseline() {
     return jdkPattern
         .matcher(missInputs[(missIndex++ & 0x7FFF_FFFF) % missInputs.length])
+        .matches();
+  }
+
+  /**
+   * Hard-miss path: all-[ab] inputs that fail after 60-74 complete groups. Forces real NFA
+   * traversal before rejection — a fair comparison against jdkHardMissBaseline.
+   */
+  @Benchmark
+  public boolean hardMissPath() {
+    return lazyMatcher.matches(
+        hardMissInputs[(hardMissIndex++ & 0x7FFF_FFFF) % hardMissInputs.length]);
+  }
+
+  /** JDK hard-miss baseline — same late-failing all-[ab] inputs. */
+  @Benchmark
+  public boolean jdkHardMissBaseline() {
+    return jdkPattern
+        .matcher(hardMissInputs[(hardMissIndex++ & 0x7FFF_FFFF) % hardMissInputs.length])
         .matches();
   }
 
