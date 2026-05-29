@@ -49,6 +49,7 @@ import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenera
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyBacktrackBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyCharClassBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.LazyDFABytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.LinearPatternBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.LiteralAlternationTrieGenerator;
 import com.datadoghq.reggie.codegen.codegen.MultiGroupGreedyBytecodeGenerator;
@@ -453,14 +454,18 @@ public class RuntimeCompiler {
 
     ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 
-    // Class declaration: public final class XXX extends ReggieMatcher
+    // Class declaration: public final class XXX extends ReggieMatcher [implements NfaStep]
+    String[] ifaces =
+        result.strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA
+            ? new String[] {"com/datadoghq/reggie/runtime/NfaStep"}
+            : null;
     cw.visit(
         V21,
         ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
         "com/datadoghq/reggie/runtime/" + className,
         null,
         "com/datadoghq/reggie/runtime/ReggieMatcher",
-        null);
+        ifaces);
 
     // RECURSIVE_DESCENT strategy doesn't require additional instance fields
     // Fields are managed within the recursive parser methods
@@ -472,7 +477,8 @@ public class RuntimeCompiler {
             || result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
             || result.strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD
             || result.strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS
-            || result.strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS;
+            || result.strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS
+            || result.strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA;
     boolean needsRecursiveDescent =
         result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
     generateConstructor(cw, pattern, className, needsNFAState, needsRecursiveDescent, nfa, ast);
@@ -824,6 +830,37 @@ public class RuntimeCompiler {
           // tracking and would skip backrefCheck states, producing incorrect bounds.
           break;
         }
+      case LAZY_DFA:
+        {
+          LazyDFABytecodeGenerator lazyGen = new LazyDFABytecodeGenerator(nfa);
+          lazyGen.generateStaticFields(cw, "com/datadoghq/reggie/runtime/" + className);
+          lazyGen.generateNfaStepMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          // apply() satisfies NfaStep; matches/match/matchesBounded/matchBounded are compact.
+          lazyGen.generateApplyMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          lazyGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          lazyGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          lazyGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          lazyGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          // find* methods use the standard NFA implementation (no capturing groups involved).
+          NFABytecodeGenerator nfaDelegate =
+              new NFABytecodeGenerator(
+                  nfa,
+                  null,
+                  null,
+                  result.requiredLiterals,
+                  result.lookaheadGreedyInfo,
+                  result.usePosixLastMatch,
+                  caseInsensitive);
+          nfaDelegate.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaDelegate.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaDelegate.generateFindLongestMatchEndMethod(
+              cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaDelegate.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaDelegate.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaDelegate.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          break;
+        }
+
       case OPTIMIZED_NFA:
       case OPTIMIZED_NFA_WITH_LOOKAROUND:
         {
