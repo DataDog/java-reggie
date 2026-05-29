@@ -261,6 +261,9 @@ public final class PatternCategorizer {
         if (charClass.chars.equals(CharSet.WORD) && !charClass.negated) {
           return PatternAtom.captured(PatternAtom.Kind.WORD, groupNumber, groupName);
         }
+        if (isIpOrHostCharClass(charClass)) {
+          return PatternAtom.captured(PatternAtom.Kind.IP_OR_HOST, groupNumber, groupName);
+        }
         Character delimiter = singleNegatedDelimiter(charClass);
         if (delimiter != null) {
           return PatternAtom.capturedUntil(groupNumber, groupName, delimiter);
@@ -448,6 +451,18 @@ public final class PatternCategorizer {
     private static Character singleNegatedDelimiter(CharClassNode node) {
       if (!node.negated || !node.chars.isSingleChar()) return null;
       return node.chars.getSingleChar();
+    }
+
+    private static boolean isIpOrHostCharClass(CharClassNode node) {
+      return !node.negated
+          && node.chars.contains('0')
+          && node.chars.contains('9')
+          && node.chars.contains('A')
+          && node.chars.contains('F')
+          && node.chars.contains('a')
+          && node.chars.contains('f')
+          && node.chars.contains('.')
+          && node.chars.contains(':');
     }
 
     private static boolean isIpOrHostAlternation(AlternationNode node) {
