@@ -113,10 +113,11 @@ public final class LazyDFACache {
       int[] t = new int[128];
       Arrays.fill(t, UNCACHED);
       t[c] = value;
-      VarHandle
-          .storeStoreFence(); // prevents JIT reordering of t[] writes past the asciiTables[state]
-      // write on this thread; stale null reads by other threads safely
-      // fall back to lookupOrCompute
+      // fullFence provides both store-store ordering (prevents reordering of t[] writes past the
+      // asciiTables[state] assignment) and load-load ordering (ensures readers that observe the
+      // non-null reference also see the filled array contents, preventing a stale 0 from being
+      // treated as DFA state 0 on weakly-ordered platforms such as ARM).
+      VarHandle.fullFence();
       asciiTables[state] = t;
     } else {
       table[c] = value; // idempotent: same key always maps to same value

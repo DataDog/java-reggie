@@ -37,6 +37,7 @@ import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyCharClassBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.LazyDFABytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.LinearPatternBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.LiteralAlternationTrieGenerator;
 import com.datadoghq.reggie.codegen.codegen.MultiGroupGreedyBytecodeGenerator;
@@ -105,14 +106,19 @@ public class ReggieMatcherBytecodeGenerator {
     // 4. Generate bytecode based on strategy
     ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 
-    // Class declaration
+    // Class declaration — LAZY_DFA generated class implements NfaStep directly so the cache
+    // can call nfaStep() without INVOKEDYNAMIC (which is unsupported in hidden classes).
+    String[] ifaces =
+        strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA
+            ? new String[] {"com/datadoghq/reggie/runtime/NfaStep"}
+            : null;
     cw.visit(
         V21,
         ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
         className,
         null,
         "com/datadoghq/reggie/runtime/ReggieMatcher",
-        null);
+        ifaces);
 
     // Generate constructor (with NFA state initialization for NFA-based strategies)
     boolean needsNFAState =
@@ -121,7 +127,8 @@ public class ReggieMatcherBytecodeGenerator {
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
             || strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD
             || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS
-            || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS;
+            || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS
+            || strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA;
     boolean needsRecursiveDescent = strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
     generateConstructor(cw, needsNFAState, needsRecursiveDescent, nfa, nameMap);
 
@@ -497,6 +504,34 @@ public class ReggieMatcherBytecodeGenerator {
             new NestedQuantifiedGroupsBytecodeGenerator(nestedInfo, getJavaClassName());
         nestedGen.generate(cw);
         break;
+
+      case LAZY_DFA:
+        {
+          LazyDFABytecodeGenerator lazyGen = new LazyDFABytecodeGenerator(nfa);
+          lazyGen.generateStaticFields(cw, getJavaClassName());
+          lazyGen.generateNfaStepMethod(cw, getJavaClassName());
+          lazyGen.generateApplyMethod(cw, getJavaClassName());
+          lazyGen.generateMatchesMethod(cw, getJavaClassName());
+          // Remaining methods delegate to the standard NFA generator.
+          NFABytecodeGenerator nfaDelegate =
+              new NFABytecodeGenerator(
+                  nfa,
+                  null,
+                  null,
+                  result.requiredLiterals,
+                  result.lookaheadGreedyInfo,
+                  false,
+                  caseInsensitive);
+          nfaDelegate.generateFindMethod(cw, getJavaClassName());
+          nfaDelegate.generateFindFromMethod(cw, getJavaClassName());
+          nfaDelegate.generateMatchMethod(cw, getJavaClassName());
+          nfaDelegate.generateMatchBoundedMethod(cw, getJavaClassName());
+          nfaDelegate.generateFindLongestMatchEndMethod(cw, getJavaClassName());
+          nfaDelegate.generateFindMatchMethod(cw, getJavaClassName());
+          nfaDelegate.generateFindMatchFromMethod(cw, getJavaClassName());
+          nfaDelegate.generateFindBoundsFromMethod(cw, getJavaClassName());
+          break;
+        }
 
       default:
         throw new IllegalStateException("Unknown strategy: " + strategy);
