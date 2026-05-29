@@ -804,9 +804,7 @@ public class PatternAnalyzer {
     MatchingStrategyResult result;
     // Skip DFA construction entirely for large anchor-free group-free patterns: the LAZY_DFA
     // promotion below will handle them on-the-fly rather than building a ≥300-state table up front.
-    if (nfa.getStates().size() >= 300
-        && !hasCapturingGroups(ast)
-        && nfa.getStates().stream().noneMatch(s -> s.anchor != null)) {
+    if (isLazyDFAEligible(nfa, ast)) {
       result =
           new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
@@ -863,9 +861,7 @@ public class PatternAnalyzer {
     // Promote large anchor-free group-free NFA patterns to the lazy DFA strategy.
     if (result.strategy == MatchingStrategy.OPTIMIZED_NFA
         && nfa != null
-        && nfa.getStates().size() >= 300
-        && !hasCapturingGroups(ast)
-        && nfa.getStates().stream().noneMatch(s -> s.anchor != null)) {
+        && isLazyDFAEligible(nfa, ast)) {
       result =
           new MatchingStrategyResult(
               MatchingStrategy.LAZY_DFA,
@@ -877,6 +873,12 @@ public class PatternAnalyzer {
               result.usePosixLastMatch);
     }
     return result;
+  }
+
+  private boolean isLazyDFAEligible(NFA nfa, RegexNode ast) {
+    return nfa.getStates().size() >= 300
+        && !hasCapturingGroups(ast)
+        && nfa.getStates().stream().noneMatch(s -> s.anchor != null);
   }
 
   private boolean hasCapturingGroups(RegexNode node) {

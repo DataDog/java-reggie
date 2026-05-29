@@ -73,7 +73,10 @@ public final class LazyDFACache {
 
   private int lookupOrCompute(int state, int c, NfaStep nfaStep) {
     int[] nextSet = nfaStep.apply(nfaStateSets[state], c);
-    if (nextSet.length == 0) return DEAD;
+    if (nextSet.length == 0) {
+      cacheEntry(state, c, DEAD);
+      return DEAD;
+    }
 
     StateSetKey key = new StateSetKey(nextSet);
     Integer id = stateIndex.get(key);
@@ -87,32 +90,36 @@ public final class LazyDFACache {
                 if (newId < cap) {
                   nfaStateSets[newId] = k.getStates();
                   accepting[newId] = containsAny(k.getStates(), acceptStateIds);
+                  return newId;
                 }
-                return newId;
+                return null; // over cap: don't insert, keeps map bounded at cap entries
               });
-      if (id >= cap) {
+      if (id == null) {
         frozen = true;
         return FALLBACK;
       }
     }
-    if (id == null || id >= cap) return FALLBACK;
+    if (id == null) return FALLBACK;
 
-    if (c < 128) {
-      int[] table = asciiTables[state];
-      if (table == null) {
-        int[] t = new int[128];
-        Arrays.fill(t, UNCACHED);
-        t[c] = id;
-        VarHandle
-            .storeStoreFence(); // prevents JIT reordering of t[] writes past the asciiTables[state]
-        // write on this thread; stale null reads by other threads safely
-        // fall back to lookupOrCompute
-        asciiTables[state] = t;
-      } else {
-        table[c] = id; // idempotent: same key always → same id
-      }
-    }
+    cacheEntry(state, c, id);
     return id;
+  }
+
+  private void cacheEntry(int state, int c, int value) {
+    if (c >= 128) return;
+    int[] table = asciiTables[state];
+    if (table == null) {
+      int[] t = new int[128];
+      Arrays.fill(t, UNCACHED);
+      t[c] = value;
+      VarHandle
+          .storeStoreFence(); // prevents JIT reordering of t[] writes past the asciiTables[state]
+      // write on this thread; stale null reads by other threads safely
+      // fall back to lookupOrCompute
+      asciiTables[state] = t;
+    } else {
+      table[c] = value; // idempotent: same key always maps to same value
+    }
   }
 
   private boolean nfaFallbackMatch(String input, int fromPos, int[] nfaSet, NfaStep nfaStep) {
