@@ -20,6 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.datadoghq.reggie.CapturePolicy;
+import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.LinearTemplatePlan;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -72,6 +75,19 @@ class LinearTemplateMatcherTest {
     assertThrows(
         IndexOutOfBoundsException.class,
         () -> matcher.matchInto("host=a status=1", new int[2], new int[3]));
+  }
+
+  @Test
+  void runtimeCompilerRoutesNamedOnlyLinearTemplates() {
+    ReggieMatcher matcher =
+        Reggie.compile(
+            "host=(?<host>\\S+) status=(?<status>[+-]?\\d+)",
+            ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build());
+
+    MatchResult result = matcher.match("host=api.example.com status=200");
+
+    assertEquals("api.example.com", result.group("host"));
+    assertEquals("200", result.group("status"));
   }
 
   private static ReggieMatcher matcherFor(String pattern) throws Exception {

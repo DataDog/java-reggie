@@ -27,9 +27,11 @@ import com.datadoghq.reggie.codegen.analysis.FallbackPatternDetector;
 import com.datadoghq.reggie.codegen.analysis.FixedRepetitionBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.GreedyBacktrackInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
+import com.datadoghq.reggie.codegen.analysis.LinearTemplatePlan;
 import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
+import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
@@ -169,6 +171,10 @@ public class RuntimeCompiler {
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
       if (options.capturePolicy() == CapturePolicy.NAMED_ONLY) {
+        ReggieMatcher linearTemplateMatcher = tryCompileLinearTemplate(pattern, ast, nameMap);
+        if (linearTemplateMatcher != null) {
+          return linearTemplateMatcher;
+        }
         ReggieMatcher accessLogMatcher = tryCompileAccessLogGrok(pattern, nameMap);
         if (accessLogMatcher != null) {
           return accessLogMatcher;
@@ -295,6 +301,26 @@ public class RuntimeCompiler {
       // Wrap other exceptions
       throw new RuntimeException("Failed to compile pattern: " + pattern, e);
     }
+  }
+
+  private static ReggieMatcher tryCompileLinearTemplate(
+      String pattern, RegexNode ast, Map<String, Integer> nameMap) {
+    return LinearTemplatePlan.from(PatternCategorizer.categorize(ast))
+        .filter(RuntimeCompiler::isRuntimeExecutableLinearTemplate)
+        .map(plan -> new LinearTemplateMatcher(pattern, plan, countGroups(pattern), nameMap))
+        .map(NameEnrichingMatcher::new)
+        .orElse(null);
+  }
+
+  private static boolean isRuntimeExecutableLinearTemplate(LinearTemplatePlan plan) {
+    for (int i = 0; i < plan.ops().size(); i++) {
+      LinearTemplatePlan.Op op = plan.ops().get(i);
+      if (op.kind() == LinearTemplatePlan.OpKind.ANCHOR) return false;
+      if (op.kind() == LinearTemplatePlan.OpKind.SKIP_ANY && i != plan.ops().size() - 1) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private static ReggieMatcher tryCompileAccessLogGrok(
