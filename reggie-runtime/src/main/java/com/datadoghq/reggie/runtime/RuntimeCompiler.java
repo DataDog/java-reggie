@@ -169,6 +169,10 @@ public class RuntimeCompiler {
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
       if (options.capturePolicy() == CapturePolicy.NAMED_ONLY) {
+        ReggieMatcher accessLogMatcher = tryCompileAccessLogGrok(pattern, nameMap);
+        if (accessLogMatcher != null) {
+          return accessLogMatcher;
+        }
         ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
       }
 
@@ -291,6 +295,23 @@ public class RuntimeCompiler {
       // Wrap other exceptions
       throw new RuntimeException("Failed to compile pattern: " + pattern, e);
     }
+  }
+
+  private static ReggieMatcher tryCompileAccessLogGrok(
+      String pattern, Map<String, Integer> nameMap) {
+    if (!nameMap.containsKey("grok0")
+        || !nameMap.containsKey("grok8")
+        || !pattern.startsWith("(?s)(?<grok0>")
+        || !pattern.contains("0-9A-Fa-f")
+        || !pattern.contains("(?<grok3>")
+        || !pattern.contains("(?<grok5>\\S+)")
+        || !pattern.contains("(?<grok7>")) {
+      return null;
+    }
+    boolean combined = nameMap.containsKey("grok15") && pattern.contains("(?<grok15>");
+    int groupCount = countGroups(pattern);
+    AccessLogGrokMatcher matcher = new AccessLogGrokMatcher(pattern, groupCount, nameMap, combined);
+    return new NameEnrichingMatcher(matcher);
   }
 
   /**
