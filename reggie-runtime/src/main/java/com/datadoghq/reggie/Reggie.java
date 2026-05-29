@@ -102,6 +102,7 @@ public final class Reggie {
    * @param pattern the regex pattern string
    * @return compiled matcher instance
    * @throws java.util.regex.PatternSyntaxException if pattern is invalid
+   * @throws UnsupportedPatternException if pattern uses an unsupported regex construct
    */
   public static ReggieMatcher compile(String pattern) {
     return RuntimeCompiler.compile(pattern);
@@ -123,6 +124,7 @@ public final class Reggie {
    * @param pattern the regex pattern string
    * @return compiled matcher instance
    * @throws java.util.regex.PatternSyntaxException if pattern is invalid
+   * @throws UnsupportedPatternException if pattern uses an unsupported regex construct
    */
   public static ReggieMatcher cached(String key, String pattern) {
     return RuntimeCompiler.cached(key, pattern);

@@ -57,6 +57,14 @@ class LogsBackendParserCompatibilityTest {
   }
 
   @Test
+  void quotedLiteralWorksInsideCharacterClass() {
+    ReggieMatcher matcher = Reggie.compile("[a\\Q-]\\Eb]+");
+
+    assertTrue(matcher.matches("a-]b"));
+    assertFalse(matcher.matches("abc"));
+  }
+
+  @Test
   void quotedLiteralCanRunToEndOfPattern() {
     ReggieMatcher matcher = Reggie.compile("foo\\Q.bar");
 

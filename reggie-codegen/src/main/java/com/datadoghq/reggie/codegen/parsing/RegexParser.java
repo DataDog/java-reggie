@@ -380,6 +380,13 @@ public class RegexParser {
         }
       }
 
+      if (peek() == '\\' && pos + 1 < pattern.length() && pattern.charAt(pos + 1) == 'Q') {
+        consume(); // consume '\\'
+        consume(); // consume 'Q'
+        ranges.addAll(parseQuotedCharClassRanges());
+        continue;
+      }
+
       char start = parseCharClassChar();
 
       if (peek() == '-' && peekNext() != ']') {
@@ -400,6 +407,19 @@ public class RegexParser {
 
     CharSet charset = CharSet.fromRanges(ranges);
     return new CharClassNode(charset, negated);
+  }
+
+  private List<CharSet.Range> parseQuotedCharClassRanges() {
+    List<CharSet.Range> quotedRanges = new ArrayList<>();
+    while (hasMore()) {
+      char ch = consume();
+      if (ch == '\\' && hasMore() && peek() == 'E') {
+        consume(); // consume 'E'
+        break;
+      }
+      quotedRanges.add(new CharSet.Range(ch, ch));
+    }
+    return quotedRanges;
   }
 
   private CharSet getCharSetForEscape(char escapeChar) {

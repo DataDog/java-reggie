@@ -294,6 +294,18 @@ class RegexParserTest {
   }
 
   @Test
+  void testQuotedLiteralInsideCharacterClass() throws Exception {
+    RegexNode node = parser.parse("[a\\Q-]\\Eb]");
+    assertTrue(node instanceof CharClassNode);
+    CharClassNode charClass = (CharClassNode) node;
+    assertTrue(charClass.chars.contains('a'));
+    assertTrue(charClass.chars.contains('-'));
+    assertTrue(charClass.chars.contains(']'));
+    assertTrue(charClass.chars.contains('b'));
+    assertFalse(charClass.chars.contains('c'));
+  }
+
+  @Test
   void testQuotedLiteralEmbeddedInPattern() throws Exception {
     RegexNode node = parser.parse("foo\\Q/bar\\Ebaz");
     assertTrue(node instanceof ConcatNode);

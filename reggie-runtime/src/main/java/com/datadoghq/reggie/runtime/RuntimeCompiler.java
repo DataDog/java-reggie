@@ -247,6 +247,9 @@ public class RuntimeCompiler {
       // instead of failing compilation.
       ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, "generated method too large");
       return fallback;
+    } catch (RegexParser.UnsupportedPatternException | UnsupportedOperationException e) {
+      throw new com.datadoghq.reggie.UnsupportedPatternException(
+          "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), e);
     } catch (PatternSyntaxException e) {
       // Re-throw PatternSyntaxException as-is
       throw e;
