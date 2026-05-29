@@ -63,7 +63,7 @@ public class LogsBackendGrokBenchmark {
           + MONTHS
           + "\\Q/\\E\\d{4}\\Q:\\E\\d{2}\\Q:\\E\\d{2}\\Q:\\E\\d{2} [+-]\\d{4})"
           + "\\Q]\\E"
-          + " \\\"(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^\\\"]*) (HTTP/\\d\\.\\d)\\\""
+          + " \\\"(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) ([^\\\" ]*) (HTTP/\\d\\.\\d)\\\""
           + " (\\d{3})"
           + " (\\d+|-)"
           + " \\\"([^\\\"]*)\\\""

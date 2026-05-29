@@ -1198,7 +1198,8 @@ public class PatternAnalyzer {
   /** Get the CharSet that a node can match. Returns null if the CharSet cannot be determined. */
   private CharSet getNodeCharSet(RegexNode node) {
     if (node instanceof CharClassNode) {
-      return ((CharClassNode) node).chars;
+      CharClassNode charClass = (CharClassNode) node;
+      return charClass.negated ? charClass.chars.complement() : charClass.chars;
     }
     if (node instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) node;
@@ -1229,7 +1230,8 @@ public class PatternAnalyzer {
    */
   private CharSet getFirstCharSet(RegexNode node) {
     if (node instanceof CharClassNode) {
-      return ((CharClassNode) node).chars;
+      CharClassNode charClass = (CharClassNode) node;
+      return charClass.negated ? charClass.chars.complement() : charClass.chars;
     }
     if (node instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) node;
