@@ -240,6 +240,12 @@ public class RuntimeCompiler {
 
       return matcher;
 
+    } catch (org.objectweb.asm.MethodTooLargeException e) {
+      // Very large grok-style alternations can exceed JVM method-size limits even after routing
+      // away from DFA generation. Preserve drop-in behavior by falling back to java.util.regex
+      // instead of failing compilation.
+      ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, "generated method too large");
+      return fallback;
     } catch (PatternSyntaxException e) {
       // Re-throw PatternSyntaxException as-is
       throw e;

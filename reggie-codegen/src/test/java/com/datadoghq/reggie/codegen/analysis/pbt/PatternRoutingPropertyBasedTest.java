@@ -124,18 +124,18 @@ public class PatternRoutingPropertyBasedTest {
   }
 
   @Property(tries = 50) // Fewer tries since these are expensive patterns
-  void largeStateSpacePatternsUseDFATableOrSpecialized(@ForAll("largeStateSpace") String pattern) {
+  void largeStateSpacePatternsUseNfaFallbackOrSpecialized(
+      @ForAll("largeStateSpace") String pattern) {
     PatternAnalyzer.MatchingStrategyResult result = analyze(pattern);
 
-    // Patterns with many states should use DFA (SWITCH or TABLE) or specialized strategy
-    // Note: (a|b|c){50} = 151 states → DFA_SWITCH
-    //       (a|b|c|d|e|f){100} = 601 states → DFA_TABLE or SPECIALIZED_QUANTIFIED_GROUP
+    // Patterns with many states should use switch-sized DFA, an NFA fallback, or a specialized
+    // strategy. Note: (a|b|c){50} = 151 states → DFA_SWITCH;
+    // (a|b|c|d|e|f){100} = 601 states → OPTIMIZED_NFA or SPECIALIZED_QUANTIFIED_GROUP.
     List<PatternAnalyzer.MatchingStrategy> validStrategies =
         List.of(
-            DFA_SWITCH, // 50-300 states
-            DFA_TABLE, // >300 states
+            DFA_SWITCH, // medium state count
             SPECIALIZED_QUANTIFIED_GROUP, // Might have specialized strategy
-            OPTIMIZED_NFA // Rare fallback
+            OPTIMIZED_NFA // Large state-space fallback
             );
 
     assertTrue(
@@ -143,7 +143,7 @@ public class PatternRoutingPropertyBasedTest {
         () ->
             "Large state space pattern: '"
                 + pattern
-                + "' should use DFA_SWITCH/DFA_TABLE/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA, got: "
+                + "' should use DFA_SWITCH/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA, got: "
                 + result.strategy);
   }
 
@@ -247,7 +247,6 @@ public class PatternRoutingPropertyBasedTest {
         || strategy == DFA_SWITCH
         || strategy == DFA_SWITCH_WITH_GROUPS
         || strategy == DFA_SWITCH_WITH_ASSERTIONS
-        || strategy == DFA_TABLE
         || strategy == OPTIMIZED_NFA;
   }
 

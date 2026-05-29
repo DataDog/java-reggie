@@ -32,6 +32,9 @@ import java.util.Set;
 /** Analyzes patterns and recommends bytecode generation strategy. */
 public class PatternAnalyzer {
 
+  private static final int DFA_UNROLLED_STATE_LIMIT = 20;
+  private static final int DFA_SWITCH_STATE_LIMIT = 300;
+
   private final RegexNode ast;
   private final NFA nfa;
 
@@ -751,7 +754,7 @@ public class PatternAnalyzer {
 
         // DFA with groups: choose strategy based on state count
         int stateCount = dfa.getStateCount();
-        if (stateCount < 20) {
+        if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
               dfa,
@@ -760,8 +763,8 @@ public class PatternAnalyzer {
               requiredLiterals,
               null,
               needsPosixSemantics);
-        } else if (stateCount < 300) {
-          // Use switch-based DFA for 20-300 states (better cache behavior)
+        } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+          // Use switch-based DFA for medium state counts (better cache behavior)
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_SWITCH_WITH_GROUPS,
               dfa,
@@ -823,16 +826,19 @@ public class PatternAnalyzer {
 
       // Choose DFA strategy based on state count
       int stateCount = dfa.getStateCount();
-      if (stateCount < 20) {
+      if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_UNROLLED, dfa, null, false, requiredLiterals);
-      } else if (stateCount < 300) {
-        // Use switch-based DFA for 20-300 states (better cache behavior)
+      } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+        // Use switch-based DFA for medium state counts (better cache behavior)
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_SWITCH, dfa, null, false, requiredLiterals);
       } else {
+        // Large DFA state spaces are expensive for grok-style alternation patterns and DFA_TABLE
+        // bytecode generation is not implemented on both runtime/processor paths. Fall back to NFA
+        // simulation once the DFA exceeds the switch-generator budget.
         return new MatchingStrategyResult(
-            MatchingStrategy.DFA_TABLE, dfa, null, false, requiredLiterals);
+            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
     } catch (StateExplosionException e) {
       // DFA too large, use optimized NFA

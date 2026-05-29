@@ -218,9 +218,9 @@ public class PatternRoutingPropertyTest {
         // DFA_SWITCH (20-300 states)
         new PatternRoutingTestCase("(a|b|c){50}", DFA_SWITCH, "medium alternation (151 states)"),
 
-        // DFA_TABLE (>300 states)
+        // Large DFA state spaces fall back to NFA instead of generating oversized DFA bytecode.
         new PatternRoutingTestCase(
-            "(a|b|c|d|e|f){100}", DFA_TABLE, "very high repetition alternation (601 states)"));
+            "(a|b|c|d|e|f){100}", OPTIMIZED_NFA, "very high repetition alternation (601 states)"));
   }
 
   @Nested
