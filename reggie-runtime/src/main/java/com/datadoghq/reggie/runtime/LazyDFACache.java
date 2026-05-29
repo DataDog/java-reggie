@@ -31,9 +31,21 @@ public final class LazyDFACache {
    */
   static final VarHandle TABLES_VH;
 
+  /**
+   * Array-element VarHandle for {@code int[]} slots. Used to write individual transition entries
+   * into an already-published ASCII table with release semantics ({@link #cacheEntry}) and to read
+   * them with acquire semantics ({@link #matches} and the generated hot loop). This pairs with the
+   * {@code nfaStateSets[newId]} and {@code accepting[newId]} initialization done inside {@code
+   * computeIfAbsent} on the writer thread, ensuring those writes are visible to any reader that
+   * subsequently observes the new DFA state id via {@code getAcquire}. On x86/TSO these compile to
+   * plain store/load (zero overhead); on ARM they emit {@code stlr}/{@code ldar}.
+   */
+  static final VarHandle INT_ARRAY_VH;
+
   static {
     try {
       TABLES_VH = MethodHandles.arrayElementVarHandle(int[][].class);
+      INT_ARRAY_VH = MethodHandles.arrayElementVarHandle(int[].class);
     } catch (Exception e) {
       throw new ExceptionInInitializerError(e);
     }
@@ -78,7 +90,7 @@ public final class LazyDFACache {
     for (int pos = 0; pos < input.length(); pos++) {
       int c = input.charAt(pos);
       int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
-      int next = (table != null && c < 128) ? table[c] : UNCACHED;
+      int next = (table != null && c < 128) ? (int) INT_ARRAY_VH.getAcquire(table, c) : UNCACHED;
       if (next == UNCACHED) {
         next = lookupOrCompute(dfaState, c, nfaStep);
       }
@@ -136,7 +148,10 @@ public final class LazyDFACache {
       // treated as DFA state 0.
       TABLES_VH.setRelease(asciiTables, state, t);
     } else {
-      table[c] = value; // idempotent: same key always maps to same value
+      // setRelease: pairs with getAcquire in the hot loop; ensures nfaStateSets/accepting
+      // initialization (written on the computeIfAbsent thread) is visible to the reader
+      // that sees this new id on ARM/RISC-V. Idempotent: same key always maps to same value.
+      INT_ARRAY_VH.setRelease(table, c, value);
     }
   }
 

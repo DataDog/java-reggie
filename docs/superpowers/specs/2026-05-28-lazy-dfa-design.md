@@ -15,7 +15,7 @@ matching cost scales with NFA state count on every character, every call.
 R1 + R2 add a lazily-materialized DFA cache over the NFA execution:
 
 - **R1** — Intern NFA state-sets to DFA state IDs on first encounter; cap at 4 096 states; freeze and fall back to plain NFA stepping when full.
-- **R2** — Each cached DFA state gets a `int[128]` ASCII transition table indexed by `c & 0x7F`. Warm-path cost is one array read per character.
+- **R2** — Each cached DFA state gets an `int[128]` ASCII transition table covering ASCII characters only (`c < 128`); non-ASCII characters (`c ≥ 128`) bypass the table and fall through to the NFA step. Warm-path cost is one array read per character.
 
 ---
 

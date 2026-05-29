@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 class LazyDFABytecodeGeneratorTest {
 
   private static final String LARGE_NFA_PATTERN = "(?:a+b+|b+a+){75}";
+  private static final String MATCH_INPUT = "ab".repeat(75); // 150 chars, accepted
 
   @Test
   void testGeneratedClassMatchesNFAForSameInputs() {
@@ -83,5 +84,42 @@ class LazyDFABytecodeGeneratorTest {
     f1.setAccessible(true);
     f2.setAccessible(true);
     assertNotSame(f1.get(null), f2.get(null));
+  }
+
+  @Test
+  void testMatchMethod() {
+    ReggieMatcher m = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
+    MatchResult r = m.match(MATCH_INPUT);
+    assertNotNull(r, "match() must return non-null for a full-input accept");
+    assertEquals(0, r.start(0));
+    assertEquals(150, r.end(0));
+    assertNull(m.match("ab".repeat(74)), "match() must return null for a non-matching input");
+  }
+
+  @Test
+  void testMatchBoundedMethod() {
+    ReggieMatcher m = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
+    // input = "xx" + "ab"*75, substring [2, 152) is the ab-repeat portion
+    String input = "xx" + MATCH_INPUT;
+    MatchResult r = m.matchBounded(input, 2, 152);
+    assertNotNull(r, "matchBounded() must return non-null when bounded region matches");
+    assertEquals(2, r.start(0));
+    assertEquals(152, r.end(0));
+    // Region [0, 152) starts with "xx" — does not match the pattern
+    assertNull(
+        m.matchBounded(input, 0, 152),
+        "matchBounded() must return null when region does not match");
+  }
+
+  @Test
+  void testFindMatchFromMethod() {
+    ReggieMatcher m = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
+    // embed the match at offset 2
+    String input = "xx" + MATCH_INPUT + "yy";
+    MatchResult r = m.findMatchFrom(input, 0);
+    assertNotNull(r, "findMatchFrom() must find the ab-repeat substring");
+    assertEquals(2, r.start(0));
+    assertEquals(152, r.end(0));
+    assertNull(m.findMatchFrom("xxxx", 0), "findMatchFrom() must return null when no match exists");
   }
 }

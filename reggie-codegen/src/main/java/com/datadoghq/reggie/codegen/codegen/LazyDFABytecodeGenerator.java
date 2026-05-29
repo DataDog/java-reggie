@@ -314,7 +314,8 @@ public class LazyDFABytecodeGenerator {
    *     for (int pos = 0, len = input.length(); pos < len; pos++) {
    *       int c = input.charAt(pos);
    *       int[] table = cache.asciiTables[dfaState];
-   *       int next = (table != null && c < 128) ? table[c] : LazyDFACache.UNCACHED;
+   *       int next = (table != null && c < 128)
+   *           ? (int) LazyDFACache.INT_ARRAY_VH.getAcquire(table, c) : LazyDFACache.UNCACHED;
    *       if (next == LazyDFACache.UNCACHED) next = cache.lookupOrCompute(dfaState, c, this);
    *       if (next == LazyDFACache.DEAD) return false;
    *       if (next == LazyDFACache.FALLBACK)
@@ -380,16 +381,19 @@ public class LazyDFABytecodeGenerator {
         INVOKEVIRTUAL, "java/lang/invoke/VarHandle", "getAcquire", "([[II)[I", false);
     mv.visitVarInsn(ASTORE, 7);
 
-    // int next = (table != null && c < 128) ? table[c] : UNCACHED  (slot 8)
+    // int next = (table != null && c < 128) ? INT_ARRAY_VH.getAcquire(table, c) : UNCACHED (slot 8)
+    // getAcquire pairs with setRelease in LazyDFACache.cacheEntry, ensuring nfaStateSets/accepting
+    // initialization is visible on ARM/RISC-V before this reader uses the new DFA state id.
     Label slowPath = new Label(), afterTableRead = new Label();
     mv.visitVarInsn(ALOAD, 7);
     mv.visitJumpInsn(IFNULL, slowPath); // table == null → slow path
     mv.visitVarInsn(ILOAD, 6);
     pushInt(mv, 128);
     mv.visitJumpInsn(IF_ICMPGE, slowPath); // c >= 128 → slow path
-    mv.visitVarInsn(ALOAD, 7);
-    mv.visitVarInsn(ILOAD, 6);
-    mv.visitInsn(IALOAD); // table[c]
+    mv.visitFieldInsn(GETSTATIC, LAZY_CACHE, "INT_ARRAY_VH", "Ljava/lang/invoke/VarHandle;");
+    mv.visitVarInsn(ALOAD, 7); // table
+    mv.visitVarInsn(ILOAD, 6); // c
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/invoke/VarHandle", "getAcquire", "([II)I", false);
     mv.visitVarInsn(ISTORE, 8);
     mv.visitJumpInsn(GOTO, afterTableRead);
     mv.visitLabel(slowPath);

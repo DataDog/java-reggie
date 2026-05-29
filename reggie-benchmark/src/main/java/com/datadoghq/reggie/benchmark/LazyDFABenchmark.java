@@ -136,7 +136,10 @@ public class LazyDFABenchmark {
       RuntimeCompiler.clearCache();
       matcher = RuntimeCompiler.compile(PATTERN);
       Random rng = new Random(99999);
-      String alpha = "abcdefghijklmnopqrstuvwxyz0123456789";
+      // Use only 'a'/'b' so every warm-up step forces a real NFA-derived DFA transition.
+      // A 36-char alphabet hits DEAD after one step and adds too few states to fill the cap,
+      // causing frozenPath to measure normal cached-DEAD-rejection rather than NFA fallback.
+      String alpha = "ab";
       // Fill the cache to trigger freeze
       for (int i = 0; i < 10_000; i++) {
         StringBuilder sb = new StringBuilder(400);
