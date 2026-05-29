@@ -21,11 +21,13 @@ R1 + R2 add a lazily-materialized DFA cache over the NFA execution:
 
 ## Scope
 
-Patterns that qualify for `LAZY_DFA` strategy:
+Patterns that qualify for `LAZY_DFA` strategy (`PatternAnalyzer.isLazyDFAEligible`):
 
-- NFA state count ≥ 300 (current `OPTIMIZED_NFA` fallback threshold)
-- No lookaround assertions (`(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`)
-- No backreferences (`\1`, `\k<name>`)
+- NFA state count ≥ 300 (only patterns that hit the `OPTIMIZED_NFA` fallback are eligible)
+- No capturing groups (`nfa.getGroupCount() == 0` / `CapturingGroupDetector` AST check)
+- No anchors (no NFA state has a non-null `AnchorType`, covering `^`, `$`, `\A`, `\Z`, `\z`, `\b`, multiline variants)
+- No lookaround assertions — these already route to `OPTIMIZED_NFA_WITH_LOOKAROUND`, not `OPTIMIZED_NFA`
+- No backreferences — these route to `OPTIMIZED_NFA_WITH_BACKREFS`
 
 All other patterns remain on their current strategy unchanged.
 
