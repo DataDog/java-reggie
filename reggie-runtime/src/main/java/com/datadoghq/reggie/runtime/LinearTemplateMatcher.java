@@ -26,6 +26,8 @@ final class LinearTemplateMatcher extends ReggieMatcher {
   private final int groupCount;
   private final int[] scratchStarts;
   private final int[] scratchEnds;
+  private final int[][] optionalScratchStarts;
+  private final int[][] optionalScratchEnds;
 
   LinearTemplateMatcher(
       String pattern, LinearTemplatePlan plan, int groupCount, Map<String, Integer> nameToIndex) {
@@ -35,6 +37,9 @@ final class LinearTemplateMatcher extends ReggieMatcher {
     this.nameToIndex = Map.copyOf(nameToIndex);
     this.scratchStarts = new int[groupCount + 1];
     this.scratchEnds = new int[groupCount + 1];
+    int optionalDepth = maxOptionalDepth(plan.ops());
+    this.optionalScratchStarts = new int[optionalDepth][groupCount + 1];
+    this.optionalScratchEnds = new int[optionalDepth][groupCount + 1];
   }
 
   @Override
@@ -118,7 +123,7 @@ final class LinearTemplateMatcher extends ReggieMatcher {
     starts[0] = offset;
     int pos = offset;
     for (int i = 0; i < plan.ops().size(); i++) {
-      pos = apply(plan.ops().get(i), input, pos, starts, ends, i == plan.ops().size() - 1);
+      pos = apply(plan.ops().get(i), input, pos, starts, ends, i == plan.ops().size() - 1, 0);
       if (pos < 0) return false;
     }
     if (fullMatch && pos != input.length()) return false;
@@ -126,8 +131,14 @@ final class LinearTemplateMatcher extends ReggieMatcher {
     return true;
   }
 
-  private static int apply(
-      LinearTemplatePlan.Op op, String input, int pos, int[] starts, int[] ends, boolean lastOp) {
+  private int apply(
+      LinearTemplatePlan.Op op,
+      String input,
+      int pos,
+      int[] starts,
+      int[] ends,
+      boolean lastOp,
+      int optionalDepth) {
     return switch (op.kind()) {
       case LITERAL -> startsWith(input, pos, op.literal()) ? pos + op.literal().length() : -1;
       case WHITESPACE_PLUS -> skipWhitespace(input, pos);
@@ -153,7 +164,7 @@ final class LinearTemplateMatcher extends ReggieMatcher {
           captureBracketedWordAfterSkip(input, pos, op.groupNumber(), starts, ends);
       case SKIP_ANY -> lastOp ? input.length() : -1;
       case ANCHOR -> pos;
-      case OPTIONAL_SEQUENCE -> applyOptional(op, input, pos, starts, ends);
+      case OPTIONAL_SEQUENCE -> applyOptional(op, input, pos, starts, ends, optionalDepth);
     };
   }
 
@@ -275,13 +286,28 @@ final class LinearTemplateMatcher extends ReggieMatcher {
     return -1;
   }
 
-  private static int applyOptional(
-      LinearTemplatePlan.Op op, String input, int pos, int[] starts, int[] ends) {
-    int[] savedStarts = starts.clone();
-    int[] savedEnds = ends.clone();
+  private int applyOptional(
+      LinearTemplatePlan.Op op,
+      String input,
+      int pos,
+      int[] starts,
+      int[] ends,
+      int optionalDepth) {
+    int[] savedStarts = optionalScratchStarts[optionalDepth];
+    int[] savedEnds = optionalScratchEnds[optionalDepth];
+    System.arraycopy(starts, 0, savedStarts, 0, starts.length);
+    System.arraycopy(ends, 0, savedEnds, 0, ends.length);
     int next = pos;
     for (int i = 0; i < op.children().size(); i++) {
-      next = apply(op.children().get(i), input, next, starts, ends, i == op.children().size() - 1);
+      next =
+          apply(
+              op.children().get(i),
+              input,
+              next,
+              starts,
+              ends,
+              i == op.children().size() - 1,
+              optionalDepth + 1);
       if (next < 0) {
         System.arraycopy(savedStarts, 0, starts, 0, starts.length);
         System.arraycopy(savedEnds, 0, ends, 0, ends.length);
@@ -289,6 +315,20 @@ final class LinearTemplateMatcher extends ReggieMatcher {
       }
     }
     return next;
+  }
+
+  private static int maxOptionalDepth(Iterable<LinearTemplatePlan.Op> ops) {
+    int max = 0;
+    for (LinearTemplatePlan.Op op : ops) {
+      int childDepth = maxOptionalDepth(op.children());
+      max =
+          Math.max(
+              max,
+              op.kind() == LinearTemplatePlan.OpKind.OPTIONAL_SEQUENCE
+                  ? 1 + childDepth
+                  : childDepth);
+    }
+    return max;
   }
 
   private static int skipWhitespace(String input, int pos) {
