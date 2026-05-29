@@ -49,6 +49,31 @@ class StrategySelectionTest {
     }
   }
 
+  @Test
+  void largePureDFAUsesTableStrategy() throws Exception {
+    PatternAnalyzer.MatchingStrategyResult result = analyze("(?:[a-z][0-9]){150}");
+
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_TABLE,
+        result.strategy,
+        "Large pure regular DFAs should use the compact table backend");
+  }
+
+  @Test
+  void negatedCharClassDelimitedCapturesDoNotRequireRecursiveDescent() throws Exception {
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse("([^ ]+) ([^\" ]*) (HTTP/\\d\\.\\d)");
+    NFA nfa = new ThompsonBuilder().build(ast, 2);
+
+    PatternAnalyzer.MatchingStrategyResult result =
+        new PatternAnalyzer(ast, nfa).analyzeAndRecommend();
+
+    assertNotEquals(
+        PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT,
+        result.strategy,
+        "Negated classes that exclude their following delimiter do not need backtracking");
+  }
+
   // ==================== Subroutine Tests ====================
 
   @Test

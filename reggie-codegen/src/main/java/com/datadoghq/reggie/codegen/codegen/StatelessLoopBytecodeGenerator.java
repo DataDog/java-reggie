@@ -259,6 +259,14 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(loopStart);
 
+    // Check upper bound BEFORE consuming: if (maxReps != -1 && count >= maxReps) break.
+    // Must come before pos < len check so that {0} exits immediately without consuming any char.
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -279,14 +287,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
-    }
 
     mv.visitJumpInsn(GOTO, loopStart);
 
@@ -445,6 +445,13 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(innerLoop);
 
+    // Check upper bound before consuming (fixes maxReps=0 case)
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -464,14 +471,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
-    }
 
     mv.visitJumpInsn(GOTO, innerLoop);
 
@@ -748,6 +747,13 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(innerLoop);
 
+    // Check upper bound before consuming (fixes maxReps=0 case)
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -767,14 +773,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
-    }
 
     mv.visitJumpInsn(GOTO, innerLoop);
 
@@ -1252,6 +1250,13 @@ public class StatelessLoopBytecodeGenerator {
 
     mv.visitLabel(innerLoop);
 
+    // Check upper bound before consuming (fixes maxReps=0 case)
+    if (info.maxReps != -1) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.maxReps);
+      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
+    }
+
     // Check: pos < len
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
@@ -1271,14 +1276,6 @@ public class StatelessLoopBytecodeGenerator {
 
     // count++;
     mv.visitIincInsn(countVar, 1);
-
-    // Check maxReps bound if applicable
-    if (info.maxReps > 0) {
-      // if (count >= maxReps) break;
-      mv.visitVarInsn(ILOAD, countVar);
-      pushInt(mv, info.maxReps);
-      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
-    }
 
     mv.visitJumpInsn(GOTO, innerLoop);
 
@@ -1618,9 +1615,16 @@ public class StatelessLoopBytecodeGenerator {
 
     // Compute matchEnd based on pattern type
     if (info.type == StatelessPatternInfo.PatternType.SINGLE_QUANTIFIER) {
-      // For simple quantifier, find where the character class stops matching
+      // For simple quantifier, find where the character class stops matching, capped at
+      // info.maxReps when a finite upper bound exists. Without this cap the greedy scan
+      // would consume every charset-matching character past the quantifier's upper bound,
+      // making {5}, {5,7}, {5,99} all behave like {5,}. The cap mirrors the bound check
+      // already enforced in findFrom / findBoundsFrom for this pattern shape.
       // matchEnd = matchStart;
-      // while (matchEnd < input.length() && charsetMatches(input.charAt(matchEnd))) matchEnd++;
+      // while (matchEnd < input.length()
+      //        && (maxReps < 0 || matchEnd - matchStart < maxReps)
+      //        && charsetMatches(input.charAt(matchEnd)))
+      //   matchEnd++;
 
       mv.visitVarInsn(ILOAD, matchStartVar);
       mv.visitVarInsn(ISTORE, matchEndVar);
@@ -1629,6 +1633,17 @@ public class StatelessLoopBytecodeGenerator {
       Label loopEnd = new Label();
 
       mv.visitLabel(loopStart);
+
+      // Enforce upper bound BEFORE consuming: if maxReps != -1 and (matchEnd - matchStart) >=
+      // maxReps, break.
+      if (info.maxReps != -1) {
+        mv.visitVarInsn(ILOAD, matchEndVar);
+        mv.visitVarInsn(ILOAD, matchStartVar);
+        mv.visitInsn(ISUB);
+        pushInt(mv, info.maxReps);
+        mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+      }
+
       // if (matchEnd >= input.length()) break;
       mv.visitVarInsn(ILOAD, matchEndVar);
       mv.visitVarInsn(ALOAD, inputVar);

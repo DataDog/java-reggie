@@ -425,6 +425,37 @@ Verify both:
 ```
 
 ### Structural Hash Rule
+**HARD RULE**: Any time you add or change a field on `DFA.DFAState`, `DFA.DFATransition`, or any
+`PatternInfo` subclass that affects bytecode generation, you MUST also update
+`StructuralHash.java` to include that field in the hash. Failure to do so causes the level-2
+structural cache to return a compiled class built for a different pattern, producing wrong runtime
+results that are extremely hard to debug.
+
+Checklist when touching `DFA.DFAState`, `DFA.DFATransition`, `NFA.NFAState`, or any `PatternInfo`:
+- `DFAState` field added → add it to `computeDFATopologyHash()` state-loop body
+- `DFATransition` field added → add it to `computeDFATopologyHash()` transition-loop body
+- `NFAState` field added → add it to `NFA.contentHashCode()` state-loop body
+- New NFA anchor predicate (`NFA.hasXxx()`) added → add the corresponding flag to `StructuralHash.compute()`
+- `PatternInfo` subclass field added → add it to that class's `structuralHashCode()`
+
+Example — `acceptanceAnchorConditions` and `entryGuard` added post-anchor fix:
+```java
+// DFAState: per-state acceptance anchor conditions. Use ordinal-derived bitmasks for
+// anchor EnumSets, not EnumSet.hashCode(), because Enum.hashCode() is identity-based.
+hash = 31 * hash + anchorBitmask(state.acceptanceAnchorConditions);
+
+// DFATransition: per-transition entry guard
+hash = 31 * hash + anchorBitmask(entry.getValue().entryGuard);
+
+private static int anchorBitmask(EnumSet<NFA.AnchorType> anchors) {
+    int mask = 0;
+    for (NFA.AnchorType anchor : anchors) {
+        mask |= (1 << anchor.ordinal());
+    }
+    return mask;
+}
+```
+
 When creating `PatternInfo` subclasses, `structuralHashCode()` MUST include ALL fields affecting bytecode:
 ```java
 public int structuralHashCode() {
@@ -700,7 +731,6 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | Lookahead inside a quantified group | `(?:(?=\d)\d)+` | `lookahead inside quantified group` |
 | Lookbehind followed by unbounded quantifier | `(?<=\d)[a-z]+` | `lookbehind followed by unbounded quantifier` |
 | Alternation inside lookbehind | `(?<=a\|b)c` | `alternation inside lookbehind` |
-| Lookbehind and lookahead used together | `(?<=\[)[^\]]+(?=\])` | `lookbehind and lookahead combined` |
 
 > **Note:** Bug 1 (multiple backreferences to same group) only applies when the analyzer selects
 > `OPTIMIZED_NFA_WITH_BACKREFS` or `VARIABLE_CAPTURE_BACKREF` strategy. Patterns routed through

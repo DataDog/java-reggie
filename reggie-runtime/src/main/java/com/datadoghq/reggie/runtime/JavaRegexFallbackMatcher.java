@@ -83,6 +83,38 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
     return m.find(start) ? toMatchResult(input, m) : null;
   }
 
+  @Override
+  public boolean matchInto(String input, int[] groupStarts, int[] groupEnds) {
+    java.util.regex.Matcher m = javaPattern.matcher(input);
+    if (!m.matches()) {
+      return false;
+    }
+    copyGroups(m, groupStarts, groupEnds);
+    return true;
+  }
+
+  @Override
+  public boolean findMatchInto(String input, int start, int[] groupStarts, int[] groupEnds) {
+    java.util.regex.Matcher m = javaPattern.matcher(input);
+    if (!m.find(start)) {
+      return false;
+    }
+    copyGroups(m, groupStarts, groupEnds);
+    return true;
+  }
+
+  private void copyGroups(java.util.regex.Matcher m, int[] groupStarts, int[] groupEnds) {
+    int gc = m.groupCount();
+    if (groupStarts.length <= gc || groupEnds.length <= gc) {
+      throw new IndexOutOfBoundsException(
+          "group arrays must have length at least " + (gc + 1) + " for this pattern");
+    }
+    for (int i = 0; i <= gc; i++) {
+      groupStarts[i] = m.start(i);
+      groupEnds[i] = m.end(i);
+    }
+  }
+
   private MatchResult toMatchResult(String input, java.util.regex.Matcher m) {
     int gc = m.groupCount();
     int[] starts = new int[gc + 1];

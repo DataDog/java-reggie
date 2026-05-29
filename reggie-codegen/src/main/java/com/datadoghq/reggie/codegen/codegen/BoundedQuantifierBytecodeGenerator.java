@@ -917,7 +917,16 @@ public class BoundedQuantifierBytecodeGenerator {
 
       mv.visitLabel(loopEnd);
 
-      // Minimum already satisfied (matchCount >= 1), no check needed
+      // For min=1 the first-char guarantees count >= 1; for min > 1 verify here.
+      if (elem.min > 1) {
+        mv.visitVarInsn(ILOAD, matchCountVar);
+        pushInt(mv, elem.min);
+        Label minSatisfied = new Label();
+        mv.visitJumpInsn(IF_ICMPGE, minSatisfied);
+        mv.visitInsn(ICONST_0);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(minSatisfied);
+      }
 
     } else {
       // elem.min == 0 (optional quantifier like {0,3})
@@ -1045,7 +1054,12 @@ public class BoundedQuantifierBytecodeGenerator {
 
       mv.visitLabel(loopEnd);
 
-      // Minimum already satisfied (matchCount >= 1), no check needed
+      // For min=1 the first-char guarantees count >= 1; for min > 1 verify here.
+      if (elem.min > 1) {
+        mv.visitVarInsn(ILOAD, matchCountVar);
+        pushInt(mv, elem.min);
+        mv.visitJumpInsn(IF_ICMPLT, matchFailed);
+      }
 
     } else {
       // elem.min == 0 (optional quantifier like {0,3})

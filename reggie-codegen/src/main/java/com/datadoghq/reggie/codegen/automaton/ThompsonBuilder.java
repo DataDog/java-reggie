@@ -211,6 +211,15 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     NFAFragment result = fragments.get(0);
     Set<NFA.NFAState> allExits = new HashSet<>();
 
+    // When min == 0, the first fragment is itself optional — the whole quantifier can match
+    // zero times by going directly from entry to exit. The chain loop below only marks
+    // fragments[1..] as optional (via the i >= min check, which is always true for min == 0
+    // starting from i=1, but never includes fragments[0] itself), so the 0-reps path was
+    // missing. Without this, c{0,3} could only match 1, 2, or 3 c's, never 0.
+    if (min == 0) {
+      allExits.add(result.entry);
+    }
+
     for (int i = 1; i < fragments.size(); i++) {
       NFAFragment next = fragments.get(i);
 

@@ -17,16 +17,21 @@ package com.datadoghq.reggie.runtime;
 
 import static org.objectweb.asm.Opcodes.*;
 
+import com.datadoghq.reggie.CapturePolicy;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.BackreferencePatternInfo;
+import com.datadoghq.reggie.codegen.analysis.CaptureProjection;
 import com.datadoghq.reggie.codegen.analysis.ConcatGreedyGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.ConcatQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.FallbackPatternDetector;
 import com.datadoghq.reggie.codegen.analysis.FixedRepetitionBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.GreedyBacktrackInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
+import com.datadoghq.reggie.codegen.analysis.LinearTokenSequencePlan;
 import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
+import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
@@ -38,6 +43,7 @@ import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatGreedyGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatQuantifiedGroupsBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
@@ -78,8 +84,10 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<String, ReggieMatcher> PATTERN_CACHE =
       new ConcurrentHashMap<>();
 
-  // Level 2: Structural hash → generated class (deduplication for similar patterns)
-  private static final ConcurrentHashMap<Integer, Class<? extends ReggieMatcher>> STRUCTURE_CACHE =
+  // Level 2: Structural hash → generated class (deduplication for similar patterns).
+  // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
+  // sets; an int key was observed to cause structural-cache false-hits with wrong match semantics.
+  private static final ConcurrentHashMap<Long, Class<? extends ReggieMatcher>> STRUCTURE_CACHE =
       new ConcurrentHashMap<>();
 
   // Lookup for hidden class definition (Java 21+)
@@ -94,7 +102,16 @@ public class RuntimeCompiler {
    * @throws PatternSyntaxException if pattern is invalid
    */
   public static ReggieMatcher compile(String pattern) {
-    return PATTERN_CACHE.computeIfAbsent(pattern, RuntimeCompiler::compileInternal);
+    return compile(pattern, ReggieOptions.DEFAULT);
+  }
+
+  /** Compile pattern with runtime compilation options. */
+  public static ReggieMatcher compile(String pattern, ReggieOptions options) {
+    if (options.capturePolicy() == CapturePolicy.ALL) {
+      return PATTERN_CACHE.computeIfAbsent(pattern, RuntimeCompiler::compileInternal);
+    }
+    String cacheKey = pattern + "\u0000capturePolicy=" + options.capturePolicy();
+    return PATTERN_CACHE.computeIfAbsent(cacheKey, k -> compileInternal(pattern, options));
   }
 
   /**
@@ -107,6 +124,11 @@ public class RuntimeCompiler {
    */
   public static ReggieMatcher cached(String key, String pattern) {
     return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern));
+  }
+
+  /** Compile with explicit cache key and runtime compilation options. */
+  public static ReggieMatcher cached(String key, String pattern, ReggieOptions options) {
+    return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern, options));
   }
 
   /** Clear both pattern and structure caches. */
@@ -139,11 +161,23 @@ public class RuntimeCompiler {
    * cache (level 2) checked here
    */
   private static ReggieMatcher compileInternal(String pattern) {
+    return compileInternal(pattern, ReggieOptions.DEFAULT);
+  }
+
+  private static ReggieMatcher compileInternal(String pattern, ReggieOptions options) {
     try {
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
+      if (options.capturePolicy() == CapturePolicy.NAMED_ONLY) {
+        ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
+        ReggieMatcher linearTokenSequenceMatcher =
+            tryCompileLinearTokenSequence(pattern, ast, nameMap);
+        if (linearTokenSequenceMatcher != null) {
+          return linearTokenSequenceMatcher;
+        }
+      }
 
       // 2. Check if pattern requires recursive descent (context-free features)
       // Do this early to avoid unnecessary NFA building
@@ -165,6 +199,24 @@ public class RuntimeCompiler {
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
 
       // 3.5. Fall back to java.util.regex for patterns with known engine bugs
+      if (result.anchorConditionDiluted) {
+        ReggieMatcher fallback =
+            new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in DFA construction");
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
+      }
+      if (result.alternationPriorityConflict) {
+        ReggieMatcher fallback =
+            new JavaRegexFallbackMatcher(
+                pattern,
+                "alternation priority conflict: DFA longest-match vs NFA first-alternative");
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
+      }
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
         ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, fallbackReason);
@@ -181,8 +233,8 @@ public class RuntimeCompiler {
         return hybrid;
       }
 
-      // 5. Compute structural hash for level 2 cache lookup
-      int structHash =
+      // 5. Compute structural hash for level 2 cache lookup (64-bit key)
+      long structHash =
           (nfa != null)
               ? StructuralHash.compute(result, nfa, caseInsensitive)
               : StructuralHash.computeWithoutGroupCount(result);
@@ -220,6 +272,25 @@ public class RuntimeCompiler {
 
       return matcher;
 
+    } catch (org.objectweb.asm.MethodTooLargeException e) {
+      // Very large grok-style alternations can exceed JVM method-size limits. Preserve drop-in
+      // behavior by falling back to java.util.regex instead of failing compilation, but include the
+      // generated method and bytecode size in the warning so routing/generator fixes can be guided
+      // by real-world patterns.
+      ReggieMatcher fallback =
+          new JavaRegexFallbackMatcher(
+              pattern,
+              "generated method too large: "
+                  + e.getClassName()
+                  + "."
+                  + e.getMethodName()
+                  + e.getDescriptor()
+                  + " codeSize="
+                  + e.getCodeSize());
+      return fallback;
+    } catch (RegexParser.UnsupportedPatternException | UnsupportedOperationException e) {
+      throw new com.datadoghq.reggie.UnsupportedPatternException(
+          "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), e);
     } catch (PatternSyntaxException e) {
       // Re-throw PatternSyntaxException as-is
       throw e;
@@ -227,6 +298,44 @@ public class RuntimeCompiler {
       // Wrap other exceptions
       throw new RuntimeException("Failed to compile pattern: " + pattern, e);
     }
+  }
+
+  private static ReggieMatcher tryCompileLinearTokenSequence(
+      String pattern, RegexNode ast, Map<String, Integer> nameMap) {
+    return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
+        .filter(RuntimeCompiler::isRuntimeExecutableLinearTokenSequence)
+        .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
+        .map(NameEnrichingMatcher::new)
+        .orElse(null);
+  }
+
+  private static boolean isRuntimeExecutableLinearTokenSequence(LinearTokenSequencePlan plan) {
+    for (int i = 0; i < plan.ops().size(); i++) {
+      LinearTokenSequencePlan.Op op = plan.ops().get(i);
+      if (op.kind() == LinearTokenSequencePlan.OpKind.ANCHOR) return false;
+      if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY && i != plan.ops().size() - 1) {
+        return false;
+      }
+      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
+          && i + 1 < plan.ops().size()
+          && canOptionalPresentBranchStealFollowingInput(op, plan.ops().get(i + 1))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean canOptionalPresentBranchStealFollowingInput(
+      LinearTokenSequencePlan.Op optional, LinearTokenSequencePlan.Op next) {
+    if (optional.children().isEmpty()) return false;
+    LinearTokenSequencePlan.Op first = optional.children().get(0);
+    if (first.kind() == LinearTokenSequencePlan.OpKind.LITERAL
+        && next.kind() == LinearTokenSequencePlan.OpKind.LITERAL) {
+      return !first.literal().isEmpty()
+          && !next.literal().isEmpty()
+          && first.literal().charAt(0) == next.literal().charAt(0);
+    }
+    return false;
   }
 
   /**
@@ -361,7 +470,9 @@ public class RuntimeCompiler {
         result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
             || result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
-            || result.strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD;
+            || result.strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD
+            || result.strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS
+            || result.strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS;
     boolean needsRecursiveDescent =
         result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
     generateConstructor(cw, pattern, className, needsNFAState, needsRecursiveDescent, nfa, ast);
@@ -536,11 +647,27 @@ public class RuntimeCompiler {
         switchGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchesAtStartMethod(cw); // Required by findFrom
         switchGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        switchGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case DFA_TABLE:
+        DFATableBytecodeGenerator tableGen = new DFATableBytecodeGenerator(result.dfa);
+        tableGen.generateStaticData(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case FIXED_REPETITION_BACKREF:
@@ -632,6 +759,7 @@ public class RuntimeCompiler {
         literalGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        literalGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateFindLongestMatchEndMethod(
             cw, "com/datadoghq/reggie/runtime/" + className);
@@ -658,6 +786,7 @@ public class RuntimeCompiler {
         hybridGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        hybridGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateFindLongestMatchEndMethod(
             cw, "com/datadoghq/reggie/runtime/" + className);
@@ -682,6 +811,7 @@ public class RuntimeCompiler {
           nfaGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchBoundedMethod(
               cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
           nfaGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -710,6 +840,7 @@ public class RuntimeCompiler {
           nfaGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchBoundedMethod(
               cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
           nfaGen.generateFindLongestMatchEndMethod(
@@ -735,6 +866,7 @@ public class RuntimeCompiler {
 
         // Now generate public API methods (these call the parser methods)
         recursiveGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        recursiveGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -833,8 +965,16 @@ public class RuntimeCompiler {
           false);
     }
 
-    // Recursive descent doesn't need special constructor initialization
-    // Parser state is managed in the parser methods themselves
+    if (needsRecursiveDescent) {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitLdcInsn(nfa != null ? nfa.getGroupCount() : countGroups(pattern)); // groupCount
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "initRecursiveState",
+          "(I)V",
+          false);
+    }
 
     mv.visitInsn(RETURN);
     mv.visitMaxs(0, 0);

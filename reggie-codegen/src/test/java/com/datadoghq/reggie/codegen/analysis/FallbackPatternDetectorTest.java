@@ -62,10 +62,10 @@ class FallbackPatternDetectorTest {
     assertNull(detect("(?<=a|b)c"));
   }
 
-  // ── Bug-5 regression: combined lookbehind + lookahead must still trigger fallback ──────────
+  // ── Bug-5 fixed: combined lookbehind + lookahead no longer triggers blanket fallback ────────
 
   @Test
-  void lookbehindAndLookaheadCombinedTriggersFallback() throws Exception {
-    assertNotNull(detect("(?<=\\d)[a-z]+(?=\\s)"));
+  void lookbehindAndLookaheadCombinedNoFallback() throws Exception {
+    assertNull(detect("(?<=\\d)[a-z]+(?=\\s)"));
   }
 }

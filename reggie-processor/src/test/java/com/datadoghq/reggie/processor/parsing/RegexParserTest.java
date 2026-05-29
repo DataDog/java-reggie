@@ -245,4 +245,74 @@ class RegexParserTest {
     assertTrue(cc.chars.contains('0'));
     assertTrue(cc.chars.contains(' '));
   }
+
+  @Test
+  void testAtomicGroupParsesAsNonCapturingGroup() throws Exception {
+    RegexNode node = parser.parse("(?>abc)");
+    assertTrue(node instanceof GroupNode);
+    GroupNode group = (GroupNode) node;
+    assertFalse(group.capturing);
+    assertEquals(0, group.groupNumber);
+  }
+
+  @Test
+  void testAtomicGroupWithQuantifier() throws Exception {
+    RegexNode node = parser.parse("(?>a+)");
+    assertTrue(node instanceof GroupNode);
+    GroupNode group = (GroupNode) node;
+    assertFalse(group.capturing);
+    assertTrue(group.child instanceof QuantifierNode);
+  }
+
+  @Test
+  void testQuotedLiteral() throws Exception {
+    RegexNode node = parser.parse("\\Qabc\\E");
+    assertTrue(node instanceof ConcatNode);
+    ConcatNode concat = (ConcatNode) node;
+    assertEquals(3, concat.children.size());
+    assertEquals('a', ((LiteralNode) concat.children.get(0)).ch);
+    assertEquals('b', ((LiteralNode) concat.children.get(1)).ch);
+    assertEquals('c', ((LiteralNode) concat.children.get(2)).ch);
+  }
+
+  @Test
+  void testQuotedLiteralTreatsMetacharactersAsLiterals() throws Exception {
+    RegexNode node = parser.parse("\\Q.\\E");
+    assertTrue(node instanceof LiteralNode);
+    assertEquals('.', ((LiteralNode) node).ch);
+  }
+
+  @Test
+  void testQuotedLiteralUnterminatedConsumesToEnd() throws Exception {
+    RegexNode node = parser.parse("\\Qabc");
+    assertTrue(node instanceof ConcatNode);
+    ConcatNode concat = (ConcatNode) node;
+    assertEquals(3, concat.children.size());
+    assertEquals('a', ((LiteralNode) concat.children.get(0)).ch);
+    assertEquals('b', ((LiteralNode) concat.children.get(1)).ch);
+    assertEquals('c', ((LiteralNode) concat.children.get(2)).ch);
+  }
+
+  @Test
+  void testQuotedLiteralInsideCharacterClass() throws Exception {
+    RegexNode node = parser.parse("[a\\Q-]\\Eb]");
+    assertTrue(node instanceof CharClassNode);
+    CharClassNode charClass = (CharClassNode) node;
+    assertTrue(charClass.chars.contains('a'));
+    assertTrue(charClass.chars.contains('-'));
+    assertTrue(charClass.chars.contains(']'));
+    assertTrue(charClass.chars.contains('b'));
+    assertFalse(charClass.chars.contains('c'));
+  }
+
+  @Test
+  void testQuotedLiteralEmbeddedInPattern() throws Exception {
+    RegexNode node = parser.parse("foo\\Q/bar\\Ebaz");
+    assertTrue(node instanceof ConcatNode);
+    ConcatNode concat = (ConcatNode) node;
+    assertEquals(7, concat.children.size());
+    assertTrue(concat.children.get(3) instanceof ConcatNode);
+    ConcatNode quoted = (ConcatNode) concat.children.get(3);
+    assertEquals('/', ((LiteralNode) quoted.children.get(0)).ch);
+  }
 }

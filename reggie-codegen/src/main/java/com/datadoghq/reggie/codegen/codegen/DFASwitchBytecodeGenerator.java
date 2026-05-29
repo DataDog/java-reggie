@@ -22,6 +22,7 @@ import com.datadoghq.reggie.codegen.automaton.AssertionCheck;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import java.util.EnumSet;
 import java.util.Map;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
@@ -213,9 +214,10 @@ public class DFASwitchBytecodeGenerator {
     // Note: pos has been incremented, so pass posVar for assertion checking
     generateStateSwitch(mv, stateVar, chVar, posVar, loopStart, allocator);
 
-    // End of input - check if in accept state
+    // End of input - check if in accept state, including zero-width assertions attached to the
+    // accepting DFA state.
     mv.visitLabel(loopEnd);
-    generateAcceptCheck(mv, stateVar);
+    generateAcceptCheckWithAssertions(mv, stateVar, posVar, allocator);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -277,7 +279,7 @@ public class DFASwitchBytecodeGenerator {
     // Check assertions BEFORE character transitions (critical for correctness)
     // Note: posVar is AFTER pos++ (incremented in main loop before switch)
     // generateAssertionCheck handles the position adjustment internally
-    if (!state.assertionChecks.isEmpty()) {
+    if (!state.accepting && !state.assertionChecks.isEmpty()) {
       Label assertionFailed = new Label();
       Label assertionsPassed = new Label();
 
@@ -327,162 +329,13 @@ public class DFASwitchBytecodeGenerator {
       int posVar,
       Label assertionFailed,
       LocalVarAllocator allocator) {
-    if (assertion.isLookahead()) {
-      // Lookahead: peek forward from current position (posVar - 1)
-      String literal = assertion.literal;
-
-      if (assertion.isPositive()) {
-        // Positive lookahead: Check all chars match
-        for (int i = 0; i < literal.length(); i++) {
-          char expectedChar = literal.charAt(i);
-          int peekOffset = assertion.offset + i;
-
-          // Bounds check: if ((pos - 1) + peekOffset >= input.length()) fail
-          mv.visitVarInsn(ILOAD, posVar); // Load pos (already incremented)
-          mv.visitInsn(ICONST_M1); // Load -1
-          mv.visitInsn(IADD); // pos - 1
-          pushInt(mv, peekOffset); // Load peekOffset
-          mv.visitInsn(IADD); // (pos - 1) + peekOffset
-          mv.visitVarInsn(ALOAD, 1); // input
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-          mv.visitJumpInsn(IF_ICMPGE, assertionFailed);
-
-          // Character check: if (input.charAt((pos - 1) + peekOffset) != expected) fail
-          mv.visitVarInsn(ALOAD, 1); // input
-          mv.visitVarInsn(ILOAD, posVar); // Load pos
-          mv.visitInsn(ICONST_M1); // Load -1
-          mv.visitInsn(IADD); // pos - 1
-          pushInt(mv, peekOffset); // Load peekOffset
-          mv.visitInsn(IADD); // (pos - 1) + peekOffset
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, (int) expectedChar);
-          mv.visitJumpInsn(IF_ICMPNE, assertionFailed);
-        }
-      } else {
-        // Negative lookahead: Check if pattern is NOT present
-        // If ANY char doesn't match, assertion succeeds (skip to end)
-        // If ALL chars match, assertion fails
-        Label assertionPassed = new Label();
-
-        for (int i = 0; i < literal.length(); i++) {
-          char expectedChar = literal.charAt(i);
-          int peekOffset = assertion.offset + i;
-
-          // Bounds check: if ((pos - 1) + peekOffset >= input.length())
-          // Pattern not present (out of bounds), so negative assertion succeeds
-          mv.visitVarInsn(ILOAD, posVar); // Load pos (already incremented)
-          mv.visitInsn(ICONST_M1); // Load -1
-          mv.visitInsn(IADD); // pos - 1
-          pushInt(mv, peekOffset); // Load peekOffset
-          mv.visitInsn(IADD); // (pos - 1) + peekOffset
-          mv.visitVarInsn(ALOAD, 1); // input
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-          mv.visitJumpInsn(IF_ICMPGE, assertionPassed);
-
-          // Character check: if (input.charAt((pos - 1) + peekOffset) != expected)
-          // Pattern doesn't match, so negative assertion succeeds
-          mv.visitVarInsn(ALOAD, 1); // input
-          mv.visitVarInsn(ILOAD, posVar); // Load pos
-          mv.visitInsn(ICONST_M1); // Load -1
-          mv.visitInsn(IADD); // pos - 1
-          pushInt(mv, peekOffset); // Load peekOffset
-          mv.visitInsn(IADD); // (pos - 1) + peekOffset
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, (int) expectedChar);
-          mv.visitJumpInsn(IF_ICMPNE, assertionPassed);
-        }
-
-        // All chars matched - pattern IS present, negative assertion fails
-        mv.visitJumpInsn(GOTO, assertionFailed);
-
-        // Pattern not present - negative assertion succeeds
-        mv.visitLabel(assertionPassed);
-      }
-    } else if (assertion.isLookbehind()) {
-      // Lookbehind: check backward from current position (posVar - 1)
-      int width = assertion.width;
-
-      // Calculate checkPos = (pos - 1) - width
-      int checkPosVar = allocator.allocate();
-      mv.visitVarInsn(ILOAD, posVar); // Load pos (already incremented)
-      mv.visitInsn(ICONST_M1); // Load -1
-      mv.visitInsn(IADD); // pos - 1
-      pushInt(mv, width); // Load width
-      mv.visitInsn(ISUB); // (pos - 1) - width
-      mv.visitVarInsn(ISTORE, checkPosVar);
-
-      // Bounds check: if (checkPos < 0)
-      mv.visitVarInsn(ILOAD, checkPosVar);
-      Label boundsOk = new Label();
-      Label assertionPassed = new Label();
-      mv.visitJumpInsn(IFGE, boundsOk); // If >= 0, bounds OK
-
-      // Can't look back far enough
-      if (assertion.isPositive()) {
-        // Positive lookbehind: fail (required pattern not present)
-        mv.visitJumpInsn(GOTO, assertionFailed);
-      } else {
-        // Negative lookbehind: succeed (no pattern to match against)
-        // Skip character checking - assertion is satisfied
-        mv.visitJumpInsn(GOTO, assertionPassed);
-      }
-
-      mv.visitLabel(boundsOk);
-
-      if (assertion.isLiteral) {
-        // Literal assertion: use String.regionMatches()
-        mv.visitVarInsn(ALOAD, 1); // Load input string
-        mv.visitVarInsn(ILOAD, checkPosVar); // Load checkPos (toffset)
-        mv.visitLdcInsn(assertion.literal); // Load literal string (other)
-        mv.visitInsn(ICONST_0); // ooffset = 0
-        pushInt(mv, assertion.literal.length()); // len
-        mv.visitMethodInsn(
-            INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-
-        // Stack now has boolean result (1 = match, 0 = no match)
-        if (assertion.isPositive()) {
-          mv.visitJumpInsn(IFEQ, assertionFailed);
-        } else {
-          mv.visitJumpInsn(IFEQ, assertionPassed);
-          mv.visitJumpInsn(GOTO, assertionFailed);
-          mv.visitLabel(assertionPassed);
-        }
-      } else {
-        // CharSet sequence assertion
-        Label mismatch = new Label();
-        int chVar = allocator.allocate();
-
-        for (int i = 0; i < assertion.charSets.size(); i++) {
-          mv.visitVarInsn(ALOAD, 1); // input
-          mv.visitVarInsn(ILOAD, checkPosVar);
-          if (i > 0) {
-            pushInt(mv, i);
-            mv.visitInsn(IADD);
-          }
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          mv.visitVarInsn(ISTORE, chVar);
-
-          generateCharSetCheck(mv, assertion.charSets.get(i), chVar, mismatch);
-        }
-
-        // All matched
-        if (assertion.isPositive()) {
-          // Positive: success
-        } else {
-          mv.visitJumpInsn(GOTO, assertionFailed);
-        }
-        mv.visitJumpInsn(GOTO, assertionPassed);
-
-        mv.visitLabel(mismatch);
-        if (assertion.isPositive()) {
-          mv.visitJumpInsn(GOTO, assertionFailed);
-        }
-        mv.visitLabel(assertionPassed);
-      }
-      // Positive assertion continues here (already passed)
-    } else {
-      throw new IllegalStateException("Unknown assertion type: " + assertion.type);
-    }
+    int assertionPosVar = allocator.allocate();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ISTORE, assertionPosVar);
+    generateAssertionCheckAtCurrentPosition(
+        mv, assertion, assertionPosVar, assertionFailed, allocator);
   }
 
   /** Generate inline character checks (same as unrolled version). */
@@ -573,6 +426,222 @@ public class DFASwitchBytecodeGenerator {
       mv.visitInsn(ICONST_0);
       mv.visitInsn(IRETURN);
     }
+  }
+
+  /** Generate code to check if current state is accepting, including per-state assertions. */
+  private void generateAcceptCheckWithAssertions(
+      MethodVisitor mv, int stateVar, int posVar, LocalVarAllocator allocator) {
+    Label notAccepting = new Label();
+    for (DFA.DFAState acceptState : dfa.getAcceptStates()) {
+      Label checkNext = new Label();
+      mv.visitVarInsn(ILOAD, stateVar);
+      pushInt(mv, acceptState.id);
+      mv.visitJumpInsn(IF_ICMPNE, checkNext);
+
+      for (AssertionCheck assertion : acceptState.assertionChecks) {
+        generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, checkNext, allocator);
+      }
+      if (!acceptState.acceptanceAnchorConditions.isEmpty()) {
+        emitAcceptanceAnchorChecks(mv, acceptState.acceptanceAnchorConditions, posVar, checkNext);
+      }
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(checkNext);
+    }
+    mv.visitLabel(notAccepting);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Generate an assertion check at the current DFA position. This is used when an accepting state
+   * is reached between character transitions (for find/matches end checks). The existing
+   * generateAssertionCheck method is for transition-time checks after pos++ and therefore evaluates
+   * at pos-1.
+   */
+  private void generateAssertionCheckAtCurrentPosition(
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int posVar,
+      Label assertionFailed,
+      LocalVarAllocator allocator) {
+    if (assertion.isLookahead()) {
+      if (assertion.isLiteral) {
+        generateLiteralLookaheadAtCurrentPosition(
+            mv, assertion, posVar, assertionFailed, allocator);
+      } else {
+        generateCharSetLookaheadAtCurrentPosition(
+            mv, assertion, posVar, assertionFailed, allocator);
+      }
+    } else if (assertion.isLookbehind()) {
+      generateLookbehindAtCurrentPosition(mv, assertion, posVar, assertionFailed, allocator);
+    } else {
+      throw new IllegalStateException("Unknown assertion type: " + assertion.type);
+    }
+  }
+
+  private void generateLiteralLookaheadAtCurrentPosition(
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int posVar,
+      Label assertionFailed,
+      LocalVarAllocator allocator) {
+    String literal = assertion.literal;
+    if (assertion.isPositive()) {
+      mv.visitVarInsn(ILOAD, posVar);
+      pushInt(mv, assertion.offset + literal.length());
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPGT, assertionFailed);
+
+      int checkPosVar = allocator.allocate();
+      for (int i = 0; i < literal.length(); i++) {
+        mv.visitVarInsn(ILOAD, posVar);
+        pushInt(mv, assertion.offset + i);
+        mv.visitInsn(IADD);
+        mv.visitVarInsn(ISTORE, checkPosVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, checkPosVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, literal.charAt(i));
+        mv.visitJumpInsn(IF_ICMPNE, assertionFailed);
+      }
+    } else {
+      Label assertionPassed = new Label();
+      int checkPosVar = allocator.allocate();
+      for (int i = 0; i < literal.length(); i++) {
+        mv.visitVarInsn(ILOAD, posVar);
+        pushInt(mv, assertion.offset + i);
+        mv.visitInsn(IADD);
+        mv.visitVarInsn(ISTORE, checkPosVar);
+        mv.visitVarInsn(ILOAD, checkPosVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitJumpInsn(IF_ICMPGE, assertionPassed);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, checkPosVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, literal.charAt(i));
+        mv.visitJumpInsn(IF_ICMPNE, assertionPassed);
+      }
+      mv.visitJumpInsn(GOTO, assertionFailed);
+      mv.visitLabel(assertionPassed);
+    }
+  }
+
+  private void generateCharSetLookaheadAtCurrentPosition(
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int posVar,
+      Label assertionFailed,
+      LocalVarAllocator allocator) {
+    if (assertion.isPositive()) {
+      mv.visitVarInsn(ILOAD, posVar);
+      pushInt(mv, assertion.offset + assertion.charSets.size());
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPGT, assertionFailed);
+
+      int checkPosVar = allocator.allocate();
+      int chVar = allocator.allocate();
+      for (int i = 0; i < assertion.charSets.size(); i++) {
+        mv.visitVarInsn(ILOAD, posVar);
+        pushInt(mv, assertion.offset + i);
+        mv.visitInsn(IADD);
+        mv.visitVarInsn(ISTORE, checkPosVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, checkPosVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitVarInsn(ISTORE, chVar);
+        generateCharSetCheck(mv, assertion.charSets.get(i), chVar, assertionFailed);
+      }
+    } else {
+      Label assertionPassed = new Label();
+      int checkPosVar = allocator.allocate();
+      int chVar = allocator.allocate();
+      for (int i = 0; i < assertion.charSets.size(); i++) {
+        mv.visitVarInsn(ILOAD, posVar);
+        pushInt(mv, assertion.offset + i);
+        mv.visitInsn(IADD);
+        mv.visitVarInsn(ISTORE, checkPosVar);
+        mv.visitVarInsn(ILOAD, checkPosVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitJumpInsn(IF_ICMPGE, assertionPassed);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, checkPosVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitVarInsn(ISTORE, chVar);
+        generateCharSetCheck(mv, assertion.charSets.get(i), chVar, assertionPassed);
+      }
+      mv.visitJumpInsn(GOTO, assertionFailed);
+      mv.visitLabel(assertionPassed);
+    }
+  }
+
+  private void generateLookbehindAtCurrentPosition(
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int posVar,
+      Label assertionFailed,
+      LocalVarAllocator allocator) {
+    int checkPosVar = allocator.allocate();
+    mv.visitVarInsn(ILOAD, posVar);
+    pushInt(mv, assertion.width);
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, checkPosVar);
+
+    mv.visitVarInsn(ILOAD, checkPosVar);
+    Label boundsOk = new Label();
+    Label assertionPassed = new Label();
+    mv.visitJumpInsn(IFGE, boundsOk);
+    if (assertion.isPositive()) {
+      mv.visitJumpInsn(GOTO, assertionFailed);
+    } else {
+      mv.visitJumpInsn(GOTO, assertionPassed);
+    }
+    mv.visitLabel(boundsOk);
+
+    if (assertion.isLiteral) {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, checkPosVar);
+      mv.visitLdcInsn(assertion.literal);
+      mv.visitInsn(ICONST_0);
+      pushInt(mv, assertion.literal.length());
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
+      if (assertion.isPositive()) {
+        mv.visitJumpInsn(IFEQ, assertionFailed);
+      } else {
+        mv.visitJumpInsn(IFEQ, assertionPassed);
+        mv.visitJumpInsn(GOTO, assertionFailed);
+      }
+    } else {
+      Label mismatch = new Label();
+      int chVar = allocator.allocate();
+      for (int i = 0; i < assertion.charSets.size(); i++) {
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, checkPosVar);
+        if (i > 0) {
+          pushInt(mv, i);
+          mv.visitInsn(IADD);
+        }
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitVarInsn(ISTORE, chVar);
+        generateCharSetCheck(mv, assertion.charSets.get(i), chVar, mismatch);
+      }
+      if (!assertion.isPositive()) {
+        mv.visitJumpInsn(GOTO, assertionFailed);
+      }
+      mv.visitJumpInsn(GOTO, assertionPassed);
+      mv.visitLabel(mismatch);
+      if (assertion.isPositive()) {
+        mv.visitJumpInsn(GOTO, assertionFailed);
+      }
+    }
+    mv.visitLabel(assertionPassed);
   }
 
   /**
@@ -709,10 +778,12 @@ public class DFASwitchBytecodeGenerator {
     mv.visitVarInsn(ILOAD, lenVar);
     mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
 
-    // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors
-    // Use requiresStartAnchor (not hasStartAnchor) to handle alternations like (^foo|bar)
-    // where one branch has anchor but pattern can still match at any position via other branch
-    if (requiresStartAnchor || hasStringStartAnchor) {
+    // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors.
+    // {@link NFA#requiresStartAnchor()} treats both START (^) and STRING_START (\A) as barriers,
+    // so it returns true only when ALL paths to a useful target go through one of them. Or-ing
+    // in {@code hasStringStartAnchor} on top short-circuits on patterns like `]\A|b` where only
+    // one branch has \A but the other can still match anywhere.
+    if (requiresStartAnchor) {
       // Non-multiline ^ or \A: Only try position 0
       // if (tryPos != 0) return -1;
       Label validPosition = new Label();
@@ -925,89 +996,23 @@ public class DFASwitchBytecodeGenerator {
     mv.visitInsn(IRETURN);
     mv.visitLabel(notNull);
 
-    // Check if start state is accepting
+    // Check if start state is accepting (per-state assertions/anchor conditions gate the
+    // empty-match path)
     if (dfa.getStartState().accepting) {
-      if (hasEndAnchor || hasStringEndAnchor || hasStringEndAbsoluteAnchor || hasMultilineEnd) {
-        // Must check end anchor before accepting empty match
-        Label continueMatching = new Label();
-
-        // Get current position (startPos) and length
-        mv.visitVarInsn(ILOAD, 2); // startPos
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-
-        if (hasStringEndAbsoluteAnchor) {
-          // \z: Accept only if startPos == length
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-          mv.visitLabel(continueMatching);
-        } else if (hasStringEndAnchor) {
-          // \Z: Accept if startPos == length OR (startPos == length-1 AND charAt(startPos) == '\n')
-          Label accept = new Label();
-
-          // Stack: startPos, length
-          mv.visitInsn(DUP2);
-          mv.visitJumpInsn(IF_ICMPEQ, accept); // If startPos == length, accept
-
-          // Check if startPos == length-1
-          mv.visitInsn(DUP2);
-          mv.visitInsn(SWAP);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(ISUB);
-          mv.visitInsn(SWAP);
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching); // startPos != length-1
-
-          // Check charAt(startPos) == '\n'
-          mv.visitInsn(POP); // Remove length
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitInsn(SWAP);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching);
-
-          mv.visitLabel(accept);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-          mv.visitLabel(continueMatching);
-        } else if (hasEndAnchor) {
-          // Non-multiline $: Accept only if startPos == length
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-          mv.visitLabel(continueMatching);
-        } else { // hasMultilineEnd
-          // Multiline $: Accept if startPos == length OR charAt(startPos) == '\n'
-          Label accept = new Label();
-
-          // Stack: startPos, length
-          mv.visitInsn(DUP2);
-          mv.visitJumpInsn(IF_ICMPEQ, accept); // If startPos == length, accept
-
-          // Check if startPos < length && charAt(startPos) == '\n'
-          mv.visitInsn(DUP2);
-          mv.visitJumpInsn(IF_ICMPGE, continueMatching); // startPos >= length, can't check charAt
-
-          // Stack: startPos, length
-          mv.visitInsn(POP); // Stack: startPos
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitInsn(SWAP);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching);
-
-          mv.visitLabel(accept);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-
-          mv.visitLabel(continueMatching);
-          // Anchor not met, continue to main matching loop
-        }
+      Label continueMatching = new Label();
+      for (AssertionCheck assertion : dfa.getStartState().assertionChecks) {
+        generateAssertionCheckAtCurrentPosition(mv, assertion, 2, continueMatching, allocator);
+      }
+      if (dfa.getStartState().acceptanceAnchorConditions.isEmpty()) {
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IRETURN);
       } else {
-        // No end anchor - accept immediately
+        emitAcceptanceAnchorChecks(
+            mv, dfa.getStartState().acceptanceAnchorConditions, 2, continueMatching);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
       }
+      mv.visitLabel(continueMatching);
     }
 
     // int state = 0; (start state)
@@ -1036,53 +1041,24 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Found accepting state - but must check end anchor if present
-      if (hasEndAnchor || hasStringEndAnchor || hasStringEndAbsoluteAnchor || hasMultilineEnd) {
-        Label continueMatching = new Label();
-
-        // Get current position and length
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-
-        if (hasEndAnchor) {
-          // Non-multiline $: Accept only if pos == length
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching); // If pos != length, continue matching
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-        } else { // hasMultilineEnd
-          // Multiline $: Accept if pos == length OR charAt(pos) == '\n'
-          Label accept = new Label();
-
-          // Stack: pos, length
-          mv.visitInsn(DUP2); // Stack: pos, length, pos, length
-          mv.visitJumpInsn(IF_ICMPEQ, accept); // If pos == length, accept
-
-          // Stack: pos, length
-          // Check if pos < length && charAt(pos) == '\n'
-          mv.visitInsn(DUP2); // Stack: pos, length, pos, length
-          mv.visitJumpInsn(IF_ICMPGE, continueMatching); // pos >= length, can't check charAt
-
-          // Stack: pos, length
-          mv.visitInsn(POP); // Stack: pos
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitInsn(SWAP); // Stack: input, pos
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching); // Not '\n', continue matching
-
-          mv.visitLabel(accept);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-        }
-
-        mv.visitLabel(continueMatching);
-        // Anchor condition not met, continue to checkNext
+      // Found accepting state — gate acceptance on per-state assertions/anchor conditions. If a
+      // lookahead assertion fails, keep consuming via outgoing transitions instead of rejecting the
+      // whole start position; a later, longer prefix may satisfy the assertion.
+      Label continueMatching = new Label();
+      for (AssertionCheck assertion : acceptState.assertionChecks) {
+        generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, continueMatching, allocator);
+      }
+      if (acceptState.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IRETURN);
       } else {
-        // No end anchor - accept immediately
+        emitAcceptanceAnchorChecks(
+            mv, acceptState.acceptanceAnchorConditions, posVar, continueMatching);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
       }
+      mv.visitLabel(continueMatching);
+      mv.visitJumpInsn(GOTO, notAccepting);
 
       mv.visitLabel(checkNext);
     }
@@ -1108,9 +1084,10 @@ public class DFASwitchBytecodeGenerator {
     // Note: pos has been incremented, so pass posVar for assertion checking
     generateStateSwitch(mv, stateVar, chVar, posVar, loopStart, allocator);
 
-    // End of input - check if accepting
+    // End of input - check if accepting, including zero-width assertions attached to the accepting
+    // DFA state.
     mv.visitLabel(loopEnd);
-    generateAcceptCheck(mv, stateVar);
+    generateAcceptCheckWithAssertions(mv, stateVar, posVar, allocator);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -1217,6 +1194,64 @@ public class DFASwitchBytecodeGenerator {
   }
 
   /**
+   * Generates matchInto(String, int[], int[]) method. This is the allocation-free equivalent of
+   * match(String): it writes group 0 and capture group boundaries into caller-provided arrays.
+   */
+  public void generateMatchIntoMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
+    mv.visitCode();
+
+    if (groupCount > 0 && hasGroupActions()) {
+      generateMatchIntoWithGroupTracking(mv);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
+
+    // if (!matches(input)) return false;
+    Label matchSuccess = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className.replace('.', '/'), "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitJumpInsn(IFNE, matchSuccess);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitLabel(matchSuccess);
+
+    // groupStarts[0] = 0; groupEnds[0] = input.length();
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitInsn(IASTORE);
+
+    // Initialize inner groups to -1 when the DFA has group slots but no group actions.
+    for (int i = 1; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 2);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, 3);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
    * Generates matchesBounded() method - boolean bounded matching (allocation-free). Uses
    * switch-based DFA on the bounded region [start, end).
    *
@@ -1309,60 +1344,23 @@ public class DFASwitchBytecodeGenerator {
     // End of input - check if in accept state
     mv.visitLabel(loopEnd);
 
-    // Check if state is accepting
+    // Check if state is accepting (bounded path — per-state conditions, CharSequence helper)
     for (DFA.DFAState acceptState : dfa.getAcceptStates()) {
       Label checkNext = new Label();
       mv.visitVarInsn(ILOAD, stateVar);
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Found accepting state - but must check end anchor if present
-      if (hasEndAnchor || hasStringEndAnchor || hasStringEndAbsoluteAnchor || hasMultilineEnd) {
-        Label continueChecking = new Label();
-
-        // At loopEnd, pos == end (we've consumed the bounded region)
-        // For end anchor, check if end satisfies anchor condition
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "length", "()I", true);
-
-        if (hasEndAnchor) {
-          // Non-multiline $: Accept only if pos == length
-          mv.visitJumpInsn(IF_ICMPNE, continueChecking);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-          mv.visitLabel(continueChecking);
-        } else { // hasMultilineEnd
-          // Multiline $: Accept if pos == length OR charAt(pos) == '\n'
-          Label accept = new Label();
-
-          // Stack: pos, length
-          mv.visitInsn(DUP2);
-          mv.visitJumpInsn(IF_ICMPEQ, accept); // If pos == length, accept
-
-          // Check if pos < length && charAt(pos) == '\n'
-          mv.visitInsn(DUP2);
-          mv.visitJumpInsn(IF_ICMPGE, continueChecking); // pos >= length, can't check charAt
-
-          // Stack: pos, length
-          mv.visitInsn(POP); // Stack: pos
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitInsn(SWAP);
-          mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, continueChecking);
-
-          mv.visitLabel(accept);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-
-          mv.visitLabel(continueChecking);
-          // Anchor not met, check next state
-        }
-      } else {
-        // No end anchor - accept immediately
+      if (acceptState.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
+      } else {
+        Label continueChecking = new Label();
+        emitAcceptanceAnchorChecksCharSequence(
+            mv, acceptState.acceptanceAnchorConditions, posVar, continueChecking);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(continueChecking);
       }
 
       mv.visitLabel(checkNext);
@@ -1543,42 +1541,10 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Found accepting state - but must check end anchor if present
-      if (hasEndAnchor || hasStringEndAnchor || hasStringEndAbsoluteAnchor || hasMultilineEnd) {
-        Label createResult = new Label();
-
-        // At loopEnd, pos == end (we've consumed the bounded region)
-        // For end anchor, check if end satisfies anchor condition
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "length", "()I", true);
-
-        if (hasEndAnchor) {
-          // Non-multiline $: Accept only if pos == length
-          mv.visitJumpInsn(IF_ICMPNE, checkNext); // Anchor not met, check next state
-          // Fall through to createResult
-        } else { // hasMultilineEnd
-          // Multiline $: Accept if pos == length OR charAt(pos) == '\n'
-          Label checkNewline = new Label();
-
-          // Stack: pos, length
-          mv.visitInsn(DUP2);
-          mv.visitJumpInsn(IF_ICMPEQ, createResult); // If pos == length, accept
-
-          // Check if pos < length && charAt(pos) == '\n'
-          mv.visitInsn(DUP2);
-          mv.visitJumpInsn(IF_ICMPGE, checkNext); // pos >= length, can't check charAt
-
-          // Stack: pos, length
-          mv.visitInsn(POP); // Stack: pos
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitInsn(SWAP);
-          mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, checkNext); // Not '\n', check next state
-        }
-
-        mv.visitLabel(createResult);
+      // Found accepting state — gate acceptance on per-state anchor conditions (CharSequence path).
+      if (!acceptState.acceptanceAnchorConditions.isEmpty()) {
+        emitAcceptanceAnchorChecksCharSequence(
+            mv, acceptState.acceptanceAnchorConditions, posVar, checkNext);
       }
 
       // Accepting state - create MatchResult
@@ -2315,6 +2281,86 @@ public class DFASwitchBytecodeGenerator {
     mv.visitInsn(ARETURN);
   }
 
+  /** Generate matchInto() method body with inline group tracking during DFA execution. */
+  private void generateMatchIntoWithGroupTracking(MethodVisitor mv) {
+    // Slots: 0=this, 1=input, 2=groupStarts, 3=groupEnds
+    LocalVarAllocator allocator = new LocalVarAllocator(4);
+
+    // if (input == null) return false;
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notNull);
+
+    int stateVar = allocator.allocate();
+    pushInt(mv, dfa.getStartState().id);
+    mv.visitVarInsn(ISTORE, stateVar);
+
+    int posVar = allocator.allocate();
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    int chVar = allocator.allocate();
+
+    // Initialize group 0 and inner groups in the caller-provided arrays.
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+
+    for (int i = 1; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 2);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, 3);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+
+    generateGroupActionsForState(mv, dfa.getStartState(), posVar, 2, 3);
+
+    Label loopStart = new Label();
+    Label loopEnd = new Label();
+
+    mv.visitLabel(loopStart);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    mv.visitIincInsn(posVar, 1);
+
+    generateStateSwitchWithGroupTrackingReturningFalse(
+        mv, stateVar, chVar, posVar, 2, 3, loopStart);
+
+    mv.visitLabel(loopEnd);
+
+    Label isAccept = new Label();
+    generateAcceptCheck(mv, stateVar, isAccept);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitLabel(isAccept);
+
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitInsn(IASTORE);
+
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+  }
+
   /** Generate switch statement with group tracking. */
   private void generateStateSwitchWithGroupTracking(
       MethodVisitor mv,
@@ -2355,6 +2401,44 @@ public class DFASwitchBytecodeGenerator {
     mv.visitLabel(defaultLabel);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
+  }
+
+  /** Generate switch statement with group tracking for boolean matchInto(). */
+  private void generateStateSwitchWithGroupTrackingReturningFalse(
+      MethodVisitor mv,
+      int stateVar,
+      int chVar,
+      int posVar,
+      int groupStartsVar,
+      int groupEndsVar,
+      Label loopStart) {
+    Label defaultLabel = new Label();
+    Label[] caseLabels = new Label[dfa.getAllStates().size()];
+
+    for (int i = 0; i < dfa.getAllStates().size(); i++) {
+      caseLabels[i] = new Label();
+    }
+
+    mv.visitVarInsn(ILOAD, stateVar);
+    mv.visitTableSwitchInsn(0, dfa.getAllStates().size() - 1, defaultLabel, caseLabels);
+
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      mv.visitLabel(caseLabels[state.id]);
+      generateStateCaseCodeWithGroupTracking(
+          mv,
+          state,
+          stateVar,
+          chVar,
+          posVar,
+          groupStartsVar,
+          groupEndsVar,
+          loopStart,
+          defaultLabel);
+    }
+
+    mv.visitLabel(defaultLabel);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
   }
 
   /** Generate case code for a state with group tracking. */
@@ -2435,6 +2519,158 @@ public class DFASwitchBytecodeGenerator {
       mv.visitVarInsn(ILOAD, stateVar);
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPEQ, acceptLabel);
+    }
+  }
+
+  // ============================================================================================
+  // Per-state anchor condition emission. Mirrors the structure in DFAUnrolledBytecodeGenerator:
+  // each DFAState records the EnumSet of anchor types required at the current input position to
+  // be considered accepting, and each DFATransition records the anchors that must hold at the
+  // source position before the transition is taken.
+  // ============================================================================================
+
+  /**
+   * Emit a check for one anchor type at {@code posVar}. When {@code charSequence} is true the
+   * length/charAt calls go through {@link CharSequence} (bounded path); otherwise they target
+   * {@link String} (unbounded path).
+   */
+  private void emitSingleAnchorCheck(
+      MethodVisitor mv, NFA.AnchorType anchor, int posVar, Label failed, boolean charSequence) {
+    String owner = charSequence ? "java/lang/CharSequence" : "java/lang/String";
+    int invoke = charSequence ? INVOKEINTERFACE : INVOKEVIRTUAL;
+    boolean isIface = charSequence;
+    switch (anchor) {
+      case STRING_END_ABSOLUTE:
+        // \z — strict end only
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+        mv.visitJumpInsn(IF_ICMPNE, failed);
+        break;
+      case START:
+      case STRING_START:
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitJumpInsn(IFNE, failed);
+        break;
+      case END:
+      // $ (non-multiline) matches at end OR before final '\n' — same as \Z.
+      // Fall through to STRING_END.
+      case STRING_END:
+        {
+          // OK iff pos == end OR (pos == end - 1 AND charAt(pos) == '\n')
+          Label ok = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(invoke, owner, "charAt", "(I)C", isIface);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitLabel(ok);
+          break;
+        }
+      case END_MULTILINE:
+        {
+          Label ok = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(invoke, owner, "charAt", "(I)C", isIface);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitLabel(ok);
+          break;
+        }
+      case START_MULTILINE:
+        {
+          Label ok = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitJumpInsn(IFEQ, ok);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitMethodInsn(invoke, owner, "charAt", "(I)C", isIface);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitLabel(ok);
+          break;
+        }
+      default:
+        break;
+    }
+  }
+
+  /** Emit per-state acceptance condition checks (String path). */
+  private void emitAcceptanceAnchorChecks(
+      MethodVisitor mv, EnumSet<NFA.AnchorType> conditions, int posVar, Label failed) {
+    for (NFA.AnchorType anchor : conditions) {
+      emitSingleAnchorCheck(mv, anchor, posVar, failed, false);
+    }
+  }
+
+  /** Emit per-state acceptance condition checks (CharSequence/bounded path). */
+  private void emitAcceptanceAnchorChecksCharSequence(
+      MethodVisitor mv, EnumSet<NFA.AnchorType> conditions, int posVar, Label failed) {
+    for (NFA.AnchorType anchor : conditions) {
+      emitSingleAnchorCheck(mv, anchor, posVar, failed, true);
+    }
+  }
+
+  /**
+   * Emit a transition entry-guard check. {@code posVar} is the position AFTER the char was consumed
+   * (i.e. source pos + 1). END-class anchors in the guard are treated as dead (the transition is
+   * skipped) since SubsetConstructor should have pruned them at construction.
+   */
+  private void emitTransitionEntryGuard(
+      MethodVisitor mv, EnumSet<NFA.AnchorType> entryGuard, int posVar, Label skipTransition) {
+    for (NFA.AnchorType anchor : entryGuard) {
+      switch (anchor) {
+        case START:
+        case STRING_START:
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+          break;
+        case START_MULTILINE:
+          {
+            Label ok = new Label();
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitJumpInsn(IF_ICMPEQ, ok);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitJumpInsn(IF_ICMPLT, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitInsn(ISUB);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitLabel(ok);
+            break;
+          }
+        case END:
+        case STRING_END_ABSOLUTE:
+        case STRING_END:
+        case END_MULTILINE:
+          mv.visitJumpInsn(GOTO, skipTransition);
+          break;
+        default:
+          break;
+      }
     }
   }
 }

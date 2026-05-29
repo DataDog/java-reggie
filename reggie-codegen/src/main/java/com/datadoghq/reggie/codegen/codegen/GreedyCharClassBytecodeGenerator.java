@@ -332,6 +332,13 @@ public class GreedyCharClassBytecodeGenerator {
 
     mv.visitLabel(checksPass);
 
+    // For min=0 (like * or {0,}), any position is a valid match start — empty match always valid.
+    // Return start immediately so the caller's greedy scan determines the actual end.
+    if (minMatches == 0) {
+      mv.visitVarInsn(ILOAD, startVar);
+      mv.visitInsn(IRETURN);
+    }
+
     // int len = input.length();
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);

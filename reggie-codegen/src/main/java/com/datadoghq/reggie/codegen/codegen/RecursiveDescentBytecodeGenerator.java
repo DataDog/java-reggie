@@ -648,6 +648,11 @@ public class RecursiveDescentBytecodeGenerator {
    * generating the public API methods.
    */
   public void generateAllParserMethods(ClassWriter cw, String className) {
+    // Flag set to true while executing find(); false (default) during matches().
+    // Lazy quantifiers use this to return the minimum match for find() vs the
+    // greedy (full-coverage) match for matches().
+    cw.visitField(ACC_PRIVATE, "lazyFindMode", "Z", null, null).visitEnd();
+
     // IMPORTANT: Generate parser methods for AST nodes FIRST
     // This must happen before generateParseRootMethod, because parseRoot
     // calls getMethodNameForNode(ast) which adds ast to the map,
@@ -750,6 +755,11 @@ public class RecursiveDescentBytecodeGenerator {
         cw.visitMethod(
             ACC_PROTECTED, "findBoundsFrom", "(Ljava/lang/CharSequence;I[I)I", null, null);
     mv.visitCode();
+
+    // lazyFindMode = true: lazy quantifiers return minimum matches during find()
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitInsn(ICONST_1);
+    mv.visitFieldInsn(PUTFIELD, className, "lazyFindMode", "Z");
 
     // Local vars: 0=this, 1=charSeq, 2=fromIndex, 3=bounds
     LocalVarAllocator allocator = new LocalVarAllocator(4);
@@ -920,6 +930,10 @@ public class RecursiveDescentBytecodeGenerator {
     // S: [A:[I], I, I]
     mv.visitInsn(IASTORE);
 
+    // Reset lazyFindMode before returning (match found path)
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitInsn(ICONST_0);
+    mv.visitFieldInsn(PUTFIELD, className, "lazyFindMode", "Z");
     // Return start position
     // S: []
     mv.visitVarInsn(ILOAD, posVar);
@@ -928,6 +942,10 @@ public class RecursiveDescentBytecodeGenerator {
 
     mv.visitLabel(findMatchPositionLoopEnd);
     // No match found anywhere
+    // Reset lazyFindMode before returning (no match path)
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitInsn(ICONST_0);
+    mv.visitFieldInsn(PUTFIELD, className, "lazyFindMode", "Z");
     mv.visitInsn(ICONST_M1);
     mv.visitInsn(IRETURN);
 
@@ -1222,6 +1240,152 @@ public class RecursiveDescentBytecodeGenerator {
 
     mv.visitMaxs(6, allocator.peek());
     mv.visitEnd();
+  }
+
+  /**
+   * Generate matchInto() method that writes capture boundaries directly into caller-provided
+   * arrays. Signature: public boolean matchInto(String input, int[] groupStarts, int[] groupEnds)
+   */
+  public void generateMatchIntoMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
+    mv.visitCode();
+
+    // Local vars: 0=this, 1=input, 2=groupStarts, 3=groupEnds
+    LocalVarAllocator allocator = new LocalVarAllocator(4);
+    int groupsVar = allocator.allocate();
+    int resultVar = allocator.allocate();
+    int iVar = allocator.allocate();
+    int requiredGroups = groupCount + 1;
+
+    // Objects.requireNonNull(input/groupStarts/groupEnds)
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitLdcInsn("input");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitLdcInsn("groupStarts");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitLdcInsn("groupEnds");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+
+    Label startsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ARRAYLENGTH);
+    BytecodeUtil.pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, startsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(startsLengthOk);
+
+    Label endsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ARRAYLENGTH);
+    BytecodeUtil.pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, endsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(endsLengthOk);
+
+    // int[] groups = this.recursiveGroups;
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(
+        GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "recursiveGroups", "[I");
+    mv.visitVarInsn(ASTORE, groupsVar);
+
+    // Initialize packed groups to -1. Caller arrays remain unchanged until success.
+    Label initLoopStart = new Label();
+    Label initLoopEnd = new Label();
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, iVar);
+
+    mv.visitLabel(initLoopStart);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitInsn(ARRAYLENGTH);
+    mv.visitJumpInsn(IF_ICMPGE, initLoopEnd);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IASTORE);
+    mv.visitIincInsn(iVar, 1);
+    mv.visitJumpInsn(GOTO, initLoopStart);
+    mv.visitLabel(initLoopEnd);
+
+    // int result = parseRoot(input, 0, input.length(), groups, 0)
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
+    mv.visitVarInsn(ISTORE, resultVar);
+
+    // Full-match check.
+    mv.visitVarInsn(ILOAD, resultVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    Label matchFailed = new Label();
+    mv.visitJumpInsn(IF_ICMPNE, matchFailed);
+
+    // Copy packed groups into caller arrays: starts[i] = groups[2*i], ends[i] = groups[2*i + 1]
+    for (int i = 0; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 2);
+      BytecodeUtil.pushInt(mv, i);
+      mv.visitVarInsn(ALOAD, groupsVar);
+      BytecodeUtil.pushInt(mv, i * 2);
+      mv.visitInsn(IALOAD);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, 3);
+      BytecodeUtil.pushInt(mv, i);
+      mv.visitVarInsn(ALOAD, groupsVar);
+      BytecodeUtil.pushInt(mv, i * 2 + 1);
+      mv.visitInsn(IALOAD);
+      mv.visitInsn(IASTORE);
+    }
+
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+
+    mv.visitLabel(matchFailed);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(6, allocator.peek());
+    mv.visitEnd();
+  }
+
+  private void generateGroupArrayTooSmallThrow(MethodVisitor mv, int requiredGroups) {
+    mv.visitTypeInsn(NEW, "java/lang/IndexOutOfBoundsException");
+    mv.visitInsn(DUP);
+    mv.visitLdcInsn(
+        "group arrays must have length at least " + requiredGroups + " for this pattern");
+    mv.visitMethodInsn(
+        INVOKESPECIAL,
+        "java/lang/IndexOutOfBoundsException",
+        "<init>",
+        "(Ljava/lang/String;)V",
+        false);
+    mv.visitInsn(ATHROW);
   }
 
   /**
@@ -1854,10 +2018,20 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitLabel(minLoopEnd);
       }
 
-      // Match as many as possible up to max
-      // For non-greedy quantifiers, the preference for fewer matches is handled
-      // by generateConcatWithBacktracking when followed by more pattern elements.
-      // When standalone or at the end of a pattern, always match max.
+      // Lazy (non-greedy) in find() mode: return the minimum match immediately.
+      // In matches() mode the greedy extension below ensures the full input can be consumed
+      // when a lazy quantifier is at the end of a concat with no following sibling.
+      if (!node.greedy) {
+        Label matchesModeLabel = new Label();
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitFieldInsn(GETFIELD, className, "lazyFindMode", "Z");
+        mv.visitJumpInsn(IFEQ, matchesModeLabel); // lazyFindMode==false → matches mode, continue
+        mv.visitVarInsn(ILOAD, 6); // currentPos after min matches
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(matchesModeLabel);
+      }
+
+      // Match as many as possible up to max (used by matches() or greedy find)
       // PCRE semantics: capturing groups should contain values from LAST iteration
       Label greedyLoopStart = new Label();
       Label greedyLoopEnd = new Label();
@@ -2345,8 +2519,16 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 5); // currentPos (before update)
       Label madeProgressGreedy = new Label();
       mv.visitJumpInsn(IF_ICMPNE, madeProgressGreedy);
-      // Empty match: count it but stop looping
-      mv.visitIincInsn(10, 1); // matchCount++ for this empty match
+      // Zero-width match: count it. For patterns like \A{3,} the anchor is always zero-width;
+      // we must keep counting until matchCount reaches min before stopping, otherwise the
+      // minimum repetition requirement won't be satisfied.
+      mv.visitIincInsn(10, 1); // matchCount++
+      if (quantNode.min > 1) {
+        // If matchCount is still below min, continue counting (safe: pos doesn't change)
+        mv.visitVarInsn(ILOAD, 10); // matchCount
+        BytecodeUtil.pushInt(mv, quantNode.min);
+        mv.visitJumpInsn(IF_ICMPLT, greedyLoop); // matchCount < min → keep going
+      }
       mv.visitJumpInsn(GOTO, greedyEnd);
 
       mv.visitLabel(madeProgressGreedy);
@@ -2585,7 +2767,23 @@ public class RecursiveDescentBytecodeGenerator {
             node, nestedBacktrackIndex, backtrackLoop, quantNode.greedy ? -1 : 1, 9, 16);
       }
 
-      // All remaining children succeeded
+      // All remaining children succeeded.
+      // For a lazy quantifier in matches() mode: if the position hasn't reached the required
+      // end yet, extend by one more iteration so the full input can be covered.
+      if (!quantNode.greedy) {
+        Label returnNow = new Label();
+        // If lazyFindMode == true (find mode), return immediately on first success.
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitFieldInsn(GETFIELD, className, "lazyFindMode", "Z");
+        mv.visitJumpInsn(IFNE, returnNow);
+        // Matches mode: if pos < end, try one more quantifier iteration.
+        mv.visitVarInsn(ILOAD, 5); // currentPos
+        mv.visitVarInsn(ILOAD, 3); // end
+        mv.visitJumpInsn(IF_ICMPGE, returnNow); // pos >= end → done
+        mv.visitIincInsn(9, 1); // tryMatchCount++ (lazy: increment toward max)
+        mv.visitJumpInsn(GOTO, backtrackLoop);
+        mv.visitLabel(returnNow);
+      }
       mv.visitVarInsn(ILOAD, 5);
       mv.visitInsn(IRETURN);
 
@@ -3310,16 +3508,40 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitLabel(atEnd);
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
-      } else if (node.type == AnchorNode.Type.END
-          || node.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
-        // $ (non-multiline) or \z: must be at end of input
+      } else if (node.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
+        // \z: strict end of input only
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
-        Label atEnd = new Label();
-        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        Label atAbsEnd = new Label();
+        mv.visitJumpInsn(IF_ICMPEQ, atAbsEnd);
         mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
-        mv.visitLabel(atEnd);
+        mv.visitLabel(atAbsEnd);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(IRETURN);
+      } else if (node.type == AnchorNode.Type.END) {
+        // $ (non-multiline): same as \Z — pos == end OR (pos == end-1 AND charAt(pos) == '\n')
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        Label dollarOk = new Label();
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        // pos != end: check if pos == end-1 AND charAt(pos) == '\n'
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitVarInsn(ILOAD, 3);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        Label dollarFail = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, dollarFail);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, dollarFail);
+        mv.visitJumpInsn(GOTO, dollarOk);
+        mv.visitLabel(dollarFail);
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(dollarOk);
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       }
@@ -3391,8 +3613,8 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitLabel(endIndexUpperBoundsOk);
 
       // Check if group has been captured
-      // PCRE semantics: An uncaptured backreference matches an empty string (0 chars)
-      // C-03: Also match empty string when group is in partial-open state
+      // JDK semantics: a backref to a group that never participated fails (returns -1).
+      // C-03: Match empty string when group is in partial-open state
       // (groups[startIndex] >= 0 AND groups[endIndex] == -1), which means we are
       // currently inside that group's first iteration (self-referencing backref).
       Label groupCaptured = new Label();
@@ -3402,8 +3624,8 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitInsn(ICONST_M1);
       mv.visitJumpInsn(IF_ICMPNE, groupCaptured);
 
-      // groups[startIndex] == -1: group not captured at all - match empty string
-      mv.visitVarInsn(ILOAD, 2); // pos
+      // groups[startIndex] == -1: group never captured — fail (JDK semantics)
+      mv.visitInsn(ICONST_M1);
       mv.visitInsn(IRETURN);
 
       mv.visitLabel(groupCaptured);

@@ -2140,14 +2140,16 @@ public class NFABytecodeGenerator {
               pushInt(mv, '\n');
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
-            case END:
             case STRING_END_ABSOLUTE:
-              // pos == input.length()
+              // \z: strict pos == input.length()
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
+            case END:
+            // $ (non-multiline): same as \Z — pos == length OR before final '\n'.
+            // Fall through to STRING_END.
             case STRING_END:
               // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
               mv.visitVarInsn(ILOAD, posVar);
@@ -6289,6 +6291,352 @@ public class NFABytecodeGenerator {
   }
 
   /**
+   * Generate matchInto() method that writes capture boundaries to caller-provided arrays without
+   * allocating MatchResultImpl or per-call group arrays.
+   */
+  public void generateMatchIntoMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
+    mv.visitCode();
+
+    // Method signature: matchInto(String input, int[] outStarts, int[] outEnds)
+    // Slots: 0=this, 1=input, 2=outStarts, 3=outEnds, 4+=locals.
+    LocalVariableAllocator allocator = new LocalVariableAllocator(4);
+    int groupCount = nfa.getGroupCount();
+    int requiredGroups = groupCount + 1;
+
+    // Objects.requireNonNull(input/outStarts/outEnds)
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitLdcInsn("input");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitLdcInsn("groupStarts");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitLdcInsn("groupEnds");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+
+    Label startsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ARRAYLENGTH);
+    pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, startsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(startsLengthOk);
+
+    Label endsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ARRAYLENGTH);
+    pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, endsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(endsLengthOk);
+
+    int groupStartsVar = allocator.allocateRef();
+    int groupEndsVar = allocator.allocateRef();
+    int currentStatesVar;
+    int nextStatesVar;
+    if (useSingleLong) {
+      currentStatesVar = allocator.allocateLong();
+      nextStatesVar = allocator.allocateLong();
+    } else if (useDualLong) {
+      currentStatesVar = allocateDualLongStateSet(allocator);
+      nextStatesVar = allocateDualLongStateSet(allocator);
+    } else {
+      currentStatesVar = allocator.allocateRef();
+      nextStatesVar = allocator.allocateRef();
+    }
+    int posVar = allocator.allocateInt();
+    int lenVar = allocator.allocateInt();
+
+    int worklistVar = allocator.allocateRef();
+    int stateIdVar = allocator.allocateInt();
+    int worklistSizeVar = allocator.allocateInt();
+    int processedVar;
+    if (useSingleLong) {
+      processedVar = allocator.allocateLong();
+    } else if (useDualLong) {
+      processedVar = allocateDualLongStateSet(allocator);
+    } else {
+      processedVar = allocator.allocateRef();
+    }
+    int indexVar = allocator.allocateInt();
+    int sizeVar = allocator.allocateInt();
+    int parentIdVar = allocator.allocateInt();
+    EpsilonClosureSlots epsilonSlots =
+        new EpsilonClosureSlots(
+            worklistVar, stateIdVar, worklistSizeVar, processedVar, indexVar, sizeVar, parentIdVar);
+
+    // Reuse scratch capture arrays from ReggieMatcher instead of allocating per call.
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "groupStarts", "[I");
+    mv.visitVarInsn(ASTORE, groupStartsVar);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "groupEnds", "[I");
+    mv.visitVarInsn(ASTORE, groupEndsVar);
+
+    // Reuse epsilon worklist.
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(
+        GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "epsilonWorklist", "[I");
+    mv.visitVarInsn(ASTORE, worklistVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, stateIdVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, worklistSizeVar);
+
+    if (useSingleLong || useDualLong) {
+      initStateSet(mv, processedVar);
+    } else {
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitFieldInsn(
+          GETFIELD,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "epsilonProcessed",
+          "Lcom/datadoghq/reggie/runtime/StateSet;");
+      mv.visitVarInsn(ASTORE, processedVar);
+      mv.visitVarInsn(ALOAD, processedVar);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/StateSet", "clear", "()V", false);
+    }
+
+    // Initialize scratch group positions to -1. Caller arrays are left untouched until success.
+    for (int i = 0; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+
+    int configGroupStartsVar = -1, configGroupEndsVar = -1, parentStateMapVar = -1;
+    if (usePosixLastMatch) {
+      configGroupStartsVar = allocator.allocateRef();
+      configGroupEndsVar = allocator.allocateRef();
+      parentStateMapVar = allocator.allocateRef();
+
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitFieldInsn(
+          GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "configGroupStarts", "[[I");
+      mv.visitVarInsn(ASTORE, configGroupStartsVar);
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitFieldInsn(
+          GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "configGroupEnds", "[[I");
+      mv.visitVarInsn(ASTORE, configGroupEndsVar);
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitFieldInsn(
+          GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "parentStateMap", "[I");
+      mv.visitVarInsn(ASTORE, parentStateMapVar);
+
+      generateInitializeConfigArrays(
+          mv,
+          configGroupStartsVar,
+          configGroupEndsVar,
+          parentStateMapVar,
+          stateCount,
+          groupCount,
+          allocator);
+    }
+
+    // Set group 0 start = 0.
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+
+    if (useSingleLong || useDualLong) {
+      initStateSet(mv, currentStatesVar);
+      initStateSet(mv, nextStatesVar);
+    } else {
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitFieldInsn(
+          GETFIELD,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "currentStates",
+          "Lcom/datadoghq/reggie/runtime/StateSet;");
+      mv.visitVarInsn(ASTORE, currentStatesVar);
+      mv.visitVarInsn(ALOAD, currentStatesVar);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/StateSet", "clear", "()V", false);
+
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitFieldInsn(
+          GETFIELD,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "nextStates",
+          "Lcom/datadoghq/reggie/runtime/StateSet;");
+      mv.visitVarInsn(ASTORE, nextStatesVar);
+      mv.visitVarInsn(ALOAD, nextStatesVar);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/StateSet", "clear", "()V", false);
+    }
+
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, posVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    addStateToSet(mv, currentStatesVar, nfa.getStartState().id, allocator);
+    generateEpsilonClosureWithGroups(
+        mv,
+        currentStatesVar,
+        1,
+        posVar,
+        groupStartsVar,
+        groupEndsVar,
+        configGroupStartsVar,
+        configGroupEndsVar,
+        parentStateMapVar,
+        allocator,
+        epsilonSlots);
+
+    int chVar = allocator.allocateInt();
+    Label loopStart = new Label();
+    Label loopEnd = new Label();
+
+    mv.visitLabel(loopStart);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    mv.visitIincInsn(posVar, 1);
+
+    clearStateSet(mv, nextStatesVar);
+    generateNFAStep(
+        mv,
+        currentStatesVar,
+        nextStatesVar,
+        chVar,
+        configGroupStartsVar,
+        configGroupEndsVar,
+        groupCount,
+        allocator);
+    generateEpsilonClosureWithGroups(
+        mv,
+        nextStatesVar,
+        1,
+        posVar,
+        groupStartsVar,
+        groupEndsVar,
+        configGroupStartsVar,
+        configGroupEndsVar,
+        parentStateMapVar,
+        allocator,
+        epsilonSlots);
+    swapStateSets(mv, currentStatesVar, nextStatesVar, allocator);
+
+    mv.visitJumpInsn(GOTO, loopStart);
+    mv.visitLabel(loopEnd);
+
+    for (NFA.NFAState acceptState : nfa.getAcceptStates()) {
+      checkStateInSetConst(mv, currentStatesVar, acceptState.id, allocator);
+      Label notThisAccept = new Label();
+      mv.visitJumpInsn(IFEQ, notThisAccept);
+
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitInsn(IASTORE);
+
+      if (usePosixLastMatch && configGroupStartsVar >= 0) {
+        for (int g = 1; g <= groupCount; g++) {
+          mv.visitVarInsn(ALOAD, groupStartsVar);
+          pushInt(mv, g);
+          mv.visitVarInsn(ALOAD, configGroupStartsVar);
+          pushInt(mv, acceptState.id);
+          mv.visitInsn(AALOAD);
+          pushInt(mv, g);
+          mv.visitInsn(IALOAD);
+          mv.visitInsn(IASTORE);
+
+          mv.visitVarInsn(ALOAD, groupEndsVar);
+          pushInt(mv, g);
+          mv.visitVarInsn(ALOAD, configGroupEndsVar);
+          pushInt(mv, acceptState.id);
+          mv.visitInsn(AALOAD);
+          pushInt(mv, g);
+          mv.visitInsn(IALOAD);
+          mv.visitInsn(IASTORE);
+        }
+      }
+
+      // Copy scratch arrays to caller arrays only after success.
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ALOAD, 2);
+      mv.visitInsn(ICONST_0);
+      pushInt(mv, requiredGroups);
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "java/lang/System",
+          "arraycopy",
+          "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+          false);
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ALOAD, 3);
+      mv.visitInsn(ICONST_0);
+      pushInt(mv, requiredGroups);
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "java/lang/System",
+          "arraycopy",
+          "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+          false);
+
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(notThisAccept);
+    }
+
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  private void generateGroupArrayTooSmallThrow(MethodVisitor mv, int requiredGroups) {
+    mv.visitTypeInsn(NEW, "java/lang/IndexOutOfBoundsException");
+    mv.visitInsn(DUP);
+    mv.visitLdcInsn(
+        "group arrays must have length at least " + requiredGroups + " for this pattern");
+    mv.visitMethodInsn(
+        INVOKESPECIAL,
+        "java/lang/IndexOutOfBoundsException",
+        "<init>",
+        "(Ljava/lang/String;)V",
+        false);
+    mv.visitInsn(ATHROW);
+  }
+
+  /**
    * Generate matchBounded() method that matches a substring range without allocation.
    *
    * <h4>Generated Method Signature</h4>
@@ -7079,13 +7427,15 @@ public class NFABytecodeGenerator {
               pushInt(mv, '\n');
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
-            case END:
             case STRING_END_ABSOLUTE:
+              // \z: strict pos == input.length()
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
+            case END:
+            // $ (non-multiline): same as \Z. Fall through to STRING_END.
             case STRING_END:
               // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
               mv.visitVarInsn(ILOAD, posVar);
@@ -7307,16 +7657,18 @@ public class NFABytecodeGenerator {
    *     int matchStart = findFrom(input, start);
    *     if (matchStart < 0) return null;
    *
-   *     // Try all possible match lengths to find the longest (greedy)
-   *     int longestEnd = matchStart;
-   *     for (int matchEnd = matchStart + 1; matchEnd <= input.length(); matchEnd++) {
+   *     // Try all possible match lengths to find the longest (greedy).
+   *     // longestEnd starts at matchStart - 1 as a "no match yet" sentinel.
+   *     // matchEnd starts at matchStart to include zero-width matches.
+   *     int longestEnd = matchStart - 1;
+   *     for (int matchEnd = matchStart; matchEnd <= input.length(); matchEnd++) {
    *         MatchResult candidate = matchBounded(input, matchStart, matchEnd);
    *         if (candidate != null) {
    *             longestEnd = matchEnd;
    *         }
    *     }
    *
-   *     if (longestEnd == matchStart) return null;  // No valid match
+   *     if (longestEnd < matchStart) return null;  // No valid match
    *
    *     // Return final result with group information
    *     return matchBounded(input, matchStart, longestEnd);
@@ -7357,14 +7709,14 @@ public class NFABytecodeGenerator {
     mv.visitLabel(found);
 
     // Find longest match end by trying all lengths using matchBounded (zero allocations)
-    // int matchEnd = matchStart + 1;
+    // int matchEnd = matchStart;  — start at matchStart to include zero-width matches
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IADD);
     mv.visitVarInsn(ISTORE, 4); // matchEnd (current try)
 
-    // int longestEnd = matchStart; (no successful match yet)
+    // int longestEnd = matchStart - 1;  — sentinel: no successful match yet
     mv.visitVarInsn(ILOAD, 3);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, 5); // longestEnd
 
     Label loopStart = new Label();
@@ -7404,11 +7756,11 @@ public class NFABytecodeGenerator {
 
     mv.visitLabel(loopEnd);
 
-    // if (longestEnd == matchStart) return null; (no match found)
+    // if (longestEnd < matchStart) return null; (no match found)
     Label hasMatch = new Label();
     mv.visitVarInsn(ILOAD, 5);
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitJumpInsn(IF_ICMPNE, hasMatch);
+    mv.visitJumpInsn(IF_ICMPGE, hasMatch);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
     mv.visitLabel(hasMatch);

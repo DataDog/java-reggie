@@ -48,7 +48,11 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   @RegexPattern("(\\d{3})-(\\d+)-(\\d{4})")
   public abstract ReggieMatcher phoneWithVariableLength();
 
-  @RegexPattern("(<\\w+>).*?(</\\w+>)")
+  // Original: (<\w+>).*?(</\w+>) — lazy .*? falls back to java.util.regex because
+  // RECURSIVE_DESCENT lacks general alternation backtracking (see FallbackPatternDetector).
+  // Using greedy .* here; .* overlaps with '<', so the concat triggers backtracking via
+  // requiresBacktrackingForGroups and still routes through RECURSIVE_DESCENT.
+  @RegexPattern("(<\\w+>).*(</\\w+>)")
   public abstract ReggieMatcher xmlTags();
 
   // ====================

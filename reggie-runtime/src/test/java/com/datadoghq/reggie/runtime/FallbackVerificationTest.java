@@ -65,12 +65,12 @@ class FallbackVerificationTest {
     assertFalse(m.find("xc"));
   }
 
-  // Bug 5: lookbehind + lookahead sandwich
+  // Bug 5 fixed: lookbehind + lookahead sandwich no longer needs fallback
   @Test
   void lookbehindLookaheadSandwich() {
     ReggieMatcher m = Reggie.compile("(?<=\\[)[^\\]]+(?=\\])");
-    assertTrue(m instanceof JavaRegexFallbackMatcher);
-    assertTrue(m.find("[value]")); // was incorrectly false before fallback
+    assertFalse(m instanceof JavaRegexFallbackMatcher);
+    assertTrue(m.find("[value]"));
     assertFalse(m.find("value"));
   }
 

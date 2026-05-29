@@ -18,6 +18,7 @@ package com.datadoghq.reggie.codegen.analysis;
 import com.datadoghq.reggie.codegen.ast.*;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
+import com.datadoghq.reggie.codegen.automaton.DFATableData;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.StateExplosionException;
 import com.datadoghq.reggie.codegen.automaton.SubsetConstructor;
@@ -31,6 +32,10 @@ import java.util.Set;
 
 /** Analyzes patterns and recommends bytecode generation strategy. */
 public class PatternAnalyzer {
+
+  private static final int DFA_UNROLLED_STATE_LIMIT = 20;
+  private static final int DFA_SWITCH_STATE_LIMIT = 300;
+  private static final int DFA_TABLE_ESTIMATED_BYTES_LIMIT = 1 << 20;
 
   private final RegexNode ast;
   private final NFA nfa;
@@ -720,9 +725,38 @@ public class PatternAnalyzer {
         // Build DFA with tag computation enabled for Tagged DFA
         DFA dfa = constructor.buildDFA(nfa, true);
 
+        if (dfa.isAnchorConditionDiluted()) {
+          MatchingStrategyResult r =
+              new MatchingStrategyResult(
+                  MatchingStrategy.OPTIMIZED_NFA,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+          r.anchorConditionDiluted = true;
+          return r;
+        }
+
+        if ((containsAlternation(ast) || containsOptionalQuantifier(ast))
+            && dfaHasAcceptingStateWithTransitions(dfa)) {
+          MatchingStrategyResult r =
+              new MatchingStrategyResult(
+                  MatchingStrategy.OPTIMIZED_NFA,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+          r.alternationPriorityConflict = true;
+          return r;
+        }
+
         // DFA with groups: choose strategy based on state count
         int stateCount = dfa.getStateCount();
-        if (stateCount < 20) {
+        if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
               dfa,
@@ -731,8 +765,8 @@ public class PatternAnalyzer {
               requiredLiterals,
               null,
               needsPosixSemantics);
-        } else if (stateCount < 300) {
-          // Use switch-based DFA for 20-300 states (better cache behavior)
+        } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+          // Use switch-based DFA for medium state counts (better cache behavior)
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_SWITCH_WITH_GROUPS,
               dfa,
@@ -771,18 +805,45 @@ public class PatternAnalyzer {
       SubsetConstructor constructor = new SubsetConstructor();
       DFA dfa = constructor.buildDFA(nfa);
 
+      if (dfa.isAnchorConditionDiluted()) {
+        MatchingStrategyResult r =
+            new MatchingStrategyResult(
+                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+        r.anchorConditionDiluted = true;
+        return r;
+      }
+
+      // Alternation priority: Java NFA semantics pick the first alternative that matches at a
+      // position; DFA semantics pick the longest match. When the pattern has explicit alternation
+      // AND the DFA has an unconditionally-accepting state that has further outgoing transitions,
+      // the DFA will return a longer match than the NFA would for the same position — violating
+      // Java regex semantics. Flag for caller to route to JDK fallback.
+      if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+        MatchingStrategyResult r =
+            new MatchingStrategyResult(
+                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+        r.alternationPriorityConflict = true;
+        return r;
+      }
+
       // Choose DFA strategy based on state count
       int stateCount = dfa.getStateCount();
-      if (stateCount < 20) {
+      if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_UNROLLED, dfa, null, false, requiredLiterals);
-      } else if (stateCount < 300) {
-        // Use switch-based DFA for 20-300 states (better cache behavior)
+      } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+        // Use switch-based DFA for medium state counts (better cache behavior)
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_SWITCH, dfa, null, false, requiredLiterals);
-      } else {
+      } else if (isDFATableEligible(dfa)) {
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_TABLE, dfa, null, false, requiredLiterals);
+      } else {
+        // Large DFA state spaces can still be too expensive as tables. Fall back to NFA simulation
+        // when the compressed table would exceed the configured memory budget or the DFA uses
+        // features not yet supported by the table backend.
+        return new MatchingStrategyResult(
+            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
     } catch (StateExplosionException e) {
       // DFA too large, use optimized NFA
@@ -791,9 +852,131 @@ public class PatternAnalyzer {
     }
   }
 
+  private boolean isDFATableEligible(DFA dfa) {
+    if (nfa != null
+        && (nfa.getGroupCount() > 0
+            || nfa.hasStartAnchor()
+            || nfa.hasEndAnchor()
+            || nfa.hasStringStartAnchor()
+            || nfa.hasStringEndAnchor()
+            || nfa.hasStringEndAbsoluteAnchor()
+            || nfa.hasMultilineStartAnchor()
+            || nfa.hasMultilineEndAnchor())) {
+      return false;
+    }
+
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.assertionChecks.isEmpty()
+          || !state.groupActions.isEmpty()
+          || !state.acceptanceAnchorConditions.isEmpty()) {
+        return false;
+      }
+      for (DFA.DFATransition transition : state.transitions.values()) {
+        if (!transition.tagOps.isEmpty() || !transition.entryGuard.isEmpty()) {
+          return false;
+        }
+      }
+    }
+
+    return DFATableData.from(dfa).estimatedBytes() <= DFA_TABLE_ESTIMATED_BYTES_LIMIT;
+  }
+
   private boolean hasBackreferences(RegexNode node) {
     BackrefDetector detector = new BackrefDetector();
     return node.accept(detector);
+  }
+
+  /**
+   * Returns true if the AST contains an optional quantifier (min=0) INSIDE a capturing group that
+   * is itself in a repeating quantifier (outer + or * or {n,m} with n<m). This is the structural
+   * pattern that causes DFA/NFA divergence: the optional element creates ambiguity within each
+   * group iteration, and the repeating outer loop amplifies it by letting the DFA choose a
+   * different (longer) path across iterations than the JDK NFA would.
+   *
+   * <p>Patterns like (a*b*c*d*e*) are NOT flagged because the group is not inside a repeating
+   * quantifier — there is no loop that could cause the DFA to accumulate extra chars.
+   */
+  private boolean containsOptionalQuantifier(RegexNode node) {
+    return hasOptionalInsideRepeatingGroup(node);
+  }
+
+  private boolean hasOptionalInsideRepeatingGroup(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      // Repeating group: outer quantifier with max>1 and the child is a group
+      if ((q.max == -1 || q.max > 1) && q.min >= 1 && q.child instanceof GroupNode) {
+        if (subtreeContainsOptional(q.child)) return true;
+      }
+      return hasOptionalInsideRepeatingGroup(q.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children)
+        if (hasOptionalInsideRepeatingGroup(c)) return true;
+      return false;
+    }
+    if (node instanceof GroupNode) return hasOptionalInsideRepeatingGroup(((GroupNode) node).child);
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        if (hasOptionalInsideRepeatingGroup(a)) return true;
+      return false;
+    }
+    return false;
+  }
+
+  /** Returns true if the subtree contains any QuantifierNode with min=0. */
+  private static boolean subtreeContainsOptional(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      if (((QuantifierNode) node).min == 0) return true;
+      return subtreeContainsOptional(((QuantifierNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) if (subtreeContainsOptional(c)) return true;
+      return false;
+    }
+    if (node instanceof GroupNode) return subtreeContainsOptional(((GroupNode) node).child);
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        if (subtreeContainsOptional(a)) return true;
+      return false;
+    }
+    return false;
+  }
+
+  private boolean containsAlternation(RegexNode node) {
+    if (node instanceof AlternationNode) return true;
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (containsAlternation(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) return containsAlternation(((GroupNode) node).child);
+    if (node instanceof QuantifierNode) return containsAlternation(((QuantifierNode) node).child);
+    return false;
+  }
+
+  private boolean dfaHasAcceptingStateWithTransitions(DFA dfa) {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (state.accepting && !state.transitions.isEmpty()) {
+        // Unconditional acceptance with outgoing transitions: DFA longest-match
+        // will advance past the zero-width match point.
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          return true;
+        }
+        // START-class anchor acceptance with outgoing transitions: at position 0
+        // (where ^/\A fire) the DFA can still advance via transitions, diverging
+        // from NFA first-alternative semantics. END-class anchors are safe because
+        // transitions cannot fire at end-of-input.
+        for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+          if (a == NFA.AnchorType.START
+              || a == NFA.AnchorType.STRING_START
+              || a == NFA.AnchorType.START_MULTILINE) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   private boolean hasLookaround(RegexNode node) {
@@ -1049,7 +1232,8 @@ public class PatternAnalyzer {
   /** Get the CharSet that a node can match. Returns null if the CharSet cannot be determined. */
   private CharSet getNodeCharSet(RegexNode node) {
     if (node instanceof CharClassNode) {
-      return ((CharClassNode) node).chars;
+      CharClassNode charClass = (CharClassNode) node;
+      return charClass.negated ? charClass.chars.complement() : charClass.chars;
     }
     if (node instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) node;
@@ -1080,7 +1264,8 @@ public class PatternAnalyzer {
    */
   private CharSet getFirstCharSet(RegexNode node) {
     if (node instanceof CharClassNode) {
-      return ((CharClassNode) node).chars;
+      CharClassNode charClass = (CharClassNode) node;
+      return charClass.negated ? charClass.chars.complement() : charClass.chars;
     }
     if (node instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) node;
@@ -1772,6 +1957,24 @@ public class PatternAnalyzer {
         lookaheadGreedyInfo; // Phase 2: lookahead+greedy+suffix pattern info
     public final boolean
         usePosixLastMatch; // Use POSIX last-match semantics for groups in quantifiers
+
+    /**
+     * True when the DFA construction detected an anchor-condition dilution: alternation branches
+     * with differing positional-anchor requirements contributed to the same partition slice (or
+     * accept site), and the intersection logic collapsed those requirements to unconditional. The
+     * built DFA is structurally valid but semantically incorrect for such patterns; callers should
+     * route to a correct fallback engine (e.g. {@code JavaRegexFallbackMatcher}) rather than using
+     * the DFA.
+     */
+    public boolean anchorConditionDiluted;
+
+    /**
+     * True when the pattern has alternation and the DFA has an unconditionally-accepting state with
+     * further outgoing transitions. In this case the DFA uses longest-match semantics but Java NFA
+     * semantics require first-alternative preference. Callers should route to a correct fallback
+     * engine (e.g. {@code JavaRegexFallbackMatcher}) rather than using the DFA.
+     */
+    public boolean alternationPriorityConflict;
 
     public MatchingStrategyResult(MatchingStrategy strategy, DFA dfa) {
       this(strategy, dfa, null, false, java.util.Collections.emptySet(), null, false);
@@ -4991,6 +5194,10 @@ public class PatternAnalyzer {
     if (quant.max != -1 && quant.max > 1000) {
       return null; // Too large to optimize
     }
+    // {0} always produces an empty match; specialized generator does not handle max=0 correctly.
+    if (quant.max == 0) {
+      return null;
+    }
 
     if (!(quant.child instanceof CharClassNode)) {
       return null;
@@ -5130,6 +5337,27 @@ public class PatternAnalyzer {
     // Reject patterns with capturing groups - this strategy doesn't support group tracking
     if (groupCounter[0] > 0) {
       return null;
+    }
+
+    // Reject when an optional element could greedily consume a character required by a later
+    // element. Example: c?c — the optional consumes the only 'c', leaving none for the required
+    // literal. The generator has no backtracking, so it would incorrectly return no-match.
+    for (int i = 0; i < elements.size() - 1; i++) {
+      if (!(elements.get(i) instanceof BoundedOptionalElement)) continue;
+      char optCh = ((BoundedOptionalElement) elements.get(i)).literal;
+      for (int j = i + 1; j < elements.size(); j++) {
+        BoundedElement next = elements.get(j);
+        if (next instanceof BoundedLiteralElement
+            && ((BoundedLiteralElement) next).literal == optCh) {
+          return null;
+        }
+        if (next instanceof BoundedQuantifierElement) {
+          BoundedQuantifierElement qe = (BoundedQuantifierElement) next;
+          if (qe.min >= 1 && (qe.charset.contains(optCh) != qe.negated)) {
+            return null;
+          }
+        }
+      }
     }
 
     return new BoundedQuantifierInfo(elements, minLen, maxLen, groupCounter[0]);
@@ -5823,8 +6051,15 @@ public class PatternAnalyzer {
 
       for (RegexNode child : concat.children) {
         if (child instanceof AnchorNode) {
-          // Skip anchors
-          continue;
+          // Skip START-type anchors — they are handled by requiresStartAnchor and do not
+          // affect SPECIALIZED_QUANTIFIED_GROUP semantics.
+          // END-type anchors ($, \Z, \z) make the pattern semantically impossible to match
+          // at non-end positions; the specialized generator is unaware of them, so bail out.
+          AnchorNode anchor = (AnchorNode) child;
+          if (anchor.type == AnchorNode.Type.START || anchor.type == AnchorNode.Type.STRING_START) {
+            continue;
+          }
+          return null; // END / STRING_END / STRING_END_ABSOLUTE / multiline anchors
         } else if (child instanceof QuantifierNode) {
           if (foundQuant != null) {
             // Multiple quantifiers - not a simple pattern
@@ -5893,6 +6128,7 @@ public class PatternAnalyzer {
     String literal = null;
     boolean isAlternation = false;
     CharSet[] alternationCharSets = null;
+    boolean isNegatedCC = false; // negation flag for direct CharClassNode groups
 
     if (groupChild instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) groupChild;
@@ -5905,8 +6141,10 @@ public class PatternAnalyzer {
       literal = String.valueOf(lit.ch);
       charSet = CharSet.of(lit.ch);
     } else if (groupChild instanceof CharClassNode) {
-      // ([a-z])+
-      charSet = ((CharClassNode) groupChild).chars;
+      // ([a-z])+ or ([^b])+
+      CharClassNode ccNode = (CharClassNode) groupChild;
+      charSet = ccNode.chars;
+      isNegatedCC = ccNode.negated;
     } else if (groupChild instanceof AlternationNode) {
       // (a|b)+ or (a+|b)+
       AlternationNode alt = (AlternationNode) groupChild;
@@ -5993,6 +6231,15 @@ public class PatternAnalyzer {
         return null;
       }
 
+      // When the OUTER quantifier is fixed (min==max, e.g. {4}) and the INNER quantifier is
+      // unbounded (like .+), the greedy inner loop consumes ALL remaining chars in the first
+      // outer iteration, leaving none for iterations 2..N (backtracking is needed).
+      // When the outer quantifier is unbounded (e.g. + or *), only one outer iteration fires
+      // on the available chars so the greedy inner loop is correct.
+      if ((innerQuant.max == -1 || innerQuant.max == Integer.MAX_VALUE) && quant.min == quant.max) {
+        return null;
+      }
+
       // Extract charset from inner quantifier's child
       if (innerQuant.child instanceof LiteralNode) {
         charSet = CharSet.of(((LiteralNode) innerQuant.child).ch);
@@ -6044,7 +6291,16 @@ public class PatternAnalyzer {
         charSet,
         literal,
         isAlternation,
-        alternationCharSets);
+        alternationCharSets,
+        false, // hasComplexAlternation
+        null, // alternationMinBounds
+        null, // alternationMaxBounds
+        null, // alternationNegated
+        null, // alternatives
+        false, // hasNestedQuantifier
+        1, // innerMinQuantifier
+        1, // innerMaxQuantifier
+        isNegatedCC); // isNegatedCharSet — propagates [^x] negation correctly
   }
 
   /**

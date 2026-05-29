@@ -22,6 +22,7 @@ import com.datadoghq.reggie.codegen.automaton.AssertionCheck;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -275,8 +276,10 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // PROTOTYPE: Generate assertion checks first (before consuming character)
-    if (!state.assertionChecks.isEmpty()) {
+    // Assertions on non-accepting states are transition guards. Assertions on accepting states gate
+    // only acceptance; if they fail before the end of input, outgoing transitions must still be
+    // tried so a longer match can satisfy the final assertion.
+    if (!state.accepting && !state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
@@ -287,34 +290,6 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitJumpInsn(IF_ICMPGE, endOfInput);
-
-    // Special check for \Z (STRING_END): if accepting and pos == length-1 and charAt(pos) == '\n',
-    // accept
-    if (state.accepting && hasStringEndAnchor) {
-      // if (pos == input.length() - 1 && input.charAt(pos) == '\n') return true;
-      Label notStringEnd = new Label();
-
-      // Check if pos == length - 1
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-
-      // Check if charAt(pos) == '\n'
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-
-      // Both conditions met - accept
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(IRETURN);
-
-      mv.visitLabel(notStringEnd);
-    }
 
     // char ch = input.charAt(pos);
     int chVar = allocator.allocate();
@@ -329,10 +304,14 @@ public class DFAUnrolledBytecodeGenerator {
     // Generate transition checks (NO BitSet, direct char comparisons)
     for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
       CharSet chars = entry.getKey();
-      DFA.DFAState target = entry.getValue().target;
+      DFA.DFATransition trans = entry.getValue();
+      DFA.DFAState target = trans.target;
 
       Label nextCheck = new Label();
       generateCharSetCheck(mv, chars, chVar, nextCheck);
+      if (!trans.entryGuard.isEmpty()) {
+        emitTransitionEntryGuard(mv, trans.entryGuard, posVar, nextCheck);
+      }
 
       // Match found - jump to target state
       mv.visitJumpInsn(GOTO, stateLabels.get(target));
@@ -345,10 +324,24 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // Handle end of input
+    // Handle end of input (with per-state assertion/acceptance condition gating)
     mv.visitLabel(endOfInput);
     if (state.accepting) {
-      mv.visitInsn(ICONST_1);
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+      }
+      if (state.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitInsn(ICONST_1);
+      } else {
+        Label rejectAtEnd = new Label();
+        Label endAccepted = new Label();
+        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, rejectAtEnd);
+        mv.visitInsn(ICONST_1);
+        mv.visitJumpInsn(GOTO, endAccepted);
+        mv.visitLabel(rejectAtEnd);
+        mv.visitInsn(ICONST_0);
+        mv.visitLabel(endAccepted);
+      }
     } else {
       mv.visitInsn(ICONST_0);
     }
@@ -456,14 +449,7 @@ public class DFAUnrolledBytecodeGenerator {
         }
       } else {
         // Character class sequence assertion (e.g., [A-Z][0-9])
-        // Optimization: Single bounds check for entire sequence
-        // if (pos + offset + length > input.length()) fail
-        mv.visitVarInsn(ILOAD, posVar);
-        pushInt(mv, assertion.offset + assertion.charSets.size());
-        mv.visitInsn(IADD);
-        mv.visitVarInsn(ALOAD, 1); // input
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitJumpInsn(IF_ICMPGT, assertionFailed);
+        Label assertionPassed = new Label();
 
         // Allocate temp vars
         int checkPosVar = allocator.allocate();
@@ -473,24 +459,30 @@ public class DFAUnrolledBytecodeGenerator {
           CharSet charSet = assertion.charSets.get(i);
           int peekOffset = assertion.offset + i;
 
-          // Cache offset calculation
-          // int checkPos = pos + peekOffset;
+          // Cache offset calculation: int checkPos = pos + peekOffset;
           mv.visitVarInsn(ILOAD, posVar);
           pushInt(mv, peekOffset);
           mv.visitInsn(IADD);
           mv.visitVarInsn(ISTORE, checkPosVar);
 
-          // Character check: if (!charSet.contains(input.charAt(checkPos))) fail
+          // Bounds check.
+          mv.visitVarInsn(ILOAD, checkPosVar);
+          mv.visitVarInsn(ALOAD, 1); // input
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+          mv.visitJumpInsn(IF_ICMPGE, assertion.isPositive() ? assertionFailed : assertionPassed);
+
           mv.visitVarInsn(ALOAD, 1); // input
           mv.visitVarInsn(ILOAD, checkPosVar);
           mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
           mv.visitVarInsn(ISTORE, chVar);
 
-          // Check if character matches charset
-          Label matches = new Label();
-          generateCharSetCheck(mv, charSet, chVar, matches);
-          mv.visitJumpInsn(GOTO, assertionFailed); // Doesn't match
-          mv.visitLabel(matches); // Matches - continue
+          generateCharSetCheck(
+              mv, charSet, chVar, assertion.isPositive() ? assertionFailed : assertionPassed);
+        }
+
+        if (!assertion.isPositive()) {
+          mv.visitJumpInsn(GOTO, assertionFailed);
+          mv.visitLabel(assertionPassed);
         }
       }
     } else if (assertion.isLookbehind()) {
@@ -773,10 +765,12 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ILOAD, 3);
     mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
 
-    // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors
-    // Use requiresStartAnchor (not hasStartAnchor) to handle alternations like (^foo|bar)
-    // where one branch has anchor but pattern can still match at any position via other branch
-    if (requiresStartAnchor || hasStringStartAnchor) {
+    // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors.
+    // {@link NFA#requiresStartAnchor()} already treats both START (^) and STRING_START (\A) as
+    // barriers, so it returns true only when ALL paths to a useful target go through one of
+    // them. Or-ing in {@code hasStringStartAnchor} on top short-circuits on patterns like
+    // `]\A|b` where only one branch has \A but the other can still match anywhere.
+    if (requiresStartAnchor) {
       // Non-multiline ^ or \A: Only try position 0
       // if (tryPos != 0) return -1;
       Label validPosition = new Label();
@@ -1012,23 +1006,23 @@ public class DFAUnrolledBytecodeGenerator {
 
     // Check if start state is accepting BUT also check assertions first!
     if (dfa.getStartState().accepting) {
+      Label conditionFailed = new Label();
       // Must check assertions before accepting empty match
       if (!dfa.getStartState().assertionChecks.isEmpty()) {
-        Label assertionFailed = new Label();
         for (AssertionCheck assertion : dfa.getStartState().assertionChecks) {
-          generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+          generateAssertionCheck(mv, assertion, posVar, conditionFailed, allocator);
         }
-        // Assertions passed - empty match is valid
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IRETURN);
-
-        // Assertions failed - continue to try non-empty match
-        mv.visitLabel(assertionFailed);
-      } else {
-        // No assertions - empty match is valid (patterns like a*)
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IRETURN);
       }
+      // Per-state anchor conditions: bare $ et al. accept only when conditions hold at pos.
+      if (!dfa.getStartState().acceptanceAnchorConditions.isEmpty()) {
+        emitAcceptanceAnchorChecks(
+            mv, dfa.getStartState().acceptanceAnchorConditions, posVar, conditionFailed);
+      }
+      // Conditions and assertions passed - empty match is valid
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IRETURN);
+      // Failed - continue to try non-empty match
+      mv.visitLabel(conditionFailed);
     }
 
     // Create labels for all states
@@ -1061,107 +1055,26 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // CRITICAL: Check assertions FIRST, before accepting!
-    // Bug was here: previously returned true immediately for accepting states,
-    // skipping assertion checks. Pattern a(?=bc) would match 'a' without checking (?=bc).
-    if (!state.assertionChecks.isEmpty()) {
-      for (AssertionCheck assertion : state.assertionChecks) {
-        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
-      }
-    }
-
-    // After assertions pass, check if this is an accepting state
-    // If so, return true (we've matched successfully)
-    // BUT: For patterns with end anchors, we must also check anchor conditions
+    // For accepting states, assertions gate acceptance only. If they fail, the DFA must still try
+    // outgoing transitions: e.g. (?<=\\[)[^\\]]+(?=\\]) should not reject after seeing just "v"
+    // in "[value]" because the trailing lookahead fails there; it should keep consuming until ']'.
     if (state.accepting && state != dfa.getStartState()) {
-      if (hasEndAnchor || hasStringEndAnchor || hasStringEndAbsoluteAnchor || hasMultilineEnd) {
-        // End anchor present - must check position before accepting
-        Label continueMatching = new Label();
-
-        // Allocate temp vars for anchor check
-        int savedPosVar = allocator.allocate();
-        int lenVar = allocator.allocate();
-
-        // Get current position and length for anchor check
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, savedPosVar); // Save pos temporarily
-
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitVarInsn(ISTORE, lenVar); // Save length temporarily
-
-        if (hasStringEndAbsoluteAnchor) {
-          // \z: Accept only if pos == length (absolute end)
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching);
-
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-        } else if (hasStringEndAnchor) {
-          // \Z: Accept if pos == length OR (pos == length-1 AND charAt(pos) == '\n')
-          Label accept = new Label();
-
-          // if (pos == length) accept
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitJumpInsn(IF_ICMPEQ, accept);
-
-          // if (pos == length-1 && charAt(pos) == '\n') accept
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(ISUB);
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching); // pos != length-1
-
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching); // Not '\n'
-
-          mv.visitLabel(accept);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-        } else if (hasEndAnchor) {
-          // Non-multiline $: Accept only if pos == length
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching);
-
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-        } else { // hasMultilineEnd
-          // Multiline $: Accept if pos == length OR charAt(pos) == '\n'
-          Label accept = new Label();
-
-          // if (pos == length) accept
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitJumpInsn(IF_ICMPEQ, accept);
-
-          // if (pos < length && charAt(pos) == '\n') accept
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitJumpInsn(IF_ICMPGE, continueMatching); // pos >= length
-
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, savedPosVar);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, continueMatching);
-
-          mv.visitLabel(accept);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IRETURN);
-        }
-
-        // Anchor condition not met, continue matching
-        mv.visitLabel(continueMatching);
-      } else {
-        // No end anchor - accept immediately
+      Label continueMatching = new Label();
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, continueMatching, allocator);
+      }
+      if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
+      } else {
+        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, continueMatching);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IRETURN);
+      }
+      mv.visitLabel(continueMatching);
+    } else if (!state.assertionChecks.isEmpty()) {
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
 
@@ -1184,10 +1097,14 @@ public class DFAUnrolledBytecodeGenerator {
     // Check transitions
     for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
       CharSet chars = entry.getKey();
-      DFA.DFAState target = entry.getValue().target;
+      DFA.DFATransition trans = entry.getValue();
+      DFA.DFAState target = trans.target;
 
       Label nextCheck = new Label();
       generateCharSetCheck(mv, chars, chVar, nextCheck);
+      if (!trans.entryGuard.isEmpty()) {
+        emitTransitionEntryGuard(mv, trans.entryGuard, posVar, nextCheck);
+      }
       mv.visitJumpInsn(GOTO, stateLabels.get(target));
       mv.visitLabel(nextCheck);
     }
@@ -1196,10 +1113,23 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // End of input - check if accepting
+    // End of input - check if accepting (respecting per-state anchor conditions). Accepting states
+    // with assertions were already evaluated before the transition block; if those assertions
+    // failed and we got here, the match must fail rather than accepting at end-of-input.
     mv.visitLabel(endOfInput);
-    if (state.accepting) {
-      mv.visitInsn(ICONST_1);
+    if (state.accepting && state.assertionChecks.isEmpty()) {
+      if (state.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitInsn(ICONST_1);
+      } else {
+        Label rejectAtEnd = new Label();
+        Label endAccepted = new Label();
+        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, rejectAtEnd);
+        mv.visitInsn(ICONST_1);
+        mv.visitJumpInsn(GOTO, endAccepted);
+        mv.visitLabel(rejectAtEnd);
+        mv.visitInsn(ICONST_0);
+        mv.visitLabel(endAccepted);
+      }
     } else {
       mv.visitInsn(ICONST_0);
     }
@@ -1585,17 +1515,27 @@ public class DFAUnrolledBytecodeGenerator {
     for (DFA.DFAState state : dfa.getAllStates()) {
       mv.visitLabel(stateLabels.get(state));
 
-      // If this is an accepting state, save current position and tags
+      // If this is an accepting state, save current position and tags (gated on anchor
+      // conditions — e.g. a state accepting only at ^ must not record mid-input positions).
       if (state.accepting) {
-        // longestPos = pos;
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestPosVar);
-
-        // savedTags = tags.clone();
-        mv.visitVarInsn(ALOAD, tagsVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
-        mv.visitTypeInsn(CHECKCAST, "[I");
-        mv.visitVarInsn(ASTORE, savedTagsVar);
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestPosVar);
+          mv.visitVarInsn(ALOAD, tagsVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
+          mv.visitTypeInsn(CHECKCAST, "[I");
+          mv.visitVarInsn(ASTORE, savedTagsVar);
+        } else {
+          Label skipSave = new Label();
+          emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipSave);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestPosVar);
+          mv.visitVarInsn(ALOAD, tagsVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
+          mv.visitTypeInsn(CHECKCAST, "[I");
+          mv.visitVarInsn(ASTORE, savedTagsVar);
+          mv.visitLabel(skipSave);
+        }
       }
 
       // Check if we've reached end of input
@@ -1965,10 +1905,18 @@ public class DFAUnrolledBytecodeGenerator {
     }
 
     // If this is an accepting state, record current position (after assertions pass).
+    // Per-state acceptance conditions must be satisfied before recording the position.
     if (state.accepting) {
-      // longestMatchEnd = pos;
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ISTORE, longestMatchEndVar);
+      if (state.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+      } else {
+        Label skipRecord = new Label();
+        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecord);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+        mv.visitLabel(skipRecord);
+      }
     }
 
     // if (pos >= input.length()) goto endOfInput
@@ -2269,13 +2217,18 @@ public class DFAUnrolledBytecodeGenerator {
     // pos++;
     mv.visitIincInsn(posVar, 1);
 
-    // Generate transition checks
+    // Generate transition checks (bounded path uses CharSequence)
+    InputAccess boundedAccess = charSequenceInputAccess(mv, endVar);
     for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
       CharSet chars = entry.getKey();
-      DFA.DFAState target = entry.getValue().target;
+      DFA.DFATransition trans = entry.getValue();
+      DFA.DFAState target = trans.target;
 
       Label nextCheck = new Label();
       generateCharSetCheck(mv, chars, 5, nextCheck);
+      if (!trans.entryGuard.isEmpty()) {
+        emitTransitionEntryGuard(mv, trans.entryGuard, posVar, nextCheck, boundedAccess);
+      }
 
       // Match found - jump to target state
       mv.visitJumpInsn(GOTO, stateLabels.get(target));
@@ -2288,10 +2241,22 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // Handle end of region
+    // Handle end of region (with per-state acceptance condition gating)
     mv.visitLabel(endOfRegion);
     if (state.accepting) {
-      mv.visitInsn(ICONST_1);
+      if (state.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitInsn(ICONST_1);
+      } else {
+        Label rejectAtEnd = new Label();
+        Label endAccepted = new Label();
+        emitAcceptanceAnchorChecksBounded(
+            mv, state.acceptanceAnchorConditions, posVar, endVar, rejectAtEnd);
+        mv.visitInsn(ICONST_1);
+        mv.visitJumpInsn(GOTO, endAccepted);
+        mv.visitLabel(rejectAtEnd);
+        mv.visitInsn(ICONST_0);
+        mv.visitLabel(endAccepted);
+      }
     } else {
       mv.visitInsn(ICONST_0);
     }
@@ -3256,6 +3221,212 @@ public class DFAUnrolledBytecodeGenerator {
         && groupEndsVar >= 0
         && !skipEagerAssertionGroupCapture) {
       generateAssertionGroupCapture(mv, assertion, posVar, groupStartsVar, groupEndsVar);
+    }
+  }
+
+  // ============================================================================================
+  // Per-state anchor condition emission (replaces the legacy global hasEndAnchor / requiresStart
+  // checks at accept sites). Each accepting DFAState carries an EnumSet of anchor types that
+  // must hold at the current input position before acceptance is granted; each DFATransition
+  // similarly carries an EnumSet of START-class anchor types that must hold at the *source*
+  // position before the transition is taken.
+  // ============================================================================================
+
+  /**
+   * Strategy bundle for emitting input-shape-specific bytecode (String vs CharSequence). Stays
+   * local to anchor-check helpers so the rest of the generator is unaffected.
+   */
+  private static final class InputAccess {
+    /** Emit {@code input.length()} on the stack. */
+    final Runnable loadLength;
+
+    /** Emit {@code input.charAt(<top of stack int>)}. The int operand is consumed. */
+    final Runnable invokeCharAt;
+
+    InputAccess(Runnable loadLength, Runnable invokeCharAt) {
+      this.loadLength = loadLength;
+      this.invokeCharAt = invokeCharAt;
+    }
+  }
+
+  /** Access for the String-typed input held in local slot 1 (unbounded path). */
+  private InputAccess stringInputAccess(MethodVisitor mv) {
+    return new InputAccess(
+        () -> {
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        },
+        () -> mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false));
+  }
+
+  /** Access for the CharSequence-typed input held in local slot 1 (bounded path). */
+  private InputAccess charSequenceInputAccess(MethodVisitor mv, int endVar) {
+    return new InputAccess(
+        () -> mv.visitVarInsn(ILOAD, endVar),
+        () ->
+            mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true));
+  }
+
+  /**
+   * Emit a check for one anchor type at {@code posVar} against the end position; jump to {@code
+   * failed} if the anchor's positional precondition does not hold.
+   */
+  private void emitSingleAnchorCheck(
+      MethodVisitor mv, NFA.AnchorType anchor, int posVar, Label failed, InputAccess access) {
+    switch (anchor) {
+      case STRING_END_ABSOLUTE:
+        // \z — strict end: if (pos != end) goto failed
+        mv.visitVarInsn(ILOAD, posVar);
+        access.loadLength.run();
+        mv.visitJumpInsn(IF_ICMPNE, failed);
+        break;
+      case START:
+      case STRING_START:
+        // if (pos != 0) goto failed
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitJumpInsn(IFNE, failed);
+        break;
+      case END:
+      // $ (non-multiline) — same semantics as \Z: matches at end OR before final '\n'.
+      // Java's $ is NOT strict: Pattern.compile("x$").matcher("x\n").find() == true.
+      // Fall through to STRING_END.
+      case STRING_END:
+        {
+          // OK iff pos == end OR (pos == end - 1 AND charAt(pos) == '\n')
+          Label ok = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          access.loadLength.run();
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.loadLength.run();
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitLabel(ok);
+          break;
+        }
+      case END_MULTILINE:
+        {
+          // OK iff pos == end OR charAt(pos) == '\n'
+          Label ok = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          access.loadLength.run();
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitLabel(ok);
+          break;
+        }
+      case START_MULTILINE:
+        {
+          // OK iff pos == 0 OR charAt(pos - 1) == '\n'
+          Label ok = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitJumpInsn(IFEQ, ok);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          access.invokeCharAt.run();
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitLabel(ok);
+          break;
+        }
+      default:
+        break;
+    }
+  }
+
+  /** Emit acceptance-condition checks against {@code input.length()} (String path). */
+  private void emitAcceptanceAnchorChecks(
+      MethodVisitor mv, EnumSet<NFA.AnchorType> conditions, int posVar, Label failed) {
+    InputAccess access = stringInputAccess(mv);
+    for (NFA.AnchorType anchor : conditions) {
+      emitSingleAnchorCheck(mv, anchor, posVar, failed, access);
+    }
+  }
+
+  /**
+   * Emit acceptance-condition checks against a precomputed end length held in {@code endVar}
+   * (CharSequence path).
+   */
+  private void emitAcceptanceAnchorChecksBounded(
+      MethodVisitor mv, EnumSet<NFA.AnchorType> conditions, int posVar, int endVar, Label failed) {
+    InputAccess access = charSequenceInputAccess(mv, endVar);
+    for (NFA.AnchorType anchor : conditions) {
+      emitSingleAnchorCheck(mv, anchor, posVar, failed, access);
+    }
+  }
+
+  /** Emit a transition entry-guard check (String input path). */
+  private void emitTransitionEntryGuard(
+      MethodVisitor mv, EnumSet<NFA.AnchorType> entryGuard, int posVar, Label skipTransition) {
+    emitTransitionEntryGuard(mv, entryGuard, posVar, skipTransition, stringInputAccess(mv));
+  }
+
+  /**
+   * Emit a transition entry-guard check. {@code posVar} is the position AFTER the char was consumed
+   * (i.e. source pos + 1). If any START-class anchor required by the guard does not hold at the
+   * source position, jump to {@code skipTransition}. {@code access} selects the
+   * input-shape-specific {@code charAt} call kind (String virtual vs CharSequence interface).
+   */
+  private void emitTransitionEntryGuard(
+      MethodVisitor mv,
+      EnumSet<NFA.AnchorType> entryGuard,
+      int posVar,
+      Label skipTransition,
+      InputAccess access) {
+    for (NFA.AnchorType anchor : entryGuard) {
+      switch (anchor) {
+        case START:
+        case STRING_START:
+          // source_pos == 0 iff pos == 1 (after pre-transition increment)
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+          break;
+        case START_MULTILINE:
+          {
+            // source_pos == 0 OR charAt(source_pos - 1) == '\n'.
+            // After the consume-increment, source_pos = pos - 1, so we test charAt(pos - 2).
+            Label ok = new Label();
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitJumpInsn(IF_ICMPEQ, ok); // pos == 1 → source_pos == 0
+            // Need pos >= 2 to look at charAt(pos - 2).
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitJumpInsn(IF_ICMPLT, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitInsn(ISUB);
+            access.invokeCharAt.run();
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitLabel(ok);
+            break;
+          }
+        case END:
+        case STRING_END_ABSOLUTE:
+        case STRING_END:
+        case END_MULTILINE:
+          // END-class anchors are pruned at construction; if one slipped through, kill the
+          // transition unconditionally.
+          mv.visitJumpInsn(GOTO, skipTransition);
+          break;
+        default:
+          break;
+      }
     }
   }
 }

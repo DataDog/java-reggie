@@ -66,7 +66,9 @@ public class LinearPatternAnalyzer implements RegexVisitor<Void> {
 
   @Override
   public Void visitLiteral(LiteralNode node) {
-    // Match a literal character (convert to string)
+    if (node.ch == 0) {
+      return null; // Epsilon — empty-group placeholder (char 0), consume nothing
+    }
     operations.add(
         new LinearPatternInfo.LinearOperation(
             LinearPatternInfo.LinearOperation.Type.MATCH_LITERAL, String.valueOf(node.ch)));

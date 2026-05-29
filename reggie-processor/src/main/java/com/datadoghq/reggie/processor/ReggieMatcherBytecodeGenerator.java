@@ -32,6 +32,7 @@ import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.codegen.BackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
@@ -118,8 +119,11 @@ public class ReggieMatcherBytecodeGenerator {
         strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
-            || strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD;
-    generateConstructor(cw, needsNFAState, nfa, nameMap);
+            || strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD
+            || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS
+            || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS;
+    boolean needsRecursiveDescent = strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
+    generateConstructor(cw, needsNFAState, needsRecursiveDescent, nfa, nameMap);
 
     // Generate methods based on strategy
     switch (strategy) {
@@ -235,6 +239,7 @@ public class ReggieMatcherBytecodeGenerator {
         switchGen.generateFindFromMethod(cw, getJavaClassName());
         switchGen.generateMatchesAtStartMethod(cw);
         switchGen.generateMatchMethod(cw, getJavaClassName());
+        switchGen.generateMatchIntoMethod(cw, getJavaClassName());
         switchGen.generateMatchesBoundedMethod(cw, getJavaClassName());
         switchGen.generateMatchBoundedMethod(cw, getJavaClassName());
         switchGen.generateFindMatchMethod(cw, getJavaClassName());
@@ -243,9 +248,19 @@ public class ReggieMatcherBytecodeGenerator {
         break;
 
       case DFA_TABLE:
-        // TODO: Implement table-driven DFA generator
-        throw new UnsupportedOperationException(
-            "DFA_TABLE bytecode generation not yet implemented.");
+        DFATableBytecodeGenerator tableGen = new DFATableBytecodeGenerator(dfa);
+        tableGen.generateStaticData(cw, getJavaClassName());
+        tableGen.generateMatchesMethod(cw, getJavaClassName());
+        tableGen.generateFindMethod(cw, getJavaClassName());
+        tableGen.generateFindFromMethod(cw, getJavaClassName());
+        tableGen.generateMatchMethod(cw, getJavaClassName());
+        tableGen.generateMatchIntoMethod(cw, getJavaClassName());
+        tableGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+        tableGen.generateMatchBoundedMethod(cw, getJavaClassName());
+        tableGen.generateFindMatchMethod(cw, getJavaClassName());
+        tableGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        tableGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+        break;
 
       case HYBRID_DFA_LOOKAHEAD:
       case SPECIALIZED_MULTIPLE_LOOKAHEADS: // Tier 3: Same as HYBRID but with 2+ lookaheads
@@ -265,6 +280,7 @@ public class ReggieMatcherBytecodeGenerator {
         hybridGen.generateFindMethod(cw, getJavaClassName());
         hybridGen.generateFindFromMethod(cw, getJavaClassName());
         hybridGen.generateMatchMethod(cw, getJavaClassName());
+        hybridGen.generateMatchIntoMethod(cw, getJavaClassName());
         hybridGen.generateMatchBoundedMethod(cw, getJavaClassName());
         hybridGen.generateFindMatchMethod(cw, getJavaClassName());
         hybridGen.generateFindMatchFromMethod(cw, getJavaClassName());
@@ -286,6 +302,7 @@ public class ReggieMatcherBytecodeGenerator {
         plainNfaGen.generateFindMethod(cw, getJavaClassName());
         plainNfaGen.generateFindFromMethod(cw, getJavaClassName());
         plainNfaGen.generateMatchMethod(cw, getJavaClassName());
+        plainNfaGen.generateMatchIntoMethod(cw, getJavaClassName());
         plainNfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
         plainNfaGen.generateFindMatchMethod(cw, getJavaClassName());
         plainNfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
@@ -334,6 +351,7 @@ public class ReggieMatcherBytecodeGenerator {
           nfaGen.generateFindMethod(cw, getJavaClassName());
           nfaGen.generateFindFromMethod(cw, getJavaClassName());
           nfaGen.generateMatchMethod(cw, getJavaClassName());
+          nfaGen.generateMatchIntoMethod(cw, getJavaClassName());
           nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
           nfaGen.generateMatchesBoundedMethod(cw, getJavaClassName());
           nfaGen.generateMatchBoundedCharSequenceMethod(cw, getJavaClassName());
@@ -359,6 +377,7 @@ public class ReggieMatcherBytecodeGenerator {
           nfaGen.generateFindMethod(cw, getJavaClassName());
           nfaGen.generateFindFromMethod(cw, getJavaClassName());
           nfaGen.generateMatchMethod(cw, getJavaClassName());
+          nfaGen.generateMatchIntoMethod(cw, getJavaClassName());
           nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
@@ -399,6 +418,7 @@ public class ReggieMatcherBytecodeGenerator {
         literalGen.generateFindMethod(cw, getJavaClassName());
         literalGen.generateFindFromMethod(cw, getJavaClassName());
         literalGen.generateMatchMethod(cw, getJavaClassName());
+        literalGen.generateMatchIntoMethod(cw, getJavaClassName());
         literalGen.generateMatchBoundedMethod(cw, getJavaClassName());
         literalGen.generateFindMatchMethod(cw, getJavaClassName());
         literalGen.generateFindMatchFromMethod(cw, getJavaClassName());
@@ -428,6 +448,7 @@ public class ReggieMatcherBytecodeGenerator {
 
         // Generate public API methods (these call the parser methods)
         recursiveGen.generateMatchesMethod(cw, getJavaClassName());
+        recursiveGen.generateMatchIntoMethod(cw, getJavaClassName());
         recursiveGen.generateFindMethod(cw, getJavaClassName());
         recursiveGen.generateFindFromMethod(cw, getJavaClassName());
         recursiveGen.generateFindBoundsFromMethod(cw, getJavaClassName());
@@ -583,7 +604,11 @@ public class ReggieMatcherBytecodeGenerator {
    * for NFA-based strategies.
    */
   private void generateConstructor(
-      ClassWriter cw, boolean needsNFAState, NFA nfa, Map<String, Integer> nameMap) {
+      ClassWriter cw,
+      boolean needsNFAState,
+      boolean needsRecursiveDescent,
+      NFA nfa,
+      Map<String, Integer> nameMap) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
     mv.visitCode();
 
@@ -611,6 +636,17 @@ public class ReggieMatcherBytecodeGenerator {
           "com/datadoghq/reggie/runtime/ReggieMatcher",
           "initNFAState",
           "(II)V",
+          false);
+    }
+
+    if (needsRecursiveDescent) {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitLdcInsn(nfa != null ? nfa.getGroupCount() : countGroups(pattern)); // groupCount
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "initRecursiveState",
+          "(I)V",
           false);
     }
 

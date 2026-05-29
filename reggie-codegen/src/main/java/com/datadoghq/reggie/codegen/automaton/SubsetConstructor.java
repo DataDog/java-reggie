@@ -26,6 +26,7 @@ public class SubsetConstructor {
   private Map<Set<NFA.NFAState>, DFA.DFAState> stateCache;
   private List<DFA.DFAState> allStates;
   private int nextStateId;
+  private boolean anchorConditionDiluted;
 
   public DFA buildDFA(NFA nfa) throws StateExplosionException {
     return buildDFA(nfa, false);
@@ -43,62 +44,117 @@ public class SubsetConstructor {
     this.stateCache = new HashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
+    this.anchorConditionDiluted = false;
 
-    // Pre-compute epsilon closures for all NFA states
-    Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures = precomputeEpsilonClosures(nfa);
+    // Pre-compute anchor-aware epsilon closures for all NFA states. Each entry maps a reachable
+    // NFA state to the weakest conjunction of anchors that must hold at the current input
+    // position for that state to be live.
+    Map<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> anchoredClosures =
+        precomputeAnchoredClosures(nfa);
 
-    // Start with epsilon-closure of NFA start state
-    Set<NFA.NFAState> startClosure = epsilonClosures.get(nfa.getStartState());
-    boolean startAccepting = containsAcceptState(startClosure, nfa.getAcceptStates());
-    List<DFA.GroupAction> startGroupActions = computeGroupActions(startClosure);
+    // Start with anchored epsilon-closure of NFA start state
+    Map<NFA.NFAState, EnumSet<NFA.AnchorType>> startClosure =
+        anchoredClosures.get(nfa.getStartState());
+    Set<NFA.NFAState> startClosureSet = startClosure.keySet();
+    List<DFA.GroupAction> startGroupActions = computeGroupActions(startClosureSet);
+    EnumSet<NFA.AnchorType> startAcceptConditions =
+        computeAcceptanceConditions(startClosure, nfa.getAcceptStates());
+    boolean startAccepting =
+        containsAcceptState(startClosureSet, nfa.getAcceptStates())
+            || !startAcceptConditions.isEmpty();
     DFA.DFAState start =
         new DFA.DFAState(
-            nextStateId++, startClosure, startAccepting, new ArrayList<>(), startGroupActions);
-    stateCache.put(startClosure, start);
+            nextStateId++,
+            startClosureSet,
+            startAccepting,
+            new ArrayList<>(),
+            startGroupActions,
+            startAcceptConditions);
+    stateCache.put(startClosureSet, start);
     allStates.add(start);
 
     Queue<DFA.DFAState> worklist = new ArrayDeque<>();
     worklist.add(start);
+    // Per-DFA-state anchor conditions, mirroring DFAState.nfaStates set membership.
+    Map<DFA.DFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> dfaStateConditions =
+        new HashMap<>();
+    dfaStateConditions.put(start, startClosure);
 
     while (!worklist.isEmpty()) {
       DFA.DFAState current = worklist.poll();
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> currentConditions =
+          dfaStateConditions.get(current);
 
       // Compute disjoint partition of outgoing character sets
       List<CharSet> partition = computeDisjointPartition(current.nfaStates);
 
       for (CharSet chars : partition) {
-        // Find all NFA states reachable on this charset
-        Set<NFA.NFAState> targets = new HashSet<>();
+        // Find all NFA states reachable on this charset, along with the weakest anchor
+        // condition required at the *source* position to take any contributing transition.
+        Map<NFA.NFAState, EnumSet<NFA.AnchorType>> targetsWithCond = new HashMap<>();
+        EnumSet<NFA.AnchorType> transitionGuard = null; // weakest across contributing sources
+        boolean transitionHasContributor = false;
+        boolean anyNonEmptySrcCond = false;
         for (NFA.NFAState nfaState : current.nfaStates) {
+          EnumSet<NFA.AnchorType> srcCond = currentConditions.get(nfaState);
+          if (srcCond == null) continue; // unreachable
+          // END-class anchors require pos == length; they cannot gate a consuming transition.
+          if (containsConsumeKillingAnchor(srcCond)) continue;
           for (NFA.Transition trans : nfaState.getTransitions()) {
             if (trans.chars.intersects(chars)) {
-              // Add epsilon closure of target state
-              targets.addAll(epsilonClosures.get(trans.target));
+              transitionHasContributor = true;
+              if (!srcCond.isEmpty()) anyNonEmptySrcCond = true;
+              transitionGuard = mergeWeakest(transitionGuard, srcCond);
+              // After consuming a char, prior conditions are discharged. The post-consume
+              // closure carries its own conditions starting from the transition target.
+              Map<NFA.NFAState, EnumSet<NFA.AnchorType>> postClosure =
+                  anchoredClosures.get(trans.target);
+              for (Map.Entry<NFA.NFAState, EnumSet<NFA.AnchorType>> e : postClosure.entrySet()) {
+                targetsWithCond.merge(
+                    e.getKey(), EnumSet.copyOf(e.getValue()), SubsetConstructor::mergeWeakestInto);
+              }
             }
           }
         }
 
-        if (targets.isEmpty()) continue;
+        if (!transitionHasContributor || targetsWithCond.isEmpty()) continue;
+        if (transitionGuard == null) transitionGuard = EnumSet.noneOf(NFA.AnchorType.class);
+        // Anchor dilution: an unconditional contributor erased a non-empty anchor guard.
+        if (transitionGuard.isEmpty() && anyNonEmptySrcCond) anchorConditionDiluted = true;
+
+        Set<NFA.NFAState> targets = targetsWithCond.keySet();
 
         // Get or create DFA state
         DFA.DFAState target = stateCache.get(targets);
         if (target == null) {
-          boolean accepting = containsAcceptState(targets, nfa.getAcceptStates());
+          EnumSet<NFA.AnchorType> targetAcceptConditions =
+              computeAcceptanceConditions(targetsWithCond, nfa.getAcceptStates());
+          boolean accepting =
+              containsAcceptState(targets, nfa.getAcceptStates())
+                  || !targetAcceptConditions.isEmpty();
           List<DFA.GroupAction> groupActions = computeGroupActions(targets);
           target =
-              new DFA.DFAState(nextStateId++, targets, accepting, new ArrayList<>(), groupActions);
+              new DFA.DFAState(
+                  nextStateId++,
+                  targets,
+                  accepting,
+                  new ArrayList<>(),
+                  groupActions,
+                  targetAcceptConditions);
           stateCache.put(targets, target);
           allStates.add(target);
+          dfaStateConditions.put(target, targetsWithCond);
           worklist.add(target);
         }
 
         // Compute tag operations if requested (Tagged DFA)
         if (computeTags && nfa.getGroupCount() > 0) {
           List<DFA.TagOperation> tagOps =
-              computeTagOperations(current.nfaStates, targets, chars, epsilonClosures);
-          current.addTransition(chars, target, tagOps);
+              computeTagOperations(
+                  current.nfaStates, targets, chars, flattenClosure(anchoredClosures));
+          current.addTransition(chars, target, tagOps, transitionGuard);
         } else {
-          current.addTransition(chars, target);
+          current.addTransition(chars, target, Collections.emptyList(), transitionGuard);
         }
       }
 
@@ -111,7 +167,7 @@ public class SubsetConstructor {
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
 
-    return new DFA(start, acceptStates, allStates);
+    return new DFA(start, acceptStates, allStates, anchorConditionDiluted);
   }
 
   /**
@@ -145,6 +201,158 @@ public class SubsetConstructor {
         }
       }
     }
+  }
+
+  /**
+   * Pre-compute anchor-aware epsilon closures: for each NFA state, a map from each ε-reachable
+   * state to the *weakest conjunction of anchor types* that must hold at the current input position
+   * to live there. An empty {@link EnumSet} means unconditional reachability.
+   */
+  private Map<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> precomputeAnchoredClosures(
+      NFA nfa) {
+    Map<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> closures = new HashMap<>();
+    for (NFA.NFAState state : nfa.getStates()) {
+      closures.put(state, computeAnchoredEpsilonClosure(state));
+    }
+    return closures;
+  }
+
+  /**
+   * Compute the anchor-aware ε-closure from {@code start}. When a state in the BFS frontier has
+   * {@code anchor != null}, that anchor is added to the condition under which each ε-successor is
+   * reachable. Multiple paths to the same state merge to the weakest conjunction (intersection).
+   */
+  private Map<NFA.NFAState, EnumSet<NFA.AnchorType>> computeAnchoredEpsilonClosure(
+      NFA.NFAState start) {
+    Map<NFA.NFAState, EnumSet<NFA.AnchorType>> result = new HashMap<>();
+    result.put(start, EnumSet.noneOf(NFA.AnchorType.class));
+    Deque<NFA.NFAState> worklist = new ArrayDeque<>();
+    worklist.add(start);
+    while (!worklist.isEmpty()) {
+      NFA.NFAState current = worklist.poll();
+      EnumSet<NFA.AnchorType> currentCond = result.get(current);
+      EnumSet<NFA.AnchorType> propagated;
+      if (current.anchor != null && isPositionAnchor(current.anchor)) {
+        propagated = EnumSet.copyOf(currentCond);
+        propagated.add(current.anchor);
+      } else {
+        propagated = currentCond;
+      }
+      for (NFA.NFAState target : current.getEpsilonTransitions()) {
+        EnumSet<NFA.AnchorType> existing = result.get(target);
+        if (existing == null) {
+          result.put(target, EnumSet.copyOf(propagated));
+          worklist.add(target);
+        } else {
+          // Weakest wins: intersection of existing and propagated. If that loosens the
+          // requirement, store and re-propagate.
+          EnumSet<NFA.AnchorType> merged = EnumSet.copyOf(existing);
+          merged.retainAll(propagated);
+          if (!merged.equals(existing)) {
+            // Two non-empty but disjoint anchor sets meeting at the same state: their
+            // intersection is empty (unconditional), erasing both anchors.
+            if (merged.isEmpty() && !existing.isEmpty() && !propagated.isEmpty()) {
+              anchorConditionDiluted = true;
+            }
+            result.put(target, merged);
+            worklist.add(target);
+          }
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Returns true if the given anchor type is one this fix knows how to gate at the DFA level. Word
+   * boundaries and reset-match anchors are handled elsewhere; they are not treated as positional
+   * gating here.
+   */
+  private static boolean isPositionAnchor(NFA.AnchorType type) {
+    switch (type) {
+      case START:
+      case END:
+      case START_MULTILINE:
+      case END_MULTILINE:
+      case STRING_START:
+      case STRING_END:
+      case STRING_END_ABSOLUTE:
+        return true;
+      case WORD_BOUNDARY:
+      case RESET_MATCH:
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Returns true if any anchor in the set requires {@code pos == length} (or near-end), which makes
+   * a consuming char-transition impossible. Used to prune dead transitions.
+   */
+  private static boolean containsConsumeKillingAnchor(EnumSet<NFA.AnchorType> conds) {
+    return conds.contains(NFA.AnchorType.END) || conds.contains(NFA.AnchorType.STRING_END_ABSOLUTE);
+    // Note: STRING_END (\Z) and END_MULTILINE allow consuming a final newline, but precise
+    // handling there would require char-set intersection. Conservative pruning is safe for
+    // the present scope; an extension can refine if needed.
+  }
+
+  /**
+   * Compute weakest acceptance conditions across all accept NFA states in {@code closure}. Returns
+   * an empty set if any accept state is unconditionally reachable; otherwise the weakest
+   * single-conjunction condition. Callers treat empty as "unconditionally accepting".
+   *
+   * <p>Side effect: sets {@link #anchorConditionDiluted} when multiple accept states have non-empty
+   * but disjoint conditions whose intersection collapses to empty.
+   */
+  private EnumSet<NFA.AnchorType> computeAcceptanceConditions(
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> closure, Set<NFA.NFAState> acceptStates) {
+    EnumSet<NFA.AnchorType> best = null;
+    for (NFA.NFAState s : closure.keySet()) {
+      if (!acceptStates.contains(s)) continue;
+      EnumSet<NFA.AnchorType> cond = closure.get(s);
+      if (cond.isEmpty()) return EnumSet.noneOf(NFA.AnchorType.class);
+      if (best == null) best = EnumSet.copyOf(cond);
+      else best.retainAll(cond);
+    }
+    if (best != null && best.isEmpty()) {
+      // All accept states had non-empty conditions, but they were disjoint — intersection
+      // collapsed to empty (unconditional). The DFA would accept without checking any anchor.
+      anchorConditionDiluted = true;
+    }
+    return best == null ? EnumSet.noneOf(NFA.AnchorType.class) : best;
+  }
+
+  /** Merge two weakest-condition values via intersection. */
+  private static EnumSet<NFA.AnchorType> mergeWeakest(
+      EnumSet<NFA.AnchorType> a, EnumSet<NFA.AnchorType> b) {
+    if (a == null) return EnumSet.copyOf(b);
+    if (b == null) return a;
+    EnumSet<NFA.AnchorType> r = EnumSet.copyOf(a);
+    r.retainAll(b);
+    return r;
+  }
+
+  /** {@link Map#merge} remapping function for weakest-condition merging. */
+  private static EnumSet<NFA.AnchorType> mergeWeakestInto(
+      EnumSet<NFA.AnchorType> existing, EnumSet<NFA.AnchorType> incoming) {
+    EnumSet<NFA.AnchorType> r = EnumSet.copyOf(existing);
+    r.retainAll(incoming);
+    return r;
+  }
+
+  /**
+   * Flatten anchored-closure data structure back to the legacy {@code Map<NFAState, Set<NFAState>>}
+   * shape consumed by tag-operation computation, which only cares about set membership, not anchor
+   * conditions.
+   */
+  private static Map<NFA.NFAState, Set<NFA.NFAState>> flattenClosure(
+      Map<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> anchored) {
+    Map<NFA.NFAState, Set<NFA.NFAState>> flat = new HashMap<>();
+    for (Map.Entry<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> e :
+        anchored.entrySet()) {
+      flat.put(e.getKey(), e.getValue().keySet());
+    }
+    return flat;
   }
 
   /**
@@ -532,26 +740,38 @@ public class SubsetConstructor {
     this.stateCache = new HashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
+    this.anchorConditionDiluted = false;
 
-    // Pre-compute epsilon closures for all NFA states
-    Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures = precomputeEpsilonClosures(nfa);
+    // Pre-compute anchor-aware epsilon closures
+    Map<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> anchoredClosures =
+        precomputeAnchoredClosures(nfa);
 
     // Extract assertions from NFA
     Map<NFA.NFAState, List<AssertionCheck>> assertionMap = extractAssertions(nfa);
 
-    // Start with epsilon-closure of NFA start state
-    Set<NFA.NFAState> startClosure = epsilonClosures.get(nfa.getStartState());
-    boolean startAccepting = containsAcceptState(startClosure, nfa.getAcceptStates());
+    // Start with anchored epsilon-closure of NFA start state
+    Map<NFA.NFAState, EnumSet<NFA.AnchorType>> startClosure =
+        anchoredClosures.get(nfa.getStartState());
+    Set<NFA.NFAState> startClosureSet = startClosure.keySet();
     DFA.DFAState start =
-        createDFAStateWithAssertions(startClosure, assertionMap, nfa.getAcceptStates());
-    stateCache.put(startClosure, start);
+        createDFAStateWithAssertions(
+            startClosureSet,
+            assertionMap,
+            nfa.getAcceptStates(),
+            computeAcceptanceConditions(startClosure, nfa.getAcceptStates()));
+    stateCache.put(startClosureSet, start);
     allStates.add(start);
 
     Queue<DFA.DFAState> worklist = new ArrayDeque<>();
     worklist.add(start);
+    Map<DFA.DFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> dfaStateConditions =
+        new HashMap<>();
+    dfaStateConditions.put(start, startClosure);
 
     while (!worklist.isEmpty()) {
       DFA.DFAState current = worklist.poll();
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> currentConditions =
+          dfaStateConditions.get(current);
 
       // State explosion check (threshold: 300 states)
       if (allStates.size() > 300) {
@@ -562,32 +782,47 @@ public class SubsetConstructor {
       List<CharSet> partition = computeDisjointPartition(current.nfaStates);
 
       for (CharSet chars : partition) {
-        // Find all NFA states reachable on this charset
-        Set<NFA.NFAState> targets = new HashSet<>();
+        Map<NFA.NFAState, EnumSet<NFA.AnchorType>> targetsWithCond = new HashMap<>();
+        EnumSet<NFA.AnchorType> transitionGuard = null;
+        boolean hasContributor = false;
+        boolean anyNonEmptySrcCond = false;
         for (NFA.NFAState nfaState : current.nfaStates) {
+          EnumSet<NFA.AnchorType> srcCond = currentConditions.get(nfaState);
+          if (srcCond == null) continue;
+          if (containsConsumeKillingAnchor(srcCond)) continue;
           for (NFA.Transition trans : nfaState.getTransitions()) {
             if (trans.chars.intersects(chars)) {
-              // Add epsilon closure of target state
-              targets.addAll(epsilonClosures.get(trans.target));
+              hasContributor = true;
+              if (!srcCond.isEmpty()) anyNonEmptySrcCond = true;
+              transitionGuard = mergeWeakest(transitionGuard, srcCond);
+              for (Map.Entry<NFA.NFAState, EnumSet<NFA.AnchorType>> e :
+                  anchoredClosures.get(trans.target).entrySet()) {
+                targetsWithCond.merge(
+                    e.getKey(), EnumSet.copyOf(e.getValue()), SubsetConstructor::mergeWeakestInto);
+              }
             }
           }
         }
 
-        if (!targets.isEmpty()) {
-          // Get or create DFA state for this target set
-          DFA.DFAState targetState = stateCache.get(targets);
-          if (targetState == null) {
-            boolean accepting = containsAcceptState(targets, nfa.getAcceptStates());
-            targetState =
-                createDFAStateWithAssertions(targets, assertionMap, nfa.getAcceptStates());
-            stateCache.put(targets, targetState);
-            allStates.add(targetState);
-            worklist.add(targetState);
-          }
+        if (!hasContributor || targetsWithCond.isEmpty()) continue;
+        if (transitionGuard == null) transitionGuard = EnumSet.noneOf(NFA.AnchorType.class);
+        if (transitionGuard.isEmpty() && anyNonEmptySrcCond) anchorConditionDiluted = true;
 
-          // Add transition
-          current.addTransition(chars, targetState);
+        Set<NFA.NFAState> targets = targetsWithCond.keySet();
+        DFA.DFAState targetState = stateCache.get(targets);
+        if (targetState == null) {
+          targetState =
+              createDFAStateWithAssertions(
+                  targets,
+                  assertionMap,
+                  nfa.getAcceptStates(),
+                  computeAcceptanceConditions(targetsWithCond, nfa.getAcceptStates()));
+          stateCache.put(targets, targetState);
+          allStates.add(targetState);
+          dfaStateConditions.put(targetState, targetsWithCond);
+          worklist.add(targetState);
         }
+        current.addTransition(chars, targetState, Collections.emptyList(), transitionGuard);
       }
     }
 
@@ -595,7 +830,7 @@ public class SubsetConstructor {
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
 
-    return new DFA(start, acceptStates, allStates);
+    return new DFA(start, acceptStates, allStates, anchorConditionDiluted);
   }
 
   /** Helper class to hold assertion extraction results. */
@@ -841,17 +1076,30 @@ public class SubsetConstructor {
       Set<NFA.NFAState> nfaStates,
       Map<NFA.NFAState, List<AssertionCheck>> assertionMap,
       Set<NFA.NFAState> acceptStates) {
+    return createDFAStateWithAssertions(
+        nfaStates, assertionMap, acceptStates, EnumSet.noneOf(NFA.AnchorType.class));
+  }
+
+  /** Create DFA state with assertion annotations, group actions, and acceptance anchor cond. */
+  private DFA.DFAState createDFAStateWithAssertions(
+      Set<NFA.NFAState> nfaStates,
+      Map<NFA.NFAState, List<AssertionCheck>> assertionMap,
+      Set<NFA.NFAState> acceptStates,
+      EnumSet<NFA.AnchorType> acceptanceAnchorConditions) {
 
     List<AssertionCheck> assertions = new ArrayList<>();
     List<DFA.GroupAction> groupActions = computeGroupActions(nfaStates);
 
+    boolean accepting =
+        containsAcceptState(nfaStates, acceptStates) || !acceptanceAnchorConditions.isEmpty();
     DFA.DFAState dfaState =
         new DFA.DFAState(
             nextStateId++,
             nfaStates,
-            containsAcceptState(nfaStates, acceptStates),
+            accepting,
             assertions,
-            groupActions);
+            groupActions,
+            acceptanceAnchorConditions);
 
     // Aggregate assertions from all NFA states
     for (NFA.NFAState nfaState : nfaStates) {

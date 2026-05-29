@@ -199,6 +199,12 @@ public final class NFA {
       if (!state.getTransitions().isEmpty()) {
         return false;
       }
+      // If accept is reachable without crossing the barrier (e.g. via END anchor for bare `$`),
+      // the pattern can match at positions other than the start, so the find()-loop "only try
+      // tryPos == 0" optimization is unsound.
+      if (acceptStates.contains(state)) {
+        return false;
+      }
       for (NFAState next : state.getEpsilonTransitions()) {
         if (visited.add(next)) {
           queue.add(next);
@@ -300,8 +306,16 @@ public final class NFA {
       hash = 31 * hash + (state.enterGroup != null ? state.enterGroup + 1 : 0);
       hash = 31 * hash + (state.exitGroup != null ? state.exitGroup + 1 : 0);
 
-      // Assertion type distinguishes (?<=...) from (?<!...) — must not collide
-      hash = 31 * hash + (state.assertionType != null ? state.assertionType.hashCode() : 0);
+      // Assertion type: use ordinal() — hashCode() uses System.identityHashCode() which can be 0.
+      hash = 31 * hash + (state.assertionType != null ? state.assertionType.ordinal() + 1 : 0);
+
+      // Anchor type: states with different anchors (END vs STRING_END_ABSOLUTE vs null)
+      // generate different bytecode; omitting this caused structural-cache collisions.
+      hash = 31 * hash + (state.anchor != null ? state.anchor.ordinal() + 1 : 0);
+
+      // Backref group: patterns differing only in referenced group number must not share
+      // a structural-cache entry (e.g. (a)(b)\1 vs (a)(b)\2).
+      hash = 31 * hash + (state.backrefCheck != null ? state.backrefCheck + 1 : 0);
     }
 
     return hash;

@@ -30,6 +30,8 @@ test {
         events "passed", "skipped", "failed"
         showStandardStreams = true
     }
+    // Forward all -Dreggie.* system properties from the Gradle JVM to the test JVM
+    systemProperties System.properties.findAll { k, v -> k.toString().startsWith("reggie.") }
 }
 
 // Custom task to run correctness validation standalone

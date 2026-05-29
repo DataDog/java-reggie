@@ -179,14 +179,18 @@ class ReggieMatcherBytecodeGeneratorTest {
 
   @Test
   void testRecursiveDescentStrategy() throws Exception {
-    Object matcher = compile("\\d+?", "RecursiveMatcher");
+    // \d+? (lazy) routes to JDK fallback: RECURSIVE_DESCENT lacks general alternation
+    // backtracking needed for lazy semantics. Use a quantified-backref pattern instead,
+    // which routes to RECURSIVE_DESCENT via hasQuantifiedBackrefs without lazy quantifiers.
+    Object matcher = compile("(\\d+)\\1{1,2}", "RecursiveMatcher");
     Method matches = matcher.getClass().getMethod("matches", String.class);
     Method find = matcher.getClass().getMethod("find", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "1"));
-    assertTrue((Boolean) matches.invoke(matcher, "5"));
-    assertFalse((Boolean) matches.invoke(matcher, "a"));
+    assertTrue((Boolean) matches.invoke(matcher, "11")); // group="1", backref once
+    assertTrue((Boolean) matches.invoke(matcher, "1111")); // group="11", backref once
+    assertFalse((Boolean) matches.invoke(matcher, "12")); // backref mismatch
+    assertFalse((Boolean) matches.invoke(matcher, "1")); // no room for backref
     assertFalse((Boolean) matches.invoke(matcher, ""));
-    assertTrue((Boolean) find.invoke(matcher, "abc1def"));
+    assertTrue((Boolean) find.invoke(matcher, "x11y"));
     assertFalse((Boolean) find.invoke(matcher, "abc"));
   }
 
@@ -229,11 +233,13 @@ class ReggieMatcherBytecodeGeneratorTest {
 
   @Test
   void testOptionalGroupBackrefStrategy() throws Exception {
-    Object matcher = compile("^(a)?(b)?\\1\\2$", "OptGroupBackrefMatcher");
+    // Use empty-alt form (a|) instead of (a)? so the group always participates
+    // (the quantified (X)? form now routes to JDK fallback for correct Java backref semantics)
+    Object matcher = compile("^(a|)(b|)\\1\\2$", "OptGroupBackrefMatcher");
     Method matches = matcher.getClass().getMethod("matches", String.class);
-    // Group 1=(a)? and group 2=(b)? are optional; backrefs \1\2 match whatever they captured
     assertTrue((Boolean) matches.invoke(matcher, "abab"));
     assertTrue((Boolean) matches.invoke(matcher, "aa"));
+    assertTrue((Boolean) matches.invoke(matcher, ""));
     assertFalse((Boolean) matches.invoke(matcher, "abba"));
     assertFalse((Boolean) matches.invoke(matcher, "abc"));
   }

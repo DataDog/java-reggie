@@ -497,21 +497,35 @@ public class OnePassBytecodeGenerator {
         break;
 
       case END:
-        // if (pos == input.length()) pass; else fail;
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ALOAD, inputVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitJumpInsn(IF_ICMPEQ, passLabel);
-        // Anchor failed - return false/null
-        if (returnBoolean) {
-          mv.visitInsn(ICONST_0);
-          mv.visitInsn(IRETURN);
-        } else {
-          mv.visitInsn(ACONST_NULL);
-          mv.visitInsn(ARETURN);
+        {
+          // $ (non-multiline): same as \Z — matches at end OR before final '\n'.
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+          mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+          Label endCheckNewline = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitJumpInsn(IF_ICMPNE, endCheckNewline);
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+          mv.visitLabel(endCheckNewline);
+          if (returnBoolean) {
+            mv.visitInsn(ICONST_0);
+            mv.visitInsn(IRETURN);
+          } else {
+            mv.visitInsn(ACONST_NULL);
+            mv.visitInsn(ARETURN);
+          }
+          mv.visitLabel(passLabel);
+          break;
         }
-        mv.visitLabel(passLabel);
-        break;
 
       case START_MULTILINE:
         // if (pos == 0 || input.charAt(pos-1) == '\n') pass; else fail;

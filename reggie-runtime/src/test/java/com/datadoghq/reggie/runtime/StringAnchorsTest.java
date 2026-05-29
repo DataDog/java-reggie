@@ -67,9 +67,10 @@ public class StringAnchorsTest {
 
     assertTrue(m.matches("abc"));
     assertTrue(m.matches("xyzabc"));
-    assertTrue(m.matches("abc\n")); // \Z matches before final newline
+    assertFalse(
+        m.matches("abc\n")); // matches() requires consuming the full input; \n is not consumed
     assertFalse(m.matches("abcx"));
-    assertFalse(m.matches("abc\nx")); // \Z doesn't match before non-final newline
+    assertFalse(m.matches("abc\nx"));
   }
 
   @Test
@@ -83,8 +84,9 @@ public class StringAnchorsTest {
     assertTrue(mZ.matches(input1));
     assertTrue(mz.matches(input1));
 
-    // \Z matches "abc\n", but \z doesn't
-    assertTrue(mZ.matches(input2), "\\Z should match before final newline");
+    // Neither \Z nor \z matches "abc\n" in matches() mode: the trailing '\n' is not consumed
+    assertFalse(
+        mZ.matches(input2), "\\Z matches() requires full input; trailing \\n is not consumed");
     assertFalse(mz.matches(input2), "\\z should not match before newline");
   }
 
