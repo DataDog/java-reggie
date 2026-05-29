@@ -88,6 +88,25 @@ class MatchIntoAPITest {
   }
 
   @Test
+  void nfaMatcherOverridesMatchInto() throws Exception {
+    ReggieMatcher matcher = Reggie.compile("(?=.*[0-9])([a-z]+)([0-9]+)");
+    int[] starts = new int[3];
+    int[] ends = new int[3];
+
+    assertNotEquals(
+        ReggieMatcher.class,
+        matcher
+            .getClass()
+            .getMethod("matchInto", String.class, int[].class, int[].class)
+            .getDeclaringClass());
+    assertTrue(matcher.matchInto("abc123", starts, ends));
+
+    MatchResult match = matcher.match("abc123");
+    assertArrayEquals(new int[] {match.start(0), match.start(1), match.start(2)}, starts);
+    assertArrayEquals(new int[] {match.end(0), match.end(1), match.end(2)}, ends);
+  }
+
+  @Test
   void tooSmallArraysThrowOnSuccessfulMatch() {
     ReggieMatcher matcher = Reggie.compile("(a)(b)");
     int[] starts = new int[2];

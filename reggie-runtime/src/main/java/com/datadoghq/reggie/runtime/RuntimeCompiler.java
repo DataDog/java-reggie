@@ -387,7 +387,9 @@ public class RuntimeCompiler {
         result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
             || result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
-            || result.strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD;
+            || result.strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD
+            || result.strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS
+            || result.strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS;
     boolean needsRecursiveDescent =
         result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
     generateConstructor(cw, pattern, className, needsNFAState, needsRecursiveDescent, nfa, ast);
@@ -659,6 +661,7 @@ public class RuntimeCompiler {
         literalGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        literalGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalGen.generateFindLongestMatchEndMethod(
             cw, "com/datadoghq/reggie/runtime/" + className);
@@ -685,6 +688,7 @@ public class RuntimeCompiler {
         hybridGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        hybridGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateFindLongestMatchEndMethod(
             cw, "com/datadoghq/reggie/runtime/" + className);
@@ -709,6 +713,7 @@ public class RuntimeCompiler {
           nfaGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchBoundedMethod(
               cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
           nfaGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -737,6 +742,7 @@ public class RuntimeCompiler {
           nfaGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          nfaGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaGen.generateMatchBoundedMethod(
               cw, "com/datadoghq/reggie/runtime/" + className); // Phase 1.1 optimization
           nfaGen.generateFindLongestMatchEndMethod(

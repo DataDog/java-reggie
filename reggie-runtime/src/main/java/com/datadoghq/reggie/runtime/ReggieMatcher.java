@@ -53,6 +53,9 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   protected StateSet epsilonProcessed;
   protected int[] groupStarts;
   protected int[] groupEnds;
+  protected int[][] configGroupStarts;
+  protected int[][] configGroupEnds;
+  protected int[] parentStateMap;
 
   // Stateful iterators for efficient BitSet iteration
   // Pre-allocated to avoid allocation overhead in hot path
@@ -82,9 +85,12 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
       this.nextStatesIter = this.nextStates.iterator();
       this.epsilonProcessedIter = this.epsilonProcessed.iterator();
 
+      this.groupStarts = new int[groupCount + 1];
+      this.groupEnds = new int[groupCount + 1];
       if (groupCount > 0) {
-        this.groupStarts = new int[groupCount + 1];
-        this.groupEnds = new int[groupCount + 1];
+        this.configGroupStarts = new int[stateCount][groupCount + 1];
+        this.configGroupEnds = new int[stateCount][groupCount + 1];
+        this.parentStateMap = new int[stateCount];
       }
     }
   }

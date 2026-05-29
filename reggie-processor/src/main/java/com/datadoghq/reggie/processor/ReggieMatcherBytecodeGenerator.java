@@ -118,7 +118,9 @@ public class ReggieMatcherBytecodeGenerator {
         strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
-            || strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD;
+            || strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD
+            || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS
+            || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS;
     generateConstructor(cw, needsNFAState, nfa, nameMap);
 
     // Generate methods based on strategy
@@ -266,6 +268,7 @@ public class ReggieMatcherBytecodeGenerator {
         hybridGen.generateFindMethod(cw, getJavaClassName());
         hybridGen.generateFindFromMethod(cw, getJavaClassName());
         hybridGen.generateMatchMethod(cw, getJavaClassName());
+        hybridGen.generateMatchIntoMethod(cw, getJavaClassName());
         hybridGen.generateMatchBoundedMethod(cw, getJavaClassName());
         hybridGen.generateFindMatchMethod(cw, getJavaClassName());
         hybridGen.generateFindMatchFromMethod(cw, getJavaClassName());
@@ -287,6 +290,7 @@ public class ReggieMatcherBytecodeGenerator {
         plainNfaGen.generateFindMethod(cw, getJavaClassName());
         plainNfaGen.generateFindFromMethod(cw, getJavaClassName());
         plainNfaGen.generateMatchMethod(cw, getJavaClassName());
+        plainNfaGen.generateMatchIntoMethod(cw, getJavaClassName());
         plainNfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
         plainNfaGen.generateFindMatchMethod(cw, getJavaClassName());
         plainNfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
@@ -335,6 +339,7 @@ public class ReggieMatcherBytecodeGenerator {
           nfaGen.generateFindMethod(cw, getJavaClassName());
           nfaGen.generateFindFromMethod(cw, getJavaClassName());
           nfaGen.generateMatchMethod(cw, getJavaClassName());
+          nfaGen.generateMatchIntoMethod(cw, getJavaClassName());
           nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
           nfaGen.generateMatchesBoundedMethod(cw, getJavaClassName());
           nfaGen.generateMatchBoundedCharSequenceMethod(cw, getJavaClassName());
@@ -360,6 +365,7 @@ public class ReggieMatcherBytecodeGenerator {
           nfaGen.generateFindMethod(cw, getJavaClassName());
           nfaGen.generateFindFromMethod(cw, getJavaClassName());
           nfaGen.generateMatchMethod(cw, getJavaClassName());
+          nfaGen.generateMatchIntoMethod(cw, getJavaClassName());
           nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
@@ -400,6 +406,7 @@ public class ReggieMatcherBytecodeGenerator {
         literalGen.generateFindMethod(cw, getJavaClassName());
         literalGen.generateFindFromMethod(cw, getJavaClassName());
         literalGen.generateMatchMethod(cw, getJavaClassName());
+        literalGen.generateMatchIntoMethod(cw, getJavaClassName());
         literalGen.generateMatchBoundedMethod(cw, getJavaClassName());
         literalGen.generateFindMatchMethod(cw, getJavaClassName());
         literalGen.generateFindMatchFromMethod(cw, getJavaClassName());
