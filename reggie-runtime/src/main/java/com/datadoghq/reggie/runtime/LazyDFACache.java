@@ -168,9 +168,42 @@ public final class LazyDFACache {
     }
   }
 
+  /**
+   * Bounded lazy-DFA match over {@code input[start, end)} without copying the substring. Used by
+   * the String overload of {@code matchBounded} so that the delegated {@code findMatchFrom} loop
+   * never allocates a substring for each candidate region.
+   */
+  public boolean matchesBounded(String input, int start, int end, NfaStep nfaStep) {
+    int dfaState = 0;
+    for (int pos = start; pos < end; pos++) {
+      int c = input.charAt(pos);
+      int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
+      int next = (table != null && c < 128) ? (int) INT_ARRAY_VH.getAcquire(table, c) : UNCACHED;
+      if (next == UNCACHED) {
+        next = lookupOrCompute(dfaState, c, nfaStep);
+      }
+      if (next == DEAD) return false;
+      if (next == FALLBACK) {
+        return nfaFallbackMatchBounded(input, pos, end, nfaStateSets[dfaState], nfaStep);
+      }
+      dfaState = next;
+    }
+    return accepting[dfaState];
+  }
+
   boolean nfaFallbackMatch(String input, int fromPos, int[] nfaSet, NfaStep nfaStep) {
     int[] states = nfaStep.apply(nfaSet, input.charAt(fromPos));
     for (int pos = fromPos + 1; pos < input.length(); pos++) {
+      if (states.length == 0) return false;
+      states = nfaStep.apply(states, input.charAt(pos));
+    }
+    return states.length > 0 && containsAny(states, acceptStateIds);
+  }
+
+  private boolean nfaFallbackMatchBounded(
+      String input, int fromPos, int end, int[] nfaSet, NfaStep nfaStep) {
+    int[] states = nfaStep.apply(nfaSet, input.charAt(fromPos));
+    for (int pos = fromPos + 1; pos < end; pos++) {
       if (states.length == 0) return false;
       states = nfaStep.apply(states, input.charAt(pos));
     }

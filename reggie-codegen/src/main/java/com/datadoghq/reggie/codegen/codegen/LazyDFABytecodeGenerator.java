@@ -467,11 +467,11 @@ public class LazyDFABytecodeGenerator {
   }
 
   /**
-   * Emits {@code public MatchResult matchBounded(String input, int start, int end)}: compact stub
-   * that extracts the substring, delegates to {@code matches(sub)}, and returns a {@code
-   * MatchResultImpl} with the original input and absolute {@code start}/{@code end} offsets. This
-   * String overload is called internally by the NFA-delegated {@code findMatchFrom} method.
-   * Variable layout: 0=this, 1=input, 2=start, 3=end, 4=sub.
+   * Emits {@code public MatchResult matchBounded(String input, int start, int end)}: delegates to
+   * {@code CACHE.matchesBounded(input, start, end, this)} — no substring allocation. This String
+   * overload is called internally by the NFA-delegated {@code findMatchFrom} method, which scans
+   * all end positions; using {@code matchesBounded} avoids O(n²) substring copies on large inputs.
+   * Variable layout: 0=this, 1=input, 2=start, 3=end.
    */
   public void generateMatchBoundedStringMethod(ClassWriter cw, String className) {
     String matchResultImpl = "com/datadoghq/reggie/runtime/MatchResultImpl";
@@ -481,18 +481,18 @@ public class LazyDFABytecodeGenerator {
             ACC_PUBLIC, "matchBounded", "(Ljava/lang/String;II)L" + matchResult + ";", null, null);
     mv.visitCode();
 
-    // String sub = input.substring(start, end)
+    // if (!CACHE.matchesBounded(input, start, end, this)) return null
+    mv.visitFieldInsn(GETSTATIC, className, "CACHE", "L" + LAZY_CACHE + ";");
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ILOAD, 3);
+    mv.visitVarInsn(ALOAD, 0); // this (NfaStep)
     mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", false);
-    mv.visitVarInsn(ASTORE, 4);
-
-    // if (!matches(sub)) return null
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, 4);
-    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+        INVOKEVIRTUAL,
+        LAZY_CACHE,
+        "matchesBounded",
+        "(Ljava/lang/String;IIL" + NFA_STEP + ";)Z",
+        false);
     Label matched = new Label();
     mv.visitJumpInsn(IFNE, matched);
     mv.visitInsn(ACONST_NULL);

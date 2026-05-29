@@ -220,10 +220,17 @@ matches("abc...")
 ## Thread-Safety
 
 - `stateIndex`: `ConcurrentHashMap` — safe concurrent interning via `computeIfAbsent`.
-- `asciiTables[id][c]`: written once per slot; the same (state, char) always produces the
-  same target, so a lost-write race produces a correct result. No lock needed. A plain
-  `Object[]` write is sufficient (JMM guarantees eventual visibility; stale reads just
-  trigger a redundant recompute that writes the same value).
+- **ASCII table publication** (`asciiTables` slot): the initial `int[128]` array is published
+  with `TABLES_VH.setRelease(asciiTables, state, t)` (array-element VarHandle with release
+  semantics); readers use `TABLES_VH.getAcquire(asciiTables, dfaState)`. This establishes a
+  happens-before on weakly-ordered platforms (ARM/RISC-V) and compiles to plain load/store on
+  x86/TSO.
+- **ASCII table entry updates** (subsequent writes to an already-published slot): written with
+  `INT_ARRAY_VH.setRelease(table, c, value)` and read with `INT_ARRAY_VH.getAcquire(table, c)`.
+  This pairs with the `nfaStateSets[newId]`/`accepting[newId]` initialization done inside
+  `computeIfAbsent` on the writer thread, ensuring those writes are visible to any reader that
+  subsequently observes the new DFA state id via `getAcquire`. Idempotent: same key always
+  maps to the same id, so racing writes produce the same value.
 - `frozen`: `volatile boolean` — guarantees all threads see the freeze once set.
 - `nextId`: `AtomicInteger` — safe increments under concurrent interning.
 

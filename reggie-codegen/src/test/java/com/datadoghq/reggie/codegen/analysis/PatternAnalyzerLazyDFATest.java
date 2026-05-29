@@ -71,4 +71,13 @@ class PatternAnalyzerLazyDFATest {
     PatternAnalyzer.MatchingStrategyResult r = analyze("((?:[a-z][0-9]){100})\\1");
     assertNotEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
   }
+
+  @Test
+  void testDoNotRouteWithCapturingGroup() throws Exception {
+    // Capturing group (no backref) — directly exercises the hasCapturingGroups guard.
+    // The backref test exits via OPTIMIZED_NFA_WITH_BACKREFS before isLazyDFAEligible is
+    // consulted, so it does not cover this path.
+    PatternAnalyzer.MatchingStrategyResult r = analyze("((?:a+b+|b+a+){75})");
+    assertNotEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
+  }
 }
