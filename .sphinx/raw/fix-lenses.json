@@ -1,0 +1,162 @@
+[
+  {
+    "theme": "lookahead-inside-capturing-group-DFA",
+    "anti_pattern": "The DFA strategy was chosen for patterns containing lookaheads inside capturing groups without checking whether the lookahead would be evaluated on a substring boundary, which cuts the lookahead context at the match edge.",
+    "fix_example": "Added a pre-DFA check that walks the AST for any positive or negative lookahead nested inside a capturing group, and routes those patterns to OPTIMIZED_NFA_WITH_LOOKAROUND instead.",
+    "root_cause": "DFA group extraction uses match(substring), which truncates the remaining input the lookahead must inspect, producing false negatives for patterns like (\\w+(?=\\d)).",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "assertion-attached-to-epsilon-targets-instead-of-assertion-state",
+    "anti_pattern": "During DFA construction, assertion checks were attached to the epsilon targets of the assertion NFA state rather than to the assertion state itself, causing the check to re-fire in every subsequent DFA state whose NFA closure still contained those epsilon targets (e.g., loop bodies).",
+    "fix_example": "The fix attaches each assertion check to its own NFA assertion state so it fires only when that specific state appears in the DFA state's NFA closure.",
+    "root_cause": "Epsilon-target attachment causes the same assertion to evaluate at multiple positions during a single match, making lookbehind-after-unbounded-quantifier patterns always fail or produce incorrect results.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "greedy-overlap-check-ignores-nullable-nodes",
+    "anti_pattern": "When detecting DFA conflicts between a greedy capturing group and its suffix, the code checked only the immediately next sibling for character-set overlap and skipped any nullable intermediate nodes (e.g., optional quantifiers), missing cases where the suffix first-char set should include characters reachable after skipping nullable elements.",
+    "fix_example": "Replaced the direct next-sibling lookup with getSuffixFirstCharSetSkippingNullable, which advances past nullable nodes before computing the first character set of the suffix.",
+    "root_cause": "Failing to skip nullable nodes causes the analyzer to miss real overlaps, allowing a DFA path that produces wrong matches when optional intermediate elements are absent.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "greedy-group-detection-requires-direct-quantifier-child",
+    "anti_pattern": "getGreedyGroupCharSet required the capturing group's child to be a QuantifierNode directly, so patterns like (a+b) whose quantifier is nested inside a concat were not recognized as greedy and were not routed to the backtracking path.",
+    "fix_example": "The fix relaxed the check to accept any capturing group regardless of direct child type, and added separate detection of quantifier-wrapping forms.",
+    "root_cause": "Overly restrictive structural checks create silent correctness holes for structurally equivalent patterns that differ only in AST nesting depth.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "fallback-detector-short-circuits-on-first-bug",
+    "anti_pattern": "FallbackPatternDetector checked bugs in fixed order and returned on the first match; when Bug 4 (alternation inside lookbehind) used containsDirectAlternation, it only inspected the top level of the lookbehind subpattern and missed alternations nested inside groups or concats.",
+    "fix_example": "The fix removed the shallow containsDirectAlternation helper and instead relies on the hasLookbehind flag combined with an NFA-level fix that correctly handles all alternation forms.",
+    "root_cause": "Shallow structural checks that do not recurse into all child node types leave complex but valid patterns unguarded by the fallback.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "structural-hash-omits-assertion-type",
+    "anti_pattern": "The structural hash for DFA states counted the number of assertion checks but did not include each assertion's type, so a state with one positive lookahead and a state with one negative lookahead produced the same hash and could be incorrectly merged or treated as equivalent.",
+    "fix_example": "The fix iterates over assertionChecks and folds each check's type enum hash into the state hash, and does the same for NFA state assertionType.",
+    "root_cause": "Hash collisions between semantically distinct assertion types cause incorrect DFA state sharing, silently turning positive assertions into negative ones or vice versa.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "lightweight-simulation-applied-to-lookbehind",
+    "anti_pattern": "The NFA bytecode generator's lightweight sub-NFA simulation path was enabled for all assertion types with six or fewer states, including lookbehind assertions, which require scanning backward and use a different evaluation model.",
+    "fix_example": "The fix gates the lightweight path behind !isLookbehind so the full simulation path is always used for lookbehind assertions regardless of sub-NFA size.",
+    "root_cause": "Lightweight forward simulation is semantically incorrect for lookbehind, producing wrong match results for small but structurally valid lookbehind sub-patterns.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "multiline-anchor-check-not-separated-from-start-anchor-check",
+    "anti_pattern": "requiresStartAnchor performed a single BFS that blocked traversal only at START and STRING_START anchors; START_MULTILINE anchors were not treated as barriers, so the find() optimization for multiline patterns was silently disabled and multiline patterns matched at every position.",
+    "fix_example": "Extracted requiresAnchorOnAllPaths(AnchorType... barriers) and introduced requiresMultilineStartAnchor which passes both START_MULTILINE and the absolute-start types as barriers, keeping the two cases separate.",
+    "root_cause": "Combining distinct anchor semantics into a single check makes it impossible to correctly optimize for patterns that use only multiline anchors, causing either missed optimization or incorrect behavior.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "anchor-absent-from-epsilon-closure-fastpath-guard",
+    "anti_pattern": "The NFA bytecode generator's hasAssertions flag checked only for states where assertionType != null, omitting states with anchor != null; this caused the fast-path epsilon-closure to be used for patterns containing inline flag groups like (?m), which require runtime anchor guards.",
+    "fix_example": "The guard was broadened to s.assertionType != null || s.anchor != null so any state requiring a runtime check forces the standard closure.",
+    "root_cause": "Missing anchor states in the fast-path exclusion list causes anchor checks to be skipped entirely, making anchored patterns match at wrong positions.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "required-literal-optimization-applied-to-NFA-backref-path",
+    "anti_pattern": "When selecting OPTIMIZED_NFA_WITH_BACKREFS, the required-literals set was passed through to the strategy result, allowing the findFrom indexOf optimization to skip positions where the literal does not appear at position 0 of a potential match.",
+    "fix_example": "The fix passes Collections.emptySet() as the requiredLiterals for OPTIMIZED_NFA_WITH_BACKREFS, disabling the indexOf optimization for that strategy.",
+    "root_cause": "For NFA-with-backrefs patterns the required literal typically appears after a variable-length prefix, so using its position as a start-position guard causes false negatives.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "annotation-processor-hardcoded-source-version",
+    "anti_pattern": "RegexPatternProcessor was annotated with @SupportedSourceVersion(SourceVersion.RELEASE_21), which causes the annotation processor to emit a mandatory warning and may refuse to process sources compiled with Java 22+.",
+    "fix_example": "Removed the static annotation and overrode getSupportedSourceVersion() to return SourceVersion.latestSupported(), making the processor forward-compatible with any JDK.",
+    "root_cause": "Hardcoding a specific source version in an annotation processor prevents it from running on future JDK versions without a code change, breaking builds silently with warnings that users may promote to errors.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "gradle-configuration-cache-lazy-provider-capture",
+    "anti_pattern": "The Sign task's onlyIf closure referenced providers.environmentVariable(...) at execution time rather than capturing the provider at configuration time, causing a Gradle configuration-cache incompatibility where the closures serialize a reference to the script-level providers object.",
+    "fix_example": "The fix captures def gpgKeyProvider = providers.environmentVariable(\"GPG_PRIVATE_KEY\") at configuration time and uses gpgKeyProvider inside both useInMemoryPgpKeys and the onlyIf closure.",
+    "root_cause": "Gradle configuration cache serializes task action closures; referencing script-scope objects that are not configuration-cache safe causes cache misses or failures.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "gradle-module-metadata-bypasses-pom-stripping",
+    "anti_pattern": "Internal bundled submodule coordinates were removed from the published POM via withXml, but Gradle Module Metadata (.module files) were still generated and published, listing the internal dependencies independently of the POM, so consumers using Gradle resolved the stripped-out internal artifacts.",
+    "fix_example": "Added tasks.withType(GenerateModuleMetadata).configureEach { enabled = false } to disable .module file generation entirely.",
+    "root_cause": "POM post-processing does not affect Gradle Module Metadata; any published .module file takes precedence over the POM for Gradle consumers, making dependency stripping ineffective.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "SWAR-range-check-wrong-bit-operator",
+    "anti_pattern": "The findFirstNotInRange SWAR formula used bitwise AND to combine the below-range and above-range masks, which requires a byte to be simultaneously below the lower bound AND above the upper bound — a condition that is never true — producing all-zeros and always reporting the character as in-range.",
+    "fix_example": "Changed the combining operator from AND to OR so the mask is set when a byte is either below the lower bound or above the upper bound.",
+    "root_cause": "Logical inversion of set membership: a value is outside a range when it fails either boundary test, so the two out-of-range conditions must be OR'd, not AND'd.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "CI-script-interpolation-breaks-on-braces-and-colons",
+    "anti_pattern": "GitLab CI script lines containing shell constructs with braces and colons (e.g., || { echo ...; exit 1; }) were written without surrounding YAML single-quotes, causing the YAML parser to misinterpret the braces and colons as YAML flow-mapping syntax.",
+    "fix_example": "Wrapped each script line containing shell braces or colons in single quotes so the YAML parser treats the whole line as a plain string.",
+    "root_cause": "YAML parses unquoted values containing : as key-value pairs and { as flow-mapping starts; shell error-handling constructs must always be quoted in YAML script blocks.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "test-asserts-boolean-with-assertNotNull",
+    "anti_pattern": "Tests verified matching behavior using assertNotNull on the result of a method that returns a primitive boolean, which always passes because autoboxed Boolean is never null.",
+    "fix_example": "Replaced assertNotNull with assertTrue/assertFalse or downgraded the test to a smoke test that merely invokes the method without asserting the value when the correctness property is not guaranteed.",
+    "root_cause": "assertNotNull on autoboxed primitives provides no signal; the test always passes regardless of the actual computed value, masking real behavioral regressions.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "inline-flag-group-multiline-anchor-not-in-epsilon-closure",
+    "anti_pattern": "The fast-path epsilon closure generator did not emit inline position guards for states with non-null anchor values, so anchors introduced by inline flag groups like (?m) were silently ignored when the fast path was taken.",
+    "fix_example": "The fix added an else-if branch in the epsilon-closure loop that emits an inline position guard for each state whose anchor is non-null, matching the full closure's behavior.",
+    "root_cause": "Any optimization fast-path that skips a class of NFA state properties will silently produce wrong results for patterns using those properties; fast paths must be guarded by a complete eligibility check.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "fallback-detector-over-broad-lookbehind-combined-with-lookahead",
+    "anti_pattern": "FallbackPatternDetector triggered the 'lookbehind and lookahead combined' fallback whenever both assertion types appeared anywhere in the pattern, even for patterns where the NFA engine correctly handles them independently.",
+    "fix_example": "The fix removed the broad combined-assertion fallback after verifying that the underlying NFA engine was fixed to handle these cases correctly, leaving only targeted per-bug fallbacks.",
+    "root_cause": "Overly conservative fallback conditions silence genuine engine correctness fixes and keep patterns in the slow java.util.regex path unnecessarily, undermining performance guarantees.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "github-actions-context-interpolation-in-run-scripts",
+    "anti_pattern": "GitHub Actions workflow run steps used ${{ github.event.inputs.version }} and ${{ needs.prepare.outputs.version }} directly inside shell scripts rather than mapping them to environment variables, making the scripts susceptible to injection if a version string contained shell metacharacters.",
+    "fix_example": "Each step that uses context values now declares them in an env: block (e.g., INPUT_VERSION: ${{ github.event.inputs.version }}) and the shell script reads $INPUT_VERSION instead.",
+    "root_cause": "Direct GitHub Actions expression interpolation into shell code is evaluated before the shell sees it; an attacker-controlled or malformed value can break script structure or execute arbitrary commands.",
+    "confidence": "high",
+    "source": "fix-mining"
+  },
+  {
+    "theme": "DFA-empty-match-accepts-without-running-start-state-assertions",
+    "anti_pattern": "The DFA bytecode generator's empty-match shortcut (when pos == end at the start state) returned immediately with the stored match flag without checking whether the start state has pending assertion checks, allowing patterns with start-state assertions (e.g., lookbehind) to accept an empty match unconditionally.",
+    "fix_example": "The fix adds a conditional block that, when the start state has non-empty assertionChecks, emits bytecode to evaluate those assertions before accepting the empty match.",
+    "root_cause": "Early-exit optimizations that bypass validation logic produce incorrect results for edge-case inputs; every accept path must run all required guards, including those on the entry state.",
+    "confidence": "medium",
+    "source": "fix-mining"
+  }
+]

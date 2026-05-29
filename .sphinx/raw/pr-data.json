@@ -1,0 +1,573 @@
+{
+  "prs": [
+    {
+      "number": 68,
+      "title": "Improve runtime compatibility, capture extraction, and token-sequence execution",
+      "url": "https://github.com/DataDog/java-reggie/pull/68",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `a4cb2184e8`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nThis PR significantly expands Reggie\u2019s runtime and codegen capabilities to better handle large, capture-heavy (Grok-style) patterns with improved compatibility, lower-allocation capture extraction, and new deterministic \u201clinear token sequence\u201d execution routing.\n\n**Changes:**\n- Adds runtime API enhancements: `matchInto` / `findMatchInto`, `CapturePolicy` + `ReggieOptions`, and a public `UnsupportedPatternException` for precise unsupported-pattern handling.\n- Improves parser compatibility and routing: atomic groups `(?>...)` (parsed as non-capturing), `\\Q...\\E` quoted literals (including inside char classes), plus expanded tests/resources for real Grok patterns.\n- Introduces scalability and correctness work across DFA/NFA/codegen: DFA state-budget handling + DFA_TABLE backend, structural-hash hardening, multiple anchor/quantifier/backref correctness fixes, and new fuzzing infrastructure.\n\n### Reviewed changes\n\nCopilot reviewed 89 out of 89 changed files in this pull request and generated 3 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/resources/com/datadoghq/reggie/runtime/logs-grok-pattern-1.regex | Adds Grok-expanded regex fixture for regression/routing coverage. |\r\n| reggie-runtime/src/test/resources/com/datadoghq/reggie/runtime/logs-grok-pattern-2.regex | Adds a second Grok-expanded regex fixture for regression/routing coverage. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/UnsupportedPatternExceptionTest.java | Verifies unsupported constructs throw the new public exception type. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/StringAnchorsTest.java | Updates expectations around `matches()` + `\\\\Z` / newline consumption. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/PCREParityDebugTest.java | Adjusts debug test semantics to use `findMatch` and clarifies intent. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/OptionalGroupBackrefTest.java | Aligns optional-group backref expectations to JDK semantics. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/MatchIntoAPITest.java | Adds tests for `matchInto`/`findMatchInto` behavior and overrides across strategies. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LookbehindVariantsTest.java | Adds regression coverage ensuring native DFA switch path handles IPv4 digit boundaries. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LogsBackendParserCompatibilityTest.java | Tests atomic group and `\\\\Q...\\\\E` parsing behavior relevant to logs backend patterns. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LinearTokenSequenceMatcherTest.java | Adds tests for the new structural linear-token-sequence matcher and capture extraction. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/FallbackVerificationTest.java | Updates fallback expectations for fixed lookbehind+lookahead sandwich behavior. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/DFAStateBudgetFallbackTest.java | Adds tests validating DFA_TABLE routing and compilation stability for large patterns. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/CapturePolicyTest.java | Verifies `CapturePolicy.NAMED_ONLY` indexing and capture dropping semantics. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/BoundedQuantifierRegressionTest.java | Regression tests for bounded quantifier upper-bound and multi-range SWAR filtering fixes. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/AnchorDiagTest.java | Adds diagnostic coverage for `$`-anchor cases (currently implemented as stdout-only). |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/UnsupportedPatternException.java | Introduces a public exception type for unsupported-but-valid regex constructs. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/ReggieMatcher.java | Adds caller-owned capture-boundary APIs (`matchInto`/`findMatchInto`) and supporting reusable state. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/JavaRegexFallbackMatcher.java | Implements `matchInto`/`findMatchInto` for the JDK fallback path. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/HybridMatcher.java | Overrides `matchInto` to combine DFA pre-check + NFA capture extraction. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/ReggieOptions.java | Adds runtime compilation options container (currently capture-policy focused). |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/Reggie.java | Adds `compile`/`cached` overloads accepting `ReggieOptions`. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/CapturePolicy.java | Adds capture tracking policy enum including `NAMED_ONLY`. |\r\n| reggie-processor/src/test/java/com/datadoghq/reggie/processor/ReggieMatcherBytecodeGeneratorTest.java | Updates processor tests to reflect routing/semantics changes (recursive descent + optional group backrefs). |\r\n| reggie-processor/src/test/java/com/datadoghq/reggie/processor/parsing/RegexParserTest.java | Adds parser tests for atomic groups and `\\\\Q...\\\\E` quoted literals. |\r\n| reggie-processor/src/main/java/com/datadoghq/reggie/processor/ReggieMatcherBytecodeGenerator.java | Wires matchInto generation and DFA_TABLE generator; adds recursive-descent state init. |\r\n| reggie-integration-tests/src/test/java/com/datadoghq/reggie/integration/DollarAnchorCacheDiagTest.java | Adds integration diagnostics around `$` anchor/cache interactions and fuzz-sweep reproduction. |\r\n| reggie-integration-tests/src/test/java/com/datadoghq/reggie/integration/AlgorithmicFuzzTest.java | Adds oracle-based fuzz sweep against JDK regex with shrink/dedupe + ceiling guard. |\r\n| reggie-integration-tests/src/main/java/com/datadoghq/reggie/integration/fuzz/RegexFuzzShrinker.java | Adds shrinker that reduces divergent cases to minimal repros. |\r\n| reggie-integration-tests/src/main/java/com/datadoghq/reggie/integration/fuzz/RegexFuzzOracle.java | Adds JDK-vs-Reggie comparison oracle for matches/findMatch behavior. |\r\n| reggie-integration-tests/src/main/java/com/datadoghq/reggie/integration/fuzz/RandomRegexGenerator.java | Adds grammar-driven deterministic regex generator for fuzzing. |\r\n| reggie-integration-tests/src/main/java/com/datadoghq/reggie/integration/fuzz/RandomInputGenerator.java | Adds input generator aligned to fuzz regex alphabet (incl. newline). |\r\n| reggie-integration-tests/src/main/java/com/datadoghq/reggie/integration/fuzz/FuzzRunner.java | Adds fuzz driver with configuration and finding caps. |\r\n| reggie-integration-tests/build.gradle | Forwards `-Dreggie.*` JVM properties into test JVM for configurable fuzz size. |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/StrategySelectionTest.java | Adds tests for DFA_TABLE selection and negated-class routing expectations. |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/pbt/PatternRoutingPropertyBasedTest.java | Updates property-based routing expectations around large state-space behavior. |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/PatternRoutingPropertyTest.java | Updates DFA examples to reflect large-DFA fallback routing changes. |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/PatternCategorizerTest.java | Adds tests for new structural categorizer and token kind extraction. |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/LinearTokenSequencePlanTest.java | Adds tests for plan generation from categorization (including quoted capture folding). |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetectorTest.java | Updates bug-5 regression expectation: no blanket fallback for lookbehind+lookahead. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/parsing/RegexParser.java | Adds atomic-group parse support and `\\\\Q...\\\\E` quoted literal parsing (incl. char classes). |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/SWARPatternAnalyzer.java | Gates multi-range SWAR optimization to known-correct shapes to avoid missed matches. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/StatelessLoopBytecodeGenerator.java | Fixes bounded-quantifier upper bound handling and `{0}` edge cases in generated loops. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/QuantifiedGroupBytecodeGenerator.java | Fixes negated charset flag propagation for quantified groups. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/OptionalGroupBackrefBytecodeGenerator.java | Aligns optional-group backref handling with Java semantics (non-participating group fails). |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/OnePassBytecodeGenerator.java | Updates `$` anchor checks to handle Java\u2019s end/before-final-newline semantics. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/LinearPatternBytecodeGenerator.java | Mirrors `$` anchor semantics update in linear bytecode path. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/GreedyCharClassBytecodeGenerator.java | Fixes `min=0` empty-match behavior for greedy charclass find-from generation. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/BoundedQuantifierBytecodeGenerator.java | Fixes minimum repetition enforcement for bounded quantifiers when `min > 1`. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/automaton/ThompsonBuilder.java | Fixes counted-quantifier `min==0` epsilon-bypass path in NFA construction. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/automaton/NFA.java | Hardens anchor reachability and structural hashing of anchor/assert/backref state features. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/automaton/DFATableData.java | Adds compact transition-table representation for large pure DFAs. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/automaton/DFA.java | Adds acceptance/entry anchor guards and an anchor-condition dilution signal. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/StructuralHash.java | Moves structural hash to 64-bit and hashes enum-driven data via ordinal/bitmask. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/PatternCategorization.java | Adds categorization record for structural routing. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/PatternAtom.java | Adds semantic atom model used by categorizer and linear plan builder. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/LinearTokenSequencePlan.java | Adds executable plan representation for token-sequence matcher execution. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/LinearPatternAnalyzer.java | Ensures epsilon literal nodes (char 0) are treated as non-consuming. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/CaptureProjection.java | Adds AST rewrite to preserve named/semantic captures while dropping unobservable unnamed captures. |\r\n| reggie-benchmark/src/main/java/com/datadoghq/reggie/benchmark/NFAMatchIntoBenchmark.java | Adds benchmark for matchInto-based capture boundary extraction. |\r\n| reggie-benchmark/src/main/java/com/datadoghq/reggie/benchmark/NFAFallbackPatterns.java | Adjusts benchmark pattern to avoid lazy-quantifier fallback and still exercise recursive descent. |\r\n| reggie-benchmark/src/main/java/com/datadoghq/reggie/benchmark/LogsBackendGrokBenchmark.java | Adds Grok-like access-log benchmark for native token-sequence routing + matchInto. |\r\n| reggie-benchmark/src/main/java/com/datadoghq/reggie/benchmark/DFATableBenchmark.java | Adds performance benchmarks for large pure DFAs using DFA_TABLE backend. |\r\n| reggie-benchmark/src/main/java/com/datadoghq/reggie/benchmark/AnchorPlacementBenchmark.java | Adds benchmarks targeting anchor-placement correctness fixes and overhead. |\r\n| doc/plans/sub-2x-perf-candidates.md | Adds performance triage notes for candidate slow benchmarks. |\r\n| doc/plans/logs-backend.md | Adds adoption requirements and describes new structural token-sequence route. |\r\n| doc/plans/issue-priority.md | Adds issue prioritization plan for correctness/features. |\r\n| doc/plans/fuzz-findings-triage.md | Adds fuzz divergence triage notes and fix directions. |\r\n| doc/plans/fuzz-findings-triage-EF-residual.md | Documents residual anchor-condition dilution issue and possible remedies. |\r\n| doc/plans/algorithmic-fuzz-tests-vs-jdk.md | Adds design doc describing the oracle-based fuzz approach. |\r\n| doc/libretti/2026-05-11-datadogjava-reggie36-pcre-lookahead-combined-with-nested-alternation-produces-wro.md | Adds spec/trace doc for implemented PCRE parity fix. |\r\n| doc/libretti/2026-05-10-datadogjava-reggie30-bug-only-first-alternative-in-lookbehind-alternation-is-chec.md | Adds spec doc for lookbehind-alternation bug. |\r\n| doc/libretti/2026-05-10-datadogjava-reggie29-bug-unbounded-quantifier-after-lookbehind-always-fails-to-ma.md | Adds spec doc for lookbehind+unbounded-quantifier bug. |\r\n| doc/libretti/2026-05-09-datadogjava-reggie35-pcre-inline-m-flag-inside-a-group-doesnt-activate-multiline.md | Adds spec doc for inline multiline-flag scoping bug. |\r\n| doc/libretti/2026-05-08-datadogjava-reggie27-bug-multiple-backreferences-to-same-group-produce-false-posi.md | Adds spec doc for multiple-backref correctness bug. |\r\n| AGENTS.md | Adds a hard rule about updating StructuralHash when DFA/NFA/PatternInfo structures change. |\n</details>\n\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        }
+      ]
+    },
+    {
+      "number": 59,
+      "title": "fix: PCRE lookahead-in-capturing-group and optional-quantifier backtrack (#36)",
+      "url": "https://github.com/DataDog/java-reggie/pull/59",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `59c5956597`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nThis PR fixes two remaining PCRE conformance issues around capturing group extraction when (1) lookaheads appear inside capturing groups and (2) capturing groups end with an optional greedy quantifier that must backtrack to allow subsequent tokens to match.\n\n**Changes:**\n- Add analysis-time detection for lookahead-inside-capturing-group and route those patterns away from the DFA strategy to an NFA-with-lookaround strategy.\n- Extend greedy-group overlap analysis to recognize trailing optional quantifiers inside ConcatNode children, and extend recursive-descent bytecode generation to do two-path backtracking for such groups.\n- Add targeted runtime and analyzer tests covering both PCRE failures.\n\n### Reviewed changes\n\nCopilot reviewed 5 out of 5 changed files in this pull request and generated 3 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LookaheadGroupCaptureTest.java | Adds a regression test for lookahead nested in alternation inside a capturing group. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/GreedyOptionalBacktrackTest.java | Adds a regression test ensuring an optional greedy token inside a capturing group backtracks when required by the suffix. |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/PatternAnalyzerGreedyGroupCharSetTest.java | Adds analyzer-level tests verifying strategy selection for trailing optional quantifiers that overlap (or don\u2019t) with the next element. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/RecursiveDescentBytecodeGenerator.java | Adds detection and two-path backtracking for capturing groups with trailing optional greedy quantifiers. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/PatternAnalyzer.java | Adds lookahead-inside-capturing-group detection and enhances greedy-group charset extraction for concat-ending optionals. |\n</details>\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `036b27bc7f`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `f13b84a9c7`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `ee95533ee6`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @Copilot review\n> \n\nReviewed the current state of the PR (latest commit `036b27b`). All three previously-raised issues have been addressed:\n\n1. **`hasLookaheadInsideCapturingGroup` guard** \u2014 the `!ignoreGroupCount` gate has been removed so lookahead-in-capturing-group patterns are routed to `OPTIMIZED_NFA_WITH_LOOKAROUND` regardless of whether the call comes from hybrid mode.\n\n2. **Trailing-optional detection tightened to `max == 1`** \u2014 `getGreedyGroupCharSet` now only treats `?` (`{0,1}`) as a trailing optional, excluding broader `{0,n}` bounds that the two-path backtracking implementation doesn't handle.\n\n3. **`generateRemainingWithBacktracking` extended** \u2014 `hasTrailingOptionalQuantifier` is now checked alongside `extractTrailingOptionalBackref` in the \"next backtracking group\" search, so two-path backtracking is applied consistently across all remaining concat children.\n\nCI is passing (green) on the latest commit. No additional issues found.",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 58,
+      "title": "fix: unbounded quantifier after lookbehind always fails (#29)",
+      "url": "https://github.com/DataDog/java-reggie/pull/58",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `b4ec170e20`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nFixes a DFA-with-assertions correctness bug where lookbehind assertions were re-evaluated incorrectly after unbounded quantifiers, and adjusts bytecode-gen ordering so failed assertions don\u2019t advance the recorded match end. Also updates fallback detection/tests and introduces a new public `com.datadoghq.reggie.ReggieMatcher` base type.\n\n**Changes:**\n- Attach assertion checks to the assertion NFA state itself during subset construction (prevents assertion re-firing through loops).\n- Reorder greedy-scan bytecode to evaluate assertions before updating `longestMatchEnd` / `lastAcceptingPos`, and add missing greedy lookahead charset handling.\n- Remove the \u201clookbehind + unbounded quantifier\u201d fallback guard and add regression/acceptance tests; add new public matcher base class.\n\n### Reviewed changes\n\nCopilot reviewed 9 out of 9 changed files in this pull request and generated 3 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LookbehindVariantsTest.java | Expands runtime tests for lookbehind followed by unbounded quantifiers. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LookbehindUnboundedQuantifierTest.java | New acceptance/regression tests specifically for issue #29 and \u201cno fallback\u201d behavior. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/FallbackVerificationTest.java | Updates expectations now that Bug-3 no longer forces fallback. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/ReggieMatcher.java | Makes the internal runtime matcher extend the new public matcher base type. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/ReggieMatcher.java | Introduces a new public API matcher base class. |\r\n| reggie-codegen/src/test/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetectorTest.java | Adds codegen-level tests ensuring Bug-3 no longer triggers fallback while other guards remain. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/DFAUnrolledBytecodeGenerator.java | Updates unrolled DFA bytecode-gen: assertion ordering changes; adds greedy lookahead charset branch; adds bounded/greedy lookbehind handling; end-of-input empty-match assertion handling. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/automaton/SubsetConstructor.java | Fixes assertion attachment point in DFA-with-assertions subset construction. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetector.java | Removes the Bug-3 fallback detector condition (lookbehind before unbounded quantifier). |\n</details>\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `9b1e92c0c1`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nhttps://github.com/DataDog/java-reggie/blob/b7ee87679951f5fafa2e40b283b7d28bbf12bfe8/reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetector.java#L62\n**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Keep fallback for switch-sized lookbehind quantifiers**\n\nWhen this guard is removed, patterns such as `(?<=\\d)[a-z]{20,}` no longer fall back, but `PatternAnalyzer` routes assertion DFAs with 20+ states to `DFA_SWITCH_WITH_ASSERTIONS` and `DFASwitchBytecodeGenerator` checks assertions only after consuming the current character (`posVar` is already incremented). For a lookbehind attached to the start state, that makes the switch path look behind the first matched letter rather than the match start, so valid inputs like `3abcdefghijklmnopqrst` are rejected. Please keep the fallback for switch-sized cases or fix the switch generator\u2019s assertion timing before allowing these through.\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@copilot resolve the merge conflicts in this pull request",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot resolve the merge conflicts in this pull request\n\nResolved and pushed. I merged `origin/main`, fixed the conflict in `FallbackPatternDetector`, and validated with targeted tests. Commits: `834a2bb` (merge conflict resolution) and `6e58767` (follow-up formatting adjustment).",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "Merge conflicts have already been resolved in commit 6e58767. No further action needed.",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 57,
+      "title": "fix: all alternatives in lookbehind alternation now checked",
+      "url": "https://github.com/DataDog/java-reggie/pull/57",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `b7534669af`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nThis PR fixes incorrect handling of alternation inside fixed-width lookbehind assertions (issue #30) by correcting assertion-specific optimizations and structural hashing/caching, and by removing the now-unnecessary fallback-to-`java.util.regex` guard for this pattern class.\n\n**Changes:**\n- Fixes `NFABytecodeGenerator` lookbehind assertion optimizations so alternations don\u2019t collapse to the first epsilon branch, and charsets are accumulated across alternatives.\n- Fixes structural hashing to distinguish positive vs negative assertions to prevent incorrect STRUCTURE_CACHE reuse.\n- Updates fallback detection and adds/updates runtime + processor tests to validate native handling and regressions.\n\n### Reviewed changes\n\nCopilot reviewed 8 out of 8 changed files in this pull request and generated 3 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LookbehindVariantsTest.java | Adds regressions for positive/negative lookbehind alternation and multi-char alternation. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/LookbehindAlternationTest.java | New acceptance suite for lookbehind alternation correctness + native-engine assertions. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/FallbackVerificationTest.java | Updates Bug-4 expectations to assert native engine usage; adjusts named-group scenario. |\r\n| reggie-processor/src/test/java/com/datadoghq/reggie/processor/ReggieMatcherBytecodeGeneratorTest.java | Updates the \u201cfallback patterns rejected\u201d test to use a pattern that still requires fallback. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/NFABytecodeGenerator.java | Adjusts literal extraction and charset extraction across alternation branches for assertions. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/automaton/NFA.java | Includes assertion type in the NFA content hash to prevent cache collisions. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/StructuralHash.java | Includes assertion-check types in DFA topology hash to avoid structural hash collisions. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetector.java | Removes alternation-in-lookbehind fallback detection. |\n</details>\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @Copilot review\n\nReviewed at commit c347070. Re-ran the targeted lookbehind/fallback tests (`LookbehindAlternationTest`, `LookbehindVariantsTest`, `FallbackVerificationTest`) and checked recent workflow runs; no additional issues found and no further code changes are needed.",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "Codex Review: Didn't find any major issues. :rocket:\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 56,
+      "title": "fix(pcre): inline (?m) flag inside group activates multiline mid-pattern",
+      "url": "https://github.com/DataDog/java-reggie/pull/56",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `d2f1b9a4c6`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nThis PR fixes PCRE-conformance for inline multiline modifiers inside groups (e.g., `\\n((?m)^b)`), ensuring `^`/`$` anchors correctly respect multiline mode when activated mid-pattern, and adjusts compile-time/bytecode-generation optimizations to avoid skipping valid match start positions.\n\n**Changes:**\n- Add anchor-aware position guards to NFA epsilon-closure generation (including multiline `^/$` and `\\Z` behavior) and expand anchor handling in RecursiveDescent codegen.\n- Refactor NFA analysis to introduce `requiresMultilineStartAnchor()` and switch OnePass \u201cskip optimization\u201d to use the stricter requirement.\n- Add regression tests at both AST/parsing level and runtime matcher level for inline `(?m)` within capturing groups.\n\n### Reviewed changes\n\nCopilot reviewed 6 out of 6 changed files in this pull request and generated 6 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/InlineModifiersTest.java | Adds runtime regressions for inline `(?m)` inside groups affecting `^`/`$`. |\r\n| reggie-processor/src/test/java/com/datadoghq/reggie/processor/parsing/RegexParserTest.java | Verifies parser propagates inline `(?m)` to anchor nodes in group scope. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/RecursiveDescentBytecodeGenerator.java | Adds multiline-aware handling for `^` and `$` anchors in recursive-descent codegen. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/OnePassBytecodeGenerator.java | Switches multiline-start skip optimization to use `requiresMultilineStartAnchor()`. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/NFABytecodeGenerator.java | Adds anchor checks to epsilon-closure generation and disables precomputed closure when anchors are present. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/automaton/NFA.java | Refactors \u201canchor required\u201d logic and introduces `requiresMultilineStartAnchor()`. |\n</details>\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `6fc9e639ad`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "Codex Review: Didn't find any major issues. Another round soon, please!\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 55,
+      "title": "fix: native handling of multiple backreferences to same group (#27)",
+      "url": "https://github.com/DataDog/java-reggie/pull/55",
+      "comments": [
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nFixes incorrect native-engine behavior for patterns that reference the same capturing group multiple times (e.g. `(\\w+)\\s+\\1\\s+\\1`), removing the previous blanket fallback to `java.util.regex` and restoring build-time/native compilation for those patterns.\n\n**Changes:**\n- Add runtime acceptance tests covering triple/quadruple backrefs and various separators/anchors.\n- Adjust strategy selection to avoid unsafe `indexOf`-based start-position skipping for `OPTIMIZED_NFA_WITH_BACKREFS`.\n- Fix NFA required-literal extraction to stop stitching literals across backreference states; remove the multi-backref fallback guard.\n\n### Reviewed changes\n\nCopilot reviewed 6 out of 6 changed files in this pull request and generated 3 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/MultiBackrefCorrectnessTest.java | Adds acceptance tests for multiple backreferences to the same group. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/FallbackVerificationTest.java | Updates \u201cBug 1\u201d verification to reflect native handling (no forced fallback). |\r\n| reggie-processor/src/test/java/com/datadoghq/reggie/processor/ReggieMatcherBytecodeGeneratorTest.java | Updates build-time rejection tests to stop rejecting multi-backref patterns. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/NFABytecodeGenerator.java | Prevents required-literal extraction from crossing backref states via epsilon transitions. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/PatternAnalyzer.java | Disables required-literal `indexOf` optimization for NFA-with-backrefs; adds extra multi-backref detection for variable-capture strategy. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetector.java | Removes the prior multi-backref fallback rule. |\n</details>\n\n\n\n<details>\n<summary>Comments suppressed due to low confidence (1)</summary>\n\n**reggie-processor/src/test/java/com/datadoghq/reggie/processor/ReggieMatcherBytecodeGeneratorTest.java:474**\n* This test no longer asserts that multi-backreference patterns are rejected, but it also doesn\u2019t add a positive assertion that bytecode generation now succeeds for a multi-backref pattern (e.g. `(\\\\w+)\\\\s+\\\\1\\\\s+\\\\1`). Adding such a \u201cshould not throw / produces loadable matcher\u201d case would better lock in the new build-time compilation behavior.\n```\n  @Test\n  void testFallbackPatternsRejected() {\n    // Patterns with known engine bugs must fail at build time, not produce buggy bytecode.\n    // Note: multiple-backref patterns (e.g. (\\w+)\\s+\\1\\s+\\1) are now handled natively\n    // and no longer rejected.\n    assertThrows(\n        UnsupportedOperationException.class,\n        () ->\n            new ReggieMatcherBytecodeGenerator(\"test.generated\", \"AltLookbehind\", \"(?<=a|b)c\")\n                .generate());\n  }\n```\n</details>\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `40356c83c6`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `c6dde81322`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `1037cf2c22`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `fe5b85c058`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `b334a69bb5`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@chatgpt-codex-connector review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @codex review\n\nReviewed the current PR state at `c6dde81` and re-ran targeted module tests (`:reggie-codegen:test`, `:reggie-runtime:test --tests com.datadoghq.reggie.runtime.MultiBackrefCorrectnessTest`, `:reggie-processor:test`); all passed, and no additional changes were needed.\n\n\n> @Copilot review\n\nReviewed the branch at `c6dde81` and validated the multi-backref fix path again with targeted tests; everything is passing and no further code changes were required.",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/settings/connectors).",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@chatgpt-codex-connector review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @chatgpt-codex-connector review\n\nReviewed current HEAD `1037cf2` and re-ran targeted validation (`:reggie-codegen:test`, `:reggie-runtime:test --tests com.datadoghq.reggie.runtime.MultiBackrefCorrectnessTest`, `:reggie-processor:test`); all passing, no additional code changes needed. No UI changes in this PR.\n\n\n> @Copilot review\n\nRe-reviewed at `1037cf2` and confirmed the multi-backref fix path remains green with targeted tests; no further updates required. No UI changes in this PR.",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@chatgpt-codex-connector review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @chatgpt-codex-connector review\n\nReviewed current HEAD `fe5b85c` and re-ran targeted validation (`:reggie-codegen:test`, `:reggie-runtime:test --tests com.datadoghq.reggie.runtime.MultiBackrefCorrectnessTest`, `:reggie-processor:test`); all passing and no additional code changes needed. No UI changes in this PR.\n\n\n> @Copilot review\n\nRe-reviewed at `fe5b85c` and confirmed the multi-backref fix path remains green with the same targeted tests; no further updates required. No UI changes in this PR.",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@chatgpt-codex-connector review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @chatgpt-codex-connector review\n\nReviewed current HEAD `b334a69` and re-ran targeted validation (`:reggie-codegen:test`, `:reggie-runtime:test --tests com.datadoghq.reggie.runtime.MultiBackrefCorrectnessTest`, `:reggie-processor:test`); all passing, with no additional code changes needed. No UI changes in this PR.\n\n\n> @Copilot review\n\nRe-reviewed at `b334a69` and confirmed the multi-backref fix path remains green with the same targeted tests; no further updates required. No UI changes in this PR.",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "To use Codex here, [create a Codex account and connect to github](https://chatgpt.com/codex/cloud/settings/connectors).",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "Codex Review: Didn't find any major issues. What shall we delve into next?\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 54,
+      "title": "[feature] Stateful streaming replacement: appendReplacement / appendTail equivalent",
+      "url": "https://github.com/DataDog/java-reggie/pull/54",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `85c141e565`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nAdds a new stateful, streaming match-and-replace API to `reggie-runtime` via `MatchCursor`, analogous to `java.util.regex.Matcher.appendReplacement/appendTail`, and introduces named-group support hooks (`NamedGroupResult`, `MatchResult.hasNamedGroups()`).\n\n**Changes:**\n- Introduces `MatchCursor` (iterator-style cursor with `findNext()`, `appendReplacement()`, `appendTail()`, `reset()`, `close()`).\n- Adds named-group result support via `NamedGroupResult` and extends `MatchResult`/`MatchResultImpl` accordingly.\n- Adds `MatchCursorTest` covering streaming replacement behaviors.\n\n### Reviewed changes\n\nCopilot reviewed 6 out of 6 changed files in this pull request and generated 5 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/MatchCursor.java | New streaming cursor implementation (iteration, replacement expansion, named-group parsing). |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/ReggieMatcher.java | Adds `cursor(String)` factory method to create a `MatchCursor`. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/NamedGroupResult.java | New sub-interface for named-group lookup (`group(String)`). |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/MatchResultImpl.java | Extends result implementation with optional named-group index support. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/MatchResult.java | Adds `hasNamedGroups()` default method for capability checks. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/MatchCursorTest.java | New test suite validating cursor iteration/replacement semantics and state transitions. |\n</details>\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `cb5297eebf`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nCopilot reviewed 6 out of 6 changed files in this pull request and generated 6 comments.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `b52f400a06`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `8a4013d072`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nhttps://github.com/DataDog/java-reggie/blob/13323b1843c3da3ad0050f38767041499d77ce9a/reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/MatchResultImpl.java#L59-L65\n**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Report named groups when the result has a name map**\n\nThe new `hasNamedGroups()` API remains false for most named-group results because `MatchResultImpl` stores the populated `nameToIndex` map but never overrides the default method; `NameEnrichingMatcher` and `JavaRegexFallbackMatcher` both return this class for named patterns. Code that branches on `hasNamedGroups()` will skip valid named access even though `group(\"name\")` succeeds.\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `0b7cfd8c79`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `7d62fc7054`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `0c6797105a`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `646b615304`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `c64ee8f08d`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `625918ce8f`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot review\n\nFixed the CI failure (commit e844992): the `NamedMatchResultImpl` constructor parameters were split across multiple lines, but Google Java Format requires them on a single continuation line when they fit within the 100-char limit. Running `spotlessApply` logic manually fixed the `spotlessJavaCheck` violation that was breaking the build.",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@copilot resolve the merge conflicts in this pull request",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot resolve the merge conflicts in this pull request\n\nResolved in commit 7fc4118. The only true conflict was in `MatchResult.java` \u2014 our `hasNamedGroups()` default vs. main's `group/start/end(String name)` defaults. Resolution: took main's approach (named-group methods directly in the interface) and updated our additions accordingly:\n- `NamedGroupResult` simplified to a marker interface (the methods it declared are now in `MatchResult`)\n- `NamedMatchResultImpl` simplified to delegate named-group storage to `MatchResultImpl`'s 5-arg constructor (no redundant field/overrides)\n- `MatchResultImpl` Javadoc cleaned up",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot review\n\nAddressed all 6 issues. Most were already fixed by commit 265fc6f; I added the remaining improvements in 8a4013d:\n\n- **nameIndex**: `MatchCursor` now uses `matcher.nameToIndex` (authoritative, from `RuntimeCompiler`/annotation processor) \u2014 `parseNamedGroups()` removed\n- **`$x` illegal ref**: `expandReplacement` throws `IllegalArgumentException` for non-digit/non-`{`/non-`$` after `$` (JDK-aligned)\n- **null guards**: `requireNonNull` in `cursor()`, `reset()`, and `MatchCursor` constructor\n- **`hasNamedGroups()`**: Added as `default false` to `MatchResult`; `NamedGroupResult` overrides to `true`\n- **Iterator tests**: Added `hasNext()/next()` traversal, idempotency, `NoSuchElementException`, mixing with `appendReplacement`, illegal group ref, `cursor(null)` NPE, `reset(null)` NPE \u2014 28 tests total",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot review\n\nAll 6 previous review issues are resolved and all 28 tests pass locally. Current state (commits 265fc6f + 8a4013d):\n\n- **nameIndex**: `matcher.nameToIndex` used directly \u2014 `parseNamedGroups()` fully removed\n- **`$x` illegal ref**: throws `IllegalArgumentException(\"Illegal group reference near index \" + i)`\n- **null guards**: `requireNonNull` in `cursor()`, `reset()`, and `MatchCursor` constructor\n- **`hasNamedGroups()`**: `default false` in `MatchResult`; `NamedGroupResult` overrides to `true`\n- **Iterator tests**: `hasNext()/next()` traversal, idempotency, `NoSuchElementException`, mixing with `appendReplacement`, illegal group ref, `cursor(null)` NPE, `reset(null)` NPE\n\nThe latest CI run shows `action_required` (no jobs executed) \u2014 this requires a maintainer to approve CI for the bot-authored commit, not an actual test failure. The previous CI run on 265fc6fa passed.",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot review\n\nCI is green on the latest commit (`13323b1`). All 31 tests pass. The code is clean \u2014 no outstanding issues from previous reviews.",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot review\n\nCI is green on the latest commit (`0b7cfd8`). All 31 tests pass. No outstanding issues.",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot review\n\nCI is green on the latest commit (`7d62fc7`). All tests pass. No outstanding issues.",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot review\n\nCI is green on the latest commit (`0c67971`). All tests pass. No outstanding issues.",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@copilot please review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot please review\n\nCI is green on the latest commit (`646b615`). All tests pass. The code review tooling found no new issues \u2014 the PR is clean and ready for merge.",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@copilot please review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot please review\n\nThe PR is in good shape. Here's what I found after reviewing the full diff, including the two newest commits (`9c334da`, `c64ee8f`):\n\n**`MatchCursor`** \u2014 no issues:\n- `findNext()` correctly drains `peeked` before advancing `searchPos`\n- `hasNext()` saves/restores `lastMatch` so `appendReplacement()` still sees the active match after a lookahead\n- `appendTail()` clears `lastMatch`, `peeked`, `peekedValid` to release references immediately\n- `reset()` and constructor both call `requireNonNull` on `input`\n- `expandReplacement()` follows JDK semantics: `\\\\` \u2192 literal, `\\$` \u2192 literal, `$N`/`${name}` \u2192 group, anything else \u2192 `IllegalArgumentException`\n\n**`MatchResultImpl.hasNamedGroups()`** \u2014 correct:\nThe new `@Override` delegates to `!nameToIndex.isEmpty()`, which covers all three construction paths:\n1. 4-arg constructor (no names) \u2192 `emptyMap` \u2192 `false` \u2713\n2. 5-arg constructor (with names) \u2192 non-empty map \u2192 `true` \u2713\n3. `JavaRegexFallbackMatcher.toMatchResult()` (passes `javaPattern.namedGroups()`) \u2192 `true` when named groups are present \u2713\n\n**`NamedMatchResultImpl`** \u2014 harmless redundancy:\n`NamedGroupResult.hasNamedGroups()` returns `true` as a default, but since `MatchResultImpl.hasNamedGroups()` is a concrete `@Override`, it takes priority for `NamedMatchResultImpl` instances. The interface default is effectively dead code here, but it doesn't cause bugs.\n\n**Tests** \u2014 good coverage: the new `namedGroupFallbackHasNamedGroupsTrue` (fallback path), `testHasNamedGroups_directMatchResultImplConstruction` (direct 5-arg ctor path), and all three iterator-mixing tests cover the non-trivial interaction points.\n\nCI is in progress on `c64ee8f`; the previous four runs were all green. No blocking issues found \u2014 ready to merge once CI completes.",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@copilot please review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot please review\n\nCI is green on the latest commit (`625918c`). All 35 tests pass. Here's a quick summary of the current state:\n\n**`MatchCursor`** \u2014 no issues:\n- `findNext()` correctly drains `peeked` before advancing `searchPos`\n- `hasNext()` saves/restores `lastMatch` so `appendReplacement()` still sees the active match after a lookahead\n- `appendTail()` clears `lastMatch`, `peeked`, `peekedValid` immediately\n- `reset()` and constructor both call `requireNonNull` on `input`\n- `expandReplacement()` follows JDK semantics: `\\\\` \u2192 literal, `\\$` \u2192 literal, `$N`/`${name}` \u2192 group, anything else \u2192 `IllegalArgumentException`\n\n**`MatchResultImpl.hasNamedGroups()`** \u2014 correct:\n- Delegates to `!nameToIndex.isEmpty()` covering all construction paths (4-arg with empty map \u2192 `false`, 5-arg with names \u2192 `true`)\n\n**`NamedGroupResult`** \u2014 clean marker interface with `hasNamedGroups()` default `true`\n\n**Tests** \u2014 35 tests covering all acceptance criteria including iterator mixing, peeked buffer semantics, and edge cases.\n\nThe PR is clean and ready for merge.\n\n\n> @copilot please review\n\nCI is green on the latest commit (`625918c`). All 35 tests pass. No outstanding issues \u2014 the PR is clean and ready for merge.\n\n\n> @copilot please review\n\nCI is green on the latest commit (`625918c`). No issues found in the review:\n\n- **`MatchCursor`**: state machine is correct \u2014 `peeked`/`lastMatch` interaction handles all mixing patterns (`hasNext\u2192findNext`, `hasNext\u2192appendReplacement`, `next\u2192appendReplacement`), `appendTail()` and `close()` clear all refs\n- **`expandReplacement`**: JDK-aligned \u2014 `\\\\x` \u2192 literal `x`, `\\$` \u2192 literal `$`, `$N`/`${name}` \u2192 group value, anything else \u2192 `IllegalArgumentException`; trailing `$` and `$$` throw; out-of-range group throws `IndexOutOfBoundsException`\n- **`MatchResultImpl.hasNamedGroups()`**: covers all three construction paths (4-arg \u2192 `emptyMap` \u2192 `false`, 5-arg with names \u2192 `true`, fallback via `JavaRegexFallbackMatcher` \u2192 `true` when names present)\n- **`NamedMatchResultImpl`**: correctly takes priority over the `NamedGroupResult` interface default since `MatchResultImpl.hasNamedGroups()` is a concrete `@Override`\n- **35 tests** \u2014 comprehensive coverage including edge cases, thread-safety, Iterator mixing, and replacement semantics\n\n\n> @copilot please review\n\nCI is green on the latest commit (`625918c`). No new issues found. The PR is clean and ready for merge.",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@copilot please review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot please review\n\nCI is green on the latest commit (`8241d39`). No new issues found:\n\n- **`MatchCursor`**: all state-machine invariants are correct \u2014 `findNext()` clears `lastMatch` on exhaustion (so `appendReplacement()` correctly throws after a null return), `peeked` buffer is drained before advancing, `hasNext()` saves/restores `lastMatch`, `appendTail()`/`close()` clear all refs\n- **`expandReplacement()`**: JDK-aligned \u2014 `\\\\x` \u2192 literal, `\\$` \u2192 literal `$`, `$N`/`${name}` \u2192 group value, trailing `$`/`$$`/`$x` \u2192 `IllegalArgumentException`, out-of-range `$N` \u2192 `IndexOutOfBoundsException`\n- **`MatchResultImpl.hasNamedGroups()`**: delegates to `!nameToIndex.isEmpty()` covering all construction paths\n- **`NamedMatchResultImpl`**: correctly inherits the concrete `hasNamedGroups()` override from `MatchResultImpl`\n- **35 tests** \u2014 comprehensive coverage including all edge cases\n\nThe PR is clean and ready for merge.\n\n\n> @copilot please review\n\nCI is green on the latest commit (`8241d39`). No new issues found \u2014 the PR is clean and ready for merge. (See the detailed review above.)",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "Codex Review: Didn't find any major issues. More of your lovely PRs please.\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 53,
+      "title": "feat: add split(String, int limit) with JDK Pattern.split semantics",
+      "url": "https://github.com/DataDog/java-reggie/pull/53",
+      "comments": [
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nThis PR adds `ReggieMatcher.split(String input, int limit)` with semantics aligned to `java.util.regex.Pattern.split(CharSequence, int)`, and updates the existing `split(String)` to behave like JDK\u2019s default split (i.e., `limit = 0`, trailing empty strings discarded). This closes the API gap described in #47 and fixes the prior behavior where `split(String)` retained trailing empty strings.\n\n**Changes:**\n- Added `ReggieMatcher.split(String, int limit)` implementing JDK `Pattern.split` limit semantics (`>0`, `<0`, `=0`).\n- Updated `ReggieMatcher.split(String)` to delegate to `split(input, 0)` (discard trailing empty strings).\n- Added comprehensive JDK-parity tests for split limit behavior and updated an existing split-at-end test expectation.\n\n### Reviewed changes\n\nCopilot reviewed 3 out of 3 changed files in this pull request and generated no comments.\n\n| File | Description |\n| ---- | ----------- |\n| `reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/ReggieMatcher.java` | Implements `split(String, int)` with JDK limit semantics and makes `split(String)` delegate to `limit=0`. |\n| `reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/SplitWithLimitTest.java` | Adds acceptance/JDK-parity test coverage across limit modes and key edge cases. |\n| `reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/ReplacementAPITest.java` | Updates split-at-end assertion to reflect `limit=0` (discard trailing empty strings) behavior. |\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "Codex Review: Didn't find any major issues. Can't wait for the next one!\n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 51,
+      "title": "feat: named group extraction \u2014 group/start/end by name",
+      "url": "https://github.com/DataDog/java-reggie/pull/51",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `6d1ea04f6a`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nAdds named capture group extraction to Reggie\u2019s runtime API by extending `MatchResult` with `group(String)`, `start(String)`, and `end(String)`, and wiring a per-matcher name\u2192index map through the runtime/compiler paths so callers can retrieve captures by name (PCRE-style `(?<name>...)` / `(?'name'...)`).\n\n**Changes:**\n- Extend `MatchResult` / `MatchResultImpl` with named-group accessors backed by a `Map<String,Integer>`.\n- Plumb named-group maps from parsing (`RegexParser`) through compilation (`RuntimeCompiler`) into matchers, with enrichment logic for hybrid and non-hybrid paths.\n- Add comprehensive runtime tests and a new JMH benchmark for named-group extraction.\n\n### Reviewed changes\n\nCopilot reviewed 11 out of 11 changed files in this pull request and generated 2 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/NamedGroupExtractionTest.java | Adds acceptance tests covering named group extraction across match/matchBounded/findMatch/findMatchFrom. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/NamedGroupCorrectnessTest.java | Adds additional correctness tests for named group APIs. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/RuntimeCompiler.java | Captures parser name maps and injects/wraps matchers for named-group support (plus hybrid injection). |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/ReggieMatcher.java | Adds per-matcher `nameToIndex` storage and setter used by the compiler. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/NameEnrichingMatcher.java | New wrapper intended to enrich returned `MatchResult` objects with name maps. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/MatchResultImpl.java | Stores `nameToIndex` and implements `group/start/end(String)` plus `withNames(...)`. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/MatchResult.java | Adds default named-group methods to the interface (throwing by default). |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/JavaRegexFallbackMatcher.java | Includes Java `Pattern.namedGroups()` map when building `MatchResultImpl`. |\r\n| reggie-runtime/src/main/java/com/datadoghq/reggie/runtime/HybridMatcher.java | Enriches NFA results with names before returning (including bounded + offset result path). |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/parsing/RegexParser.java | Exposes last-parse group name map via `getGroupNameMap()`. |\r\n| reggie-benchmark/src/main/java/com/datadoghq/reggie/benchmark/NamedGroupExtractionBenchmark.java | Adds a JMH benchmark comparing named vs index extraction (Reggie vs JDK vs RE2J). |\n</details>\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nCopilot reviewed 12 out of 12 changed files in this pull request and generated 2 comments.",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nCopilot reviewed 12 out of 12 changed files in this pull request and generated 2 comments.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `16c35fb29e`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nCopilot reviewed 12 out of 12 changed files in this pull request and generated 2 comments.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `13f2878f61`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `c1a2d3e13c`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@copilot resolve the merge conflicts in this pull request",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot resolve the merge conflicts in this pull request\n\nResolved by merging `origin/main` into this branch and fixing the conflict in `ReggieMatcher` imports in commit `aad02fb`. No UI changes were involved, so there is no screenshot to share.",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@chatgpt-codex-connector review",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @Copilot review\n\nReview completed. Current branch state is clean, and recent CI includes a successful run (`25558612140`). The earlier CI failure was a Spotless formatting issue in `ReggieMatcherBytecodeGenerator` and is already addressed by commit `13f2878`. No UI changes were made, so there is no screenshot to provide.",
+          "type": "comment"
+        },
+        {
+          "author": "jbachorik",
+          "body": "@chatgpt-codex-connector review",
+          "type": "comment"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "To use Codex here, [create an environment for this repo](https://chatgpt.com/codex/cloud/settings/environments).",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @Copilot review\n\nReview completed. Branch is clean at `c1a2d3e`, and latest branch workflows are in progress; the last completed CI run for this line of fixes was successful (`25558612140`). The earlier failed CI run (`25551371545`) was a Spotless violation in `ReggieMatcherBytecodeGenerator`, already addressed in `13f2878`. No UI changes were made, so there is no screenshot to provide.",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 48,
+      "title": "feat: support self-referencing backreferences in RECURSIVE_DESCENT",
+      "url": "https://github.com/DataDog/java-reggie/pull/48",
+      "comments": [
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `392b7630de`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nAdds support for self-referencing backreferences in the `RECURSIVE_DESCENT` code generator so that `\\N` inside an \u201copen\u201d capture group resolves to a zero-length match / partial capture (PCRE/JDK semantics), and upgrades previously-known-failure tests into normal coverage.\n\n**Changes:**\n- Add compile-time detection of self-referencing backrefs and emit a \u201cpartial-open\u201d sentinel for those groups during codegen.\n- Extend recursive-descent backtracking to handle sequential groups with trailing optional cross-backrefs.\n- Promote/expand runtime test coverage and add benchmarks + roadmap update.\n\n### Reviewed changes\n\nCopilot reviewed 7 out of 7 changed files in this pull request and generated 5 comments.\n\n<details>\n<summary>Show a summary per file</summary>\n\n| File | Description |\r\n| ---- | ----------- |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/TestRecursiveDescentFailures.java | Removes conditional enablement for self-ref tests (now expected to pass), but leaves an outdated \u201cknown limitation\u201d comment. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/TestBackrefQuantifiers.java | Makes self-ref test unconditional and adds regressions ensuring non-self-ref quantified captures aren\u2019t corrupted. |\r\n| reggie-runtime/src/test/java/com/datadoghq/reggie/runtime/SelfReferencingBackrefTest.java | New acceptance/regression suite for self-referencing backrefs. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/RecursiveDescentBytecodeGenerator.java | Implements partial-open sentinel handling and new concat backtracking helpers for trailing optional backrefs. |\r\n| reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/PatternAnalyzer.java | Adds `hasSelfReferencingBackref(GroupNode)` helper for compile-time detection. |\r\n| reggie-benchmark/src/main/java/com/datadoghq/reggie/benchmark/BackreferenceBenchmark.java | Adds JDK/Reggie benchmarks for the new self-ref patterns. |\r\n| doc/plans/pcre-conformance-roadmap.md | Marks Phase 4.1 as completed and records implementation notes. |\n</details>\n\n\n\n\n\n\n---\n\n\ud83d\udca1 <a href=\"/DataDog/java-reggie/new/main?filename=.github/instructions/*.instructions.md\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Add Copilot custom instructions</a> for smarter, more guided reviews. <a href=\"https://docs.github.com/en/copilot/customizing-copilot/adding-repository-custom-instructions-for-github-copilot\" class=\"Link--inTextBlock\" target=\"_blank\" rel=\"noopener noreferrer\">Learn how to get started</a>.",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nCopilot reviewed 7 out of 7 changed files in this pull request and generated 2 comments.",
+          "type": "review"
+        },
+        {
+          "author": "copilot-pull-request-reviewer",
+          "body": "## Pull request overview\n\nCopilot reviewed 7 out of 7 changed files in this pull request and generated 3 comments.",
+          "type": "review"
+        },
+        {
+          "author": "chatgpt-codex-connector",
+          "body": "### \ud83d\udca1 Codex Review\n\nHere are some automated review suggestions for this pull request.\n\n**Reviewed commit:** `ba8c6b5734`\n    \n\n<details> <summary>\u2139\ufe0f About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\nIf Codex has suggestions, it will comment; otherwise it will react with \ud83d\udc4d.\n\n\n\n\nCodex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n            \n</details>",
+          "type": "review"
+        },
+        {
+          "author": "gh-worker-devflow-routing-ef8351",
+          "body": "<!-- \"FeedbackWorkflowId\":\"0b31d6f1-e179-401e-8679-fa901c2b78ec_38\" -->\n[View all feedbacks in Devflow UI.](https://mosaic.us1.ddbuild.io/devflow/history/0b31d6f1-e179-401e-8679-fa901c2b78ec_38)\n\n`2026-05-08 08:16:14 UTC` :information_source: Start processing command `/merge`\n\n---\n`2026-05-08 08:16:20 UTC` :information_source: **MergeQueue:** waiting for PR to be ready\n\nThis pull request is not mergeable according to GitHub. Common reasons include pending required checks, missing approvals, or merge conflicts \u2014 but it could also be blocked by other repository rules or settings.\nIt will be added to the queue as soon as checks pass and/or get approvals. [View in MergeQueue UI.](https://mosaic.us1.ddbuild.io/merge-queue/merge-request?mergerequestId=d0c7b0e1-f33a-437e-bf34-9faa2a53b160)\n**Note:** if you pushed new commits since the last approval, you may need additional approval.\nYou can remove it from the waiting list with `/remove` command.\n\n---\n`2026-05-08 08:16:46 UTC` :warning: **MergeQueue:** This merge request was unqueued\n\njaroslav.bachorik@datadoghq.com unqueued this merge request",
+          "type": "comment"
+        }
+      ]
+    },
+    {
+      "number": 21,
+      "title": "chore(deps): update trufflesecurity/trufflehog digest to 5474feb",
+      "url": "https://github.com/DataDog/java-reggie/pull/21",
+      "comments": [
+        {
+          "author": "jbachorik",
+          "body": "@copilot resolve the merge conflicts in this pull request",
+          "type": "comment"
+        },
+        {
+          "author": "copilot-swe-agent",
+          "body": "> @copilot resolve the merge conflicts in this pull request\n\nMerged `main` into the PR branch and resolved the conflict in `.github/workflows/security.yml` \u2014 kept the updated trufflehog digest (`5474feb`) from this PR while picking up the gradle/actions v6.1.0 update from main. Commit: `3d91a97`.",
+          "type": "comment"
+        }
+      ]
+    }
+  ],
+  "total_prs_fetched": 25,
+  "prs_with_comments": 11
+}

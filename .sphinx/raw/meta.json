@@ -1,0 +1,17 @@
+{
+  "extracted_at": "2026-05-29T19:43:19.193864+00:00",
+  "remote": "DataDog/java-reggie",
+  "prs_scanned": 25,
+  "commits_scanned": 72,
+  "advisor_sources": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".github/pull_request_template.md",
+    "README.md",
+    "build.gradle",
+    ".github/workflows/ci.yml",
+    ".github/workflows/dependabot-automerge.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/security.yml"
+  ]
+}
