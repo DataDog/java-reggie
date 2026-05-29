@@ -58,11 +58,6 @@ public final class FallbackPatternDetector {
       return "lookahead inside quantified group";
     }
 
-    // Bug 5: lookbehind and lookahead used together (sandwich / interaction)
-    if (v.hasLookbehind && v.hasLookahead) {
-      return "lookbehind and lookahead combined";
-    }
-
     // Anchor inside a quantifier (e.g. ${2}, \z{n}) creates unusual NFA/DFA shapes that the
     // current generators don't handle correctly.
     if (v.hasAnchorInQuantifier) {

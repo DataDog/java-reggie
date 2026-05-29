@@ -722,7 +722,6 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | Lookahead inside a quantified group | `(?:(?=\d)\d)+` | `lookahead inside quantified group` |
 | Lookbehind followed by unbounded quantifier | `(?<=\d)[a-z]+` | `lookbehind followed by unbounded quantifier` |
 | Alternation inside lookbehind | `(?<=a\|b)c` | `alternation inside lookbehind` |
-| Lookbehind and lookahead used together | `(?<=\[)[^\]]+(?=\])` | `lookbehind and lookahead combined` |
 
 > **Note:** Bug 1 (multiple backreferences to same group) only applies when the analyzer selects
 > `OPTIMIZED_NFA_WITH_BACKREFS` or `VARIABLE_CAPTURE_BACKREF` strategy. Patterns routed through

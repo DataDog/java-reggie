@@ -190,6 +190,22 @@ class LookbehindVariantsTest {
     assertTrue(m.find("3abc"));
   }
 
+  @Test
+  void ipv4DigitBoundariesUseNativeDfaSwitchAssertions() {
+    ReggieMatcher m =
+        Reggie.compile(
+            "(?<![0-9])"
+                + "(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.]"
+                + "(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.]"
+                + "(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.]"
+                + "(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})"
+                + "(?![0-9])");
+    assertFalse(m instanceof JavaRegexFallbackMatcher);
+    assertTrue(m.find("client=10.202.82.195 status=200"));
+    assertFalse(m.find("1110.202.82.195"));
+    assertFalse(m.find("10.202.82.1957"));
+  }
+
   // ── Lookbehind on matches() (full-string) ──────────────────────────────────
 
   @Test

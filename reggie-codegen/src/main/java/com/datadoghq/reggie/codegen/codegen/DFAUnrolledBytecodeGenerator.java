@@ -276,8 +276,10 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // PROTOTYPE: Generate assertion checks first (before consuming character)
-    if (!state.assertionChecks.isEmpty()) {
+    // Assertions on non-accepting states are transition guards. Assertions on accepting states gate
+    // only acceptance; if they fail before the end of input, outgoing transitions must still be
+    // tried so a longer match can satisfy the final assertion.
+    if (!state.accepting && !state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
@@ -322,9 +324,12 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // Handle end of input (with per-state acceptance condition gating)
+    // Handle end of input (with per-state assertion/acceptance condition gating)
     mv.visitLabel(endOfInput);
     if (state.accepting) {
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+      }
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
       } else {
@@ -444,14 +449,7 @@ public class DFAUnrolledBytecodeGenerator {
         }
       } else {
         // Character class sequence assertion (e.g., [A-Z][0-9])
-        // Optimization: Single bounds check for entire sequence
-        // if (pos + offset + length > input.length()) fail
-        mv.visitVarInsn(ILOAD, posVar);
-        pushInt(mv, assertion.offset + assertion.charSets.size());
-        mv.visitInsn(IADD);
-        mv.visitVarInsn(ALOAD, 1); // input
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitJumpInsn(IF_ICMPGT, assertionFailed);
+        Label assertionPassed = new Label();
 
         // Allocate temp vars
         int checkPosVar = allocator.allocate();
@@ -461,24 +459,30 @@ public class DFAUnrolledBytecodeGenerator {
           CharSet charSet = assertion.charSets.get(i);
           int peekOffset = assertion.offset + i;
 
-          // Cache offset calculation
-          // int checkPos = pos + peekOffset;
+          // Cache offset calculation: int checkPos = pos + peekOffset;
           mv.visitVarInsn(ILOAD, posVar);
           pushInt(mv, peekOffset);
           mv.visitInsn(IADD);
           mv.visitVarInsn(ISTORE, checkPosVar);
 
-          // Character check: if (!charSet.contains(input.charAt(checkPos))) fail
+          // Bounds check.
+          mv.visitVarInsn(ILOAD, checkPosVar);
+          mv.visitVarInsn(ALOAD, 1); // input
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+          mv.visitJumpInsn(IF_ICMPGE, assertion.isPositive() ? assertionFailed : assertionPassed);
+
           mv.visitVarInsn(ALOAD, 1); // input
           mv.visitVarInsn(ILOAD, checkPosVar);
           mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
           mv.visitVarInsn(ISTORE, chVar);
 
-          // Check if character matches charset
-          Label matches = new Label();
-          generateCharSetCheck(mv, charSet, chVar, matches);
-          mv.visitJumpInsn(GOTO, assertionFailed); // Doesn't match
-          mv.visitLabel(matches); // Matches - continue
+          generateCharSetCheck(
+              mv, charSet, chVar, assertion.isPositive() ? assertionFailed : assertionPassed);
+        }
+
+        if (!assertion.isPositive()) {
+          mv.visitJumpInsn(GOTO, assertionFailed);
+          mv.visitLabel(assertionPassed);
         }
       }
     } else if (assertion.isLookbehind()) {
@@ -1051,29 +1055,26 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // CRITICAL: Check assertions FIRST, before accepting!
-    // Bug was here: previously returned true immediately for accepting states,
-    // skipping assertion checks. Pattern a(?=bc) would match 'a' without checking (?=bc).
-    if (!state.assertionChecks.isEmpty()) {
-      for (AssertionCheck assertion : state.assertionChecks) {
-        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
-      }
-    }
-
-    // After assertions pass, check if this is an accepting state.
-    // Per-state anchor conditions (populated by SubsetConstructor when an accept NFA state is
-    // reachable only via anchor crossings) gate the acceptance here; states without conditions
-    // accept unconditionally.
+    // For accepting states, assertions gate acceptance only. If they fail, the DFA must still try
+    // outgoing transitions: e.g. (?<=\\[)[^\\]]+(?=\\]) should not reject after seeing just "v"
+    // in "[value]" because the trailing lookahead fails there; it should keep consuming until ']'.
     if (state.accepting && state != dfa.getStartState()) {
+      Label continueMatching = new Label();
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, continueMatching, allocator);
+      }
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
       } else {
-        Label continueMatching = new Label();
         emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, continueMatching);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
-        mv.visitLabel(continueMatching);
+      }
+      mv.visitLabel(continueMatching);
+    } else if (!state.assertionChecks.isEmpty()) {
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
 
@@ -1112,9 +1113,11 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // End of input - check if accepting (respecting per-state anchor conditions)
+    // End of input - check if accepting (respecting per-state anchor conditions). Accepting states
+    // with assertions were already evaluated before the transition block; if those assertions
+    // failed and we got here, the match must fail rather than accepting at end-of-input.
     mv.visitLabel(endOfInput);
-    if (state.accepting) {
+    if (state.accepting && state.assertionChecks.isEmpty()) {
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
       } else {
