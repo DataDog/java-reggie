@@ -21,6 +21,19 @@ import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Lazily-materialized DFA cache over NFA execution.
+ *
+ * <p>On first encounter of a (DFA-state, character) pair the NFA is stepped and the resulting
+ * state-set is interned as a new DFA state; on subsequent encounters the cached state id is
+ * returned directly from a per-state {@code int[128]} ASCII transition table. The cache is bounded
+ * at {@link #DEFAULT_CAP} DFA states; once full it freezes and remaining inputs fall back to plain
+ * NFA stepping.
+ *
+ * <p>The lazily-materialized DFA technique and the state-set interning key idea are adapted from
+ * Mike Snoyman's {@code lazydfa} implementation in the {@code glob_perf} benchmark suite ({@code
+ * DataDog/experimental/users/dangermike/glob_perf}).
+ */
 public final class LazyDFACache {
 
   /**
