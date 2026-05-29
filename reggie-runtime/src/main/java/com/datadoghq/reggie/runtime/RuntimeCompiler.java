@@ -38,6 +38,7 @@ import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatGreedyGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatQuantifiedGroupsBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
@@ -570,6 +571,21 @@ public class RuntimeCompiler {
         switchGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case DFA_TABLE:
+        DFATableBytecodeGenerator tableGen = new DFATableBytecodeGenerator(result.dfa);
+        tableGen.generateStaticData(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        tableGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case FIXED_REPETITION_BACKREF:

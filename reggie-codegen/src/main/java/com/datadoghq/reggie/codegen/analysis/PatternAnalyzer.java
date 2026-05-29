@@ -18,6 +18,7 @@ package com.datadoghq.reggie.codegen.analysis;
 import com.datadoghq.reggie.codegen.ast.*;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
+import com.datadoghq.reggie.codegen.automaton.DFATableData;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.StateExplosionException;
 import com.datadoghq.reggie.codegen.automaton.SubsetConstructor;
@@ -34,6 +35,7 @@ public class PatternAnalyzer {
 
   private static final int DFA_UNROLLED_STATE_LIMIT = 20;
   private static final int DFA_SWITCH_STATE_LIMIT = 300;
+  private static final int DFA_TABLE_ESTIMATED_BYTES_LIMIT = 1 << 20;
 
   private final RegexNode ast;
   private final NFA nfa;
@@ -833,10 +835,13 @@ public class PatternAnalyzer {
         // Use switch-based DFA for medium state counts (better cache behavior)
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_SWITCH, dfa, null, false, requiredLiterals);
+      } else if (isDFATableEligible(dfa)) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.DFA_TABLE, dfa, null, false, requiredLiterals);
       } else {
-        // Large DFA state spaces are expensive for grok-style alternation patterns and DFA_TABLE
-        // bytecode generation is not implemented on both runtime/processor paths. Fall back to NFA
-        // simulation once the DFA exceeds the switch-generator budget.
+        // Large DFA state spaces can still be too expensive as tables. Fall back to NFA simulation
+        // when the compressed table would exceed the configured memory budget or the DFA uses
+        // features not yet supported by the table backend.
         return new MatchingStrategyResult(
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
@@ -845,6 +850,35 @@ public class PatternAnalyzer {
       return new MatchingStrategyResult(
           MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
     }
+  }
+
+  private boolean isDFATableEligible(DFA dfa) {
+    if (nfa != null
+        && (nfa.getGroupCount() > 0
+            || nfa.hasStartAnchor()
+            || nfa.hasEndAnchor()
+            || nfa.hasStringStartAnchor()
+            || nfa.hasStringEndAnchor()
+            || nfa.hasStringEndAbsoluteAnchor()
+            || nfa.hasMultilineStartAnchor()
+            || nfa.hasMultilineEndAnchor())) {
+      return false;
+    }
+
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.assertionChecks.isEmpty()
+          || !state.groupActions.isEmpty()
+          || !state.acceptanceAnchorConditions.isEmpty()) {
+        return false;
+      }
+      for (DFA.DFATransition transition : state.transitions.values()) {
+        if (!transition.tagOps.isEmpty() || !transition.entryGuard.isEmpty()) {
+          return false;
+        }
+      }
+    }
+
+    return DFATableData.from(dfa).estimatedBytes() <= DFA_TABLE_ESTIMATED_BYTES_LIMIT;
   }
 
   private boolean hasBackreferences(RegexNode node) {

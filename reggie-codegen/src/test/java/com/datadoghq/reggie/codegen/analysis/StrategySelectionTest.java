@@ -50,6 +50,16 @@ class StrategySelectionTest {
   }
 
   @Test
+  void largePureDFAUsesTableStrategy() throws Exception {
+    PatternAnalyzer.MatchingStrategyResult result = analyze("(?:[a-z][0-9]){150}");
+
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_TABLE,
+        result.strategy,
+        "Large pure regular DFAs should use the compact table backend");
+  }
+
+  @Test
   void negatedCharClassDelimitedCapturesDoNotRequireRecursiveDescent() throws Exception {
     RegexParser parser = new RegexParser();
     RegexNode ast = parser.parse("([^ ]+) ([^\" ]*) (HTTP/\\d\\.\\d)");

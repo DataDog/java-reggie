@@ -32,6 +32,7 @@ import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.codegen.BackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
@@ -247,9 +248,19 @@ public class ReggieMatcherBytecodeGenerator {
         break;
 
       case DFA_TABLE:
-        // TODO: Implement table-driven DFA generator
-        throw new UnsupportedOperationException(
-            "DFA_TABLE bytecode generation not yet implemented.");
+        DFATableBytecodeGenerator tableGen = new DFATableBytecodeGenerator(dfa);
+        tableGen.generateStaticData(cw, getJavaClassName());
+        tableGen.generateMatchesMethod(cw, getJavaClassName());
+        tableGen.generateFindMethod(cw, getJavaClassName());
+        tableGen.generateFindFromMethod(cw, getJavaClassName());
+        tableGen.generateMatchMethod(cw, getJavaClassName());
+        tableGen.generateMatchIntoMethod(cw, getJavaClassName());
+        tableGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+        tableGen.generateMatchBoundedMethod(cw, getJavaClassName());
+        tableGen.generateFindMatchMethod(cw, getJavaClassName());
+        tableGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        tableGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+        break;
 
       case HYBRID_DFA_LOOKAHEAD:
       case SPECIALIZED_MULTIPLE_LOOKAHEADS: // Tier 3: Same as HYBRID but with 2+ lookaheads
