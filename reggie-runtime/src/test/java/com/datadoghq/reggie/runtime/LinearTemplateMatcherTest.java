@@ -27,6 +27,7 @@ import com.datadoghq.reggie.codegen.analysis.LinearTemplatePlan;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -78,7 +79,7 @@ class LinearTemplateMatcherTest {
   }
 
   @Test
-  void runtimeCompilerRoutesNamedOnlyLinearTemplates() {
+  void runtimeCompilerRoutesNamedOnlyLinearTemplates() throws Exception {
     ReggieMatcher matcher =
         Reggie.compile(
             "host=(?<host>\\S+) status=(?<status>[+-]?\\d+)",
@@ -88,6 +89,47 @@ class LinearTemplateMatcherTest {
 
     assertEquals("api.example.com", result.group("host"));
     assertEquals("200", result.group("status"));
+    assertDelegateType(matcher, LinearTemplateMatcher.class);
+  }
+
+  @Test
+  void runtimeCompilerRoutesCombinedAccessLogTemplateWithNonGrokNames() throws Exception {
+    String pattern =
+        "(?s)(?<client>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}|[A-Za-z0-9.-]+) "
+            + "(?<ident>\\S+) (?<auth>\\S+) "
+            + "\\[(?<timestamp>[\\d]{2}/(?:[jJ][aA][nN]|[mM][aA][rR])/[\\d]{4,19}:[\\d]{2}:[\\d]{2}:[\\d]{2} [+-]\\d\\d:?\\d\\d)\\]\\s+"
+            + "\"(?>(?<method>\\b\\w+\\b) |)(?<target>\\S+)(?> HTTP\\/(?<version>\\d+\\.\\d+)|)\" "
+            + "(?<status>[+-]?\\d+) (?>(?<bytes>[+-]?\\d+)|-) "
+            + "\"(?<referer>\\S+)\" \"(?<agent>[^\\\"]*)\" \"(?<field1>[^\\\"]*)\" \"(?<field2>[^\\\"]*)\" "
+            + "(?<duration>[+-]?(?>\\d+(?:\\.(?:\\d*)?)?|\\.\\d+)) "
+            + "(?<upstream>[+-]?(?>\\d+(?:\\.(?:\\d*)?)?|\\.\\d+)).* "
+            + "\\[(?<logger>\\b\\w+\\b)\\] .*";
+    ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY_OPTIONS);
+    String input =
+        "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
+            + "200 17888 \"https://example.com/index.html\" \"Mozilla/5.0 Test\" \"-\" "
+            + "\"tracking-id\" 0.024 0.024 . [nginx_access]  [not_the_logger]";
+
+    MatchResult result = matcher.match(input);
+
+    assertEquals("10.202.82.195", result.group("client"));
+    assertEquals("POST", result.group("method"));
+    assertEquals("/config?x=y", result.group("target"));
+    assertEquals("1.1", result.group("version"));
+    assertEquals("https://example.com/index.html", result.group("referer"));
+    assertEquals("Mozilla/5.0 Test", result.group("agent"));
+    assertEquals("nginx_access", result.group("logger"));
+    assertDelegateType(matcher, LinearTemplateMatcher.class);
+  }
+
+  private static final ReggieOptions NAMED_ONLY_OPTIONS =
+      ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build();
+
+  private static void assertDelegateType(ReggieMatcher matcher, Class<?> expectedType)
+      throws Exception {
+    Field delegate = matcher.getClass().getDeclaredField("delegate");
+    delegate.setAccessible(true);
+    assertEquals(expectedType, delegate.get(matcher).getClass());
   }
 
   private static ReggieMatcher matcherFor(String pattern) throws Exception {

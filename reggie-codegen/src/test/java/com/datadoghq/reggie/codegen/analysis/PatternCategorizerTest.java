@@ -62,7 +62,7 @@ class PatternCategorizerTest {
             PatternAtom.Kind.SIGNED_INTEGER,
             PatternAtom.Kind.UNTIL_DELIMITER,
             PatternAtom.Kind.SIGNED_DECIMAL_NUMBER,
-            PatternAtom.Kind.WORD),
+            PatternAtom.Kind.BRACKETED_WORD_AFTER_SKIP),
         capturedKinds);
 
     assertTrue(

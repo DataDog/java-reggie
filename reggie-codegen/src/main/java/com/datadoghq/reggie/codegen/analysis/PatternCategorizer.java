@@ -95,7 +95,25 @@ public final class PatternCategorizer {
 
     @Override
     public Boolean visitConcat(ConcatNode node) {
-      for (RegexNode child : node.children) {
+      for (int i = 0; i < node.children.size(); i++) {
+        if (isTrailingBracketedWordSearch(node.children, i)) {
+          flushLiteral();
+          GroupNode group = (GroupNode) node.children.get(i + 3);
+          atoms.add(
+              PatternAtom.captured(
+                  PatternAtom.Kind.BRACKETED_WORD_AFTER_SKIP, group.groupNumber, group.name));
+          i += 6;
+          continue;
+        }
+
+        RegexNode child = node.children.get(i);
+        if (isBracketDelimitedComplexCapture(node.children, i)) {
+          flushLiteral();
+          GroupNode group = (GroupNode) child;
+          atoms.add(PatternAtom.capturedUntil(group.groupNumber, group.name, ']'));
+          continue;
+        }
+
         if (!collect(child)) return false;
       }
       return true;
@@ -103,6 +121,20 @@ public final class PatternCategorizer {
 
     @Override
     public Boolean visitAlternation(AlternationNode node) {
+      PatternAtom signedIntegerOrDash = signedIntegerOrDashAtom(node, 0, null);
+      if (signedIntegerOrDash != null) {
+        flushLiteral();
+        atoms.add(signedIntegerOrDash);
+        return true;
+      }
+
+      List<PatternAtom> optional = optionalAlternativeAtoms(node);
+      if (optional != null) {
+        flushLiteral();
+        atoms.add(PatternAtom.optionalSequence(optional));
+        return true;
+      }
+
       flushLiteral();
       atoms.add(PatternAtom.uncaptured(PatternAtom.Kind.COMPLEX_ALTERNATION));
       notes.add("alternation categorized as complex reusable atom");
@@ -123,14 +155,14 @@ public final class PatternCategorizer {
 
     @Override
     public Boolean visitGroup(GroupNode node) {
+      if (!node.capturing) {
+        return collect(node.child);
+      }
       PatternAtom atom = atomForGroup(node);
       if (atom != null) {
         flushLiteral();
         atoms.add(atom);
         return true;
-      }
-      if (!node.capturing) {
-        return collect(node.child);
       }
       notes.add("capturing group is not a recognized linear atom: " + node);
       return false;
@@ -201,6 +233,9 @@ public final class PatternCategorizer {
         return PatternAtom.captured(PatternAtom.Kind.SIGNED_DECIMAL_NUMBER, groupNumber, groupName);
       }
       if (child instanceof AlternationNode alternation) {
+        PatternAtom signedIntegerOrDash =
+            signedIntegerOrDashAtom(alternation, groupNumber, groupName);
+        if (signedIntegerOrDash != null) return signedIntegerOrDash;
         if (isIpOrHostAlternation(alternation)) {
           return PatternAtom.captured(PatternAtom.Kind.IP_OR_HOST, groupNumber, groupName);
         }
@@ -247,6 +282,162 @@ public final class PatternCategorizer {
       return null;
     }
 
+    private static List<PatternAtom> optionalAlternativeAtoms(AlternationNode node) {
+      if (node.alternatives.size() != 2) return null;
+      RegexNode left = node.alternatives.get(0);
+      RegexNode right = node.alternatives.get(1);
+      RegexNode present;
+      if (isEmptyAlternative(left)) {
+        present = right;
+      } else if (isEmptyAlternative(right)) {
+        present = left;
+      } else {
+        return null;
+      }
+      Collector nested = new Collector();
+      if (!nested.collect(present)) return null;
+      nested.flushLiteral();
+      return nested.atoms;
+    }
+
+    private static PatternAtom signedIntegerOrDashAtom(
+        AlternationNode node, int groupNumber, String groupName) {
+      if (node.alternatives.size() != 2) return null;
+      boolean hasDash = false;
+      boolean hasInteger = false;
+      int capturedGroupNumber = groupNumber;
+      String capturedGroupName = groupName;
+      for (RegexNode alternative : node.alternatives) {
+        RegexNode child = stripNonCapturingGroup(alternative);
+        if (child instanceof LiteralNode literal && literal.ch == '-') {
+          hasDash = true;
+        } else if (child instanceof GroupNode group
+            && isSignedInteger(stripNonCapturingGroup(group.child))) {
+          hasInteger = true;
+          capturedGroupNumber = group.groupNumber;
+          capturedGroupName = group.name;
+        } else if (isSignedInteger(child)) {
+          hasInteger = true;
+        }
+      }
+      return hasDash && hasInteger
+          ? PatternAtom.captured(
+              PatternAtom.Kind.SIGNED_INTEGER_OR_DASH, capturedGroupNumber, capturedGroupName)
+          : null;
+    }
+
+    private static boolean isEmptyAlternative(RegexNode node) {
+      if (node instanceof LiteralNode literal) return literal.ch == 0;
+      return node instanceof ConcatNode concat && concat.children.isEmpty();
+    }
+
+    private static boolean isBracketDelimitedComplexCapture(List<RegexNode> children, int index) {
+      if (index == 0 || index + 1 >= children.size()) return false;
+      return children.get(index) instanceof GroupNode group
+          && group.capturing
+          && atomForGroup(group) == null
+          && children.get(index - 1) instanceof LiteralNode open
+          && open.ch == '['
+          && children.get(index + 1) instanceof LiteralNode close
+          && close.ch == ']'
+          && !containsBacktrackingControl(group.child);
+    }
+
+    private static boolean isTrailingBracketedWordSearch(List<RegexNode> children, int index) {
+      if (index + 6 >= children.size()) return false;
+      return isAnyStar(children.get(index))
+          && children.get(index + 1) instanceof LiteralNode spaceBefore
+          && spaceBefore.ch == ' '
+          && children.get(index + 2) instanceof LiteralNode open
+          && open.ch == '['
+          && children.get(index + 3) instanceof GroupNode group
+          && group.capturing
+          && isWordBoundaryWordBoundary(stripNonCapturingGroup(group.child))
+          && children.get(index + 4) instanceof LiteralNode close
+          && close.ch == ']'
+          && children.get(index + 5) instanceof LiteralNode spaceAfter
+          && spaceAfter.ch == ' '
+          && isAnyStar(children.get(index + 6));
+    }
+
+    private static boolean containsBacktrackingControl(RegexNode node) {
+      return node.accept(
+          new RegexVisitor<Boolean>() {
+            @Override
+            public Boolean visitLiteral(LiteralNode node) {
+              return false;
+            }
+
+            @Override
+            public Boolean visitCharClass(CharClassNode node) {
+              return false;
+            }
+
+            @Override
+            public Boolean visitConcat(ConcatNode node) {
+              return node.children.stream().anyMatch(child -> child.accept(this));
+            }
+
+            @Override
+            public Boolean visitAlternation(AlternationNode node) {
+              return node.alternatives.stream().anyMatch(child -> child.accept(this));
+            }
+
+            @Override
+            public Boolean visitQuantifier(QuantifierNode node) {
+              return !node.greedy || node.child.accept(this);
+            }
+
+            @Override
+            public Boolean visitGroup(GroupNode node) {
+              return node.child.accept(this);
+            }
+
+            @Override
+            public Boolean visitAnchor(AnchorNode node) {
+              return false;
+            }
+
+            @Override
+            public Boolean visitBackreference(BackreferenceNode node) {
+              return true;
+            }
+
+            @Override
+            public Boolean visitAssertion(AssertionNode node) {
+              return true;
+            }
+
+            @Override
+            public Boolean visitSubroutine(SubroutineNode node) {
+              return true;
+            }
+
+            @Override
+            public Boolean visitConditional(ConditionalNode node) {
+              return true;
+            }
+
+            @Override
+            public Boolean visitBranchReset(BranchResetNode node) {
+              return true;
+            }
+          });
+    }
+
+    private static boolean isAnyStar(RegexNode node) {
+      if (!(node instanceof QuantifierNode quantifier)
+          || quantifier.min != 0
+          || quantifier.max != -1
+          || !quantifier.greedy
+          || !(quantifier.child instanceof CharClassNode charClass)
+          || charClass.negated) {
+        return false;
+      }
+      return charClass.chars.equals(CharSet.ANY)
+          || charClass.chars.equals(CharSet.ANY_EXCEPT_NEWLINE);
+    }
+
     private static RegexNode stripNonCapturingGroup(RegexNode node) {
       while (node instanceof GroupNode group && !group.capturing) {
         node = group.child;
@@ -260,13 +451,33 @@ public final class PatternCategorizer {
     }
 
     private static boolean isIpOrHostAlternation(AlternationNode node) {
-      boolean hasIpLikeAlternative = false;
-      boolean hasHostLikeAlternative = false;
-      for (RegexNode alternative : node.alternatives) {
-        hasIpLikeAlternative |= isIpLikeAlternative(alternative);
-        hasHostLikeAlternative |= isHostLikeAlternative(alternative);
+      return containsIpLikeShape(node) && containsHostLikeShape(node);
+    }
+
+    private static boolean containsIpLikeShape(RegexNode node) {
+      if (isIpLikeAlternative(node) || isHexColonHeavy(node)) return true;
+      if (node instanceof AlternationNode alternation) {
+        return alternation.alternatives.stream().anyMatch(Collector::containsIpLikeShape);
       }
-      return hasIpLikeAlternative && hasHostLikeAlternative;
+      if (node instanceof ConcatNode concat) {
+        return concat.children.stream().anyMatch(Collector::containsIpLikeShape);
+      }
+      if (node instanceof GroupNode group) return containsIpLikeShape(group.child);
+      if (node instanceof QuantifierNode quantifier) return containsIpLikeShape(quantifier.child);
+      return false;
+    }
+
+    private static boolean containsHostLikeShape(RegexNode node) {
+      if (isHostLikeAlternative(node) || isHostnameLabelSequence(node)) return true;
+      if (node instanceof AlternationNode alternation) {
+        return alternation.alternatives.stream().anyMatch(Collector::containsHostLikeShape);
+      }
+      if (node instanceof ConcatNode concat) {
+        return concat.children.stream().anyMatch(Collector::containsHostLikeShape);
+      }
+      if (node instanceof GroupNode group) return containsHostLikeShape(group.child);
+      if (node instanceof QuantifierNode quantifier) return containsHostLikeShape(quantifier.child);
+      return false;
     }
 
     private static boolean isIpLikeAlternative(RegexNode node) {
@@ -299,6 +510,73 @@ public final class PatternCategorizer {
           && charClass.chars.contains('9')
           && charClass.chars.contains('.')
           && charClass.chars.contains('-');
+    }
+
+    private static boolean isHexColonHeavy(RegexNode node) {
+      Counter counter = new Counter();
+      countHexColonSignals(node, counter);
+      return counter.hexClasses >= 1 && counter.colons >= 2;
+    }
+
+    private static boolean isHostnameLabelSequence(RegexNode node) {
+      Counter counter = new Counter();
+      countHostnameSignals(node, counter);
+      return counter.wordBoundaries >= 1 && counter.hostnameClasses >= 2;
+    }
+
+    private static void countHexColonSignals(RegexNode node, Counter counter) {
+      if (node instanceof LiteralNode literal) {
+        if (literal.ch == ':') counter.colons++;
+      } else if (node instanceof CharClassNode charClass) {
+        if (!charClass.negated
+            && charClass.chars.contains('0')
+            && charClass.chars.contains('9')
+            && charClass.chars.contains('A')
+            && charClass.chars.contains('F')
+            && charClass.chars.contains('a')
+            && charClass.chars.contains('f')) {
+          counter.hexClasses++;
+        }
+      } else if (node instanceof ConcatNode concat) {
+        concat.children.forEach(child -> countHexColonSignals(child, counter));
+      } else if (node instanceof AlternationNode alternation) {
+        alternation.alternatives.forEach(child -> countHexColonSignals(child, counter));
+      } else if (node instanceof GroupNode group) {
+        countHexColonSignals(group.child, counter);
+      } else if (node instanceof QuantifierNode quantifier) {
+        countHexColonSignals(quantifier.child, counter);
+      }
+    }
+
+    private static void countHostnameSignals(RegexNode node, Counter counter) {
+      if (node instanceof AnchorNode anchor && anchor.type == AnchorNode.Type.WORD_BOUNDARY) {
+        counter.wordBoundaries++;
+      } else if (node instanceof CharClassNode charClass) {
+        if (!charClass.negated
+            && charClass.chars.contains('0')
+            && charClass.chars.contains('9')
+            && charClass.chars.contains('A')
+            && charClass.chars.contains('Z')
+            && charClass.chars.contains('a')
+            && charClass.chars.contains('z')) {
+          counter.hostnameClasses++;
+        }
+      } else if (node instanceof ConcatNode concat) {
+        concat.children.forEach(child -> countHostnameSignals(child, counter));
+      } else if (node instanceof AlternationNode alternation) {
+        alternation.alternatives.forEach(child -> countHostnameSignals(child, counter));
+      } else if (node instanceof GroupNode group) {
+        countHostnameSignals(group.child, counter);
+      } else if (node instanceof QuantifierNode quantifier) {
+        countHostnameSignals(quantifier.child, counter);
+      }
+    }
+
+    private static final class Counter {
+      int hexClasses;
+      int colons;
+      int hostnameClasses;
+      int wordBoundaries;
     }
 
     private static boolean isDigitRepeat(RegexNode node, int min, int max) {
@@ -344,10 +622,37 @@ public final class PatternCategorizer {
     }
 
     private static boolean isSignedDecimalNumber(RegexNode node) {
-      if (!(node instanceof ConcatNode concat) || concat.children.size() != 3) return false;
-      return isOptionalSign(concat.children.get(0))
-          && isDigitPlus(concat.children.get(1))
-          && isOptionalDotDigits(concat.children.get(2));
+      if (!(node instanceof ConcatNode concat)) return false;
+      if (concat.children.size() == 3) {
+        return isOptionalSign(concat.children.get(0))
+            && isDigitPlus(concat.children.get(1))
+            && isOptionalDotDigits(concat.children.get(2));
+      }
+      return concat.children.size() == 2
+          && isOptionalSign(concat.children.get(0))
+          && isDecimalAlternation(stripNonCapturingGroup(concat.children.get(1)));
+    }
+
+    private static boolean isDecimalAlternation(RegexNode node) {
+      if (!(node instanceof AlternationNode alternation)) return false;
+      return alternation.alternatives.stream().anyMatch(Collector::startsWithDigitPlus)
+          && alternation.alternatives.stream().anyMatch(Collector::startsWithDotDigitPlus);
+    }
+
+    private static boolean startsWithDigitPlus(RegexNode node) {
+      RegexNode child = stripNonCapturingGroup(node);
+      return child instanceof ConcatNode concat
+          && !concat.children.isEmpty()
+          && isDigitPlus(concat.children.get(0));
+    }
+
+    private static boolean startsWithDotDigitPlus(RegexNode node) {
+      RegexNode child = stripNonCapturingGroup(node);
+      return child instanceof ConcatNode concat
+          && concat.children.size() == 2
+          && concat.children.get(0) instanceof LiteralNode literal
+          && literal.ch == '.'
+          && isDigitPlus(concat.children.get(1));
     }
 
     private static boolean isOptionalSign(RegexNode node) {

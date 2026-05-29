@@ -135,6 +135,8 @@ final class LinearTemplateMatcher extends ReggieMatcher {
       case CAPTURE_DIGITS -> captureDigits(input, pos, op.groupNumber(), starts, ends);
       case CAPTURE_SIGNED_INTEGER ->
           captureSignedInteger(input, pos, op.groupNumber(), starts, ends);
+      case CAPTURE_SIGNED_INTEGER_OR_DASH ->
+          captureSignedIntegerOrDash(input, pos, op.groupNumber(), starts, ends);
       case CAPTURE_DECIMAL_NUMBER ->
           captureDecimal(input, pos, op.groupNumber(), starts, ends, false);
       case CAPTURE_SIGNED_DECIMAL_NUMBER ->
@@ -143,10 +145,15 @@ final class LinearTemplateMatcher extends ReggieMatcher {
       case CAPTURE_UNTIL_DELIMITER ->
           captureUntil(input, pos, op.delimiter(), op.groupNumber(), starts, ends);
       case CAPTURE_QUOTED_UNTIL_DELIMITER ->
-          captureQuotedUntil(input, pos, op.delimiter(), op.groupNumber(), starts, ends);
+          captureQuotedUntil(input, pos, op.delimiter(), op.groupNumber(), starts, ends, false);
+      case CAPTURE_QUOTED_NON_SPACE ->
+          captureQuotedUntil(input, pos, op.delimiter(), op.groupNumber(), starts, ends, true);
       case CAPTURE_IP_OR_HOST -> captureIpOrHost(input, pos, op.groupNumber(), starts, ends);
+      case CAPTURE_BRACKETED_WORD_AFTER_SKIP ->
+          captureBracketedWordAfterSkip(input, pos, op.groupNumber(), starts, ends);
       case SKIP_ANY -> lastOp ? input.length() : -1;
       case ANCHOR -> pos;
+      case OPTIONAL_SEQUENCE -> applyOptional(op, input, pos, starts, ends);
     };
   }
 
@@ -177,6 +184,12 @@ final class LinearTemplateMatcher extends ReggieMatcher {
     return pos;
   }
 
+  private static int captureSignedIntegerOrDash(
+      String input, int pos, int group, int[] starts, int[] ends) {
+    if (pos < input.length() && input.charAt(pos) == '-') return pos + 1;
+    return captureSignedInteger(input, pos, group, starts, ends);
+  }
+
   private static int captureDecimal(
       String input, int pos, int group, int[] starts, int[] ends, boolean signed) {
     int start = pos;
@@ -185,11 +198,15 @@ final class LinearTemplateMatcher extends ReggieMatcher {
     }
     int digitStart = pos;
     while (pos < input.length() && isDigit(input.charAt(pos))) pos++;
+    boolean sawLeadingDigits = pos > digitStart;
     if (pos < input.length() && input.charAt(pos) == '.') {
       pos++;
+      int fractionStart = pos;
       while (pos < input.length() && isDigit(input.charAt(pos))) pos++;
+      if (!sawLeadingDigits && pos == fractionStart) return -1;
+    } else if (!sawLeadingDigits) {
+      return -1;
     }
-    if (pos == digitStart) return -1;
     set(starts, ends, group, start, pos);
     return pos;
   }
@@ -211,11 +228,22 @@ final class LinearTemplateMatcher extends ReggieMatcher {
   }
 
   private static int captureQuotedUntil(
-      String input, int pos, char delimiter, int group, int[] starts, int[] ends) {
+      String input,
+      int pos,
+      char delimiter,
+      int group,
+      int[] starts,
+      int[] ends,
+      boolean nonSpace) {
     if (pos >= input.length() || input.charAt(pos) != '"') return -1;
     int start = pos + 1;
     int end = input.indexOf(delimiter, start);
     if (end < 0) return -1;
+    if (nonSpace) {
+      for (int i = start; i < end; i++) {
+        if (Character.isWhitespace(input.charAt(i))) return -1;
+      }
+    }
     set(starts, ends, group, start, end);
     return end + 1;
   }
@@ -223,6 +251,44 @@ final class LinearTemplateMatcher extends ReggieMatcher {
   private static int captureIpOrHost(String input, int pos, int group, int[] starts, int[] ends) {
     int end = captureNonSpace(input, pos, group, starts, ends);
     return end >= 0 && isIpOrHost(input, pos, end) ? end : -1;
+  }
+
+  private static int captureBracketedWordAfterSkip(
+      String input, int pos, int group, int[] starts, int[] ends) {
+    int search = pos;
+    while (search < input.length()) {
+      int open = input.indexOf('[', search);
+      if (open < 0) return -1;
+      int close = input.indexOf(']', open + 1);
+      if (close < 0) return -1;
+      int wordEnd = open + 1;
+      while (wordEnd < close && isWord(input.charAt(wordEnd))) wordEnd++;
+      if (wordEnd == close
+          && wordEnd > open + 1
+          && close + 1 < input.length()
+          && Character.isWhitespace(input.charAt(close + 1))) {
+        set(starts, ends, group, open + 1, close);
+        return input.length();
+      }
+      search = open + 1;
+    }
+    return -1;
+  }
+
+  private static int applyOptional(
+      LinearTemplatePlan.Op op, String input, int pos, int[] starts, int[] ends) {
+    int[] savedStarts = starts.clone();
+    int[] savedEnds = ends.clone();
+    int next = pos;
+    for (int i = 0; i < op.children().size(); i++) {
+      next = apply(op.children().get(i), input, next, starts, ends, i == op.children().size() - 1);
+      if (next < 0) {
+        System.arraycopy(savedStarts, 0, starts, 0, starts.length);
+        System.arraycopy(savedEnds, 0, ends, 0, ends.length);
+        return pos;
+      }
+    }
+    return next;
   }
 
   private static int skipWhitespace(String input, int pos) {
