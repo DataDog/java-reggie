@@ -801,9 +801,19 @@ public class PatternAnalyzer {
     }
 
     // Try standard DFA construction (lookaround already handled above)
-    try {
-      SubsetConstructor constructor = new SubsetConstructor();
-      DFA dfa = constructor.buildDFA(nfa);
+    MatchingStrategyResult result;
+    // Skip DFA construction entirely for large anchor-free group-free patterns: the LAZY_DFA
+    // promotion below will handle them on-the-fly rather than building a ≥300-state table up front.
+    if (nfa.getStates().size() >= 300
+        && !hasCapturingGroups(ast)
+        && nfa.getStates().stream().noneMatch(s -> s.anchor != null)) {
+      result =
+          new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+    } else
+      try {
+        SubsetConstructor constructor = new SubsetConstructor();
+        DFA dfa = constructor.buildDFA(nfa);
 
       if (dfa.isAnchorConditionDiluted()) {
         MatchingStrategyResult r =
@@ -839,17 +849,39 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_TABLE, dfa, null, false, requiredLiterals);
       } else {
-        // Large DFA state spaces can still be too expensive as tables. Fall back to NFA simulation
-        // when the compressed table would exceed the configured memory budget or the DFA uses
-        // features not yet supported by the table backend.
-        return new MatchingStrategyResult(
-            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+        // Large DFA not eligible for table backend; fall through to LAZY_DFA promotion check.
+        result =
+            new MatchingStrategyResult(
+                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
     } catch (StateExplosionException e) {
-      // DFA too large, use optimized NFA
-      return new MatchingStrategyResult(
-          MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+      // DFA too large to construct; fall through to LAZY_DFA promotion check.
+      result =
+          new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+      }
+    // Promote large anchor-free group-free NFA patterns to the lazy DFA strategy.
+    if (result.strategy == MatchingStrategy.OPTIMIZED_NFA
+        && nfa != null
+        && nfa.getStates().size() >= 300
+        && !hasCapturingGroups(ast)
+        && nfa.getStates().stream().noneMatch(s -> s.anchor != null)) {
+      result =
+          new MatchingStrategyResult(
+              MatchingStrategy.LAZY_DFA,
+              result.dfa,
+              result.patternInfo,
+              result.useTaggedDFA,
+              result.requiredLiterals,
+              result.lookaheadGreedyInfo,
+              result.usePosixLastMatch);
     }
+    return result;
+  }
+
+  private boolean hasCapturingGroups(RegexNode node) {
+    CapturingGroupDetector detector = new CapturingGroupDetector();
+    return node.accept(detector);
   }
 
   private boolean isDFATableEligible(DFA dfa) {
@@ -1937,6 +1969,7 @@ public class PatternAnalyzer {
     DFA_SWITCH_WITH_GROUPS, // 20-300 states - switch with inline group tracking
     DFA_TABLE, // >300 states - table-driven
     OPTIMIZED_NFA, // DFA state explosion - optimized NFA
+    LAZY_DFA, // Large anchor-free group-free NFA - on-the-fly DFA construction
     OPTIMIZED_NFA_WITH_BACKREFS, // Has backreferences
     OPTIMIZED_NFA_WITH_LOOKAROUND, // Has variable-width lookaround assertions (NFA for all)
     HYBRID_DFA_LOOKAHEAD, // Hybrid: DFA for lookahead sub-patterns, NFA for main pattern
@@ -3571,6 +3604,76 @@ public class PatternAnalyzer {
         minCount,
         separatorNode,
         totalGroupCount);
+  }
+
+  /** Visitor to detect capturing groups in AST. */
+  private static class CapturingGroupDetector implements RegexVisitor<Boolean> {
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      return node.children.stream().anyMatch(child -> child.accept(this));
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.capturing || node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return node.subPattern != null && node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      boolean hasThen = node.thenBranch.accept(this);
+      boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
+      return hasThen || hasElse;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      for (RegexNode alt : node.alternatives) {
+        if (alt.accept(this)) {
+          return true;
+        }
+      }
+      return false;
+    }
   }
 
   /** Visitor to detect backreferences in AST. */
