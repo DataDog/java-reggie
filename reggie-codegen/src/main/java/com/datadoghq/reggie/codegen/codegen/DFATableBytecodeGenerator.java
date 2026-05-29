@@ -42,6 +42,8 @@ public final class DFATableBytecodeGenerator {
         .visitEnd();
     cw.visitField(ACC_PRIVATE | ACC_STATIC | ACC_FINAL, "DFA_ASCII_CLASSES", "[I", null, null)
         .visitEnd();
+    cw.visitField(ACC_PRIVATE | ACC_STATIC | ACC_FINAL, "DFA_START_ASCII", "[Z", null, null)
+        .visitEnd();
     cw.visitField(ACC_PRIVATE | ACC_STATIC | ACC_FINAL, "DFA_RANGE_STARTS", "[C", null, null)
         .visitEnd();
     cw.visitField(ACC_PRIVATE | ACC_STATIC | ACC_FINAL, "DFA_RANGE_ENDS", "[C", null, null)
@@ -69,6 +71,12 @@ public final class DFATableBytecodeGenerator {
     mv.visitMethodInsn(
         INVOKESTATIC, RUNTIME, "decodeRleIntArray", "([Ljava/lang/String;I)[I", false);
     mv.visitFieldInsn(PUTSTATIC, className, "DFA_ASCII_CLASSES", "[I");
+
+    pushStringArray(mv, encodeBooleans(table.startAscii));
+    pushInt(mv, table.startAscii.length);
+    mv.visitMethodInsn(
+        INVOKESTATIC, RUNTIME, "decodeBooleanArray", "([Ljava/lang/String;I)[Z", false);
+    mv.visitFieldInsn(PUTSTATIC, className, "DFA_START_ASCII", "[Z");
 
     pushStringArray(mv, split(new String(table.rangeStarts)));
     pushInt(mv, table.rangeStarts.length);
@@ -400,13 +408,14 @@ public final class DFATableBytecodeGenerator {
     mv.visitFieldInsn(GETSTATIC, className, "DFA_TRANSITIONS", "[I");
     mv.visitFieldInsn(GETSTATIC, className, "DFA_ACCEPTING", "[Z");
     mv.visitFieldInsn(GETSTATIC, className, "DFA_ASCII_CLASSES", "[I");
+    mv.visitFieldInsn(GETSTATIC, className, "DFA_START_ASCII", "[Z");
     mv.visitFieldInsn(GETSTATIC, className, "DFA_RANGE_STARTS", "[C");
     mv.visitFieldInsn(GETSTATIC, className, "DFA_RANGE_ENDS", "[C");
     mv.visitFieldInsn(GETSTATIC, className, "DFA_RANGE_CLASSES", "[I");
   }
 
   private static String tableCallDescriptor(String prefix, String suffix) {
-    return "(" + prefix + "II[I[Z[I[C[C[I" + suffix;
+    return "(" + prefix + "II[I[Z[I[Z[C[C[I" + suffix;
   }
 
   private static void newMatchResult(

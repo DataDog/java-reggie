@@ -46,6 +46,7 @@ public class DFATableBenchmark {
   private String matchingInput;
   private String searchInput;
   private String nonMatchingInput;
+  private String noStartCharSearchInput;
   private int[] bounds;
 
   @Setup
@@ -55,6 +56,7 @@ public class DFATableBenchmark {
     matchingInput = "a1".repeat(150);
     searchInput = "prefix-" + matchingInput + "-suffix";
     nonMatchingInput = matchingInput + "x";
+    noStartCharSearchInput = "-".repeat(1024);
     bounds = new int[2];
   }
 
@@ -87,6 +89,16 @@ public class DFATableBenchmark {
       bh.consume(bounds[1]);
     }
     return found;
+  }
+
+  @Benchmark
+  public boolean jdkFindNoStartChar() {
+    return jdk.matcher(noStartCharSearchInput).find();
+  }
+
+  @Benchmark
+  public boolean reggieFindBoundsNoStartChar() {
+    return reggie.findBoundsFrom(noStartCharSearchInput, 0, bounds);
   }
 
   @Benchmark

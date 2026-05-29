@@ -67,6 +67,7 @@ public final class DFATableRuntime {
       int[] transitions,
       boolean[] accepting,
       int[] asciiClasses,
+      boolean[] startAscii,
       char[] rangeStarts,
       char[] rangeEnds,
       int[] rangeClasses) {
@@ -101,6 +102,7 @@ public final class DFATableRuntime {
       int[] transitions,
       boolean[] accepting,
       int[] asciiClasses,
+      boolean[] startAscii,
       char[] rangeStarts,
       char[] rangeEnds,
       int[] rangeClasses) {
@@ -134,6 +136,7 @@ public final class DFATableRuntime {
       int[] transitions,
       boolean[] accepting,
       int[] asciiClasses,
+      boolean[] startAscii,
       char[] rangeStarts,
       char[] rangeEnds,
       int[] rangeClasses) {
@@ -146,12 +149,32 @@ public final class DFATableRuntime {
       return -1;
     }
 
-    for (int candidate = from; candidate <= length; candidate++) {
-      int state = startState;
+    if (startState < accepting.length && accepting[startState]) {
+      return from;
+    }
+
+    for (int candidate = from; candidate < length; candidate++) {
+      char first = input.charAt(candidate);
+      if (first < 128 && !startAscii[first]) {
+        continue;
+      }
+      int state =
+          nextState(
+              startState,
+              first,
+              classCount,
+              transitions,
+              asciiClasses,
+              rangeStarts,
+              rangeEnds,
+              rangeClasses);
+      if (state < 0) {
+        continue;
+      }
       if (state < accepting.length && accepting[state]) {
         return candidate;
       }
-      for (int pos = candidate; pos < length; pos++) {
+      for (int pos = candidate + 1; pos < length; pos++) {
         state =
             nextState(
                 state,
@@ -182,6 +205,7 @@ public final class DFATableRuntime {
       int[] transitions,
       boolean[] accepting,
       int[] asciiClasses,
+      boolean[] startAscii,
       char[] rangeStarts,
       char[] rangeEnds,
       int[] rangeClasses) {
@@ -194,14 +218,36 @@ public final class DFATableRuntime {
       return false;
     }
 
-    for (int candidate = from; candidate <= length; candidate++) {
-      int state = startState;
+    if (startState < accepting.length && accepting[startState]) {
+      bounds[0] = from;
+      bounds[1] = from;
+      return true;
+    }
+
+    for (int candidate = from; candidate < length; candidate++) {
+      char first = input.charAt(candidate);
+      if (first < 128 && !startAscii[first]) {
+        continue;
+      }
+      int state =
+          nextState(
+              startState,
+              first,
+              classCount,
+              transitions,
+              asciiClasses,
+              rangeStarts,
+              rangeEnds,
+              rangeClasses);
+      if (state < 0) {
+        continue;
+      }
       if (state < accepting.length && accepting[state]) {
         bounds[0] = candidate;
-        bounds[1] = candidate;
+        bounds[1] = candidate + 1;
         return true;
       }
-      for (int pos = candidate; pos < length; pos++) {
+      for (int pos = candidate + 1; pos < length; pos++) {
         state =
             nextState(
                 state,

@@ -30,6 +30,7 @@ public final class DFATableData {
   public final int[] transitions;
   public final boolean[] accepting;
   public final int[] asciiClasses;
+  public final boolean[] startAscii;
   public final char[] rangeStarts;
   public final char[] rangeEnds;
   public final int[] rangeClasses;
@@ -41,6 +42,7 @@ public final class DFATableData {
       int[] transitions,
       boolean[] accepting,
       int[] asciiClasses,
+      boolean[] startAscii,
       char[] rangeStarts,
       char[] rangeEnds,
       int[] rangeClasses) {
@@ -50,6 +52,7 @@ public final class DFATableData {
     this.transitions = transitions;
     this.accepting = accepting;
     this.asciiClasses = asciiClasses;
+    this.startAscii = startAscii;
     this.rangeStarts = rangeStarts;
     this.rangeEnds = rangeEnds;
     this.rangeClasses = rangeClasses;
@@ -140,8 +143,10 @@ public final class DFATableData {
     }
 
     int[] asciiClasses = new int[128];
+    boolean[] startAscii = new boolean[128];
     for (int ch = 0; ch < asciiClasses.length; ch++) {
       asciiClasses[ch] = classFor((char) ch, rangeStarts, rangeEnds, rangeClasses);
+      startAscii[ch] = transitions[dfa.getStartState().id * classCount + asciiClasses[ch]] >= 0;
     }
 
     return new DFATableData(
@@ -151,6 +156,7 @@ public final class DFATableData {
         transitions,
         accepting,
         asciiClasses,
+        startAscii,
         toCharArray(rangeStarts),
         toCharArray(rangeEnds),
         toIntArray(rangeClasses));
@@ -160,6 +166,7 @@ public final class DFATableData {
     return transitions.length * Integer.BYTES
         + accepting.length
         + asciiClasses.length * Integer.BYTES
+        + startAscii.length
         + rangeStarts.length * Character.BYTES
         + rangeEnds.length * Character.BYTES
         + rangeClasses.length * Integer.BYTES;
