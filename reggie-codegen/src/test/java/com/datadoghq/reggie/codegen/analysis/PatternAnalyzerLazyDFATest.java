@@ -44,8 +44,10 @@ class PatternAnalyzerLazyDFATest {
 
   @Test
   void testDoNotRouteWhenNFASmall() throws Exception {
-    // (a?){50} has ~100 NFA states — below threshold → stays OPTIMIZED_NFA
-    PatternAnalyzer.MatchingStrategyResult r = analyze("(a?){50}");
+    // (?:a?){50} has ~100 NFA states, no capturing groups, no anchors — below the 300-state
+    // threshold. Uses non-capturing group so the assertion exercises the size guard specifically
+    // (a capturing group would also be excluded by the group check).
+    PatternAnalyzer.MatchingStrategyResult r = analyze("(?:a?){50}");
     assertNotEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
   }
 

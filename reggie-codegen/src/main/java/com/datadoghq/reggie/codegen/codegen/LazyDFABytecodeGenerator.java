@@ -268,6 +268,25 @@ public class LazyDFABytecodeGenerator {
    * to {@code nfaStep} so the generated class satisfies the {@code NfaStep} contract without
    * requiring INVOKEDYNAMIC/LambdaMetafactory (which is problematic in hidden classes).
    */
+  /**
+   * Emits {@code public boolean matches(String input)} as a plain delegation to the public {@code
+   * CACHE.matches(input, this)} call. Unlike {@link #generateMatchesMethod}, this version accesses
+   * no package-private {@code LazyDFACache} members and is safe to emit for AOT classes that live
+   * outside {@code com.datadoghq.reggie.runtime}.
+   */
+  public void generateMatchesDelegatingMethod(ClassWriter cw, String className) {
+    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
+    mv.visitCode();
+    mv.visitFieldInsn(GETSTATIC, className, "CACHE", "L" + LAZY_CACHE + ";");
+    mv.visitVarInsn(ALOAD, 1); // input
+    mv.visitVarInsn(ALOAD, 0); // this (implements NfaStep)
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, LAZY_CACHE, "matches", "(Ljava/lang/String;L" + NFA_STEP + ";)Z", false);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
   public void generateApplyMethod(ClassWriter cw, String className) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "apply", "([II)[I", null, null);
     mv.visitCode();

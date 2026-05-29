@@ -511,7 +511,9 @@ public class ReggieMatcherBytecodeGenerator {
           lazyGen.generateStaticFields(cw, getJavaClassName());
           lazyGen.generateNfaStepMethod(cw, getJavaClassName());
           lazyGen.generateApplyMethod(cw, getJavaClassName());
-          lazyGen.generateMatchesMethod(cw, getJavaClassName());
+          // Use the delegating (non-inlined) matches() — the AOT class lives in the user's package
+          // and cannot access package-private LazyDFACache members that the inlined version uses.
+          lazyGen.generateMatchesDelegatingMethod(cw, getJavaClassName());
           lazyGen.generateMatchMethod(cw, getJavaClassName());
           // CharSequence abstract methods required by ReggieMatcher.
           lazyGen.generateMatchesBoundedMethod(cw, getJavaClassName());
