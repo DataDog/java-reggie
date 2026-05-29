@@ -45,15 +45,19 @@ public final class LazyDFACache {
   static final VarHandle TABLES_VH;
 
   /**
-   * Array-element VarHandle for {@code int[]} slots. Used to write individual transition entries
-   * into an already-published ASCII table with release semantics ({@link #cacheEntry}) and to read
-   * them with acquire semantics ({@link #matches} and the generated hot loop). This pairs with the
-   * {@code nfaStateSets[newId]} and {@code accepting[newId]} initialization done inside {@code
-   * computeIfAbsent} on the writer thread, ensuring those writes are visible to any reader that
-   * subsequently observes the new DFA state id via {@code getAcquire}. On x86/TSO these compile to
-   * plain store/load (zero overhead); on ARM they emit {@code stlr}/{@code ldar}.
+   * Array-element VarHandle for {@code int[]} slots. Used to publish individual transition entries
+   * with release semantics in {@link #cacheEntry} and to read them with acquire semantics on
+   * weakly-ordered platforms (ARM/RISC-V). On x86/TSO (Total Store Order), plain loads already
+   * carry acquire semantics, so the acquire read is skipped to avoid VarHandle dispatch overhead.
    */
   static final VarHandle INT_ARRAY_VH;
+
+  /**
+   * {@code true} on weakly-ordered architectures (ARM, RISC-V) where element-level acquire reads
+   * are required to pair with {@link #INT_ARRAY_VH} release writes. {@code false} on x86/TSO where
+   * plain array loads are sufficient and the VarHandle overhead is avoided.
+   */
+  static final boolean NEEDS_INT_ARRAY_ACQUIRE;
 
   static {
     try {
@@ -62,6 +66,14 @@ public final class LazyDFACache {
     } catch (Exception e) {
       throw new ExceptionInInitializerError(e);
     }
+    String arch = System.getProperty("os.arch", "");
+    // x86 and x86_64 use TSO — plain loads carry acquire semantics at no extra cost.
+    // Everything else (aarch64, riscv, ppc, ...) requires explicit acquire reads.
+    NEEDS_INT_ARRAY_ACQUIRE =
+        !arch.equals("x86")
+            && !arch.equals("x86_64")
+            && !arch.equals("amd64")
+            && !arch.equals("i386");
   }
 
   static final int DEFAULT_CAP = 4096;
@@ -103,7 +115,10 @@ public final class LazyDFACache {
     for (int pos = 0; pos < input.length(); pos++) {
       int c = input.charAt(pos);
       int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
-      int next = (table != null && c < 128) ? (int) INT_ARRAY_VH.getAcquire(table, c) : UNCACHED;
+      int next =
+          (table != null && c < 128)
+              ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
+              : UNCACHED;
       if (next == UNCACHED) {
         next = lookupOrCompute(dfaState, c, nfaStep);
       }
@@ -178,7 +193,10 @@ public final class LazyDFACache {
     for (int pos = start; pos < end; pos++) {
       int c = input.charAt(pos);
       int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
-      int next = (table != null && c < 128) ? (int) INT_ARRAY_VH.getAcquire(table, c) : UNCACHED;
+      int next =
+          (table != null && c < 128)
+              ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
+              : UNCACHED;
       if (next == UNCACHED) {
         next = lookupOrCompute(dfaState, c, nfaStep);
       }
