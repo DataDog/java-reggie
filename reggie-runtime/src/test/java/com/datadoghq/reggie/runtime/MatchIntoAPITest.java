@@ -107,6 +107,25 @@ class MatchIntoAPITest {
   }
 
   @Test
+  void recursiveDescentMatcherOverridesMatchInto() throws Exception {
+    ReggieMatcher matcher = Reggie.compile("(a(?R)?b)");
+    int[] starts = new int[2];
+    int[] ends = new int[2];
+
+    assertNotEquals(
+        ReggieMatcher.class,
+        matcher
+            .getClass()
+            .getMethod("matchInto", String.class, int[].class, int[].class)
+            .getDeclaringClass());
+    assertTrue(matcher.matchInto("aabb", starts, ends));
+
+    MatchResult match = matcher.match("aabb");
+    assertArrayEquals(new int[] {match.start(0), match.start(1)}, starts);
+    assertArrayEquals(new int[] {match.end(0), match.end(1)}, ends);
+  }
+
+  @Test
   void tooSmallArraysThrowOnSuccessfulMatch() {
     ReggieMatcher matcher = Reggie.compile("(a)(b)");
     int[] starts = new int[2];

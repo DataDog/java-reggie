@@ -121,7 +121,8 @@ public class ReggieMatcherBytecodeGenerator {
             || strategy == PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD
             || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS
             || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS;
-    generateConstructor(cw, needsNFAState, nfa, nameMap);
+    boolean needsRecursiveDescent = strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
+    generateConstructor(cw, needsNFAState, needsRecursiveDescent, nfa, nameMap);
 
     // Generate methods based on strategy
     switch (strategy) {
@@ -436,6 +437,7 @@ public class ReggieMatcherBytecodeGenerator {
 
         // Generate public API methods (these call the parser methods)
         recursiveGen.generateMatchesMethod(cw, getJavaClassName());
+        recursiveGen.generateMatchIntoMethod(cw, getJavaClassName());
         recursiveGen.generateFindMethod(cw, getJavaClassName());
         recursiveGen.generateFindFromMethod(cw, getJavaClassName());
         recursiveGen.generateFindBoundsFromMethod(cw, getJavaClassName());
@@ -591,7 +593,11 @@ public class ReggieMatcherBytecodeGenerator {
    * for NFA-based strategies.
    */
   private void generateConstructor(
-      ClassWriter cw, boolean needsNFAState, NFA nfa, Map<String, Integer> nameMap) {
+      ClassWriter cw,
+      boolean needsNFAState,
+      boolean needsRecursiveDescent,
+      NFA nfa,
+      Map<String, Integer> nameMap) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
     mv.visitCode();
 
@@ -619,6 +625,17 @@ public class ReggieMatcherBytecodeGenerator {
           "com/datadoghq/reggie/runtime/ReggieMatcher",
           "initNFAState",
           "(II)V",
+          false);
+    }
+
+    if (needsRecursiveDescent) {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitLdcInsn(nfa != null ? nfa.getGroupCount() : countGroups(pattern)); // groupCount
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "initRecursiveState",
+          "(I)V",
           false);
     }
 

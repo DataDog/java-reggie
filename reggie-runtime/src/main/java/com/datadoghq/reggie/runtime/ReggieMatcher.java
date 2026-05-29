@@ -56,6 +56,7 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   protected int[][] configGroupStarts;
   protected int[][] configGroupEnds;
   protected int[] parentStateMap;
+  protected int[] recursiveGroups;
 
   // Stateful iterators for efficient BitSet iteration
   // Pre-allocated to avoid allocation overhead in hot path
@@ -92,6 +93,13 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
         this.configGroupEnds = new int[stateCount][groupCount + 1];
         this.parentStateMap = new int[stateCount];
       }
+    }
+  }
+
+  /** Initialize reusable state for recursive-descent matchers. */
+  protected void initRecursiveState(int groupCount) {
+    if (this.recursiveGroups == null) {
+      this.recursiveGroups = new int[(groupCount + 1) * 2];
     }
   }
 

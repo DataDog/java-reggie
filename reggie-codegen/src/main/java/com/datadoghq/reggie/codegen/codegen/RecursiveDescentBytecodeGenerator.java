@@ -1243,6 +1243,152 @@ public class RecursiveDescentBytecodeGenerator {
   }
 
   /**
+   * Generate matchInto() method that writes capture boundaries directly into caller-provided
+   * arrays. Signature: public boolean matchInto(String input, int[] groupStarts, int[] groupEnds)
+   */
+  public void generateMatchIntoMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
+    mv.visitCode();
+
+    // Local vars: 0=this, 1=input, 2=groupStarts, 3=groupEnds
+    LocalVarAllocator allocator = new LocalVarAllocator(4);
+    int groupsVar = allocator.allocate();
+    int resultVar = allocator.allocate();
+    int iVar = allocator.allocate();
+    int requiredGroups = groupCount + 1;
+
+    // Objects.requireNonNull(input/groupStarts/groupEnds)
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitLdcInsn("input");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitLdcInsn("groupStarts");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitLdcInsn("groupEnds");
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;",
+        false);
+    mv.visitInsn(POP);
+
+    Label startsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ARRAYLENGTH);
+    BytecodeUtil.pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, startsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(startsLengthOk);
+
+    Label endsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ARRAYLENGTH);
+    BytecodeUtil.pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, endsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(endsLengthOk);
+
+    // int[] groups = this.recursiveGroups;
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(
+        GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "recursiveGroups", "[I");
+    mv.visitVarInsn(ASTORE, groupsVar);
+
+    // Initialize packed groups to -1. Caller arrays remain unchanged until success.
+    Label initLoopStart = new Label();
+    Label initLoopEnd = new Label();
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, iVar);
+
+    mv.visitLabel(initLoopStart);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitInsn(ARRAYLENGTH);
+    mv.visitJumpInsn(IF_ICMPGE, initLoopEnd);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IASTORE);
+    mv.visitIincInsn(iVar, 1);
+    mv.visitJumpInsn(GOTO, initLoopStart);
+    mv.visitLabel(initLoopEnd);
+
+    // int result = parseRoot(input, 0, input.length(), groups, 0)
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
+    mv.visitVarInsn(ISTORE, resultVar);
+
+    // Full-match check.
+    mv.visitVarInsn(ILOAD, resultVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    Label matchFailed = new Label();
+    mv.visitJumpInsn(IF_ICMPNE, matchFailed);
+
+    // Copy packed groups into caller arrays: starts[i] = groups[2*i], ends[i] = groups[2*i + 1]
+    for (int i = 0; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 2);
+      BytecodeUtil.pushInt(mv, i);
+      mv.visitVarInsn(ALOAD, groupsVar);
+      BytecodeUtil.pushInt(mv, i * 2);
+      mv.visitInsn(IALOAD);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, 3);
+      BytecodeUtil.pushInt(mv, i);
+      mv.visitVarInsn(ALOAD, groupsVar);
+      BytecodeUtil.pushInt(mv, i * 2 + 1);
+      mv.visitInsn(IALOAD);
+      mv.visitInsn(IASTORE);
+    }
+
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+
+    mv.visitLabel(matchFailed);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(6, allocator.peek());
+    mv.visitEnd();
+  }
+
+  private void generateGroupArrayTooSmallThrow(MethodVisitor mv, int requiredGroups) {
+    mv.visitTypeInsn(NEW, "java/lang/IndexOutOfBoundsException");
+    mv.visitInsn(DUP);
+    mv.visitLdcInsn(
+        "group arrays must have length at least " + requiredGroups + " for this pattern");
+    mv.visitMethodInsn(
+        INVOKESPECIAL,
+        "java/lang/IndexOutOfBoundsException",
+        "<init>",
+        "(Ljava/lang/String;)V",
+        false);
+    mv.visitInsn(ATHROW);
+  }
+
+  /**
    * Generate find method - searches for pattern in the input string. Signature: public boolean
    * find(String input)
    */

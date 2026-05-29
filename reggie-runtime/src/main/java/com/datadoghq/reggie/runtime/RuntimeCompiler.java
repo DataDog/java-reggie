@@ -768,6 +768,7 @@ public class RuntimeCompiler {
 
         // Now generate public API methods (these call the parser methods)
         recursiveGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        recursiveGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -866,8 +867,16 @@ public class RuntimeCompiler {
           false);
     }
 
-    // Recursive descent doesn't need special constructor initialization
-    // Parser state is managed in the parser methods themselves
+    if (needsRecursiveDescent) {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitLdcInsn(nfa != null ? nfa.getGroupCount() : countGroups(pattern)); // groupCount
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "initRecursiveState",
+          "(I)V",
+          false);
+    }
 
     mv.visitInsn(RETURN);
     mv.visitMaxs(0, 0);
