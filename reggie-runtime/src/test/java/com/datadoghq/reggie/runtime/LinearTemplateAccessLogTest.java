@@ -24,7 +24,7 @@ import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
 
-class AccessLogGrokSpecializationTest {
+class LinearTemplateAccessLogTest {
   private static final ReggieOptions NAMED_ONLY =
       ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build();
 
