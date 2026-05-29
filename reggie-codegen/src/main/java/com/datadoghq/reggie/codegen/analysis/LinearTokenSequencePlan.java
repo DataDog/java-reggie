@@ -36,6 +36,7 @@ public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
     CAPTURE_QUOTED_NON_SPACE,
     CAPTURE_IP_OR_HOST,
     CAPTURE_SIGNED_INTEGER_OR_DASH,
+    CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH,
     CAPTURE_BRACKETED_WORD_AFTER_SKIP,
     SKIP_ANY,
     ANCHOR,
@@ -115,6 +116,8 @@ public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
       case SIGNED_INTEGER -> Op.capture(OpKind.CAPTURE_SIGNED_INTEGER, atom.groupNumber());
       case SIGNED_INTEGER_OR_DASH ->
           Op.capture(OpKind.CAPTURE_SIGNED_INTEGER_OR_DASH, atom.groupNumber());
+      case SIGNED_INTEGER_OR_UNCAPTURED_DASH ->
+          Op.capture(OpKind.CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH, atom.groupNumber());
       case DECIMAL_NUMBER -> Op.capture(OpKind.CAPTURE_DECIMAL_NUMBER, atom.groupNumber());
       case SIGNED_DECIMAL_NUMBER ->
           Op.capture(OpKind.CAPTURE_SIGNED_DECIMAL_NUMBER, atom.groupNumber());

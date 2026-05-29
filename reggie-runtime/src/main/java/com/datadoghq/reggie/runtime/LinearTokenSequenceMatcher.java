@@ -159,7 +159,9 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       case CAPTURE_SIGNED_INTEGER ->
           captureSignedInteger(input, pos, op.groupNumber(), starts, ends);
       case CAPTURE_SIGNED_INTEGER_OR_DASH ->
-          captureSignedIntegerOrDash(input, pos, op.groupNumber(), starts, ends);
+          captureSignedIntegerOrDash(input, pos, op.groupNumber(), starts, ends, true);
+      case CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH ->
+          captureSignedIntegerOrDash(input, pos, op.groupNumber(), starts, ends, false);
       case CAPTURE_DECIMAL_NUMBER ->
           captureDecimal(input, pos, op.groupNumber(), starts, ends, false);
       case CAPTURE_SIGNED_DECIMAL_NUMBER ->
@@ -208,8 +210,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static int captureSignedIntegerOrDash(
-      String input, int pos, int group, int[] starts, int[] ends) {
-    if (pos < input.length() && input.charAt(pos) == '-') return pos + 1;
+      String input, int pos, int group, int[] starts, int[] ends, boolean captureDash) {
+    if (pos < input.length() && input.charAt(pos) == '-') {
+      if (captureDash) set(starts, ends, group, pos, pos + 1);
+      return pos + 1;
+    }
     return captureSignedInteger(input, pos, group, starts, ends);
   }
 

@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -90,6 +91,40 @@ class LinearTokenSequenceMatcherTest {
     assertEquals("api.example.com", result.group("host"));
     assertEquals("200", result.group("status"));
     assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
+  }
+
+  @Test
+  void namedOnlyProjectionRunsBeforeLinearTokenRouting() throws Exception {
+    ReggieMatcher matcher = Reggie.compile("(?<host>\\S+) (\\d+)", NAMED_ONLY_OPTIONS);
+    int[] starts = new int[] {777, 777, 777};
+    int[] ends = new int[] {888, 888, 888};
+
+    assertTrue(matcher.matchInto("api.example.com 200", starts, ends));
+
+    assertEquals("api.example.com", "api.example.com 200".substring(starts[1], ends[1]));
+    assertEquals(-1, starts[2]);
+    assertEquals(-1, ends[2]);
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
+  }
+
+  @Test
+  void capturedDashAlternativeRecordsNamedGroupSpan() throws Exception {
+    ReggieMatcher matcher = Reggie.compile("(?<bytes>(?:-|[+-]?\\d+))", NAMED_ONLY_OPTIONS);
+
+    MatchResult dash = matcher.match("-");
+    MatchResult digits = matcher.match("42");
+
+    assertEquals("-", dash.group("bytes"));
+    assertEquals("42", digits.group("bytes"));
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
+  }
+
+  @Test
+  void ambiguousOptionalSequencesUseGeneralRegexRoute() {
+    ReggieMatcher matcher = Reggie.compile("(?:a|)a", NAMED_ONLY_OPTIONS);
+
+    assertTrue(matcher.matches("a"));
+    assertNotEquals(LinearTokenSequenceMatcher.class, matcher.getClass());
   }
 
   @Test

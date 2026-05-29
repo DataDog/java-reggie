@@ -171,12 +171,12 @@ public class RuntimeCompiler {
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
       if (options.capturePolicy() == CapturePolicy.NAMED_ONLY) {
+        ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
         ReggieMatcher linearTokenSequenceMatcher =
             tryCompileLinearTokenSequence(pattern, ast, nameMap);
         if (linearTokenSequenceMatcher != null) {
           return linearTokenSequenceMatcher;
         }
-        ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
       }
 
       // 2. Check if pattern requires recursive descent (context-free features)
@@ -316,8 +316,26 @@ public class RuntimeCompiler {
       if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY && i != plan.ops().size() - 1) {
         return false;
       }
+      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
+          && i + 1 < plan.ops().size()
+          && canOptionalPresentBranchStealFollowingInput(op, plan.ops().get(i + 1))) {
+        return false;
+      }
     }
     return true;
+  }
+
+  private static boolean canOptionalPresentBranchStealFollowingInput(
+      LinearTokenSequencePlan.Op optional, LinearTokenSequencePlan.Op next) {
+    if (optional.children().isEmpty()) return false;
+    LinearTokenSequencePlan.Op first = optional.children().get(0);
+    if (first.kind() == LinearTokenSequencePlan.OpKind.LITERAL
+        && next.kind() == LinearTokenSequencePlan.OpKind.LITERAL) {
+      return !first.literal().isEmpty()
+          && !next.literal().isEmpty()
+          && first.literal().charAt(0) == next.literal().charAt(0);
+    }
+    return false;
   }
 
   /**

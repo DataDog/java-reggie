@@ -323,10 +323,12 @@ public final class PatternCategorizer {
           hasInteger = true;
         }
       }
-      return hasDash && hasInteger
-          ? PatternAtom.captured(
-              PatternAtom.Kind.SIGNED_INTEGER_OR_DASH, capturedGroupNumber, capturedGroupName)
-          : null;
+      if (!hasDash || !hasInteger) return null;
+      PatternAtom.Kind kind =
+          groupNumber > 0
+              ? PatternAtom.Kind.SIGNED_INTEGER_OR_DASH
+              : PatternAtom.Kind.SIGNED_INTEGER_OR_UNCAPTURED_DASH;
+      return PatternAtom.captured(kind, capturedGroupNumber, capturedGroupName);
     }
 
     private static boolean isEmptyAlternative(RegexNode node) {
