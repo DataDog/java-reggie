@@ -287,6 +287,11 @@ public class RegexParser {
       } else if (peek() == '|') {
         // Branch reset: (?|alt1|alt2)
         return parseBranchReset();
+      } else if (peek() == '>') {
+        // Atomic group: (?>X). Reggie has no backtracking in its DFA/NFA engines, so the
+        // backtracking-prevention hint has the same language semantics as a non-capturing group.
+        consume();
+        capturing = false;
       } else {
         throw new UnsupportedPatternException(
             "Unsupported special group construct at position " + pos);
@@ -522,6 +527,9 @@ public class RegexParser {
       case 'g':
         // PCRE backreference: \g{N}, \g{-N}, or \g{name}
         return parseGBackreference();
+      case 'Q':
+        // Quoted literal: \Q...\E
+        return parseQuotedLiteral();
       default:
         // Escaped literal (e.g., \., \*, \+)
         return new LiteralNode(ch);
@@ -713,6 +721,27 @@ public class RegexParser {
 
       return new BackreferenceNode(groupNum, name);
     }
+  }
+
+  /**
+   * Parse a quoted literal sequence: \Q...\E. Consumes all characters until \E (or end of pattern)
+   * and returns them as literal AST nodes.
+   */
+  private RegexNode parseQuotedLiteral() {
+    List<RegexNode> parts = new ArrayList<>();
+    while (hasMore()) {
+      char ch = consume();
+      if (ch == '\\' && hasMore() && peek() == 'E') {
+        consume(); // consume 'E'
+        break;
+      }
+      parts.add(new LiteralNode(ch));
+    }
+
+    if (parts.isEmpty()) {
+      return new LiteralNode((char) 0);
+    }
+    return parts.size() == 1 ? parts.get(0) : new ConcatNode(parts);
   }
 
   private RegexNode parseAnchor() throws ParseException {
