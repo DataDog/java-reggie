@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
 import com.datadoghq.reggie.codegen.automaton.CharSet;
@@ -37,7 +38,8 @@ public class LazyDFABytecodeGenerator {
   private static final String NFA_STEP = "com/datadoghq/reggie/runtime/NfaStep";
   private static final String ARRAYS = "java/util/Arrays";
 
-  // Mirrors of LazyDFACache sentinels — must stay in sync.
+  // Mirrors of LazyDFACache.UNCACHED/DEAD/FALLBACK. Cannot import directly because
+  // reggie-codegen does not depend on reggie-runtime at compile time. Update both if changed.
   private static final int UNCACHED = -1;
   private static final int DEAD = -2;
   private static final int FALLBACK = -3;
@@ -758,12 +760,5 @@ public class LazyDFABytecodeGenerator {
       result[state.id] = closure.stream().mapToInt(Integer::intValue).sorted().toArray();
     }
     return result;
-  }
-
-  static void pushInt(MethodVisitor mv, int v) {
-    if (v >= -1 && v <= 5) mv.visitInsn(ICONST_0 + v);
-    else if (v >= Byte.MIN_VALUE && v <= Byte.MAX_VALUE) mv.visitIntInsn(BIPUSH, v);
-    else if (v >= Short.MIN_VALUE && v <= Short.MAX_VALUE) mv.visitIntInsn(SIPUSH, v);
-    else mv.visitLdcInsn(v);
   }
 }
