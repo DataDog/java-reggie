@@ -28,7 +28,7 @@ public final class LazyDFACache {
   static final int FALLBACK = -3;
 
   private final ConcurrentHashMap<StateSetKey, Integer> stateIndex;
-  private final Object[] asciiTables; // asciiTables[id] = int[128] or null
+  private final int[][] asciiTables; // asciiTables[id] = int[128] or null
   private final int[][] nfaStateSets; // nfaStateSets[id] = sorted NFA state IDs
   private final boolean[] accepting;
   private final int[] acceptStateIds;
@@ -45,7 +45,7 @@ public final class LazyDFACache {
     this.cap = cap;
     this.acceptStateIds = acceptStateIds;
     this.stateIndex = new ConcurrentHashMap<>();
-    this.asciiTables = new Object[cap];
+    this.asciiTables = new int[cap][];
     this.nfaStateSets = new int[cap][];
     this.accepting = new boolean[cap];
     this.nextId = new AtomicInteger(1); // 0 = start state
@@ -59,7 +59,7 @@ public final class LazyDFACache {
     int dfaState = 0;
     for (int pos = 0; pos < input.length(); pos++) {
       int c = input.charAt(pos);
-      int[] table = (int[]) asciiTables[dfaState];
+      int[] table = asciiTables[dfaState];
       int next = (table != null && c < 128) ? table[c] : UNCACHED;
       if (next == UNCACHED) {
         next = lookupOrCompute(dfaState, c, nfaStep);
@@ -98,7 +98,7 @@ public final class LazyDFACache {
     if (id == null || id >= cap) return FALLBACK;
 
     if (c < 128) {
-      int[] table = (int[]) asciiTables[state];
+      int[] table = asciiTables[state];
       if (table == null) {
         int[] t = new int[128];
         Arrays.fill(t, UNCACHED);
