@@ -165,6 +165,88 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   public abstract MatchResult findMatchFrom(String input, int start);
 
   /**
+   * Tests whether the entire input string matches and stores group boundaries in caller-provided
+   * arrays. Group 0 is the entire match; groups 1..n are capturing groups. Unmatched optional
+   * groups are stored as {@code -1} in both arrays.
+   *
+   * <p>The default implementation delegates to {@link #match(String)} and therefore may allocate.
+   * Bytecode generators can override this method to populate the arrays directly.
+   *
+   * @param input the string to match
+   * @param groupStarts caller-provided array for group start offsets
+   * @param groupEnds caller-provided array for group end offsets
+   * @return true if the entire input matches; false otherwise, leaving arrays unchanged
+   * @throws NullPointerException if any argument is null
+   * @throws IndexOutOfBoundsException if the arrays are too small for the matched pattern's groups
+   */
+  public boolean matchInto(String input, int[] groupStarts, int[] groupEnds) {
+    Objects.requireNonNull(input, "input");
+    Objects.requireNonNull(groupStarts, "groupStarts");
+    Objects.requireNonNull(groupEnds, "groupEnds");
+
+    MatchResult match = match(input);
+    if (match == null) {
+      return false;
+    }
+    copyGroups(match, groupStarts, groupEnds);
+    return true;
+  }
+
+  /**
+   * Finds the first match and stores group boundaries in caller-provided arrays. Equivalent to
+   * {@link #findMatchInto(String, int, int[], int[])} with {@code start == 0}.
+   *
+   * @param input the string to search
+   * @param groupStarts caller-provided array for group start offsets
+   * @param groupEnds caller-provided array for group end offsets
+   * @return true if a match is found; false otherwise, leaving arrays unchanged
+   */
+  public boolean findMatchInto(String input, int[] groupStarts, int[] groupEnds) {
+    return findMatchInto(input, 0, groupStarts, groupEnds);
+  }
+
+  /**
+   * Finds a match starting at the given offset and stores group boundaries in caller-provided
+   * arrays. Group 0 is the entire match; groups 1..n are capturing groups. Unmatched optional
+   * groups are stored as {@code -1} in both arrays.
+   *
+   * <p>The default implementation delegates to {@link #findMatchFrom(String, int)} and therefore
+   * may allocate. Bytecode generators can override this method to populate the arrays directly.
+   *
+   * @param input the string to search
+   * @param start the starting offset
+   * @param groupStarts caller-provided array for group start offsets
+   * @param groupEnds caller-provided array for group end offsets
+   * @return true if a match is found; false otherwise, leaving arrays unchanged
+   * @throws NullPointerException if any array/input argument is null
+   * @throws IndexOutOfBoundsException if the arrays are too small for the matched pattern's groups
+   */
+  public boolean findMatchInto(String input, int start, int[] groupStarts, int[] groupEnds) {
+    Objects.requireNonNull(input, "input");
+    Objects.requireNonNull(groupStarts, "groupStarts");
+    Objects.requireNonNull(groupEnds, "groupEnds");
+
+    MatchResult match = findMatchFrom(input, start);
+    if (match == null) {
+      return false;
+    }
+    copyGroups(match, groupStarts, groupEnds);
+    return true;
+  }
+
+  protected static void copyGroups(MatchResult match, int[] groupStarts, int[] groupEnds) {
+    int groups = match.groupCount();
+    if (groupStarts.length <= groups || groupEnds.length <= groups) {
+      throw new IndexOutOfBoundsException(
+          "group arrays must have length at least " + (groups + 1) + " for this pattern");
+    }
+    for (int i = 0; i <= groups; i++) {
+      groupStarts[i] = match.start(i);
+      groupEnds[i] = match.end(i);
+    }
+  }
+
+  /**
    * Finds the pattern starting at the given offset and stores match boundaries in the provided
    * array. This is an allocation-free alternative to findMatchFrom() for operations that only need
    * match positions (like literal replacements without backreferences).

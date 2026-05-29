@@ -54,6 +54,14 @@ public class HybridMatcher extends ReggieMatcher {
   }
 
   @Override
+  public boolean matchInto(String input, int[] groupStarts, int[] groupEnds) {
+    if (!dfaMatcher.matches(input)) {
+      return false;
+    }
+    return nfaMatcher.matchInto(input, groupStarts, groupEnds);
+  }
+
+  @Override
   public boolean matchesBounded(CharSequence input, int start, int end) {
     return dfaMatcher.matchesBounded(input, start, end);
   }

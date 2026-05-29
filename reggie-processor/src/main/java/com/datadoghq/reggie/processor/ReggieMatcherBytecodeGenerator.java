@@ -235,6 +235,7 @@ public class ReggieMatcherBytecodeGenerator {
         switchGen.generateFindFromMethod(cw, getJavaClassName());
         switchGen.generateMatchesAtStartMethod(cw);
         switchGen.generateMatchMethod(cw, getJavaClassName());
+        switchGen.generateMatchIntoMethod(cw, getJavaClassName());
         switchGen.generateMatchesBoundedMethod(cw, getJavaClassName());
         switchGen.generateMatchBoundedMethod(cw, getJavaClassName());
         switchGen.generateFindMatchMethod(cw, getJavaClassName());

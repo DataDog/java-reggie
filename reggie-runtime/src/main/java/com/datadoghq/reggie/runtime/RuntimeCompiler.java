@@ -556,6 +556,7 @@ public class RuntimeCompiler {
         switchGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchesAtStartMethod(cw); // Required by findFrom
         switchGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        switchGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);

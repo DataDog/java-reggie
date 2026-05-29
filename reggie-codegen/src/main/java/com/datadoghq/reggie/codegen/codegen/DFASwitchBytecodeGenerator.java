@@ -1115,6 +1115,64 @@ public class DFASwitchBytecodeGenerator {
   }
 
   /**
+   * Generates matchInto(String, int[], int[]) method. This is the allocation-free equivalent of
+   * match(String): it writes group 0 and capture group boundaries into caller-provided arrays.
+   */
+  public void generateMatchIntoMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
+    mv.visitCode();
+
+    if (groupCount > 0 && hasGroupActions()) {
+      generateMatchIntoWithGroupTracking(mv);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
+
+    // if (!matches(input)) return false;
+    Label matchSuccess = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className.replace('.', '/'), "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitJumpInsn(IFNE, matchSuccess);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitLabel(matchSuccess);
+
+    // groupStarts[0] = 0; groupEnds[0] = input.length();
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitInsn(IASTORE);
+
+    // Initialize inner groups to -1 when the DFA has group slots but no group actions.
+    for (int i = 1; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 2);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, 3);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
    * Generates matchesBounded() method - boolean bounded matching (allocation-free). Uses
    * switch-based DFA on the bounded region [start, end).
    *
@@ -2144,6 +2202,86 @@ public class DFASwitchBytecodeGenerator {
     mv.visitInsn(ARETURN);
   }
 
+  /** Generate matchInto() method body with inline group tracking during DFA execution. */
+  private void generateMatchIntoWithGroupTracking(MethodVisitor mv) {
+    // Slots: 0=this, 1=input, 2=groupStarts, 3=groupEnds
+    LocalVarAllocator allocator = new LocalVarAllocator(4);
+
+    // if (input == null) return false;
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notNull);
+
+    int stateVar = allocator.allocate();
+    pushInt(mv, dfa.getStartState().id);
+    mv.visitVarInsn(ISTORE, stateVar);
+
+    int posVar = allocator.allocate();
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    int chVar = allocator.allocate();
+
+    // Initialize group 0 and inner groups in the caller-provided arrays.
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+
+    for (int i = 1; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 2);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, 3);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+
+    generateGroupActionsForState(mv, dfa.getStartState(), posVar, 2, 3);
+
+    Label loopStart = new Label();
+    Label loopEnd = new Label();
+
+    mv.visitLabel(loopStart);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    mv.visitIincInsn(posVar, 1);
+
+    generateStateSwitchWithGroupTrackingReturningFalse(
+        mv, stateVar, chVar, posVar, 2, 3, loopStart);
+
+    mv.visitLabel(loopEnd);
+
+    Label isAccept = new Label();
+    generateAcceptCheck(mv, stateVar, isAccept);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitLabel(isAccept);
+
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitInsn(IASTORE);
+
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+  }
+
   /** Generate switch statement with group tracking. */
   private void generateStateSwitchWithGroupTracking(
       MethodVisitor mv,
@@ -2184,6 +2322,44 @@ public class DFASwitchBytecodeGenerator {
     mv.visitLabel(defaultLabel);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
+  }
+
+  /** Generate switch statement with group tracking for boolean matchInto(). */
+  private void generateStateSwitchWithGroupTrackingReturningFalse(
+      MethodVisitor mv,
+      int stateVar,
+      int chVar,
+      int posVar,
+      int groupStartsVar,
+      int groupEndsVar,
+      Label loopStart) {
+    Label defaultLabel = new Label();
+    Label[] caseLabels = new Label[dfa.getAllStates().size()];
+
+    for (int i = 0; i < dfa.getAllStates().size(); i++) {
+      caseLabels[i] = new Label();
+    }
+
+    mv.visitVarInsn(ILOAD, stateVar);
+    mv.visitTableSwitchInsn(0, dfa.getAllStates().size() - 1, defaultLabel, caseLabels);
+
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      mv.visitLabel(caseLabels[state.id]);
+      generateStateCaseCodeWithGroupTracking(
+          mv,
+          state,
+          stateVar,
+          chVar,
+          posVar,
+          groupStartsVar,
+          groupEndsVar,
+          loopStart,
+          defaultLabel);
+    }
+
+    mv.visitLabel(defaultLabel);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
   }
 
   /** Generate case code for a state with group tracking. */
