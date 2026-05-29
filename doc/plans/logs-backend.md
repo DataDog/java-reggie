@@ -62,3 +62,41 @@ Key parser locations:
 - parseGroup() line 291 — (?> catch-all throw
 - parseEscape() line 527 — \Q/\E silent default
 - Source: reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/parsing/RegexParser.java
+---
+
+## Final adoption architecture/status
+
+The logs-backend Grok access-log path now uses a native, deterministic Reggie route under
+`CapturePolicy.NAMED_ONLY`:
+
+```
+regex AST -> PatternCategorizer -> LinearTokenSequencePlan -> LinearTokenSequenceMatcher
+```
+
+Important properties:
+
+- The route is structural: it categorizes reusable token atoms (IP/host, non-space fields,
+  quoted fields, integers, decimals, optional request fragments, delimiter captures, and trailing
+  bracketed logger capture). It does **not** route by exact pattern string or `grokN` capture names.
+- `CapturePolicy.NAMED_ONLY` preserves original named group indexes so Grok can continue calling
+  `group(originalIndex)` after discovering names from the expanded regex.
+- The old ad-hoc `AccessLogGrokMatcher` oracle has been removed; production routing now depends on
+  the generic categorizer/planner/runtime matcher only.
+- The two real expanded logs-backend Grok patterns are committed as runtime test resources and have
+  regression tests proving they route through `LinearTokenSequenceMatcher`.
+- JDK/Reggie named capture-boundary equivalence is tested for the real expanded patterns across
+  common/combined access logs, optional method/version fields, `-` byte count, empty quoted fields,
+  IPv6/hostname clients, and logger bracket decoys.
+
+Integrated benchmark after scratch-state reuse and oracle removal (`-wi 2 -i 3 -f 2 -prof gc`):
+
+| Engine | Score | Allocation |
+|---|---:|---:|
+| JDK regex | 16.210 ± 2.128 us/op | 7701.393 ± 154.805 B/op |
+| Reggie native token sequence | 2.353 ± 0.161 us/op | 7682.979 ± 61.845 B/op |
+
+Target coverage for the logs-backend benchmark remains:
+
+```
+[Reggie] coverage: 2/2 native, 0/2 internal JDK fallback, 0/2 after atomic-strip, 0/2 supplier JDK fallback
+```

@@ -126,7 +126,16 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     starts[0] = offset;
     int pos = offset;
     for (int i = 0; i < plan.ops().size(); i++) {
-      pos = apply(plan.ops().get(i), input, pos, starts, ends, i == plan.ops().size() - 1, 0);
+      LinearTokenSequencePlan.Op op = plan.ops().get(i);
+      if (isTargetBeforeOptionalHttpVersion(plan.ops(), i)) {
+        pos =
+            captureTargetBeforeOptionalHttpVersion(
+                op, plan.ops().get(i + 1), input, pos, starts, ends);
+        if (pos < 0) return false;
+        i++;
+        continue;
+      }
+      pos = apply(op, input, pos, starts, ends, i == plan.ops().size() - 1, 0);
       if (pos < 0) return false;
     }
     if (fullMatch && pos != input.length()) return false;
@@ -270,23 +279,70 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   private static int captureBracketedWordAfterSkip(
       String input, int pos, int group, int[] starts, int[] ends) {
     int search = pos;
+    int lastStart = -1;
+    int lastEnd = -1;
     while (search < input.length()) {
       int open = input.indexOf('[', search);
-      if (open < 0) return -1;
+      if (open < 0) break;
       int close = input.indexOf(']', open + 1);
-      if (close < 0) return -1;
+      if (close < 0) break;
       int wordEnd = open + 1;
       while (wordEnd < close && isWord(input.charAt(wordEnd))) wordEnd++;
       if (wordEnd == close
           && wordEnd > open + 1
           && close + 1 < input.length()
           && Character.isWhitespace(input.charAt(close + 1))) {
-        set(starts, ends, group, open + 1, close);
-        return input.length();
+        lastStart = open + 1;
+        lastEnd = close;
       }
       search = open + 1;
     }
-    return -1;
+    if (lastStart < 0) return -1;
+    set(starts, ends, group, lastStart, lastEnd);
+    return input.length();
+  }
+
+  private static boolean isTargetBeforeOptionalHttpVersion(
+      java.util.List<LinearTokenSequencePlan.Op> ops, int index) {
+    if (index + 2 >= ops.size()) return false;
+    LinearTokenSequencePlan.Op target = ops.get(index);
+    LinearTokenSequencePlan.Op optional = ops.get(index + 1);
+    LinearTokenSequencePlan.Op quote = ops.get(index + 2);
+    if (target.kind() != LinearTokenSequencePlan.OpKind.CAPTURE_NON_SPACE
+        || optional.kind() != LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
+        || quote.kind() != LinearTokenSequencePlan.OpKind.LITERAL
+        || !quote.literal().startsWith("\"")) return false;
+    if (optional.children().size() != 2) return false;
+    LinearTokenSequencePlan.Op prefix = optional.children().get(0);
+    LinearTokenSequencePlan.Op version = optional.children().get(1);
+    return prefix.kind() == LinearTokenSequencePlan.OpKind.LITERAL
+        && " HTTP/".equals(prefix.literal())
+        && version.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_DECIMAL_NUMBER;
+  }
+
+  private static int captureTargetBeforeOptionalHttpVersion(
+      LinearTokenSequencePlan.Op target,
+      LinearTokenSequencePlan.Op optionalHttpVersion,
+      String input,
+      int pos,
+      int[] starts,
+      int[] ends) {
+    int quote = input.indexOf('"', pos);
+    if (quote < 0 || quote == pos) return -1;
+    int marker = input.lastIndexOf(" HTTP/", quote);
+    if (marker >= pos && isNonSpace(input, pos, marker)) {
+      LinearTokenSequencePlan.Op version = optionalHttpVersion.children().get(1);
+      int versionStart = marker + " HTTP/".length();
+      int versionEnd = scanDecimal(input, versionStart, quote, false);
+      if (versionEnd == quote) {
+        set(starts, ends, target.groupNumber(), pos, marker);
+        set(starts, ends, version.groupNumber(), versionStart, quote);
+        return quote;
+      }
+    }
+    if (!isNonSpace(input, pos, quote)) return -1;
+    set(starts, ends, target.groupNumber(), pos, quote);
+    return quote;
   }
 
   private int applyOptional(
@@ -359,6 +415,32 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       }
     }
     return end > start;
+  }
+
+  private static boolean isNonSpace(String input, int start, int end) {
+    if (end <= start) return false;
+    for (int i = start; i < end; i++) {
+      if (Character.isWhitespace(input.charAt(i))) return false;
+    }
+    return true;
+  }
+
+  private static int scanDecimal(String input, int pos, int limit, boolean signed) {
+    if (signed && pos < limit && (input.charAt(pos) == '+' || input.charAt(pos) == '-')) {
+      pos++;
+    }
+    int digitStart = pos;
+    while (pos < limit && isDigit(input.charAt(pos))) pos++;
+    boolean sawLeadingDigits = pos > digitStart;
+    if (pos < limit && input.charAt(pos) == '.') {
+      pos++;
+      int fractionStart = pos;
+      while (pos < limit && isDigit(input.charAt(pos))) pos++;
+      if (!sawLeadingDigits && pos == fractionStart) return -1;
+    } else if (!sawLeadingDigits) {
+      return -1;
+    }
+    return pos;
   }
 
   private static boolean isDigit(char ch) {

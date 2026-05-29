@@ -23,10 +23,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.datadoghq.reggie.CapturePolicy;
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class LinearTokenSequenceAccessLogTest {
@@ -115,6 +120,62 @@ class LinearTokenSequenceAccessLogTest {
   }
 
   @Test
+  void realExpandedCommonPatternHasJdkEquivalentNamedCaptureBoundaries() throws Exception {
+    String pattern = testResource("logs-grok-pattern-1.regex");
+    assertNamedCaptureBoundariesEquivalent(
+        pattern,
+        commonMessage("10.202.82.195", "POST ", "/config?x=y", " HTTP/1.1", "17888"),
+        commonMessage("2001:db8::1", "", "/health", " HTTP/2.0", "-"),
+        commonMessage("api-1.example.com", "GET ", "/without-version", "", "42"));
+  }
+
+  @Test
+  void realExpandedCombinedPatternHasJdkEquivalentNamedCaptureBoundaries() throws Exception {
+    String pattern = testResource("logs-grok-pattern-2.regex");
+    assertNamedCaptureBoundariesEquivalent(
+        pattern,
+        combinedMessage(
+            "10.202.82.195",
+            "POST ",
+            "/config?x=y",
+            " HTTP/1.1",
+            "17888",
+            "https://example.com/index.html",
+            "Mozilla/5.0 Test",
+            "-",
+            "tracking-id",
+            "0.024",
+            "0.024",
+            "[decoy] . [nginx_access]  [not-the-logger]"),
+        combinedMessage(
+            "2001:db8::1",
+            "",
+            "/health",
+            " HTTP/2.0",
+            "-",
+            "-",
+            "",
+            "",
+            "",
+            ".5",
+            "0.",
+            "[ignored] . [nginx_access]  [not_the_logger]"),
+        combinedMessage(
+            "api-1.example.com",
+            "GET ",
+            "/without-version",
+            "",
+            "42",
+            "http://embedded.example/launcher.html",
+            "Agent/1.0",
+            "field1",
+            "field2",
+            "+12.5",
+            "-0.25",
+            "[not_the_logger] . [nginx_access]  [host-with-dash]"));
+  }
+
+  @Test
   void leavesCallerArraysUnchangedOnNoMatch() {
     ReggieMatcher matcher = Reggie.compile(COMBINED_ACCESS_LOG_PATTERN, NAMED_ONLY);
     int[] starts = new int[17];
@@ -132,6 +193,92 @@ class LinearTokenSequenceAccessLogTest {
     assertEquals(value, input.substring(starts[group], ends[group]));
   }
 
+  private static void assertNamedCaptureBoundariesEquivalent(String pattern, String... inputs)
+      throws Exception {
+    RegexParser parser = new RegexParser();
+    parser.parse(pattern);
+    Map<String, Integer> nameToIndex = parser.getGroupNameMap();
+    Pattern jdkPattern = Pattern.compile(pattern);
+    ReggieMatcher reggieMatcher = Reggie.compile(pattern, NAMED_ONLY);
+    assertDelegateTypeUnchecked(reggieMatcher, LinearTokenSequenceMatcher.class);
+
+    for (String input : inputs) {
+      Matcher jdkMatcher = jdkPattern.matcher(input);
+      boolean jdkMatches = jdkMatcher.matches();
+      int[] starts = new int[jdkMatcher.groupCount() + 1];
+      int[] ends = new int[jdkMatcher.groupCount() + 1];
+      Arrays.fill(starts, 777);
+      Arrays.fill(ends, 888);
+      boolean reggieMatches = reggieMatcher.matchInto(input, starts, ends);
+
+      assertEquals(jdkMatches, reggieMatches, input);
+      if (!jdkMatches) {
+        assertTrue(Arrays.stream(starts).allMatch(value -> value == 777), input);
+        assertTrue(Arrays.stream(ends).allMatch(value -> value == 888), input);
+        continue;
+      }
+
+      assertEquals(jdkMatcher.start(), starts[0], input);
+      assertEquals(jdkMatcher.end(), ends[0], input);
+      for (Map.Entry<String, Integer> entry : nameToIndex.entrySet()) {
+        int group = entry.getValue();
+        assertEquals(jdkMatcher.start(group), starts[group], entry.getKey() + " start: " + input);
+        assertEquals(jdkMatcher.end(group), ends[group], entry.getKey() + " end: " + input);
+        if (starts[group] >= 0) {
+          assertEquals(
+              jdkMatcher.group(group),
+              input.substring(starts[group], ends[group]),
+              entry.getKey() + " value: " + input);
+        }
+      }
+    }
+  }
+
+  private static String commonMessage(
+      String client,
+      String methodWithSpace,
+      String target,
+      String versionWithPrefix,
+      String bytes) {
+    return client
+        + " - - [15/Mar/2019:19:45:35 -0700]  \""
+        + methodWithSpace
+        + target
+        + versionWithPrefix
+        + "\" 200 "
+        + bytes;
+  }
+
+  private static String combinedMessage(
+      String client,
+      String methodWithSpace,
+      String target,
+      String versionWithPrefix,
+      String bytes,
+      String referer,
+      String userAgent,
+      String trackingId,
+      String upstreamTrackingId,
+      String duration,
+      String upstreamDuration,
+      String tail) {
+    return commonMessage(client, methodWithSpace, target, versionWithPrefix, bytes)
+        + " \""
+        + referer
+        + "\" \""
+        + userAgent
+        + "\" \""
+        + trackingId
+        + "\" \""
+        + upstreamTrackingId
+        + "\" "
+        + duration
+        + " "
+        + upstreamDuration
+        + " "
+        + tail;
+  }
+
   private static String testResource(String name) throws IOException {
     String path = "/com/datadoghq/reggie/runtime/" + name;
     try (InputStream stream = LinearTokenSequenceAccessLogTest.class.getResourceAsStream(path)) {
@@ -145,5 +292,13 @@ class LinearTokenSequenceAccessLogTest {
     Field delegate = matcher.getClass().getDeclaredField("delegate");
     delegate.setAccessible(true);
     assertEquals(expectedType, delegate.get(matcher).getClass());
+  }
+
+  private static void assertDelegateTypeUnchecked(ReggieMatcher matcher, Class<?> expectedType) {
+    try {
+      assertDelegateType(matcher, expectedType);
+    } catch (Exception e) {
+      throw new AssertionError(e);
+    }
   }
 }
