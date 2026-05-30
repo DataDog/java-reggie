@@ -15,6 +15,8 @@
  */
 package com.datadoghq.reggie.integration;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.integration.fuzz.RandomRegexGenerator;
 import com.datadoghq.reggie.runtime.MatchResult;
@@ -221,6 +223,8 @@ public class DollarAnchorCacheDiagTest {
       System.out.printf(
           "[backref-diag] pat=%-30s inp=%-5s class=%-20s%n  matches: jdk=%s reg=%s  find: jdk=%s reg=%s%n",
           pat, "\"" + inp + "\"", rm.getClass().getSimpleName(), jdkM, reggieM, jdkF, reggieF);
+      assertEquals(jdkM, reggieM, "matches() mismatch for pat='" + pat + "' inp='" + inp + "'");
+      assertEquals(jdkF, reggieF, "find() mismatch for pat='" + pat + "' inp='" + inp + "'");
     }
   }
 }

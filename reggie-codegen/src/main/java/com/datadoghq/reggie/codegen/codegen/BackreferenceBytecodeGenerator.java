@@ -2057,19 +2057,18 @@ public class BackreferenceBytecodeGenerator {
   }
 
   /**
-   * Generates match() method - returns MatchResult with group information. Currently a placeholder
-   * that returns null (group extraction not yet implemented for all types).
+   * Generates match() method.
    *
    * <h3>Generated Algorithm</h3>
    *
    * <pre>{@code
    * MatchResult match(String input) {
-   *     return null;  // Placeholder
+   *     if (!matches(input)) return null;
+   *     return findMatchFrom(input, 0);
    * }
    * }</pre>
    */
   public void generateMatchMethod(ClassWriter cw, String className) {
-    // For now, return null (groups not yet implemented)
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -2078,21 +2077,70 @@ public class BackreferenceBytecodeGenerator {
             null,
             null);
     mv.visitCode();
+    Label matched = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitJumpInsn(IFNE, matched);
     mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(matched);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className,
+        "findMatchFrom",
+        "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
     mv.visitInsn(ARETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
 
   /**
-   * Generates matchBounded() method - returns MatchResult for bounded region. Currently a
-   * placeholder that returns null.
+   * Generates matchesBounded() method.
    *
    * <h3>Generated Algorithm</h3>
    *
    * <pre>{@code
-   * MatchResult matchBounded(String input, int start, int end) {
-   *     return null;  // Placeholder
+   * boolean matchesBounded(CharSequence input, int start, int end) {
+   *     return matches(input.subSequence(start, end).toString());
+   * }
+   * }</pre>
+   */
+  public void generateMatchesBoundedMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Generates matchBounded() method.
+   *
+   * <h3>Generated Algorithm</h3>
+   *
+   * <pre>{@code
+   * MatchResult matchBounded(CharSequence input, int start, int end) {
+   *     if (!matchesBounded(input, start, end)) return null;
+   *     return findMatchFrom(input.toString(), start);
    * }
    * }</pre>
    */
@@ -2101,11 +2149,32 @@ public class BackreferenceBytecodeGenerator {
         cw.visitMethod(
             ACC_PUBLIC,
             "matchBounded",
-            "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
             null,
             null);
     mv.visitCode();
+    Label matched = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", false);
+    mv.visitJumpInsn(IFNE, matched);
     mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(matched);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className,
+        "findMatchFrom",
+        "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
     mv.visitInsn(ARETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -2153,65 +2222,118 @@ public class BackreferenceBytecodeGenerator {
     mv.visitEnd();
   }
 
-  /**
-   * Generates findMatchFrom() method - returns MatchResult with group captures. Only
-   * GREEDY_ANY_BACKREF has a full implementation; other types return null placeholder.
-   *
-   * <h3>Generated Algorithm (GREEDY_ANY_BACKREF)</h3>
-   *
-   * <pre>{@code
-   * // Pattern: (.*)\d+\1 or similar
-   * MatchResult findMatchFrom(String input, int startPos) {
-   *     if (input == null) return null;
-   *     int len = input.length();
-   *
-   *     for (int pos = startPos; pos < len; pos++) {
-   *         int remaining = len - pos;
-   *
-   *         // Try group lengths from longest to shortest (greedy)
-   *         for (int groupLen = (remaining - separatorMin) / 2; groupLen >= minLen; groupLen--) {
-   *             int groupEnd = pos + groupLen;
-   *
-   *             // Try each possible backreference start position
-   *             for (int backrefStart = groupEnd + separatorMin; backrefStart <= len - groupLen; backrefStart++) {
-   *                 // Verify separator chars (e.g., all digits for \d+)
-   *                 if (!validSeparator(input, groupEnd, backrefStart)) continue;
-   *
-   *                 // Check backreference matches captured group
-   *                 if (input.regionMatches(backrefStart, input, pos, groupLen)) {
-   *                     int matchEnd = backrefStart + groupLen;
-   *
-   *                     // Build MatchResult
-   *                     int[] starts = {pos, pos};        // group 0, group 1
-   *                     int[] ends = {matchEnd, groupEnd}; // group 0, group 1
-   *                     return new MatchResultImpl(input, starts, ends, 1);
-   *                 }
-   *             }
-   *         }
-   *     }
-   *     return null;
-   * }
-   * }</pre>
-   */
+  /** Generates findMatchFrom() method. Delegates to BackreferenceHelpers for non-greedy types. */
   public void generateFindMatchFromMethod(ClassWriter cw, String className) {
-    if (patternInfo.type == BackreferencePatternInfo.BackrefType.GREEDY_ANY_BACKREF) {
-      generateGreedyAnyBackrefFindMatchFromMethod(cw, className);
-    } else {
-      // Placeholder for other pattern types
-      MethodVisitor mv =
-          cw.visitMethod(
-              ACC_PUBLIC,
-              "findMatchFrom",
-              "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
-              null,
-              null);
-      mv.visitCode();
-      mv.visitInsn(ACONST_NULL);
-      mv.visitInsn(ARETURN);
-      mv.visitMaxs(0, 0);
-      mv.visitEnd();
+    switch (patternInfo.type) {
+      case GREEDY_ANY_BACKREF:
+        generateGreedyAnyBackrefFindMatchFromMethod(cw, className);
+        break;
+      case HTML_TAG:
+        generateHtmlTagFindMatchFromMethod(cw);
+        break;
+      case REPEATED_WORD:
+        generateRepeatedWordFindMatchFromMethod(cw);
+        break;
+      case ATTRIBUTE_MATCH:
+        generateAttributeMatchFindMatchFromMethod(cw);
+        break;
+      default:
+        generateNullFindMatchFromMethod(cw);
+        break;
     }
   }
+
+  private void generateNullFindMatchFromMethod(ClassWriter cw) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC,
+            "findMatchFrom",
+            "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
+            null,
+            null);
+    mv.visitCode();
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  // Descriptor:
+  // (Ljava/lang/String;ICCLjava/lang/String;C)Lcom/datadoghq/reggie/runtime/MatchResult;
+  private static final String HELPERS = "com/datadoghq/reggie/runtime/BackreferenceHelpers";
+  private static final String MATCH_RESULT_DESC = "Lcom/datadoghq/reggie/runtime/MatchResult;";
+
+  private void generateHtmlTagFindMatchFromMethod(ClassWriter cw) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "findMatchFrom", "(Ljava/lang/String;I)" + MATCH_RESULT_DESC, null, null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 1); // input
+    mv.visitVarInsn(ILOAD, 2); // startPos
+    BytecodeUtil.pushInt(mv, patternInfo.openPrefix.charAt(0)); // openPrefixChar
+    BytecodeUtil.pushInt(mv, patternInfo.openSuffix.charAt(0)); // openSuffixChar
+    mv.visitLdcInsn(patternInfo.closePrefix); // closePrefixStr
+    BytecodeUtil.pushInt(mv, patternInfo.closeSuffix.charAt(0)); // closeSuffixChar
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        HELPERS,
+        "findHtmlTagMatchFrom",
+        "(Ljava/lang/String;IIILjava/lang/String;I)" + MATCH_RESULT_DESC,
+        false);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  private void generateRepeatedWordFindMatchFromMethod(ClassWriter cw) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "findMatchFrom", "(Ljava/lang/String;I)" + MATCH_RESULT_DESC, null, null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 1); // input
+    mv.visitVarInsn(ILOAD, 2); // startPos
+    mv.visitInsn(patternInfo.hasWordBoundary ? ICONST_1 : ICONST_0);
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        HELPERS,
+        "findRepeatedWordMatchFrom",
+        "(Ljava/lang/String;IZ)" + MATCH_RESULT_DESC,
+        false);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  private void generateAttributeMatchFindMatchFromMethod(ClassWriter cw) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "findMatchFrom", "(Ljava/lang/String;I)" + MATCH_RESULT_DESC, null, null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 1); // input
+    mv.visitVarInsn(ILOAD, 2); // startPos
+    BytecodeUtil.pushInt(mv, patternInfo.quoteChar.charAt(0));
+    mv.visitLdcInsn(patternInfo.assignmentOp);
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        HELPERS,
+        "findAttributeMatchFrom",
+        "(Ljava/lang/String;IILjava/lang/String;)" + MATCH_RESULT_DESC,
+        false);
+    // descriptor: (String, int startPos, int quoteChar, String assignmentOp)
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Generates findMatchFrom() for GREEDY_ANY_BACKREF pattern. Returns MatchResult with proper group
+   * captures.
+   *
+   * <p>Algorithm: For each starting position pos: For each groupLen from max to min (greedy - try
+   * longest first): For each backrefStart from pos+groupLen+separatorMin to len-groupLen: If
+   * input[backrefStart..backrefStart+groupLen] == input[pos..pos+groupLen]: Verify separator chars
+   * in input[pos+groupLen..backrefStart] If valid: MATCH FOUND, return MatchResult
+   */
 
   /**
    * Generate findMatchFrom() for GREEDY_ANY_BACKREF pattern. Returns MatchResult with proper group

@@ -58,8 +58,7 @@ public class RecursiveDescentPatternInfo implements PatternInfo {
     public Integer visitLiteral(LiteralNode node) {
       int hash = 1;
       hash = 31 * hash + "Literal".hashCode();
-      // Single character literal - include constant hash
-      hash = 31 * hash + 1;
+      hash = 31 * hash + node.ch;
       return hash;
     }
 
@@ -68,8 +67,10 @@ public class RecursiveDescentPatternInfo implements PatternInfo {
       int hash = 2;
       hash = 31 * hash + "CharClass".hashCode();
       hash = 31 * hash + (node.negated ? 1 : 0);
-      // Include range count from CharSet
-      hash = 31 * hash + node.chars.getRanges().size();
+      for (com.datadoghq.reggie.codegen.automaton.CharSet.Range r : node.chars.getRanges()) {
+        hash = 31 * hash + r.start;
+        hash = 31 * hash + r.end;
+      }
       return hash;
     }
 
@@ -123,7 +124,8 @@ public class RecursiveDescentPatternInfo implements PatternInfo {
     public Integer visitAnchor(AnchorNode node) {
       int hash = 7;
       hash = 31 * hash + "Anchor".hashCode();
-      hash = 31 * hash + node.type.hashCode();
+      hash = 31 * hash + node.type.ordinal();
+      hash = 31 * hash + (node.multiline ? 1 : 0);
       return hash;
     }
 
@@ -139,7 +141,8 @@ public class RecursiveDescentPatternInfo implements PatternInfo {
     public Integer visitAssertion(AssertionNode node) {
       int hash = 9;
       hash = 31 * hash + "Assertion".hashCode();
-      hash = 31 * hash + node.type.hashCode();
+      hash = 31 * hash + node.type.ordinal();
+      hash = 31 * hash + node.fixedWidth;
       if (node.subPattern != null) {
         hash = 31 * hash + node.subPattern.accept(this);
       }

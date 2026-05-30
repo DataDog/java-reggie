@@ -89,8 +89,13 @@ public final class Reggie {
 
   /**
    * Compile a regex pattern at runtime with automatic caching. The pattern is compiled lazily on
-   * first use and cached for subsequent calls. Thread-safe: uses {@code
-   * ConcurrentHashMap.computeIfAbsent} to avoid duplicate compilation.
+   * first use and cached for subsequent calls.
+   *
+   * <p>Thread-safe: each call returns a fresh {@link com.datadoghq.reggie.runtime.ReggieMatcher}
+   * instance. DFA-backed matchers are shared instances (they use only local variables). NFA-backed
+   * matchers (patterns that require NFA simulation) are never shared; a new instance is created
+   * from the cached compiled class on every call so that callers may safely hold an exclusive
+   * reference without external synchronisation.
    *
    * <p>Example:
    *

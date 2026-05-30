@@ -31,7 +31,7 @@ build:
   extends: .gradle_job
   stage: build
   script:
-    - ./gradlew build -x :reggie-integration-tests:test $GRADLE_ARGS
+    - ./gradlew build $GRADLE_ARGS
   artifacts:
     when: always
     reports:
@@ -64,6 +64,8 @@ publish_snapshot:
     - .gradle_job
     - .publish_sa
   stage: publish
+  needs:
+    - build
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: on_success

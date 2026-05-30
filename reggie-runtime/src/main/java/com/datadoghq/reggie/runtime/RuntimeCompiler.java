@@ -81,8 +81,39 @@ import org.objectweb.asm.util.TraceClassVisitor;
  */
 public class RuntimeCompiler {
 
-  // Level 1: Pattern string → matcher instance (fast path for exact matches)
+  // Level 1: Pattern string → matcher instance (fast path for exact matches).
+  // NFA-backed patterns are NOT stored here; they use NFA_CLASS_CACHE instead.
   private static final ConcurrentHashMap<String, ReggieMatcher> PATTERN_CACHE =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Factory for NFA-backed matchers. Encapsulates the compiled class and the name map so that each
+   * compile() call can produce a fully-enriched fresh instance without re-parsing the pattern.
+   */
+  private static final class NfaMatcherFactory {
+    final Class<? extends ReggieMatcher> matcherClass;
+    final Map<String, Integer> nameMap;
+
+    NfaMatcherFactory(Class<? extends ReggieMatcher> matcherClass, Map<String, Integer> nameMap) {
+      this.matcherClass = matcherClass;
+      this.nameMap = nameMap;
+    }
+
+    ReggieMatcher newInstance(String pattern) {
+      ReggieMatcher m = instantiateFromClassUnchecked(matcherClass, pattern);
+      if (!nameMap.isEmpty()) {
+        m.setNameToIndex(nameMap);
+        m = new NameEnrichingMatcher(m);
+      }
+      return m;
+    }
+  }
+
+  // Level 1b: Pattern string → NFA matcher factory for NFA-backed strategies.
+  // NFA matchers mutate shared instance fields (currentStates, nextStates, epsilonProcessed,
+  // configGroupStarts) during matching, so a single shared instance cannot be used concurrently.
+  // We cache a factory here that produces a fresh enriched instance on every compile() call.
+  private static final ConcurrentHashMap<String, NfaMatcherFactory> NFA_CLASS_CACHE =
       new ConcurrentHashMap<>();
 
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
@@ -108,11 +139,38 @@ public class RuntimeCompiler {
 
   /** Compile pattern with runtime compilation options. */
   public static ReggieMatcher compile(String pattern, ReggieOptions options) {
-    if (options.capturePolicy() == CapturePolicy.ALL) {
-      return PATTERN_CACHE.computeIfAbsent(pattern, RuntimeCompiler::compileInternal);
+    String cacheKey =
+        options.capturePolicy() == CapturePolicy.ALL
+            ? pattern
+            : pattern + "\u0000capturePolicy=" + options.capturePolicy();
+
+    // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
+    // NFA matchers mutate shared instance fields during matching and cannot be shared across
+    // threads or calls; we cache a factory and instantiate per-call instead.
+    NfaMatcherFactory factory = NFA_CLASS_CACHE.get(cacheKey);
+    if (factory != null) {
+      return factory.newInstance(pattern);
     }
-    String cacheKey = pattern + "\u0000capturePolicy=" + options.capturePolicy();
-    return PATTERN_CACHE.computeIfAbsent(cacheKey, k -> compileInternal(pattern, options));
+
+    // Slow path: compile and cache the result.
+    // compileInternal will populate NFA_CLASS_CACHE if the strategy is NFA-backed, in which case
+    // the L1 entry is immediately removed so that subsequent calls hit the fast path above.
+    ReggieMatcher compiled =
+        PATTERN_CACHE.computeIfAbsent(
+            cacheKey,
+            k ->
+                options.capturePolicy() == CapturePolicy.ALL
+                    ? compileInternal(pattern, ReggieOptions.DEFAULT, k)
+                    : compileInternal(pattern, options, k));
+
+    // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
+    // remove it from L1 and return a fresh instance so callers never share NFA state.
+    factory = NFA_CLASS_CACHE.get(cacheKey);
+    if (factory != null) {
+      PATTERN_CACHE.remove(cacheKey, compiled);
+      return factory.newInstance(pattern);
+    }
+    return compiled;
   }
 
   /**
@@ -135,6 +193,7 @@ public class RuntimeCompiler {
   /** Clear both pattern and structure caches. */
   public static void clearCache() {
     PATTERN_CACHE.clear();
+    NFA_CLASS_CACHE.clear();
     STRUCTURE_CACHE.clear();
   }
 
@@ -162,10 +221,20 @@ public class RuntimeCompiler {
    * cache (level 2) checked here
    */
   private static ReggieMatcher compileInternal(String pattern) {
-    return compileInternal(pattern, ReggieOptions.DEFAULT);
+    return compileInternal(pattern, ReggieOptions.DEFAULT, pattern);
   }
 
   private static ReggieMatcher compileInternal(String pattern, ReggieOptions options) {
+    return compileInternal(pattern, options, pattern);
+  }
+
+  /**
+   * Compile a pattern with an explicit L1 cache key. When the strategy is NFA-backed, the compiled
+   * class is stored in NFA_CLASS_CACHE under {@code cacheKey} so that compile() can skip L1 and
+   * return a fresh instance on every subsequent call.
+   */
+  private static ReggieMatcher compileInternal(
+      String pattern, ReggieOptions options, String cacheKey) {
     try {
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
@@ -226,6 +295,17 @@ public class RuntimeCompiler {
         }
         return fallback;
       }
+      // Fall back for strategies whose MatchResult API (match, findMatch, bounded methods) is not
+      // yet fully implemented. Callers get correct behavior via JDK until implementation is
+      // complete.
+      String incompleteApiReason = incompleteMatchResultApiReason(result.strategy);
+      if (incompleteApiReason != null) {
+        ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, incompleteApiReason);
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
+      }
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
@@ -243,11 +323,7 @@ public class RuntimeCompiler {
       // 6. Check structural cache (level 2)
       Class<? extends ReggieMatcher> matcherClass = STRUCTURE_CACHE.get(structHash);
 
-      ReggieMatcher matcher;
-      if (matcherClass != null) {
-        // Cache hit: Reuse existing class, instantiate with current pattern
-        matcher = instantiateFromClass(matcherClass, pattern);
-      } else {
+      if (matcherClass == null) {
         // 7. Cache miss: Generate bytecode and define hidden class
         byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
 
@@ -261,9 +337,20 @@ public class RuntimeCompiler {
 
         // 8. Cache the generated class for future patterns with same structure
         STRUCTURE_CACHE.put(structHash, matcherClass);
-
-        matcher = instantiateFromClass(matcherClass, pattern);
       }
+
+      // 8b. For NFA-backed strategies: register a factory in NFA_CLASS_CACHE so that compile()
+      // can skip L1 and always return a fresh per-call instance. NFA matchers mutate shared
+      // fields (currentStates, nextStates, …) during matching and are not safe to share across
+      // threads or calls. The factory also captures the name map so that each fresh instance is
+      // fully enriched without re-parsing the pattern.
+      if (isNfaBacked(result.strategy)) {
+        NFA_CLASS_CACHE.putIfAbsent(cacheKey, new NfaMatcherFactory(matcherClass, nameMap));
+        // Return an enriched instance for this (first) call.
+        return NFA_CLASS_CACHE.get(cacheKey).newInstance(pattern);
+      }
+
+      ReggieMatcher matcher = instantiateFromClass(matcherClass, pattern);
 
       // 9. Inject name map and wrap for named group support
       if (!nameMap.isEmpty()) {
@@ -337,6 +424,21 @@ public class RuntimeCompiler {
           && first.literal().charAt(0) == next.literal().charAt(0);
     }
     return false;
+  }
+
+  /**
+   * /** Returns a non-null reason string when the selected strategy has an incomplete MatchResult
+   * API (match, findMatch, matchBounded, etc. not yet implemented). The caller falls back to JDK.
+   */
+  private static String incompleteMatchResultApiReason(PatternAnalyzer.MatchingStrategy strategy) {
+    switch (strategy) {
+      case VARIABLE_CAPTURE_BACKREF:
+        return "MatchResult API not yet implemented for VARIABLE_CAPTURE_BACKREF strategy";
+      case NESTED_QUANTIFIED_GROUPS:
+        return "MatchResult API not yet implemented for NESTED_QUANTIFIED_GROUPS strategy";
+      default:
+        return null;
+    }
   }
 
   /**
@@ -440,6 +542,40 @@ public class RuntimeCompiler {
       Class<? extends ReggieMatcher> matcherClass, String pattern) throws Exception {
     Constructor<? extends ReggieMatcher> ctor = matcherClass.getDeclaredConstructor(String.class);
     return ctor.newInstance(pattern);
+  }
+
+  /**
+   * Instantiate a matcher from a compiled class, wrapping checked exceptions as runtime exceptions.
+   * Used on the fast path in compile() where the class is already known to be valid.
+   */
+  private static ReggieMatcher instantiateFromClassUnchecked(
+      Class<? extends ReggieMatcher> matcherClass, String pattern) {
+    try {
+      Constructor<? extends ReggieMatcher> ctor = matcherClass.getDeclaredConstructor(String.class);
+      return ctor.newInstance(pattern);
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to instantiate matcher for pattern: " + pattern, e);
+    }
+  }
+
+  /**
+   * Returns true for matching strategies whose generated bytecode reads and writes shared instance
+   * fields (currentStates, nextStates, epsilonProcessed, configGroupStarts) during matching.
+   * Instances of these matchers must not be shared across threads or sequential compile() calls.
+   */
+  private static boolean isNfaBacked(PatternAnalyzer.MatchingStrategy strategy) {
+    switch (strategy) {
+      case OPTIMIZED_NFA:
+      case OPTIMIZED_NFA_WITH_BACKREFS:
+      case OPTIMIZED_NFA_WITH_LOOKAROUND:
+      case HYBRID_DFA_LOOKAHEAD:
+      case SPECIALIZED_MULTIPLE_LOOKAHEADS:
+      case SPECIALIZED_LITERAL_LOOKAHEADS:
+      case LAZY_DFA:
+        return true;
+      default:
+        return false;
+    }
   }
 
   /** Generate bytecode for the matcher class using the selected strategy. */
@@ -743,6 +879,7 @@ public class RuntimeCompiler {
         backrefGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         backrefGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         backrefGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        backrefGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         backrefGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         backrefGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         backrefGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);

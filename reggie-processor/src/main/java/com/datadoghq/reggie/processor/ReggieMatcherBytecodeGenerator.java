@@ -93,6 +93,22 @@ public class ReggieMatcherBytecodeGenerator {
 
     // Reject patterns with known engine bugs at compile time — emitting buggy bytecode is worse
     // than a build failure. Use Reggie.compile() for runtime compilation with automatic fallback.
+    if (result.anchorConditionDiluted) {
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' cannot be compiled at annotation-processing time: anchor condition diluted in"
+              + " DFA construction. Use Reggie.compile() for runtime compilation with automatic"
+              + " fallback.");
+    }
+    if (result.alternationPriorityConflict) {
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' cannot be compiled at annotation-processing time: alternation priority"
+              + " conflict — DFA longest-match vs NFA first-alternative semantics. Use"
+              + " Reggie.compile() for runtime compilation with automatic fallback.");
+    }
     String fallbackReason = FallbackPatternDetector.needsFallback(ast, strategy);
     if (fallbackReason != null) {
       throw new UnsupportedOperationException(
@@ -322,9 +338,12 @@ public class ReggieMatcherBytecodeGenerator {
         linearGen.generateMatchesMethod(cw, getJavaClassName());
         linearGen.generateFindMethod(cw, getJavaClassName());
         linearGen.generateFindFromMethod(cw, getJavaClassName());
-        // Note: LINEAR_BACKREFERENCE currently only supports allocation-free methods
-        // Group extraction methods (match, matchBounded, findMatch, findMatchFrom) not yet
-        // implemented
+        linearGen.generateMatchMethod(cw, getJavaClassName());
+        linearGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+        linearGen.generateMatchBoundedMethod(cw, getJavaClassName());
+        linearGen.generateFindMatchMethod(cw, getJavaClassName());
+        linearGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        linearGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;
 
       case SPECIALIZED_BACKREFERENCE:
@@ -609,13 +628,20 @@ public class ReggieMatcherBytecodeGenerator {
       }
       if (ch == '\\') {
         inEscape = true;
-      } else if (ch == '(' && i + 1 < pattern.length()) {
-        // Check if it's a capturing group (not (?:...))
-        if (i + 2 < pattern.length()
-            && pattern.charAt(i + 1) == '?'
-            && pattern.charAt(i + 2) == ':') {
-          continue; // Non-capturing
+      } else if (ch == '(' && i + 1 < pattern.length() && pattern.charAt(i + 1) == '?') {
+        if (i + 2 < pattern.length()) {
+          char next = pattern.charAt(i + 2);
+          if (next == ':') continue; // (?:...) non-capturing
+          if (next == '=' || next == '!') continue; // (?=...) lookahead, (?!...) neg lookahead
+          if (next == '#') continue; // (?#...) comment
+          if (next == '>') continue; // (?>...) atomic group
+          if (next == '<' && i + 3 < pattern.length()) {
+            char afterLt = pattern.charAt(i + 3);
+            if (afterLt == '=' || afterLt == '!') continue; // (?<=...) / (?<!...) lookbehind
+          }
         }
+        count++;
+      } else if (ch == '(') {
         count++;
       }
     }

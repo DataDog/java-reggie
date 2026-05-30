@@ -30,8 +30,39 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
 
   JavaRegexFallbackMatcher(String pattern, String reason) {
     super(pattern);
-    this.javaPattern = Pattern.compile(pattern);
+    this.javaPattern = Pattern.compile(toJdkCompatible(pattern));
     LOG.warning("Falling back to java.util.regex for pattern '" + pattern + "': " + reason);
+  }
+
+  /**
+   * Converts Perl-style single-quoted named groups and backreferences to JDK angle-bracket syntax:
+   * {@code (?'name'...)} → {@code (?<name>...)} and {@code \k'name'} → {@code \k<name>}.
+   */
+  static String toJdkCompatible(String pattern) {
+    if (pattern == null || (!pattern.contains("(?'") && !pattern.contains("\\k'"))) {
+      return pattern;
+    }
+    StringBuilder sb = new StringBuilder(pattern.length());
+    int i = 0;
+    while (i < pattern.length()) {
+      if (pattern.startsWith("(?'", i)) {
+        int nameEnd = pattern.indexOf("'", i + 3);
+        if (nameEnd > i + 3) {
+          sb.append("(?<").append(pattern, i + 3, nameEnd).append(">");
+          i = nameEnd + 1;
+          continue;
+        }
+      } else if (pattern.startsWith("\\k'", i)) {
+        int nameEnd = pattern.indexOf("'", i + 3);
+        if (nameEnd > i + 3) {
+          sb.append("\\k<").append(pattern, i + 3, nameEnd).append(">");
+          i = nameEnd + 1;
+          continue;
+        }
+      }
+      sb.append(pattern.charAt(i++));
+    }
+    return sb.toString();
   }
 
   @Override

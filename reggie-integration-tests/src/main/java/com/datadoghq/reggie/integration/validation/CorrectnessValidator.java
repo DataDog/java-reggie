@@ -15,11 +15,11 @@
  */
 package com.datadoghq.reggie.integration.validation;
 
+import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.integration.testdata.CommonPatternsLoader;
 import com.datadoghq.reggie.integration.testdata.TestCase;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Pattern;
 
 /** Validates regex patterns against test cases for correctness. */
 public class CorrectnessValidator {
@@ -49,11 +49,7 @@ public class CorrectnessValidator {
   }
 
   private boolean matchWithReggie(String pattern, String input) {
-    // For MVP: Use JDK Pattern as proxy since Reggie requires
-    // compile-time code generation
-    // TODO: Implement runtime pattern compilation or dynamic class loading
-    Pattern jdkPattern = Pattern.compile(pattern);
-    return jdkPattern.matcher(input).find();
+    return Reggie.compile(pattern).find(input);
   }
 
   public static void main(String[] args) throws Exception {

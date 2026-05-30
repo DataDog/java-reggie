@@ -95,9 +95,9 @@ public class AlgorithmicFuzzTest {
     }
 
     // Backstop: if the divergence count blows up beyond a ceiling, fail. This is a
-    // regression-detection guard, not a quality target — tightened from 25% to 10% after
-    // Cat E/F anchor-condition-dilution fixes were confirmed.
-    int ceiling = (int) (cfg.patternCount * cfg.inputsPerPattern * 0.10);
+    // regression-detection guard, not a quality target — tightened from 10% to 5% after
+    // MatchResult API stubs and structural-cache collision fixes were confirmed.
+    int ceiling = (int) (cfg.patternCount * cfg.inputsPerPattern * 0.05);
     assertTrue(
         report.findings.size() < ceiling,
         "Fuzz produced "

@@ -128,11 +128,9 @@ public class CorrectnessTest {
 
     System.out.println("\nPCRE Capturing Groups Validation:");
     System.out.println(report.getSummary());
-    // Note: Capturing group extraction is work in progress (Phase 5)
-    // Current pass rate expected to be lower until implementation is complete
     assertTrue(
-        report.getPassRate() >= 0.25,
-        "Should pass >=25% of PCRE capturing group tests, got: "
+        report.getPassRate() >= 0.93,
+        "Should pass >=93% of PCRE capturing group tests, got: "
             + String.format("%.1f%%", report.getPassRate() * 100));
   }
 
