@@ -386,8 +386,12 @@ public class PatternAnalyzer {
     }
 
     // Check for concat+greedy group patterns: prefix(greedy)suffix
+    // Decline when the greedy group's char set overlaps the following suffix (e.g.
+    // ([ab0]{2,})[^a]): the non-backtracking fast path commits to the greedy match and cannot give
+    // characters back to satisfy the suffix, producing a silent wrong answer. Such patterns fall
+    // through to a backtracking-capable strategy.
     ConcatGreedyGroupInfo concatGreedyInfo = detectConcatGreedyGroup(ast);
-    if (concatGreedyInfo != null) {
+    if (concatGreedyInfo != null && !requiresBacktrackingForGroups(ast)) {
       return new MatchingStrategyResult(
           MatchingStrategy.SPECIALIZED_CONCAT_GREEDY_GROUP,
           null,

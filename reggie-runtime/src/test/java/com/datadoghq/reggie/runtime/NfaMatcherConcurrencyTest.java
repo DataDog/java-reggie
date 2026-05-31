@@ -44,14 +44,14 @@ import org.junit.jupiter.api.Test;
  */
 public class NfaMatcherConcurrencyTest {
 
-  // Pattern using a lookahead — routes to HYBRID_DFA_LOOKAHEAD strategy with 383 NFA states
-  // (>128 threshold). This guarantees StateSet instance-field usage and does NOT go through the
-  // hybrid DFA/NFA path that would hide the race (shouldUseHybrid only triggers for OPTIMIZED_NFA).
-  private static final String NFA_PATTERN = "(?=(?:a|b|c|d){20}).*(?:e|f|g|h){20}";
+  // Backreference pattern — routes to OPTIMIZED_NFA_WITH_BACKREFS, a genuinely NFA-backed generated
+  // strategy that uses the shared StateSet instance fields during matching. (Lookahead strategies
+  // delegate to java.util.regex, which is immutable and safe to share, so they cannot exercise the
+  // shared-mutable-state race this test guards against.)
+  private static final String NFA_PATTERN = "(a|b)c\\1";
 
-  // Input that matches: starts with 20 chars from {a,b,c,d} (satisfies the lookahead),
-  // then .* matches, then (?:e|f|g|h){20} matches the last 20 chars.
-  private static final String MATCHING_INPUT = "a".repeat(20) + "e".repeat(20);
+  // Input that matches: group 1 captures "a", then "c", then the backreference matches "a".
+  private static final String MATCHING_INPUT = "aca";
 
   // Input that must NOT match
   private static final String NON_MATCHING_INPUT = "x";

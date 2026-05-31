@@ -317,6 +317,18 @@ public class RuntimeCompiler {
         }
         return fallback;
       }
+      // Fall back for lookahead strategies whose generated boolean engine is itself incorrect
+      // (find()/findFrom() never report a match, and matches() accepts embedded matches). These
+      // cannot keep a "fast boolean path" because that path is wrong; delegate the whole matcher to
+      // java.util.regex so booleans and group spans are both correct.
+      String lookaheadDefect = lookaheadBooleanEngineDefectReason(result.strategy);
+      if (lookaheadDefect != null) {
+        ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, lookaheadDefect);
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
+      }
       // Fall back for strategies whose MatchResult API (match, findMatch, bounded methods) is not
       // yet fully implemented. Callers get correct behavior via JDK until implementation is
       // complete.
@@ -462,6 +474,30 @@ public class RuntimeCompiler {
         return "MatchResult API not yet implemented for VARIABLE_CAPTURE_BACKREF strategy";
       case NESTED_QUANTIFIED_GROUPS:
         return "MatchResult API not yet implemented for NESTED_QUANTIFIED_GROUPS strategy";
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Strategies whose generated boolean engine is itself incorrect (not merely the rich MatchResult
+   * API): {@code find()}/{@code findFrom()} never report a match and {@code matches()} accepts
+   * embedded matches. The whole matcher must delegate to {@code java.util.regex} until the
+   * generated lookahead engine is fixed; a "fast boolean path" cannot be kept because that path is
+   * wrong.
+   */
+  private static String lookaheadBooleanEngineDefectReason(
+      PatternAnalyzer.MatchingStrategy strategy) {
+    switch (strategy) {
+      case SPECIALIZED_MULTIPLE_LOOKAHEADS:
+        return "boolean engine incorrect for SPECIALIZED_MULTIPLE_LOOKAHEADS strategy"
+            + " (find/findFrom never match, matches accepts embedded matches)";
+      case SPECIALIZED_LITERAL_LOOKAHEADS:
+        return "boolean engine incorrect for SPECIALIZED_LITERAL_LOOKAHEADS strategy"
+            + " (find/findFrom never match, matches accepts embedded matches)";
+      case HYBRID_DFA_LOOKAHEAD:
+        return "boolean engine incorrect for HYBRID_DFA_LOOKAHEAD strategy"
+            + " (find/findFrom never match)";
       default:
         return null;
     }
@@ -672,11 +708,9 @@ public class RuntimeCompiler {
         literalAltGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalAltGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalAltGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        literalAltGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        literalAltGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        literalAltGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        literalAltGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        literalAltGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        // Rich MatchResult methods (match/findMatch/findMatchFrom and bounded variants) are
+        // inherited from the JDK-backed defaults in ReggieMatcher; the generated trie versions
+        // returned null spans. Boolean fast path (matches/find/findFrom) stays generated.
         literalAltGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
@@ -797,8 +831,8 @@ public class RuntimeCompiler {
         unrolled.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateMatchesAtStartMethod(cw); // Required by findFrom
         unrolled.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        unrolled.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        unrolled.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindLongestMatchEndMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -817,7 +851,9 @@ public class RuntimeCompiler {
         switchGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        switchGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        // matchBounded is inherited from the base default, which delegates to the (correct)
+        // generated match(); the generated DFA-switch matchBounded returned null for whole-region
+        // matches.
         switchGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -847,13 +883,10 @@ public class RuntimeCompiler {
         fixedRepGen.generateMatchesMethod(cw);
         fixedRepGen.generateFindMethod(cw);
         fixedRepGen.generateFindFromMethod(cw);
-        // Generate match() with full group capture support
-        fixedRepGen.generateMatchMethod(cw);
-        // Generate stub methods for remaining MatchResult-returning methods
-        fixedRepGen.generateMatchesBoundedStubMethod(cw);
-        fixedRepGen.generateMatchBoundedStubMethod(cw);
-        fixedRepGen.generateFindMatchStubMethod(cw);
-        fixedRepGen.generateFindMatchFromStubMethod(cw);
+        // Rich MatchResult methods (match/findMatch/findMatchFrom and bounded variants) are
+        // inherited from the JDK-backed defaults in ReggieMatcher. The generated match() reported
+        // a whole-input match even when the input had unmatched trailing characters, and the other
+        // rich methods were UnsupportedOperationException stubs. Boolean fast path stays generated.
         break;
 
       case VARIABLE_CAPTURE_BACKREF:

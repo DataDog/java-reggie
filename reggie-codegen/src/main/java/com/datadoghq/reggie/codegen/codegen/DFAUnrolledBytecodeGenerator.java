@@ -1187,18 +1187,48 @@ public class DFAUnrolledBytecodeGenerator {
             null);
     mv.visitCode();
 
-    // If using Tagged DFA with groups, delegate to findMatch which uses tag-based tracking
-    // This is necessary for optional groups where state-based group actions are incorrect
+    // If using Tagged DFA with groups, run the tag-based search anchored at position 0 and accept
+    // it only when it spans the whole input. match() is whole-input (see ReggieMatcher#match);
+    // delegating straight to findMatch() returned embedded matches (e.g. "x bce y" for
+    // (a|b)c(d|e)).
+    // findFrom returns the leftmost match start, so a whole-input match (if any) starts at 0; the
+    // start()==0 && end()==length() guard rejects embedded and prefix-only matches.
     if (useTaggedDFA && groupCount > 0) {
-      // return findMatch(input);
-      mv.visitVarInsn(ALOAD, 0); // this
-      mv.visitVarInsn(ALOAD, 1); // input
+      // MatchResult r = findMatchFrom(input, 0);
+      int rVar = 2;
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitInsn(ICONST_0);
       mv.visitMethodInsn(
           INVOKEVIRTUAL,
           className.replace('.', '/'),
-          "findMatch",
-          "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
+          "findMatchFrom",
+          "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
           false);
+      mv.visitVarInsn(ASTORE, rVar);
+
+      Label returnNull = new Label();
+      // if (r == null) return null;
+      mv.visitVarInsn(ALOAD, rVar);
+      mv.visitJumpInsn(IFNULL, returnNull);
+      // if (r.start() != 0) return null;
+      mv.visitVarInsn(ALOAD, rVar);
+      mv.visitMethodInsn(
+          INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "start", "()I", true);
+      mv.visitJumpInsn(IFNE, returnNull);
+      // if (r.end() != input.length()) return null;
+      mv.visitVarInsn(ALOAD, rVar);
+      mv.visitMethodInsn(
+          INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "end", "()I", true);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPNE, returnNull);
+      // return r;
+      mv.visitVarInsn(ALOAD, rVar);
+      mv.visitInsn(ARETURN);
+
+      mv.visitLabel(returnNull);
+      mv.visitInsn(ACONST_NULL);
       mv.visitInsn(ARETURN);
       mv.visitMaxs(0, 0);
       mv.visitEnd();

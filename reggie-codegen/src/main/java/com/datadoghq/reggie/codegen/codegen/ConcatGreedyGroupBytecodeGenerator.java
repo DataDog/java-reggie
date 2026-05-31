@@ -478,7 +478,10 @@ public class ConcatGreedyGroupBytecodeGenerator {
       mv.visitIincInsn(posVar, 1);
 
     } else if (node instanceof CharClassNode) {
-      CharSet charset = ((CharClassNode) node).chars;
+      CharClassNode charClass = (CharClassNode) node;
+      // Respect the negation flag: [^b] stores chars={b} negated=true and must match the
+      // complement. Without this, a negated suffix class matched its own characters (inverted).
+      CharSet charset = charClass.negated ? charClass.chars.complement() : charClass.chars;
 
       // if (pos >= len) goto fail;
       mv.visitVarInsn(ILOAD, posVar);

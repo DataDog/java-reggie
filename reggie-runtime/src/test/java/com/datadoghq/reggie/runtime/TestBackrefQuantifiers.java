@@ -79,10 +79,13 @@ public class TestBackrefQuantifiers {
     assertEquals("a", r2.group(1));
     assertEquals("b", r2.group(2));
 
+    // match() is whole-input (see ReggieMatcher#match javadoc and java.util.regex.Matcher#matches).
+    // "aaaaab" is 6 chars but ^(a)\1{2,3}(.) consumes at most a + 3*a + 1 = 5, so the whole input
+    // cannot match (JDK Pattern.matches("^(a)\\1{2,3}(.)","aaaaab") == false). Use find() to locate
+    // the embedded [0,5) match.
     MatchResult r3 = m.match("aaaaab");
-    assertNotNull(r3, "Should match 'aaaaab'");
-    assertEquals("a", r3.group(1));
-    assertEquals("a", r3.group(2));
+    assertNull(r3, "match() is whole-input; 'aaaaab' has an unmatched trailing char");
+    assertTrue(m.find("aaaaab"), "find() locates the embedded match");
   }
 
   @Test
