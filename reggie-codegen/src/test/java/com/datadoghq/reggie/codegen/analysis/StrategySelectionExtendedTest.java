@@ -217,8 +217,11 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testBoundedQuantifiersRange() throws Exception {
-    // Concat with range quantifier (min≥1 required); avoids both STATELESS_LOOP and FIXED_SEQUENCE
-    PatternAnalyzer.MatchingStrategyResult result = analyze("[a-z]{1,3}b");
+    // Concat with range quantifier (min≥1 required); avoids both STATELESS_LOOP and FIXED_SEQUENCE.
+    // The trailing literal must be DISJOINT from the quantified class: an overlapping shape such as
+    // [a-z]{1,3}b requires giving back the overshoot (e.g. "ab" must match) which the
+    // non-backtracking fast path cannot do, so the analyzer declines it.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("[a-z]{1,3}0");
     assertEquals(PatternAnalyzer.MatchingStrategy.SPECIALIZED_BOUNDED_QUANTIFIERS, result.strategy);
   }
 

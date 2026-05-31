@@ -5458,7 +5458,55 @@ public class PatternAnalyzer {
       }
     }
 
+    // Reject when a RANGED quantifier (max > min) could greedily overshoot and consume a character
+    // required by a following element whose acceptable first-character set overlaps the
+    // quantifier's
+    // own character set. Example: [ab]{1,2}b on "ab" — the greedy fast path consumes both 'a' and
+    // 'b' for the quantifier, leaving nothing for the trailing 'b'; the correct match requires
+    // giving the 'b' back. The non-backtracking generator never does this, so it would incorrectly
+    // return no-match. Exact counts ({m}) cannot overshoot and are unaffected. Only decline when a
+    // real overlap exists, so disjoint shapes like [xy]{1,2}z continue to use the fast path.
+    for (int i = 0; i < elements.size() - 1; i++) {
+      if (!(elements.get(i) instanceof BoundedQuantifierElement)) continue;
+      BoundedQuantifierElement ranged = (BoundedQuantifierElement) elements.get(i);
+      if (ranged.max <= ranged.min) continue; // exact count cannot overshoot
+      CharSet rangedSet = ranged.negated ? ranged.charset.complement() : ranged.charset;
+      // A greedy overshoot of the ranged element can steal characters from any later element up to
+      // the point where a mandatory (min-length) element interrupts the overlap. Scan forward and
+      // stop once we reach an element whose first chars cannot be supplied by the ranged set.
+      for (int j = i + 1; j < elements.size(); j++) {
+        CharSet nextFirst = firstCharSet(elements.get(j));
+        if (nextFirst != null && rangedSet.intersects(nextFirst)) {
+          return null; // overlap requires backtracking the fast path cannot perform
+        }
+        // Once the following element's first char cannot come from the ranged set, the overshoot
+        // can no longer be misattributed past it (it has minLength >= 1 and acts as a barrier).
+        if (elements.get(j).minLength() >= 1) {
+          break;
+        }
+      }
+    }
+
     return new BoundedQuantifierInfo(elements, minLen, maxLen, groupCounter[0]);
+  }
+
+  /**
+   * Compute the set of characters that may legally appear as the first consumed character of a
+   * bounded element, for overlap analysis. Returns {@code null} when the set cannot be determined
+   * (treated as no usable overlap information).
+   */
+  private static CharSet firstCharSet(BoundedElement elem) {
+    if (elem instanceof BoundedLiteralElement) {
+      return CharSet.of(((BoundedLiteralElement) elem).literal);
+    }
+    if (elem instanceof BoundedOptionalElement) {
+      return CharSet.of(((BoundedOptionalElement) elem).literal);
+    }
+    if (elem instanceof BoundedQuantifierElement) {
+      BoundedQuantifierElement qe = (BoundedQuantifierElement) elem;
+      return qe.negated ? qe.charset.complement() : qe.charset;
+    }
+    return null;
   }
 
   /**

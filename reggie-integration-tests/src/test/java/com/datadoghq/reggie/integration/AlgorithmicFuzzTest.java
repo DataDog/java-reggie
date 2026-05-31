@@ -15,15 +15,20 @@
  */
 package com.datadoghq.reggie.integration;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.datadoghq.reggie.integration.fuzz.FuzzRunner;
 import com.datadoghq.reggie.integration.fuzz.RegexFuzzOracle.Finding;
 import com.datadoghq.reggie.integration.fuzz.RegexFuzzShrinker;
 import com.datadoghq.reggie.integration.fuzz.RegexFuzzShrinker.Shrunk;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -105,6 +110,97 @@ public class AlgorithmicFuzzTest {
             + " findings (> ceiling "
             + ceiling
             + "). Look at the printed findings; this is likely a regression.");
+  }
+
+  /**
+   * Large deterministic sweep that asserts <em>zero</em> divergences between Reggie and the JDK.
+   * This is the production-readiness gate. It runs from the same fixed {@link #BASE_SEED} as the
+   * smoke test, so the (pattern, input) stream and minimal repro set are fully reproducible.
+   *
+   * <p>Default-disabled while known divergences are still being fixed (tracked in {@code
+   * doc/temp/prod-readiness/fuzz-inventory.md}). Enable by removing {@link Disabled} or by passing
+   * {@code -Dreggie.fuzz.enforceZero=true} (see {@link #zeroDivergenceGate_enforcedViaProperty()}).
+   */
+  @Test
+  @Disabled("enabled in Wave C once all divergences are fixed")
+  @Timeout(value = 600, unit = TimeUnit.SECONDS)
+  public void zeroDivergenceGate() {
+    runZeroDivergenceGate();
+  }
+
+  /**
+   * Companion entry point that is <em>not</em> {@code @Disabled}: it self-skips unless {@code
+   * -Dreggie.fuzz.enforceZero=true} is set, letting CI exercise the gate without editing source.
+   */
+  @Test
+  @Timeout(value = 600, unit = TimeUnit.SECONDS)
+  public void zeroDivergenceGate_enforcedViaProperty() {
+    assumeTrue(
+        Boolean.getBoolean("reggie.fuzz.enforceZero"),
+        "set -Dreggie.fuzz.enforceZero=true to enforce the zero-divergence gate");
+    runZeroDivergenceGate();
+  }
+
+  private void runZeroDivergenceGate() {
+    FuzzRunner.Config cfg = largeSweepConfig();
+    FuzzRunner.Report report = new FuzzRunner().run(cfg);
+    System.out.println("[zero-divergence-gate] " + report.summary());
+
+    int totalChecks = cfg.patternCount * cfg.inputsPerPattern;
+    assertTrue(
+        totalChecks >= 50_000,
+        "gate must sweep at least 50k checks; configured for " + totalChecks);
+
+    List<Shrunk> repros = shrinkAndDedupe(report);
+    for (Shrunk s : repros) {
+      System.out.println(
+          "[zero-divergence-gate-repro] "
+              + s.findingKind
+              + ": pattern="
+              + s.pattern
+              + " input="
+              + s.input);
+    }
+
+    assertEquals(
+        0,
+        report.findings.size(),
+        "Zero-divergence gate found "
+            + report.findings.size()
+            + " divergences ("
+            + repros.size()
+            + " unique minimal repros). See printed repros and"
+            + " doc/temp/prod-readiness/fuzz-inventory.md.");
+  }
+
+  /**
+   * Single source of truth for the large sweep dimensions, so the gate and any discovery run use
+   * identical (deterministic) parameters. Pattern count is overridable via {@code
+   * -Dreggie.fuzz.size=...}, defaulting to 10_000 (× 8 inputs = 80_000 configured checks).
+   */
+  static FuzzRunner.Config largeSweepConfig() {
+    FuzzRunner.Config cfg = new FuzzRunner.Config();
+    cfg.seed = BASE_SEED;
+    cfg.patternCount = sizedPatternCount(10_000);
+    cfg.inputsPerPattern = 8;
+    cfg.patternDepth = 3;
+    cfg.inputMaxLength = 12;
+    return cfg;
+  }
+
+  /**
+   * Shrink every finding to a minimal repro and dedupe by (kind, pattern, input). Deterministic
+   * across runs with the same seed.
+   */
+  static List<Shrunk> shrinkAndDedupe(FuzzRunner.Report report) {
+    RegexFuzzShrinker shrinker = new RegexFuzzShrinker();
+    Map<String, Shrunk> unique = new LinkedHashMap<>();
+    for (Finding f : report.findings) {
+      Shrunk s = shrinker.shrink(f);
+      String key = s.findingKind + "||" + s.pattern + "||" + s.input;
+      unique.putIfAbsent(key, s);
+    }
+    return new ArrayList<>(unique.values());
   }
 
   /**
