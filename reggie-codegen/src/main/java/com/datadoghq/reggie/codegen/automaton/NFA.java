@@ -316,6 +316,11 @@ public final class NFA {
       // Backref group: patterns differing only in referenced group number must not share
       // a structural-cache entry (e.g. (a)(b)\1 vs (a)(b)\2).
       hash = 31 * hash + (state.backrefCheck != null ? state.backrefCheck + 1 : 0);
+
+      // Lookbehind width: patterns with different fixed-width lookbehind windows generate
+      // different bytecode (the width is pushed as a literal constant in the assertion check).
+      // assertionWidth == -1 for non-lookbehind states, so add 1 to distinguish from unset.
+      hash = 31 * hash + (state.assertionWidth + 1);
     }
 
     return hash;

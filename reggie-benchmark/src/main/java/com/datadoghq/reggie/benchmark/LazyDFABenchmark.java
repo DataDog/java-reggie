@@ -49,7 +49,10 @@ public class LazyDFABenchmark {
   // JDK baseline — same pattern, same inputs, java.util.regex NFA
   private Pattern jdkPattern;
   private String[] missInputs;
-  private int missIndex;
+  // Separate counters so missPath() and jdkMissBaseline() walk the same input stream
+  // independently, making each benchmark pairwise comparable over the same inputs.
+  private int reggieIndex;
+  private int jdkIndex;
   // Hard-miss inputs: all-[ab] strings that fail late in the pattern,
   // forcing real NFA/DFA traversal rather than immediate first-char rejection.
   private String[] hardMissInputs;
@@ -98,7 +101,7 @@ public class LazyDFABenchmark {
    */
   @Benchmark
   public boolean missPath() {
-    return lazyMatcher.matches(missInputs[(missIndex++ & 0x7FFF_FFFF) % missInputs.length]);
+    return lazyMatcher.matches(missInputs[(reggieIndex++ & 0x7FFF_FFFF) % missInputs.length]);
   }
 
   /** JDK baseline — same pattern, fixed matching input, java.util.regex NFA. */
@@ -107,12 +110,10 @@ public class LazyDFABenchmark {
     return jdkPattern.matcher(MATCH_INPUT).matches();
   }
 
-  /** JDK baseline — same diverse miss inputs as missPath. */
+  /** JDK baseline — same diverse miss inputs as missPath, independent index. */
   @Benchmark
   public boolean jdkMissBaseline() {
-    return jdkPattern
-        .matcher(missInputs[(missIndex++ & 0x7FFF_FFFF) % missInputs.length])
-        .matches();
+    return jdkPattern.matcher(missInputs[(jdkIndex++ & 0x7FFF_FFFF) % missInputs.length]).matches();
   }
 
   /**

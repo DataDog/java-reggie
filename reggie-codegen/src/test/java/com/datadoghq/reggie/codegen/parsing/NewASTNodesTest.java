@@ -241,9 +241,14 @@ class NewASTNodesTest {
 
   @Test
   void testConditionalBuildsNFA() {
-    // Verify that conditional nodes can be built into NFA
-    RegexNode node = assertDoesNotThrow(() -> parse("(?(1)a|b)"));
-    assertInstanceOf(ConditionalNode.class, node);
+    // Verify that conditional nodes can be built into NFA.
+    // Group 1 must be defined before the conditional; use (x)?(?(1)a|b).
+    RegexNode node = assertDoesNotThrow(() -> parse("(x)?(?(1)a|b)"));
+    // The top-level node is a concat; the second child is the ConditionalNode
+    assertInstanceOf(ConcatNode.class, node);
+    ConcatNode concat = (ConcatNode) node;
+    RegexNode conditionalNode = concat.children.get(1);
+    assertInstanceOf(ConditionalNode.class, conditionalNode);
 
     // Should successfully build NFA now that conditionals are implemented
     assertDoesNotThrow(

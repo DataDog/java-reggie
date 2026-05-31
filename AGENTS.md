@@ -66,7 +66,7 @@ Reggie is a high-performance Java regex library with dual compilation modes (com
 - Build: Gradle 8.11+
 - Architecture: Thompson NFA → DFA → Specialized Bytecode
 - Performance: 7-389x faster than JDK Pattern
-- PCRE Conformance: 91.3% (303/332 tests)
+- PCRE Conformance: 95.4% (329/345 evaluated tests)
 - Modules: 6 (annotations, codegen, processor, runtime, benchmark, integration-tests)
 
 ## Architecture
@@ -254,7 +254,7 @@ open build/reports/jacoco/aggregate/html/index.html
 ### Test Locations
 - Unit tests: `src/test/java/` in each module (mirrored package structure)
 - Integration tests: `reggie-integration-tests/src/test/java/`
-  - `CorrectnessTest.java`: PCRE and RE2 integration tests (91.3% PCRE passing)
+  - `CorrectnessTest.java`: PCRE and RE2 integration tests (95.4% PCRE passing)
 - Benchmarks: `reggie-benchmark/src/main/java/`
 
 ### Documentation
@@ -318,7 +318,7 @@ open build/reports/jacoco/aggregate/html/index.html
 6. Profile if needed: Use async-profiler
 
 ### Improving PCRE Conformance
-Current: 91.3% (303/332), Target: 95%+
+Current: 95.4% (329/345 evaluated tests), Target: 97%+
 1. Run: `./gradlew :reggie-integration-tests:test --tests CorrectnessTest`
 2. Analyze failures by category
 3. Implement fix (follow "Adding Feature" workflow)
@@ -705,45 +705,62 @@ cd reggie
 ## Project Status
 
 - **Maturity**: Production-ready
-- **PCRE Conformance**: 91.3% (303/332)
+- **PCRE Conformance**: 95.4% (329/345 evaluated tests, 364-entry corpus)
 - **Performance**: 7-389x faster than JDK Pattern
 - **Test Coverage**:
   - Line Coverage: 73.0% (within 70-75% target) ✅
   - Branch Coverage: 59.5% (target: 70%) ⚠️
-  - 322 JMH benchmarks, 386 PCRE integration tests
+  - 322 JMH benchmarks, 364-entry PCRE corpus (345 evaluated, 5 skipped, 14 unsupported-feature errors)
   - 699 unit tests across 86 test classes
 - **Active Development**: PCRE conformance improvements ongoing
 
 ## Automatic Fallback to java.util.regex
 
-Certain pattern structures trigger known correctness bugs in the reggie engine. For these patterns,
-`Reggie.compile()` automatically falls back to `java.util.regex` and emits a `WARNING` log:
+Certain pattern structures trigger known correctness issues in the reggie engine. For these
+patterns, `Reggie.compile()` automatically falls back to `java.util.regex` and emits a `WARNING`
+log:
 
 ```
 Falling back to java.util.regex for pattern '<pattern>': <reason>
 ```
 
-**Patterns that fall back** (handled by `FallbackPatternDetector`):
+**Patterns that fall back** — two sources contribute reasons:
 
-| Bug | Example | Reason |
-|-----|---------|--------|
-| Multiple `\1` to same group in NFA/variable-capture path | `(\w+)\s+\1\s+\1` | `multiple backreferences to group 1 in NFA mode` |
+### `FallbackPatternDetector` (AST-level checks, `reggie-codegen`)
+
+| Condition | Example | Reason string |
+|-----------|---------|---------------|
 | Lookahead inside a quantified group | `(?:(?=\d)\d)+` | `lookahead inside quantified group` |
-| Lookbehind followed by unbounded quantifier | `(?<=\d)[a-z]+` | `lookbehind followed by unbounded quantifier` |
-| Alternation inside lookbehind | `(?<=a\|b)c` | `alternation inside lookbehind` |
+| Anchor repeated by a quantifier (other than `{1}`) | `${2}` | `anchor inside quantifier: ${n}, \z{n}, etc.` |
+| END-type anchor immediately before a char-consuming element | `$\n` | `end-anchor before consumer: $ or \Z followed by char-consuming element` |
+| Lazy quantifier with `RECURSIVE_DESCENT` or `OPTIMIZED_NFA_WITH_BACKREFS` strategy | `(a+?)b` | `lazy quantifier: requires shortest-match semantics not supported by this strategy` |
+| Backref used in one alternation branch whose group is defined in a different branch (`RECURSIVE_DESCENT` or `OPTIMIZED_NFA_WITH_BACKREFS`) | `(a)|\1` | `cross-alternative backref: group captured in one branch, used in another` |
+| Backref to a nullable group under `OPTIMIZED_NFA_WITH_BACKREFS` | `(a?)\1` | `backref to nullable group: parallel NFA simulation records wrong capture span` |
+| Optional `(X)?` group with backref under `OPTIONAL_GROUP_BACKREF` (X non-nullable) | `(abc)?\1` | `optional group backref with non-nullable (X)? form: unmatched group wrongly treated as empty` |
 
-> **Note:** Bug 1 (multiple backreferences to same group) only applies when the analyzer selects
-> `OPTIMIZED_NFA_WITH_BACKREFS` or `VARIABLE_CAPTURE_BACKREF` strategy. Patterns routed through
-> other backref strategies (`SPECIALIZED_BACKREFERENCE`, `FIXED_REPETITION_BACKREF`, etc.) are
-> not subject to this fallback.
+### `RuntimeCompiler` (analyzer-flag checks)
+
+| Condition | Example | Reason string |
+|-----------|---------|---------------|
+| DFA construction diluted an anchor condition | patterns where DFA state merging loses `^`/`$` precision | `anchor condition diluted in DFA construction` |
+| DFA longest-match conflicts with NFA first-alternative priority | `(a|ab)` in find context | `alternation priority conflict: DFA longest-match vs NFA first-alternative` |
+| `VARIABLE_CAPTURE_BACKREF` strategy — MatchResult API not yet implemented | `(\w+)\s+\1` (variable capture) | `MatchResult API not yet implemented for VARIABLE_CAPTURE_BACKREF strategy` |
+| `NESTED_QUANTIFIED_GROUPS` strategy — MatchResult API not yet implemented | `((a+)+)` | `MatchResult API not yet implemented for NESTED_QUANTIFIED_GROUPS strategy` |
+| Generated method exceeds JVM 64 KB method-size limit (large alternations) | large Grok patterns | `generated method too large: <class>.<method><desc> codeSize=<n>` |
 
 The fallback applies only to `Reggie.compile()` (runtime path). Patterns compiled via the
-`@RegexPattern` annotation processor that trigger a known bug will fail at build time with an
-`UnsupportedOperationException` — use `Reggie.compile()` instead for those patterns.
+`@RegexPattern` annotation processor that trigger an unsupported condition will fail at build time
+with an `UnsupportedOperationException` — use `Reggie.compile()` instead for those patterns.
 
 The fallback is transparent to callers of `Reggie.compile()` — correctness is guaranteed at the
 cost of reggie's allocation-free performance. All other patterns continue to use the fast reggie
 engine.
+
+**Previously documented fallback reasons that no longer exist in production code:**
+- `multiple backreferences to group 1 in NFA mode` — removed; multi-backref patterns are now
+  handled correctly or routed via specific strategies
+- `lookbehind followed by unbounded quantifier` — removed; this case is no longer a known bug
+- `alternation inside lookbehind` — removed; this case is no longer a known bug
 
 ## Known Limitations
 
@@ -765,6 +782,9 @@ engine.
     - Root cause: Subroutines in RecursiveDescentBytecodeGenerator save/restore groups but don't support backtracking
     - Proper support requires backtrackable subroutines (estimated 8-12 hours implementation)
     - Tests for this are skipped by default; run with `-Dreggie.test.knownFailures=true` to enable
+- **Branch reset groups**: Partially supported — `(?|...)` with numbered groups routes to
+  `RECURSIVE_DESCENT` and passes correctness tests. The named-capture variant
+  `(?|(?'name'...)|(?'name'...))` is not yet supported and throws at compile time.
 - **Unicode properties**: Not yet supported (`\p{L}`, `\p{N}`, etc.)
 - **Atomic groups**: Not supported (`(?>...)`)
 - **Possessive quantifiers**: Not supported (`*+`, `++`, `?+`)

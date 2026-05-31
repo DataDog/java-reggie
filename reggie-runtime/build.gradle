@@ -91,6 +91,9 @@ tasks.register('debugPattern', JavaExec) {
 }
 
 tasks.register('verifyCoverage', JacocoCoverageVerification) {
+    dependsOn tasks.named('test')
+    executionData tasks.named('test')
+    sourceSets sourceSets.main
     violationRules {
         rule {
             limit {

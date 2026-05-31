@@ -114,7 +114,9 @@ public final class StructuralHash {
    * Compute hash of DFA including topology and content.
    *
    * <p>Includes: state count, transition counts, accept state count, max out-degree, character sets
-   * on transitions, per-state acceptance anchor conditions, per-transition entry guards.
+   * on transitions, per-state acceptance anchor conditions, per-transition entry guards, per-state
+   * group-action content (groupId + type), per-transition tag-operation content (tagId + type),
+   * assertion-check content (type, literal, offset, width, charSets, group captures).
    *
    * <p>Excludes: state IDs (generated identifiers).
    */
@@ -133,16 +135,36 @@ public final class StructuralHash {
       // System.identityHashCode() can return 0, making {END} look the same as {}.
       hash = 31L * hash + anchorBitmask(state.acceptanceAnchorConditions);
 
-      hash = 31L * hash + state.groupActions.size();
+      for (var ga : state.groupActions) {
+        hash = 31L * hash + ga.groupId;
+        hash = 31L * hash + ga.type.ordinal();
+      }
 
       hash = 31L * hash + state.assertionChecks.size();
       for (var ac : state.assertionChecks) {
         hash = 31L * hash + ac.type.ordinal();
+        hash = 31L * hash + (ac.literal != null ? ac.literal.hashCode() : 0);
+        hash = 31L * hash + ac.offset;
+        hash = 31L * hash + ac.width;
+        if (ac.charSets != null) {
+          for (var cs : ac.charSets) {
+            hash = 31L * hash + cs.hashCode();
+          }
+        }
+        for (var gc : ac.groups) {
+          hash = 31L * hash + gc.groupNumber;
+          hash = 31L * hash + gc.startOffset;
+          hash = 31L * hash + gc.length;
+        }
       }
 
       for (var entry : state.transitions.entrySet()) {
         hash = 31L * hash + entry.getKey().hashCode();
         hash = 31L * hash + anchorBitmask(entry.getValue().entryGuard);
+        for (var tagOp : entry.getValue().tagOps) {
+          hash = 31L * hash + tagOp.tagId;
+          hash = 31L * hash + tagOp.type.ordinal();
+        }
       }
     }
 

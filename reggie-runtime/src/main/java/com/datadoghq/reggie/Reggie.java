@@ -127,15 +127,15 @@ public final class Reggie {
   }
 
   /**
-   * Compile a regex pattern with an explicit cache key. Useful for user-controlled caching when you
-   * want the same compiled matcher for different pattern strings, or need to explicitly manage
-   * cache keys.
+   * Compile a regex pattern with an explicit cache key. The first call for a given {@code key}
+   * compiles the pattern and caches the result. Subsequent calls with the <em>same</em> key and
+   * <em>same</em> pattern return the cached instance. Calling with the same key but a
+   * <em>different</em> pattern throws {@link IllegalStateException} to prevent silent aliasing.
    *
    * <p>Example:
    *
    * <pre>
-   * String userPattern = getUserInput();
-   * ReggieMatcher matcher = Reggie.cached("user-search", userPattern);
+   * ReggieMatcher matcher = Reggie.cached("phone", "\\d{3}-\\d{3}-\\d{4}");
    * </pre>
    *
    * @param key custom cache key
@@ -143,6 +143,7 @@ public final class Reggie {
    * @return compiled matcher instance
    * @throws java.util.regex.PatternSyntaxException if pattern is invalid
    * @throws UnsupportedPatternException if pattern uses an unsupported regex construct
+   * @throws IllegalStateException if the key is already mapped to a different pattern
    */
   public static ReggieMatcher cached(String key, String pattern) {
     return RuntimeCompiler.cached(key, pattern);
@@ -154,9 +155,13 @@ public final class Reggie {
   }
 
   /**
-   * Clear the entire runtime pattern cache. This removes all cached compiled patterns, freeing
-   * memory. Future calls to {@link #compile(String)} or {@link #cached(String, String)} will
+   * Clear the entire runtime pattern cache. Removes all cached compiled patterns and releases
+   * hidden-class references held in the structural cache, allowing the JVM to reclaim the metaspace
+   * they occupied. Future calls to {@link #compile(String)} or {@link #cached(String, String)} will
    * recompile patterns from scratch.
+   *
+   * <p>For workloads that compile a large number of unique user-provided patterns, call this
+   * periodically to prevent unbounded heap and metaspace growth.
    */
   public static void clearCache() {
     RuntimeCompiler.clearCache();

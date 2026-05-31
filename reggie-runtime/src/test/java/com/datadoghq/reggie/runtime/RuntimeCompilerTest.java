@@ -184,12 +184,21 @@ public class RuntimeCompilerTest {
   }
 
   @Test
-  public void testExplicitCacheKey() {
+  public void testExplicitCacheKeySamePattern() {
     ReggieMatcher m1 = RuntimeCompiler.cached("key1", "\\d+");
-    ReggieMatcher m2 = RuntimeCompiler.cached("key1", "[a-z]+");
+    ReggieMatcher m2 = RuntimeCompiler.cached("key1", "\\d+");
 
-    assertSame(m1, m2, "Same cache key should return same instance");
+    assertSame(m1, m2, "Same key + same pattern should return cached instance");
     assertEquals(1, RuntimeCompiler.cacheSize());
+  }
+
+  @Test
+  public void testExplicitCacheKeyDifferentPatternThrows() {
+    RuntimeCompiler.cached("key1", "\\d+");
+    assertThrows(
+        IllegalStateException.class,
+        () -> RuntimeCompiler.cached("key1", "[a-z]+"),
+        "Same key with a different pattern must throw IllegalStateException");
   }
 
   @Test

@@ -102,7 +102,7 @@ public class RegexParser {
     return items.size() == 1 ? items.get(0) : new ConcatNode(items);
   }
 
-  private boolean isAlternationOrGroupEnd() {
+  private boolean isAlternationOrGroupEnd() throws ParseException {
     char ch = peek();
     return ch == '|' || ch == ')';
   }
@@ -139,7 +139,7 @@ public class RegexParser {
     }
   }
 
-  private boolean checkNonGreedy() {
+  private boolean checkNonGreedy() throws ParseException {
     skipExtendedWhitespace();
     if (hasMore() && peek() == '?') {
       consume();
@@ -185,7 +185,11 @@ public class RegexParser {
     if (sb.length() == 0) {
       throw new ParseException("Expected number at position " + pos);
     }
-    return Integer.parseInt(sb.toString());
+    try {
+      return Integer.parseInt(sb.toString());
+    } catch (NumberFormatException e) {
+      throw new ParseException("Quantifier count overflow at position " + pos);
+    }
   }
 
   private RegexNode parseAtom() throws ParseException {
@@ -409,7 +413,7 @@ public class RegexParser {
     return new CharClassNode(charset, negated);
   }
 
-  private List<CharSet.Range> parseQuotedCharClassRanges() {
+  private List<CharSet.Range> parseQuotedCharClassRanges() throws ParseException {
     List<CharSet.Range> quotedRanges = new ArrayList<>();
     while (hasMore()) {
       char ch = consume();
@@ -456,6 +460,9 @@ public class RegexParser {
           return '\r';
         case 'f':
           return '\f';
+        case 'b':
+          // \b inside a character class is backspace (U+0008), not a word-boundary anchor
+          return (char) 8;
         case 'x':
           // Hex escape: \xhh
           return parseCharFromHexEscape();
@@ -582,17 +589,44 @@ public class RegexParser {
     return parseHexEscapeInternal();
   }
 
-  /** Internal implementation of hex escape parsing. */
+  /** Internal implementation of hex escape parsing. Handles both \xhh and \x{NNNN} forms. */
   private RegexNode parseHexEscapeInternal() throws ParseException {
-    // Already consumed '\x', now parse up to 2 hex digits
+    // Already consumed '\x'
     if (!hasMore()) {
       throw new ParseException("Incomplete hex escape at position " + pos);
     }
 
+    // Braced form: \x{NNNN}
+    if (peek() == '{') {
+      consume(); // consume '{'
+      StringBuilder sb = new StringBuilder();
+      while (hasMore() && peek() != '}') {
+        char ch = peek();
+        if (Character.digit(ch, 16) == -1) {
+          throw new ParseException("Invalid character in hex escape at position " + pos);
+        }
+        sb.append(consume());
+      }
+      if (sb.length() == 0) {
+        throw new ParseException("Empty hex escape \\x{} at position " + pos);
+      }
+      consume('}');
+      try {
+        int codePoint = Integer.parseInt(sb.toString(), 16);
+        if (codePoint > 0xFFFF) {
+          throw new ParseException(
+              "Hex escape \\x{" + sb + "} is outside the BMP (> U+FFFF) at position " + pos);
+        }
+        return new LiteralNode((char) codePoint);
+      } catch (NumberFormatException e) {
+        throw new ParseException("Hex escape overflow \\x{" + sb + "} at position " + pos);
+      }
+    }
+
+    // Plain form: \xhh — up to 2 hex digits
     int value = 0;
     int digitCount = 0;
 
-    // Parse up to 2 hex digits
     while (hasMore() && digitCount < 2) {
       char ch = peek();
       int digit = Character.digit(ch, 16);
@@ -747,7 +781,7 @@ public class RegexParser {
    * Parse a quoted literal sequence: \Q...\E. Consumes all characters until \E (or end of pattern)
    * and returns them as literal AST nodes.
    */
-  private RegexNode parseQuotedLiteral() {
+  private RegexNode parseQuotedLiteral() throws ParseException {
     List<RegexNode> parts = new ArrayList<>();
     while (hasMore()) {
       char ch = consume();
@@ -1030,9 +1064,9 @@ public class RegexParser {
     return pos < pattern.length();
   }
 
-  private char peek() {
+  private char peek() throws ParseException {
     if (!hasMore()) {
-      throw new IllegalStateException("Unexpected end of pattern");
+      throw new ParseException("Unexpected end of pattern at position " + pos);
     }
     return pattern.charAt(pos);
   }
@@ -1044,7 +1078,10 @@ public class RegexParser {
     return pattern.charAt(pos + 1);
   }
 
-  private char consume() {
+  private char consume() throws ParseException {
+    if (pos >= pattern.length()) {
+      throw new ParseException("Unexpected end of pattern at position " + pos);
+    }
     return pattern.charAt(pos++);
   }
 
@@ -1276,6 +1313,15 @@ public class RegexParser {
     }
 
     consume(')');
+
+    // Validate that the referenced group exists
+    if (conditionGroup > groupCount) {
+      throw new ParseException(
+          "Backreference condition \\("
+              + conditionGroup
+              + ") refers to non-existent group at position "
+              + pos);
+    }
 
     // Save modifiers - inline modifiers inside conditional shouldn't affect rest of pattern
     RegexModifiers savedModifiers = currentModifiers;

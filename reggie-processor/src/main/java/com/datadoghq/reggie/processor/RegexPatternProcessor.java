@@ -131,6 +131,17 @@ public class RegexPatternProcessor extends AbstractProcessor {
 
   private void processClass(TypeElement containingClass, List<ExecutableElement> methods)
       throws Exception {
+    // Validate that the enclosing element is an abstract class, not an interface
+    if (containingClass.getKind() != ElementKind.CLASS
+        || !containingClass.getModifiers().contains(Modifier.ABSTRACT)) {
+      messager.printMessage(
+          Diagnostic.Kind.ERROR,
+          "@RegexPattern methods must be declared in an abstract class, not an interface or"
+              + " concrete class",
+          containingClass);
+      return;
+    }
+
     String packageName = elementUtils.getPackageOf(containingClass).getQualifiedName().toString();
     // For nested classes, use binary name (OuterClass$InnerClass) not simple name
     String qualifiedName = containingClass.getQualifiedName().toString();
@@ -142,23 +153,29 @@ public class RegexPatternProcessor extends AbstractProcessor {
 
     // Generate matcher classes for each method
     for (ExecutableElement method : methods) {
-      generateMatcherClass(packageName, method);
+      generateMatcherClass(packageName, simpleClassName, method);
     }
 
     // Generate implementation class
     generateImplementationClass(packageName, simpleClassName, methods);
   }
 
-  private String generateMatcherClassName(String methodName) {
-    // Convert method name to matcher class name: phone -> PhoneMatcher
-    return Character.toUpperCase(methodName.charAt(0)) + methodName.substring(1) + "Matcher";
+  private String generateMatcherClassName(String providerClassName, String methodName) {
+    // Qualify with provider class name to avoid collisions across different provider classes.
+    // e.g., ExamplePatterns.phone() -> ExamplePatterns_PhoneMatcher
+    return providerClassName
+        + "_"
+        + Character.toUpperCase(methodName.charAt(0))
+        + methodName.substring(1)
+        + "Matcher";
   }
 
-  private void generateMatcherClass(String packageName, ExecutableElement method) throws Exception {
+  private void generateMatcherClass(
+      String packageName, String providerClassName, ExecutableElement method) throws Exception {
     RegexPattern annotation = method.getAnnotation(RegexPattern.class);
     String pattern = annotation.value();
     String methodName = method.getSimpleName().toString();
-    String matcherClassName = generateMatcherClassName(methodName);
+    String matcherClassName = generateMatcherClassName(providerClassName, methodName);
 
     messager.printMessage(
         Diagnostic.Kind.NOTE,
@@ -190,7 +207,7 @@ public class RegexPatternProcessor extends AbstractProcessor {
     java.util.List<ImplClassBytecodeGenerator.MethodInfo> methodInfos = new java.util.ArrayList<>();
     for (ExecutableElement method : methods) {
       String methodName = method.getSimpleName().toString();
-      String matcherClassName = generateMatcherClassName(methodName);
+      String matcherClassName = generateMatcherClassName(className, methodName);
       methodInfos.add(new ImplClassBytecodeGenerator.MethodInfo(methodName, matcherClassName));
     }
 

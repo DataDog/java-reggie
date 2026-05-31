@@ -1,8 +1,8 @@
 # PCRE Conformance Roadmap
 
-**Current Status**: 91.3% pass rate (303/332 tests)
-**Last Updated**: 2026-02-03
-**Target**: 95%+ pass rate
+**Current Status**: 95.4% pass rate (329/345 evaluated tests, 364-entry corpus)
+**Last Updated**: 2026-05-30
+**Target**: 97%+ pass rate
 
 ## How to Use This Document
 
@@ -161,9 +161,9 @@ When starting a new session to work on PCRE conformance:
 These are advanced PCRE features not currently planned for implementation:
 
 - **Relative backreferences**: `(?-2)` - reference group by relative position
-- **Branch reset groups**: `(?|...)` - reset group numbers in each branch
+- **Branch reset groups (numbered)**: `(?|...)` — now supported via RECURSIVE_DESCENT; see `BranchResetCorrectnessTest`
+- **Branch reset groups (named)**: `(?|(?'a'...)|(?'a'...))` — named-capture variant not yet supported
 - **Backtracking control verbs**: `(*MARK:)`, `(*PRUNE:)`, `(*SKIP:)`, `(*THEN:)`
-- **Named captures with branch reset**: `(?|(?'a'...)|(?'a'...))`
 
 **Status**: Out of scope for initial PCRE conformance. These are rarely used in practice.
 
@@ -342,9 +342,9 @@ Pattern → PatternAnalyzer.analyzeStrategy()
 
 ---
 
-## Current Status Summary (2026-02-03)
+## Current Status Summary (2026-05-30)
 
-### Pass Rate: 91.3% (303/332 tests)
+### Pass Rate: 95.4% (329/345 evaluated tests, 364-entry corpus)
 
 ### What IS Supported
 
@@ -374,7 +374,7 @@ Pattern → PatternAnalyzer.analyzeStrategy()
 |---------|--------|--------|
 | Self-referencing backrefs | ❌ | `(a\1?){4}` - requires per-iteration capture updates |
 | Recursive palindromes | ❌ | `^((.)(?1)\2|.?)$` - requires backtrackable subroutines |
-| Branch reset groups | ❌ | `(?|...)` - advanced PCRE feature |
+| Branch reset groups (named) | ⚠️ | `(?|(?'a'aaa)|(?'a'b))` - numbered form works via RECURSIVE_DESCENT; named-capture variant not yet supported |
 | Relative backrefs | ❌ | `(?-2)` - advanced PCRE feature |
 | Backtracking verbs | ❌ | `(*PRUNE)`, `(*SKIP)`, `(*MARK)`, `(*THEN)` |
 | Atomic groups | ❌ | `(?>...)` - not implemented |
@@ -409,5 +409,5 @@ Pattern → PatternAnalyzer.analyzeStrategy()
 
 **Out of Scope**:
 - Backtracking control verbs (`*PRUNE`, `*SKIP`, etc.)
-- Branch reset groups (`(?|...)`)
+- Branch reset groups with named captures (`(?|(?'a'...)|(?'a'...))`) — numbered `(?|...)` is already supported
 - These are rarely used in practice and add significant complexity

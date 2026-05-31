@@ -240,6 +240,7 @@ public class PatternRoutingPropertyTest {
   static Stream<PatternRoutingTestCase> provideContextFreeExamples() {
     return Stream.of(
         new PatternRoutingTestCase("(?R)", RECURSIVE_DESCENT, "recursive subroutine"),
-        new PatternRoutingTestCase("(?(1)yes|no)", RECURSIVE_DESCENT, "conditional pattern"));
+        // Group 1 must be defined before the conditional for the pattern to be valid
+        new PatternRoutingTestCase("(a)?(?(1)yes|no)", RECURSIVE_DESCENT, "conditional pattern"));
   }
 }

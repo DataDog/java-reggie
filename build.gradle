@@ -179,6 +179,13 @@ tasks.register('jacocoVerify', JacocoCoverageVerification) {
                 minimum = 0.70  // 70% overall minimum
             }
         }
+        rule {
+            limit {
+                counter = 'BRANCH'
+                minimum = 0.55  // Target: 0.70 — ratchet up as coverage improves
+                maximum = 1.0
+            }
+        }
     }
 
     // Collect execution data from all subprojects except benchmark
@@ -201,3 +208,6 @@ tasks.register('jacocoVerify', JacocoCoverageVerification) {
         ])
     }))
 }
+
+// Wire coverage gate into the standard check lifecycle
+check.dependsOn jacocoVerify

@@ -182,15 +182,37 @@ public class RuntimeCompiler {
    * @throws PatternSyntaxException if pattern is invalid
    */
   public static ReggieMatcher cached(String key, String pattern) {
+    ReggieMatcher existing = PATTERN_CACHE.get(key);
+    if (existing != null) {
+      if (!pattern.equals(existing.pattern())) {
+        throw new IllegalStateException(
+            "Cache key '" + key + "' is already mapped to a different pattern");
+      }
+      return existing;
+    }
     return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern));
   }
 
   /** Compile with explicit cache key and runtime compilation options. */
   public static ReggieMatcher cached(String key, String pattern, ReggieOptions options) {
+    ReggieMatcher existing = PATTERN_CACHE.get(key);
+    if (existing != null) {
+      if (!pattern.equals(existing.pattern())) {
+        throw new IllegalStateException(
+            "Cache key '" + key + "' is already mapped to a different pattern");
+      }
+      return existing;
+    }
     return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern, options));
   }
 
-  /** Clear both pattern and structure caches. */
+  /**
+   * Clears all three caches: {@code PATTERN_CACHE} (matcher instances), {@code NFA_CLASS_CACHE}
+   * (NFA-backed compiled classes), and {@code STRUCTURE_CACHE} (all hidden Class objects). Clearing
+   * the structure cache releases hidden-class references, allowing the JVM to reclaim the metaspace
+   * they occupy. For workloads compiling many unique user-provided patterns, call this periodically
+   * to avoid unbounded metaspace growth.
+   */
   public static void clearCache() {
     PATTERN_CACHE.clear();
     NFA_CLASS_CACHE.clear();
@@ -379,6 +401,10 @@ public class RuntimeCompiler {
     } catch (RegexParser.UnsupportedPatternException | UnsupportedOperationException e) {
       throw new com.datadoghq.reggie.UnsupportedPatternException(
           "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), e);
+    } catch (RegexParser.ParseException e) {
+      // Parser reported a structural error — expose as PatternSyntaxException so callers
+      // receive a typed, documented exception rather than a generic RuntimeException.
+      throw new PatternSyntaxException(e.getMessage(), pattern, -1);
     } catch (PatternSyntaxException e) {
       // Re-throw PatternSyntaxException as-is
       throw e;
