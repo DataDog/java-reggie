@@ -86,6 +86,13 @@ class HybridDiagnosticProcessorTest {
         .anyMatch(d -> d.getMessage(Locale.ROOT).contains(needle));
   }
 
+  private boolean hasErrorContaining(
+      DiagnosticCollector<JavaFileObject> diagnostics, String needle) {
+    return diagnostics.getDiagnostics().stream()
+        .filter(d -> d.getKind() == Diagnostic.Kind.ERROR)
+        .anyMatch(d -> d.getMessage(Locale.ROOT).contains(needle));
+  }
+
   @Test
   void hybridPatternEmitsCompileTimeWarning(@TempDir Path out) throws IOException {
     // Literal alternation -> SPECIALIZED_LITERAL_ALTERNATION -> RICH_API_HYBRID.
@@ -117,7 +124,48 @@ class HybridDiagnosticProcessorTest {
     DiagnosticCollector<JavaFileObject> diagnostics = compile("t.NativePatterns", code, out);
     assertTrue(
         !hasWarningContaining(diagnostics, "HYBRID matcher")
-            && !hasWarningContaining(diagnostics, "delegates the whole matcher"),
+            && !hasWarningContaining(diagnostics, "requires java.util.regex fallback"),
         () -> "unexpected jdk-dependency warning; got " + diagnostics.getDiagnostics());
+  }
+
+  @Test
+  void fullFallbackMultipleLookaheadsRejectedAtCompileTime(@TempDir Path out) throws IOException {
+    // Multiple lookaheads -> SPECIALIZED_MULTIPLE_LOOKAHEADS -> FULL_FALLBACK -> build ERROR.
+    String code =
+        "package t;\n"
+            + "import com.datadoghq.reggie.annotations.RegexPattern;\n"
+            + "import com.datadoghq.reggie.runtime.ReggieMatcher;\n"
+            + "public abstract class FallbackPatterns {\n"
+            + "  @RegexPattern(\"(?=.*[A-Z])(?=.*\\\\d).{5,}\")\n"
+            + "  public abstract ReggieMatcher password();\n"
+            + "}\n";
+    DiagnosticCollector<JavaFileObject> diagnostics = compile("t.FallbackPatterns", code, out);
+    assertTrue(
+        hasErrorContaining(diagnostics, "requires java.util.regex fallback"),
+        () -> "expected FULL_FALLBACK rejection error; got " + diagnostics.getDiagnostics());
+    // It must be rejected, not silently warned-and-generated.
+    assertTrue(
+        !hasWarningContaining(diagnostics, "delegates the whole matcher"),
+        () ->
+            "FULL_FALLBACK must be a build error, not a mandatory warning; got "
+                + diagnostics.getDiagnostics());
+  }
+
+  @Test
+  void fullFallbackBackrefRejectedAtCompileTime(@TempDir Path out) throws IOException {
+    // Variable-length capture + backref -> VARIABLE_CAPTURE_BACKREF -> FULL_FALLBACK -> build
+    // ERROR.
+    String code =
+        "package t;\n"
+            + "import com.datadoghq.reggie.annotations.RegexPattern;\n"
+            + "import com.datadoghq.reggie.runtime.ReggieMatcher;\n"
+            + "public abstract class BackrefPatterns {\n"
+            + "  @RegexPattern(\"(a+)\\\\1\")\n"
+            + "  public abstract ReggieMatcher repeated();\n"
+            + "}\n";
+    DiagnosticCollector<JavaFileObject> diagnostics = compile("t.BackrefPatterns", code, out);
+    assertTrue(
+        hasErrorContaining(diagnostics, "requires java.util.regex fallback"),
+        () -> "expected FULL_FALLBACK rejection error; got " + diagnostics.getDiagnostics());
   }
 }

@@ -165,16 +165,16 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testVariableCaptureBackrefStrategy() throws Exception {
-    Object matcher = compile("(\\w+)\\s+\\1", "VarCaptureBackrefMatcher");
-    Method matches = matcher.getClass().getMethod("matches", String.class);
-    Method find = matcher.getClass().getMethod("find", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "hello hello"));
-    assertTrue((Boolean) matches.invoke(matcher, "go go"));
-    assertFalse((Boolean) matches.invoke(matcher, "hello world"));
-    assertFalse((Boolean) matches.invoke(matcher, "hello"));
-    assertTrue((Boolean) find.invoke(matcher, "the the fox"));
-    assertFalse((Boolean) find.invoke(matcher, "no repeat here"));
+  void testVariableCaptureBackrefStrategyRejected() {
+    // VARIABLE_CAPTURE_BACKREF is a FULL_FALLBACK strategy: the runtime path routes it to
+    // java.util.regex, but a fixed @RegexPattern class cannot fall back, so the generator rejects
+    // it at compile time rather than emitting a known-incorrect matcher.
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            new ReggieMatcherBytecodeGenerator(
+                    "test.generated", "VarCaptureBackrefMatcher", "(\\w+)\\s+\\1")
+                .generate());
   }
 
   @Test
@@ -195,14 +195,15 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testSpecializedBackreferenceStrategy() throws Exception {
-    Object matcher = compile("\\b(\\w+)\\s+\\1\\b", "BackrefMatcher");
-    Method matches = matcher.getClass().getMethod("matches", String.class);
-    Method find = matcher.getClass().getMethod("find", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "hello hello"));
-    assertFalse((Boolean) matches.invoke(matcher, "hello world"));
-    assertTrue((Boolean) find.invoke(matcher, "the the quick fox"));
-    assertFalse((Boolean) find.invoke(matcher, "no repeat here"));
+  void testWordBoundaryBackrefStrategyRejected() {
+    // \b(\w+)\s+\1\b resolves to VARIABLE_CAPTURE_BACKREF (FULL_FALLBACK) and is rejected at
+    // compile time; the runtime path (Reggie.compile()) handles it via java.util.regex.
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            new ReggieMatcherBytecodeGenerator(
+                    "test.generated", "BackrefMatcher", "\\b(\\w+)\\s+\\1\\b")
+                .generate());
   }
 
   @Test
@@ -348,25 +349,26 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testSpecializedMultipleLookaheadsStrategy() throws Exception {
-    Object matcher = compile("(?=.*[A-Z])(?=.*\\d).{8,}", "MultipleLookaheadsMatcher");
-    Method matches = matcher.getClass().getMethod("matches", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "Password1"));
-    assertFalse((Boolean) matches.invoke(matcher, "password1"));
-    assertFalse((Boolean) matches.invoke(matcher, "PASSW0R"));
+  void testSpecializedMultipleLookaheadsStrategyRejected() {
+    // SPECIALIZED_MULTIPLE_LOOKAHEADS is FULL_FALLBACK (the native lookahead boolean engine is not
+    // provably correct). Rejected at compile time; Reggie.compile() handles it at runtime.
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            new ReggieMatcherBytecodeGenerator(
+                    "test.generated", "MultipleLookaheadsMatcher", "(?=.*[A-Z])(?=.*\\d).{8,}")
+                .generate());
   }
 
   @Test
-  void testHybridDfaLookaheadStrategy() throws Exception {
-    Object matcher = compile("(?=.*[A-Z])abc", "HybridLookaheadMatcher");
-    Method matches = matcher.getClass().getMethod("matches", String.class);
-    Method find = matcher.getClass().getMethod("find", String.class);
-    assertFalse((Boolean) matches.invoke(matcher, "abc")); // lookahead: no uppercase
-    assertFalse(
-        (Boolean)
-            matches.invoke(matcher, "abcZ")); // uppercase after; matches() fails (partial consume)
-    assertTrue(
-        (Boolean) find.invoke(matcher, "abcX")); // finds "abc" substring when uppercase is ahead
+  void testHybridDfaLookaheadStrategyRejected() {
+    // HYBRID_DFA_LOOKAHEAD is FULL_FALLBACK. Rejected at compile time; Reggie.compile() handles it.
+    assertThrows(
+        UnsupportedOperationException.class,
+        () ->
+            new ReggieMatcherBytecodeGenerator(
+                    "test.generated", "HybridLookaheadMatcher", "(?=.*[A-Z])abc")
+                .generate());
   }
 
   @Test

@@ -38,14 +38,21 @@ public abstract class AssertionPatterns implements ReggiePatterns {
   @RegexPattern("(?<!ab)c")
   public abstract ReggieMatcher negativeLookbehind();
 
-  @RegexPattern("(?=.*[A-Z])(?=.*\\d)(?=.*[!@#$%]).{8,}")
-  public abstract ReggieMatcher passwordValidation();
+  // Uses runtime compilation: multiple lookaheads resolve to SPECIALIZED_MULTIPLE_LOOKAHEADS,
+  // a FULL_FALLBACK strategy that cannot be compiled at annotation-processing time.
+  // Reggie.compile()
+  // routes it to java.util.regex at runtime (the correct path).
+  public ReggieMatcher passwordValidation() {
+    return PASSWORD_VALIDATION;
+  }
 
   @RegexPattern("a(?=bc)bc")
   public abstract ReggieMatcher prototypePattern();
 
-  @RegexPattern("(?=.*[A-Z])(?=.*\\d).{5,}")
-  public abstract ReggieMatcher minLengthFive();
+  // Uses runtime compilation: multiple lookaheads (SPECIALIZED_MULTIPLE_LOOKAHEADS, FULL_FALLBACK).
+  public ReggieMatcher minLengthFive() {
+    return MIN_LENGTH_FIVE;
+  }
 
   // DFA-friendly: fixed-width character class assertions
   @RegexPattern("(?<=[A-Z])c")
@@ -54,9 +61,11 @@ public abstract class AssertionPatterns implements ReggiePatterns {
   @RegexPattern("(?=[0-9])")
   public abstract ReggieMatcher charClassLookahead();
 
-  // Complex patterns that may force NFA fallback
-  @RegexPattern("(?=\\w*\\d)")
-  public abstract ReggieMatcher variableWidthLookahead();
+  // Uses runtime compilation: variable-width lookahead resolves to HYBRID_DFA_LOOKAHEAD, a
+  // FULL_FALLBACK strategy that cannot be compiled at annotation-processing time.
+  public ReggieMatcher variableWidthLookahead() {
+    return VARIABLE_WIDTH_LOOKAHEAD;
+  }
 
   // Uses runtime compilation: alternation inside lookbehind triggers automatic fallback
   // to java.util.regex and cannot be compiled at annotation-processing time.
@@ -64,5 +73,9 @@ public abstract class AssertionPatterns implements ReggiePatterns {
     return ALT_LOOKBEHIND;
   }
 
+  private static final ReggieMatcher PASSWORD_VALIDATION =
+      Reggie.compile("(?=.*[A-Z])(?=.*\\d)(?=.*[!@#$%]).{8,}");
+  private static final ReggieMatcher MIN_LENGTH_FIVE = Reggie.compile("(?=.*[A-Z])(?=.*\\d).{5,}");
+  private static final ReggieMatcher VARIABLE_WIDTH_LOOKAHEAD = Reggie.compile("(?=\\w*\\d)");
   private static final ReggieMatcher ALT_LOOKBEHIND = Reggie.compile("(?<=a|b)c");
 }

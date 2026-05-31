@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggiePatterns;
 import com.datadoghq.reggie.annotations.RegexPattern;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
@@ -29,14 +30,20 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   // BACKREFERENCES (always NFA)
   // ====================
 
-  @RegexPattern("(\\w+)\\s+\\1")
-  public abstract ReggieMatcher duplicateWord();
+  // Uses runtime compilation: variable-length capture + backref resolves to
+  // VARIABLE_CAPTURE_BACKREF, a FULL_FALLBACK strategy that cannot be compiled at
+  // annotation-processing time. Reggie.compile() routes it to java.util.regex at runtime.
+  public ReggieMatcher duplicateWord() {
+    return DUPLICATE_WORD;
+  }
 
   @RegexPattern("([a-z]{3}).*\\1")
   public abstract ReggieMatcher backrefWithContent();
 
-  @RegexPattern("(a+)\\1")
-  public abstract ReggieMatcher repeatedSequence();
+  // Uses runtime compilation: VARIABLE_CAPTURE_BACKREF (FULL_FALLBACK).
+  public ReggieMatcher repeatedSequence() {
+    return REPEATED_SEQUENCE;
+  }
 
   // ====================
   // VARIABLE-LENGTH QUANTIFIERS IN GROUPS (forces NFA for group tracking)
@@ -60,20 +67,27 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   // These assertions contain quantifiers that make them complex
   // ====================
 
-  @RegexPattern("(?=.*\\d{3})\\w+")
-  public abstract ReggieMatcher lookaheadWithQuantifier();
+  // Uses runtime compilation: lookahead with quantifier resolves to HYBRID_DFA_LOOKAHEAD, a
+  // FULL_FALLBACK strategy that cannot be compiled at annotation-processing time.
+  public ReggieMatcher lookaheadWithQuantifier() {
+    return LOOKAHEAD_WITH_QUANTIFIER;
+  }
 
   @RegexPattern("(?=\\w+@).*@example\\.com")
   public abstract ReggieMatcher lookaheadWithPlusQuantifier();
 
-  // Pattern without literal suffix - prevents Boyer-Moore optimization in JDK
-  @RegexPattern("(?=\\w+@).*@\\w+\\.\\w+")
-  public abstract ReggieMatcher lookaheadNoBoyerMoore();
+  // Pattern without literal suffix - prevents Boyer-Moore optimization in JDK.
+  // Uses runtime compilation: HYBRID_DFA_LOOKAHEAD (FULL_FALLBACK).
+  public ReggieMatcher lookaheadNoBoyerMoore() {
+    return LOOKAHEAD_NO_BOYER_MOORE;
+  }
 
-  // Pattern with multiple lookaheads - forces NFA, avoids STATELESS_LOOP detection
-  // Has ≤64 states but requires state tracking due to complexity
-  @RegexPattern("(?=\\w+@)(?=.*example).*@\\w+\\.com")
-  public abstract ReggieMatcher multipleLookaheads();
+  // Pattern with multiple lookaheads. Uses runtime compilation: resolves to
+  // SPECIALIZED_LITERAL_LOOKAHEADS, a FULL_FALLBACK strategy that cannot be compiled at
+  // annotation-processing time.
+  public ReggieMatcher multipleLookaheads() {
+    return MULTIPLE_LOOKAHEADS;
+  }
 
   // ====================
   // POTENTIAL STATE EXPLOSION PATTERNS
@@ -103,4 +117,15 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
 
   @RegexPattern("a{5,10}b{3,7}")
   public abstract ReggieMatcher boundedQuantifiers();
+
+  // Runtime-compiled matchers for FULL_FALLBACK patterns (see methods above). These cannot be
+  // generated at annotation-processing time, so they go through Reggie.compile()'s runtime path,
+  // which delegates to java.util.regex — preserving each benchmark's intended pattern.
+  private static final ReggieMatcher DUPLICATE_WORD = Reggie.compile("(\\w+)\\s+\\1");
+  private static final ReggieMatcher REPEATED_SEQUENCE = Reggie.compile("(a+)\\1");
+  private static final ReggieMatcher LOOKAHEAD_WITH_QUANTIFIER = Reggie.compile("(?=.*\\d{3})\\w+");
+  private static final ReggieMatcher LOOKAHEAD_NO_BOYER_MOORE =
+      Reggie.compile("(?=\\w+@).*@\\w+\\.\\w+");
+  private static final ReggieMatcher MULTIPLE_LOOKAHEADS =
+      Reggie.compile("(?=\\w+@)(?=.*example).*@\\w+\\.com");
 }

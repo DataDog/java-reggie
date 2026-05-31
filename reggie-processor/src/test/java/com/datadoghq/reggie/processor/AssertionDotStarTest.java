@@ -19,27 +19,43 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggiePatterns;
-import com.datadoghq.reggie.annotations.RegexPattern;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import org.junit.jupiter.api.Test;
 
-/** Test assertions with .* (dot-star) patterns like (?=.*[A-Z]) */
+/**
+ * Test assertions with .* (dot-star) patterns like (?=.*[A-Z]).
+ *
+ * <p>These lookahead patterns resolve to FULL_FALLBACK strategies (HYBRID_DFA_LOOKAHEAD /
+ * SPECIALIZED_MULTIPLE_LOOKAHEADS) that cannot be compiled at annotation-processing time, so the
+ * provider obtains the matchers via {@link Reggie#compile(String)} (the runtime path, which
+ * delegates to java.util.regex and is correct). Because no methods are {@code @RegexPattern}-driven
+ * anymore, the provider is a plain concrete class instantiated directly rather than through {@link
+ * Reggie#patterns}. The assertions below still cover the same patterns.
+ */
 public class AssertionDotStarTest {
 
-  public abstract static class DotStarPatterns implements ReggiePatterns {
-    @RegexPattern("(?=.*[A-Z])abc")
-    public abstract ReggieMatcher lookaheadDotStarUpper();
+  public static final class DotStarPatterns implements ReggiePatterns {
+    public ReggieMatcher lookaheadDotStarUpper() {
+      return LOOKAHEAD_DOT_STAR_UPPER;
+    }
 
-    @RegexPattern("(?=.*\\d)abc")
-    public abstract ReggieMatcher lookaheadDotStarDigit();
+    public ReggieMatcher lookaheadDotStarDigit() {
+      return LOOKAHEAD_DOT_STAR_DIGIT;
+    }
 
-    @RegexPattern("(?=.*[A-Z])(?=.*\\d).{5,}")
-    public abstract ReggieMatcher multipleLookaheads();
+    public ReggieMatcher multipleLookaheads() {
+      return MULTIPLE_LOOKAHEADS;
+    }
+
+    private static final ReggieMatcher LOOKAHEAD_DOT_STAR_UPPER = Reggie.compile("(?=.*[A-Z])abc");
+    private static final ReggieMatcher LOOKAHEAD_DOT_STAR_DIGIT = Reggie.compile("(?=.*\\d)abc");
+    private static final ReggieMatcher MULTIPLE_LOOKAHEADS =
+        Reggie.compile("(?=.*[A-Z])(?=.*\\d).{5,}");
   }
 
   @Test
   public void testLookaheadDotStarUpper() {
-    DotStarPatterns patterns = Reggie.patterns(DotStarPatterns.class);
+    DotStarPatterns patterns = new DotStarPatterns();
 
     // Pattern (?=.*[A-Z])abc means: match "abc" where there's uppercase AHEAD
     // With matches(), the entire string must be consumed, so "abc" + uppercase ahead
@@ -58,7 +74,7 @@ public class AssertionDotStarTest {
 
   @Test
   public void testLookaheadDotStarDigit() {
-    DotStarPatterns patterns = Reggie.patterns(DotStarPatterns.class);
+    DotStarPatterns patterns = new DotStarPatterns();
 
     // Pattern (?=.*\d)abc means: match "abc" where there's digit AHEAD
 
@@ -73,7 +89,7 @@ public class AssertionDotStarTest {
 
   @Test
   public void testMultipleLookaheads() {
-    DotStarPatterns patterns = Reggie.patterns(DotStarPatterns.class);
+    DotStarPatterns patterns = new DotStarPatterns();
 
     // Pattern: (?=.*[A-Z])(?=.*\d).{5,}
     // NOTE: Multi-lookahead optimization currently has minLength hardcoded to 8,

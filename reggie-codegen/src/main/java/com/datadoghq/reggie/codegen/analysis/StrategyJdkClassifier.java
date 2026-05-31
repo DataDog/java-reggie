@@ -44,10 +44,13 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy;
  * methods (inheriting the base JDK-backed defaults).
  *
  * <p>This classification reflects the <strong>runtime path</strong> ({@code Reggie.compile()}). On
- * the compile-time annotation-processor path the {@code RICH_API_HYBRID} set is identical, and the
- * {@code FULL_FALLBACK} set is surfaced as a compile-time warning (the AST-level fallbacks are
- * additionally rejected with {@code UnsupportedOperationException}, but the lookahead and
- * incomplete-MatchResult FULL_FALLBACK strategies are not rejected — they only warn).
+ * the compile-time annotation-processor path the {@code RICH_API_HYBRID} set is identical and still
+ * generates (with a {@code MANDATORY_WARNING}), while the {@code FULL_FALLBACK} set is rejected:
+ * {@code ReggieMatcherBytecodeGenerator.generate()} throws {@code UnsupportedOperationException}
+ * for every {@code FULL_FALLBACK} strategy (alongside the AST-level fallbacks), which {@code
+ * RegexPatternProcessor} surfaces as a build error. A fixed {@code @RegexPattern} class cannot fall
+ * back to {@code java.util.regex} at runtime, so the (known-incorrect) native bytecode is never
+ * emitted; {@code Reggie.compile()} must be used for those patterns instead.
  */
 public final class StrategyJdkClassifier {
 

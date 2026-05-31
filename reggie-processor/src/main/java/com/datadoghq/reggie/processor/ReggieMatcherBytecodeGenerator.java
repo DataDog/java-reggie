@@ -133,6 +133,22 @@ public class ReggieMatcherBytecodeGenerator {
               + ". Use Reggie.compile() for runtime compilation with automatic fallback.");
     }
 
+    // Reject FULL_FALLBACK strategies at compile time. The runtime path routes these to
+    // JavaRegexFallbackMatcher (which is correct), but @RegexPattern generates a fixed class that
+    // cannot fall back at runtime, so emitting the native bytecode here would ship a
+    // known-incorrect
+    // matcher (e.g. the lookahead boolean engine is wrong). Fail the build instead.
+    if (StrategyJdkClassifier.classifyJdkDependency(strategy)
+        == StrategyJdkClassifier.StrategyJdkClass.FULL_FALLBACK) {
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' cannot be compiled at annotation-processing time: it requires java.util.regex"
+              + " fallback (strategy "
+              + strategy
+              + "). Use Reggie.compile() for runtime compilation with automatic fallback.");
+    }
+
     // 4. Generate bytecode based on strategy
     ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
 
