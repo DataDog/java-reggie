@@ -24,6 +24,7 @@ import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
 import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
+import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.DFA;
@@ -61,9 +62,21 @@ public class ReggieMatcherBytecodeGenerator {
   private final String className;
   private final String pattern;
 
+  // The strategy selected for this pattern, recorded by generate() so callers (the annotation
+  // processor) can classify the JDK dependency and emit the compile-time hybrid warning.
+  private PatternAnalyzer.MatchingStrategy resolvedStrategy;
+
   public ReggieMatcherBytecodeGenerator(String packageName, String className, String pattern) {
     this.className = packageName.replace('.', '/') + "/" + className;
     this.pattern = pattern;
+  }
+
+  /**
+   * Returns the {@link PatternAnalyzer.MatchingStrategy} selected during the most recent {@link
+   * #generate()} call, or {@code null} if {@code generate()} has not completed yet.
+   */
+  public PatternAnalyzer.MatchingStrategy resolvedStrategy() {
+    return resolvedStrategy;
   }
 
   /**
@@ -89,6 +102,7 @@ public class ReggieMatcherBytecodeGenerator {
     PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
     PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
     PatternAnalyzer.MatchingStrategy strategy = result.strategy;
+    this.resolvedStrategy = strategy;
     DFA dfa = result.dfa;
 
     // Reject patterns with known engine bugs at compile time — emitting buggy bytecode is worse
@@ -146,7 +160,10 @@ public class ReggieMatcherBytecodeGenerator {
             || strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS
             || strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA;
     boolean needsRecursiveDescent = strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
-    generateConstructor(cw, needsNFAState, needsRecursiveDescent, nfa, nameMap);
+    boolean nativeRichApi =
+        StrategyJdkClassifier.classifyJdkDependency(strategy)
+            == StrategyJdkClassifier.StrategyJdkClass.NATIVE;
+    generateConstructor(cw, needsNFAState, needsRecursiveDescent, nfa, nameMap, nativeRichApi);
 
     // Generate methods based on strategy
     switch (strategy) {
@@ -675,7 +692,8 @@ public class ReggieMatcherBytecodeGenerator {
       boolean needsNFAState,
       boolean needsRecursiveDescent,
       NFA nfa,
-      Map<String, Integer> nameMap) {
+      Map<String, Integer> nameMap,
+      boolean nativeRichApi) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "<init>", "()V", null, null);
     mv.visitCode();
 
@@ -714,6 +732,18 @@ public class ReggieMatcherBytecodeGenerator {
           "com/datadoghq/reggie/runtime/ReggieMatcher",
           "initRecursiveState",
           "(I)V",
+          false);
+    }
+
+    // Mark NATIVE-classified matchers so the ReggieMatcher backstop can detect a generator/
+    // classification drift if they ever build the java.util.regex rich-API delegate.
+    if (nativeRichApi) {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL,
+          "com/datadoghq/reggie/runtime/ReggieMatcher",
+          "markNativeRichApi",
+          "()V",
           false);
     }
 

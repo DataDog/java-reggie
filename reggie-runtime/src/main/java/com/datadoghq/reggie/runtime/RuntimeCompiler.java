@@ -33,6 +33,7 @@ import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
+import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -68,6 +69,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Logger;
 import java.util.regex.PatternSyntaxException;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -81,6 +83,13 @@ import org.objectweb.asm.util.TraceClassVisitor;
  */
 public class RuntimeCompiler {
 
+  private static final Logger LOG = Logger.getLogger(RuntimeCompiler.class.getName());
+
+  // Patterns for which a RICH_API_HYBRID warning has already been logged, so the loud
+  // "delegates to java.util.regex" warning fires at most once per pattern even though
+  // compileInternal may run more than once for the same pattern under cache races.
+  private static final Set<String> HYBRID_WARNED = ConcurrentHashMap.newKeySet();
+
   // Level 1: Pattern string → matcher instance (fast path for exact matches).
   // NFA-backed patterns are NOT stored here; they use NFA_CLASS_CACHE instead.
   private static final ConcurrentHashMap<String, ReggieMatcher> PATTERN_CACHE =
@@ -93,14 +102,22 @@ public class RuntimeCompiler {
   private static final class NfaMatcherFactory {
     final Class<? extends ReggieMatcher> matcherClass;
     final Map<String, Integer> nameMap;
+    final boolean nativeRichApi;
 
-    NfaMatcherFactory(Class<? extends ReggieMatcher> matcherClass, Map<String, Integer> nameMap) {
+    NfaMatcherFactory(
+        Class<? extends ReggieMatcher> matcherClass,
+        Map<String, Integer> nameMap,
+        boolean nativeRichApi) {
       this.matcherClass = matcherClass;
       this.nameMap = nameMap;
+      this.nativeRichApi = nativeRichApi;
     }
 
     ReggieMatcher newInstance(String pattern) {
       ReggieMatcher m = instantiateFromClassUnchecked(matcherClass, pattern);
+      if (nativeRichApi) {
+        m.markNativeRichApi();
+      }
       if (!nameMap.isEmpty()) {
         m.setNameToIndex(nameMap);
         m = new NameEnrichingMatcher(m);
@@ -217,6 +234,7 @@ public class RuntimeCompiler {
     PATTERN_CACHE.clear();
     NFA_CLASS_CACHE.clear();
     STRUCTURE_CACHE.clear();
+    HYBRID_WARNED.clear();
   }
 
   /** Get current pattern cache size (level 1). */
@@ -341,6 +359,21 @@ public class RuntimeCompiler {
         return fallback;
       }
 
+      // 3.6. Loud warning for RICH_API_HYBRID strategies: native boolean matching but the rich
+      // MatchResult API (match/findMatch/findMatchFrom/matchBounded) delegates to java.util.regex
+      // via the base-class defaults. FULL_FALLBACK already warned above (and returned); this never
+      // double-warns. Logged once per pattern.
+      String hybridReason = StrategyJdkClassifier.richApiHybridReason(result.strategy);
+      if (hybridReason != null && HYBRID_WARNED.add(pattern)) {
+        LOG.warning(
+            "Reggie compiled '"
+                + pattern
+                + "' to a HYBRID matcher: native boolean matching but group extraction"
+                + " (match/findMatch) delegates to java.util.regex (strategy "
+                + result.strategy
+                + ").");
+      }
+
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
         ReggieMatcher hybrid = compileHybrid(pattern, ast, nfa, analyzer, result, caseInsensitive);
@@ -378,13 +411,20 @@ public class RuntimeCompiler {
       // fields (currentStates, nextStates, …) during matching and are not safe to share across
       // threads or calls. The factory also captures the name map so that each fresh instance is
       // fully enriched without re-parsing the pattern.
+      boolean nativeRichApi =
+          StrategyJdkClassifier.classifyJdkDependency(result.strategy)
+              == StrategyJdkClassifier.StrategyJdkClass.NATIVE;
       if (isNfaBacked(result.strategy)) {
-        NFA_CLASS_CACHE.putIfAbsent(cacheKey, new NfaMatcherFactory(matcherClass, nameMap));
+        NFA_CLASS_CACHE.putIfAbsent(
+            cacheKey, new NfaMatcherFactory(matcherClass, nameMap, nativeRichApi));
         // Return an enriched instance for this (first) call.
         return NFA_CLASS_CACHE.get(cacheKey).newInstance(pattern);
       }
 
       ReggieMatcher matcher = instantiateFromClass(matcherClass, pattern);
+      if (nativeRichApi) {
+        matcher.markNativeRichApi();
+      }
 
       // 9. Inject name map and wrap for named group support
       if (!nameMap.isEmpty()) {

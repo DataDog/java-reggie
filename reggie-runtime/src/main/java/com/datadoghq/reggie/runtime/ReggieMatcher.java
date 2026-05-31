@@ -20,7 +20,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.logging.Logger;
 
 /**
  * Base class for all compile-time generated regex matchers. Annotate abstract methods returning
@@ -36,6 +38,19 @@ import java.util.function.Function;
  * }</pre>
  */
 public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
+
+  private static final Logger LOG = Logger.getLogger(ReggieMatcher.class.getName());
+
+  // Fires the misclassification backstop warning (below) at most once per JVM, so a classification
+  // bug is never completely silent yet never floods the log.
+  private static final AtomicBoolean NATIVE_DELEGATE_WARNED = new AtomicBoolean(false);
+
+  // Set true by the compiler (runtime or annotation-processor path) when this matcher's strategy
+  // was classified NATIVE — i.e. it is expected to fully generate the rich MatchResult API and
+  // never build the JDK delegate. If such a matcher ever reaches jdkRichDelegate(), that is a
+  // StrategyJdkClassifier / generator-emission bug; we warn instead of failing silently.
+  private boolean expectsNativeRichApi;
+
   protected final String pattern;
 
   // injected by RuntimeCompiler after instantiation
@@ -43,6 +58,16 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
 
   protected void setNameToIndex(Map<String, Integer> map) {
     this.nameToIndex = map;
+  }
+
+  /**
+   * Marks this matcher as having been classified {@code NATIVE} by {@code StrategyJdkClassifier} —
+   * its generator is expected to emit the full rich MatchResult API, so it must never build the JDK
+   * delegate. Set by the compiler; if such a matcher ever reaches {@link #jdkRichDelegate()} the
+   * backstop there warns about the classification/emission bug.
+   */
+  protected void markNativeRichApi() {
+    this.expectsNativeRichApi = true;
   }
 
   // Reusable NFA state for allocation-free matching
@@ -83,6 +108,17 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
    * a wrong group span to be returned silently.
    */
   private java.util.regex.Pattern jdkRichDelegate() {
+    // Backstop (defense in depth): a matcher classified NATIVE should fully generate the rich
+    // MatchResult API and never reach here. If one does, StrategyJdkClassifier and the generator's
+    // method emission have drifted — warn once so the misclassification is never silent.
+    if (expectsNativeRichApi && NATIVE_DELEGATE_WARNED.compareAndSet(false, true)) {
+      LOG.warning(
+          "Reggie matcher for pattern '"
+              + pattern
+              + "' was classified NATIVE but built the java.util.regex rich-API delegate; this is a"
+              + " StrategyJdkClassifier/generator classification bug — group extraction is silently"
+              + " using java.util.regex.");
+    }
     if (jdkRichUnsupported) {
       throw richUnsupported(null);
     }

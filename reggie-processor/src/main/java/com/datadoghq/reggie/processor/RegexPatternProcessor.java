@@ -187,6 +187,50 @@ public class RegexPatternProcessor extends AbstractProcessor {
 
     byte[] bytecode = generator.generate();
 
+    // Loud compile-time warning for patterns that lean on java.util.regex at runtime.
+    //  - RICH_API_HYBRID: native boolean matching, but the rich MatchResult API
+    //    (match/findMatch/findMatchFrom/matchBounded) delegates to java.util.regex.
+    //  - FULL_FALLBACK: the runtime compiler routes the whole matcher to java.util.regex because
+    // the
+    //    generated engine is not provably correct. Some of these (anchor dilution, alternation
+    //    priority, AST-level fallbacks) are already rejected earlier with
+    // UnsupportedOperationException
+    //    and never reach here; the remainder (lookahead boolean-engine defects,
+    // incomplete-MatchResult
+    //    backref strategies) are NOT rejected and would otherwise emit silently-wrong bytecode —
+    // warn
+    //    loudly here so the build never hides it.
+    com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy strategy =
+        generator.resolvedStrategy();
+    com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.StrategyJdkClass jdkClass =
+        com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.classifyJdkDependency(strategy);
+    if (jdkClass
+        == com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.StrategyJdkClass
+            .RICH_API_HYBRID) {
+      messager.printMessage(
+          Diagnostic.Kind.MANDATORY_WARNING,
+          "@RegexPattern '"
+              + pattern
+              + "' compiles to a HYBRID matcher: native boolean matching but group extraction"
+              + " (match/findMatch) delegates to java.util.regex (strategy "
+              + strategy
+              + ").",
+          method);
+    } else if (jdkClass
+        == com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.StrategyJdkClass
+            .FULL_FALLBACK) {
+      messager.printMessage(
+          Diagnostic.Kind.MANDATORY_WARNING,
+          "@RegexPattern '"
+              + pattern
+              + "' resolves to strategy "
+              + strategy
+              + " whose generated engine is not provably correct; at runtime Reggie.compile()"
+              + " delegates the whole matcher to java.util.regex. The compile-time matcher may"
+              + " return wrong results — prefer Reggie.compile() for this pattern.",
+          method);
+    }
+
     // Write bytecode to .class file
     String qualifiedName = packageName + "." + matcherClassName;
     FileObject classFile = processingEnv.getFiler().createClassFile(qualifiedName);
