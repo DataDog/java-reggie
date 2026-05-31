@@ -30,6 +30,10 @@ jobs:
       - name: Build and test
         run: ./gradlew build
 
+      - name: Correctness gates
+        timeout-minutes: 10
+        run: ./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.zeroDivergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforceZero=true
+
       - name: Generate coverage report and verify gates
         run: ./gradlew jacocoAggregateReport jacocoVerify
 

@@ -873,7 +873,7 @@ Based on extensive research, Reggie's hybrid compile-time/runtime approach is **
 
 ## Contributing
 
-This is an experimental project, but contributions are welcome!
+Reggie is production-ready. Contributions are welcome!
 
 ### Areas for Contribution
 

@@ -70,7 +70,7 @@ tasks.named('test') {
     // Pass system properties for bytecode debugging
     systemProperty 'reggie.debug.trace', System.getProperty('reggie.debug.trace')
     // Pass the meta-test enforcement flag through to the test JVM (StrategyCorrectnessMetaTest).
-    systemProperty 'reggie.metatest.enforce', System.getProperty('reggie.metatest.enforce', 'false')
+    systemProperty 'reggie.metatest.enforce', System.getProperty('reggie.metatest.enforce', 'true')
 }
 
 // Task to run bytecode debugger

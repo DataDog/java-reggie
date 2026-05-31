@@ -714,11 +714,27 @@ cd reggie
   - 699 unit tests across 86 test classes
 - **Active Development**: PCRE conformance improvements ongoing
 
+## Correctness Guarantee
+
+Reggie never silently returns a wrong answer for an accepted pattern. Every result is either:
+
+- **(a) provably correct** — generated natively by one of Reggie's bytecode strategies, or
+- **(b) transparently delegated** — pattern compilation via `Reggie.compile()` logs a WARNING and
+  falls back to `java.util.regex` at runtime; pattern compilation via `@RegexPattern` rejects the
+  pattern at build time with an `UnsupportedOperationException`.
+
+This guarantee is enforced continuously in CI by two automated gates:
+
+- **Zero-divergence differential fuzzer** (`AlgorithmicFuzzTest.zeroDivergenceGate_enforcedViaProperty`):
+  76k+ deterministic (pattern, input) pairs checked against JDK — 0 divergences required.
+- **Per-strategy correctness meta-test** (`StrategyCorrectnessMetaTest`): all 8 public
+  `ReggieMatcher` methods exercised for every `MatchingStrategy` against JDK — 0 mismatches
+  required (enforced via `-Dreggie.metatest.enforce=true` in every build).
+
 ## Automatic Fallback to java.util.regex
 
-Certain pattern structures trigger known correctness issues in the reggie engine. For these
-patterns, `Reggie.compile()` automatically falls back to `java.util.regex` and emits a `WARNING`
-log:
+Certain pattern structures are not handled natively. For these patterns, `Reggie.compile()`
+automatically falls back to `java.util.regex` and emits a `WARNING` log:
 
 ```
 Falling back to java.util.regex for pattern '<pattern>': <reason>
@@ -748,8 +764,19 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | `NESTED_QUANTIFIED_GROUPS` strategy — MatchResult API not yet implemented | `((a+)+)` | `MatchResult API not yet implemented for NESTED_QUANTIFIED_GROUPS strategy` |
 | Generated method exceeds JVM 64 KB method-size limit (large alternations) | large Grok patterns | `generated method too large: <class>.<method><desc> codeSize=<n>` |
 
+In addition to full fallback, two strategies use a **hybrid** approach: `SPECIALIZED_LITERAL_ALTERNATION`
+and `FIXED_REPETITION_BACKREF` generate native boolean methods (`matches`/`find`/`findFrom`) but
+delegate group-extraction (`match`/`findMatch`/`findMatchFrom`) to a lazily-compiled `java.util.regex`
+pattern. `Reggie.compile()` logs a one-time WARNING; `@RegexPattern` emits a `MANDATORY_WARNING`.
+
+**FULL_FALLBACK strategies** (5): `SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`,
+`HYBRID_DFA_LOOKAHEAD` (lookahead boolean-engine defects); `VARIABLE_CAPTURE_BACKREF`,
+`NESTED_QUANTIFIED_GROUPS` (incomplete MatchResult API).
+
+**RICH_API_HYBRID strategies** (2): `SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`.
+
 The fallback applies only to `Reggie.compile()` (runtime path). Patterns compiled via the
-`@RegexPattern` annotation processor that trigger an unsupported condition will fail at build time
+`@RegexPattern` annotation processor that trigger a FULL_FALLBACK condition will fail at build time
 with an `UnsupportedOperationException` — use `Reggie.compile()` instead for those patterns.
 
 The fallback is transparent to callers of `Reggie.compile()` — correctness is guaranteed at the
@@ -789,6 +816,19 @@ engine.
 - **Atomic groups**: Not supported (`(?>...)`)
 - **Possessive quantifiers**: Not supported (`*+`, `++`, `?+`)
 - **Inline flags**: Partially supported - `(?i)`, `(?m)`, `(?s)`, `(?x)` work globally; scoped flags like `(?i:...)` not yet supported
+
+### Performance known gaps
+
+The following are **performance-only** issues — not correctness issues. Both items were observed
+in the JMH benchmark suite and deferred as follow-up work:
+
+- **Literal-alternation `match()` / group-extraction hybrid overhead**: `SPECIALIZED_LITERAL_ALTERNATION`
+  and `FIXED_REPETITION_BACKREF` delegate group-extraction to a lazily-compiled JDK pattern. This
+  per-call wrapper cost produces 0.57–0.62x JDK throughput on the group-extraction path. The boolean
+  path (`matches()`/`find()`) is still faster than JDK. Root cause: JDK delegate invocation overhead
+  on every `match()`/`findMatch()` call; investigating in a deferred effort.
+- **`ONEPASS_NFA` `find()` regression**: `find()` on `ONEPASS_NFA` patterns measures ~0.28x JDK.
+  This is a pre-existing gap in the native path, unrelated to the hybrid delegation work.
 
 ## Questions & Support
 

@@ -99,17 +99,13 @@ public class AlgorithmicFuzzTest {
       printed++;
     }
 
-    // Backstop: if the divergence count blows up beyond a ceiling, fail. This is a
-    // regression-detection guard, not a quality target — tightened from 10% to 5% after
-    // MatchResult API stubs and structural-cache collision fixes were confirmed.
-    int ceiling = (int) (cfg.patternCount * cfg.inputsPerPattern * 0.05);
+    // Zero-tolerance gate: all checked patterns must agree with JDK. Both gates are
+    // enforced in CI. Any finding is a regression.
     assertTrue(
-        report.findings.size() < ceiling,
+        report.findings.size() == 0,
         "Fuzz produced "
             + report.findings.size()
-            + " findings (> ceiling "
-            + ceiling
-            + "). Look at the printed findings; this is likely a regression.");
+            + " findings (expected 0). Look at the printed findings; this is a regression.");
   }
 
   /**

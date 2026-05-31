@@ -37,6 +37,19 @@ build:
     reports:
       junit: "**/build/test-results/**/*.xml"
 
+correctness_gate:
+  extends: .gradle_job
+  stage: build
+  needs:
+    - build
+  timeout: 10 minutes
+  script:
+    - ./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.zeroDivergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforceZero=true $GRADLE_ARGS
+  artifacts:
+    when: always
+    reports:
+      junit: "**/build/test-results/**/*.xml"
+
 publish_to_maven_central:
   extends:
     - .gradle_job
@@ -66,6 +79,7 @@ publish_snapshot:
   stage: publish
   needs:
     - build
+    - correctness_gate
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: on_success
