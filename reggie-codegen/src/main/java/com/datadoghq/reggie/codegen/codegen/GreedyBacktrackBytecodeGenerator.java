@@ -218,9 +218,12 @@ public class GreedyBacktrackBytecodeGenerator {
       mv.visitJumpInsn(IF_ICMPLT, returnFalse); // if greedyLen < minCount, fail
     }
 
-    // If we also need to verify greedy charset matches all chars in the range
-    // Skip validation if charset is "any" (matches all chars)
-    if (info.greedyCharSet != null && !isAnyCharSet(info.greedyCharSet)) {
+    // If we also need to verify greedy charset matches all chars in the range.
+    // Only skip validation when the charset truly matches EVERY character (CharSet.ANY). Note that
+    // PatternAnalyzer now declines GREEDY_BACKTRACK unless the greedy charset is CharSet.ANY, so in
+    // practice this branch is not taken; the explicit ANY check is kept as a correctness guard
+    // (CharSet.ANY_EXCEPT_NEWLINE must not be treated as "any" — it would consume '\n').
+    if (info.greedyCharSet != null && !info.greedyCharSet.equals(CharSet.ANY)) {
       // Loop to verify each char in greedy range matches charset
       int checkPosVar = nextVar;
       int greedyEndVar = nextVar + 1;
@@ -1253,6 +1256,48 @@ public class GreedyBacktrackBytecodeGenerator {
       mv.visitVarInsn(ILOAD, foundVar);
       // S: [I] -> []
       mv.visitJumpInsn(IFLT, notFound);
+
+      // For the default '.' (CharSet.ANY_EXCEPT_NEWLINE), the greedy run cannot span a '\n'. The
+      // leftmost valid start in find context is therefore just after the last '\n' that precedes
+      // the suffix (clamped to the current scan position). Adjust pos accordingly so the run only
+      // covers characters '.' actually matches; the min-count check below then validates the length
+      // (and advances past this occurrence if it is now too short). With CharSet.ANY (DOTALL) this
+      // adjustment is skipped and the original behavior is preserved.
+      if (info.greedyCharSet != null && info.greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE)) {
+        // int nl = input.lastIndexOf('\n', found - 1);
+        int nlVar = nextVar + 1;
+        // S: [] -> [A:String]
+        mv.visitVarInsn(ALOAD, inputVar);
+        // S: [A:String] -> [A:String, I]  (newline code point)
+        pushInt(mv, '\n');
+        // S: [A:String, I] -> [A:String, I, I]  (found - 1)
+        mv.visitVarInsn(ILOAD, foundVar);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        // S: [A:String, I, I] -> [I]
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "lastIndexOf", "(II)I", false);
+        // S: [I] -> []
+        mv.visitVarInsn(ISTORE, nlVar);
+
+        // if (nl >= pos) pos = nl + 1;
+        Label noNewline = new Label();
+        // S: [] -> [I]
+        mv.visitVarInsn(ILOAD, nlVar);
+        // S: [I] -> [I, I]
+        mv.visitVarInsn(ILOAD, posVar);
+        // S: [I, I] -> []
+        mv.visitJumpInsn(IF_ICMPLT, noNewline);
+        // pos = nl + 1
+        // S: [] -> [I]
+        mv.visitVarInsn(ILOAD, nlVar);
+        // S: [I] -> [I, I]
+        mv.visitInsn(ICONST_1);
+        // S: [I, I] -> [I]
+        mv.visitInsn(IADD);
+        // S: [I] -> []
+        mv.visitVarInsn(ISTORE, posVar);
+        mv.visitLabel(noNewline);
+      }
 
       // Check greedy min count: found - pos >= greedyMinCount
       if (info.greedyMinCount > 0) {
@@ -2866,7 +2911,4 @@ public class GreedyBacktrackBytecodeGenerator {
    * Check if a charset matches all characters (no validation needed). This is true for CharSet.ANY
    * and CharSet.ANY_EXCEPT_NEWLINE (used by `.`).
    */
-  private boolean isAnyCharSet(CharSet charset) {
-    return charset.equals(CharSet.ANY) || charset.equals(CharSet.ANY_EXCEPT_NEWLINE);
-  }
 }

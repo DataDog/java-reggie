@@ -725,7 +725,9 @@ public class PatternAnalyzer {
         // Build DFA with tag computation enabled for Tagged DFA
         DFA dfa = constructor.buildDFA(nfa, true);
 
-        if (dfa.isAnchorConditionDiluted()) {
+        if (dfa.isAnchorConditionDiluted()
+            || hasMisplacedStartAnchorInAlternation(ast)
+            || hasStringEndAnchorInAlternation(ast)) {
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
@@ -806,7 +808,12 @@ public class PatternAnalyzer {
       SubsetConstructor constructor = new SubsetConstructor();
       DFA dfa = constructor.buildDFA(nfa);
 
-      if (dfa.isAnchorConditionDiluted()) {
+      // A START-class anchor placed after a consumer inside an alternation branch makes that branch
+      // unsatisfiable in find context, but the DFA mishandles it (treats \A/^ as match-start, not
+      // input-start). Decline the DFA fast path so we route to a correct strategy / JDK fallback.
+      if (dfa.isAnchorConditionDiluted()
+          || hasMisplacedStartAnchorInAlternation(ast)
+          || hasStringEndAnchorInAlternation(ast)) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
                 MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
@@ -980,6 +987,120 @@ public class PatternAnalyzer {
     if (node instanceof GroupNode) return containsAlternation(((GroupNode) node).child);
     if (node instanceof QuantifierNode) return containsAlternation(((QuantifierNode) node).child);
     return false;
+  }
+
+  /**
+   * Detects an alternation branch in which a START-class anchor ({@code ^} non-multiline or {@code
+   * \A}) is positioned after a character-consuming element. Such a branch is unsatisfiable in find
+   * context (the anchor demands absolute input position 0, which can never hold once characters
+   * have been consumed), yet the DFA construction treats the anchor as a "match-start" condition
+   * and loses that distinction when the branch is merged with siblings — silently accepting matches
+   * the JDK rejects. Example: {@code 1[^c]$|.-\A} on "1-0" — branch {@code .-\A} can never match
+   * (the \A follows ".-"), but the DFA accepts via that branch and {@code find()} wrongly returns
+   * true.
+   *
+   * <p>Returns {@code true} when any alternation branch anywhere in the AST exhibits this shape, so
+   * the caller can decline the DFA fast path and route to a correct strategy.
+   */
+  private boolean hasMisplacedStartAnchorInAlternation(RegexNode node) {
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (startAnchorPrecededByConsumer(alt, false)
+            || hasMisplacedStartAnchorInAlternation(alt)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasMisplacedStartAnchorInAlternation(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return hasMisplacedStartAnchorInAlternation(((GroupNode) node).child);
+    }
+    if (node instanceof QuantifierNode) {
+      return hasMisplacedStartAnchorInAlternation(((QuantifierNode) node).child);
+    }
+    return false;
+  }
+
+  /**
+   * Detects the combination of an alternation and a {@code \Z} (STRING_END) anchor. {@code \Z}
+   * matches at end-of-input OR immediately before a final newline; the DFA's longest-match
+   * resolution can accept the "before final newline" position while the JDK greedily prefers
+   * consuming the trailing newline via a preceding optional/variable element, yielding a different
+   * (shorter) span. Example: {@code [1][^-]?\Z|_{2}} on "1\n" — JDK matches [0,2] (consumes '\n'
+   * via [^-]?), the DFA stops at [0,1]. {@code $} and {@code \z} are unaffected. Decline the DFA
+   * fast path for this shape so it routes to a correct strategy.
+   */
+  private boolean hasStringEndAnchorInAlternation(RegexNode node) {
+    return containsAlternation(node) && nfa != null && nfa.hasStringEndAnchor();
+  }
+
+  /**
+   * Returns true if, scanning {@code node} left to right, a START-class anchor appears after at
+   * least one element that definitely consumes a character. {@code consumedBefore} carries that
+   * "characters already consumed" state into the scan.
+   */
+  private boolean startAnchorPrecededByConsumer(RegexNode node, boolean consumedBefore) {
+    return scanForMisplacedStartAnchor(node, consumedBefore) == SCAN_MISPLACED;
+  }
+
+  private static final int SCAN_NO_CONSUME = 0; // no consuming element seen, no anchor violation
+  private static final int SCAN_CONSUMED = 1; // at least one consuming element seen
+  private static final int SCAN_MISPLACED = 2; // found a misplaced START anchor
+
+  /**
+   * Scans a branch for a START-class anchor preceded by a consumer. Returns {@link #SCAN_MISPLACED}
+   * if found; otherwise {@link #SCAN_CONSUMED} when the branch definitely consumes a character or
+   * {@link #SCAN_NO_CONSUME} when it does not.
+   */
+  private int scanForMisplacedStartAnchor(RegexNode node, boolean consumedBefore) {
+    if (node instanceof AnchorNode) {
+      AnchorNode anchor = (AnchorNode) node;
+      boolean startClass =
+          (anchor.type == AnchorNode.Type.STRING_START)
+              || (anchor.type == AnchorNode.Type.START && !anchor.multiline);
+      if (startClass && consumedBefore) {
+        return SCAN_MISPLACED;
+      }
+      return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
+    }
+    if (node instanceof ConcatNode) {
+      boolean consumed = consumedBefore;
+      for (RegexNode child : ((ConcatNode) node).children) {
+        int r = scanForMisplacedStartAnchor(child, consumed);
+        if (r == SCAN_MISPLACED) return SCAN_MISPLACED;
+        if (r == SCAN_CONSUMED) consumed = true;
+      }
+      return consumed ? SCAN_CONSUMED : SCAN_NO_CONSUME;
+    }
+    if (node instanceof GroupNode) {
+      return scanForMisplacedStartAnchor(((GroupNode) node).child, consumedBefore);
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      int r = scanForMisplacedStartAnchor(q.child, consumedBefore);
+      if (r == SCAN_MISPLACED) return SCAN_MISPLACED;
+      // Only treat as a definite consumer when the quantifier requires at least one repetition.
+      if (r == SCAN_CONSUMED && q.min >= 1) return SCAN_CONSUMED;
+      return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
+    }
+    if (node instanceof LiteralNode) {
+      // Epsilon literal (char 0) consumes nothing.
+      if (((LiteralNode) node).ch == 0) {
+        return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
+      }
+      return SCAN_CONSUMED;
+    }
+    if (node instanceof CharClassNode) {
+      return SCAN_CONSUMED;
+    }
+    // Unknown / non-consuming (assertions, lookarounds): preserve prior consumed state.
+    return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
   }
 
   private boolean dfaHasAcceptingStateWithTransitions(DFA dfa) {
@@ -6024,6 +6145,17 @@ public class PatternAnalyzer {
       return null;
     }
 
+    // The GREEDY_BACKTRACK suffix-search fast paths (find/findMatch via indexOf/lastIndexOf) only
+    // re-validate the greedy run for the two '.' charsets they reason about precisely: CharSet.ANY
+    // (DOTALL '.') and CharSet.ANY_EXCEPT_NEWLINE (default '.'). Any other broad charset (e.g. a
+    // large negated class) cannot be soundly handled by the indexOf scan, so decline and let it
+    // route to a charset-validating strategy.
+    if (greedyCharSet != null
+        && !greedyCharSet.equals(CharSet.ANY)
+        && !greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE)) {
+      return null;
+    }
+
     // There must be something after the greedy group (the suffix)
     if (greedyGroupIndex >= allNodes.size() - 1) {
       return null; // No suffix
@@ -6338,6 +6470,29 @@ public class PatternAnalyzer {
         } else {
           // Other complex alternative - not supported
           return null;
+        }
+      }
+
+      // Decline when a multi-branch alternation contains a quantified branch whose match length is
+      // not "exactly one character per iteration". The fast path models the whole alternation as a
+      // per-character greedy loop over the UNION charset, which silently ignores branch length
+      // constraints. Examples it gets wrong: ([b]|.{3}){1,} on "cb" and ([b]|.{3,}){1,} on "cb" —
+      // the union charset becomes "any char", so the loop greedily matches both characters [0,2],
+      // but the JDK only matches the single 'b' at [1,2] (the .{3}/.{3,} branch needs >=3 chars and
+      // cannot fire). A branch is safe only when it consumes exactly one character per step:
+      //   - a single-char branch [1,1] (literal or char class), or
+      //   - an UNBOUNDED branch whose minimum is <= 1 (a+, a*, [a-z]+) — repeatedly consuming one
+      //     character is equivalent to the union greedy loop.
+      // Any branch with minimum >= 2 (e.g. a{2,}, .{3,}) or a bounded maximum >= 2 (e.g. .{3},
+      // [a-z]{1,3}) imposes a multi-character length the per-char loop cannot honor.
+      if (numAlts > 1) {
+        for (int i = 0; i < numAlts; i++) {
+          boolean singleChar = altMinBounds[i] == 1 && altMaxBounds[i] == 1;
+          boolean unboundedSingleStep =
+              altMaxBounds[i] == Integer.MAX_VALUE && altMinBounds[i] <= 1;
+          if (!singleChar && !unboundedSingleStep) {
+            return null; // multi-length branch the per-char loop cannot honor
+          }
         }
       }
 

@@ -138,26 +138,71 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   public abstract MatchResult match(String input);
 
   /**
-   * Tests whether a bounded region of the input matches the pattern (boolean check). This is an
-   * allocation-free alternative to matches(input.subSequence(start, end).toString()).
+   * Tests whether a bounded region of the input matches the pattern (boolean check). The pattern
+   * must match the <em>entire</em> region {@code [start, end)}, matching the region semantics of
+   * {@link java.util.regex.Matcher#region(int, int)} followed by {@link
+   * java.util.regex.Matcher#matches()}.
+   *
+   * <p>The default implementation delegates to {@link #matches(String)} over the extracted region
+   * substring and therefore allocates a substring. Bytecode generators may override this method
+   * with an allocation-free implementation.
    *
    * @param input the character sequence to match
    * @param start the start index (inclusive)
    * @param end the end index (exclusive)
    * @return true if the bounded region matches
    */
-  public abstract boolean matchesBounded(CharSequence input, int start, int end);
+  public boolean matchesBounded(CharSequence input, int start, int end) {
+    return matches(input.subSequence(start, end).toString());
+  }
 
   /**
    * Tests whether a bounded region of the input matches the pattern and returns the match result.
-   * This is an allocation-free alternative to match(input.subSequence(start, end)).
+   * The pattern must match the <em>entire</em> region {@code [start, end)}. The returned result's
+   * spans are relative to the <em>original</em> input (i.e. shifted by {@code start}), and {@link
+   * MatchResult#group(int)} returns substrings of the original input — matching the region
+   * semantics of {@link java.util.regex.Matcher#region(int, int)} followed by {@link
+   * java.util.regex.Matcher#matches()}.
+   *
+   * <p>The default implementation delegates to {@link #match(String)} over the extracted region
+   * substring and shifts the resulting spans. Bytecode generators may override this method with an
+   * allocation-free implementation.
    *
    * @param input the character sequence to match
    * @param start the start index (inclusive)
    * @param end the end index (exclusive)
    * @return the match result, or null if the bounded region doesn't match
    */
-  public abstract MatchResult matchBounded(CharSequence input, int start, int end);
+  public MatchResult matchBounded(CharSequence input, int start, int end) {
+    String region = input.subSequence(start, end).toString();
+    MatchResult r = match(region);
+    if (r == null) {
+      return null;
+    }
+    if (start == 0) {
+      return r;
+    }
+    return shiftSpans(r, start, input.toString());
+  }
+
+  /**
+   * Builds a copy of {@code r} with every group span shifted by {@code delta}, anchored to {@code
+   * originalInput} so that {@link MatchResult#group(int)} returns substrings of the original input.
+   * Unmatched groups (span {@code -1}) are preserved as {@code -1}. Named-group lookups are
+   * preserved when the source result exposes them via {@code this.nameToIndex}.
+   */
+  private MatchResult shiftSpans(MatchResult r, int delta, String originalInput) {
+    int groupCount = r.groupCount();
+    int[] starts = new int[groupCount + 1];
+    int[] ends = new int[groupCount + 1];
+    for (int i = 0; i <= groupCount; i++) {
+      int s = r.start(i);
+      int e = r.end(i);
+      starts[i] = s == -1 ? -1 : s + delta;
+      ends[i] = e == -1 ? -1 : e + delta;
+    }
+    return new MatchResultImpl(originalInput, starts, ends, groupCount, nameToIndex);
+  }
 
   /**
    * Finds if the pattern occurs anywhere in the input string and returns the match result. Unlike
