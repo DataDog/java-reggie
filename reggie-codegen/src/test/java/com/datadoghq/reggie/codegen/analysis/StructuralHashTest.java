@@ -18,9 +18,14 @@ package com.datadoghq.reggie.codegen.analysis;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.codegen.ast.RegexNode;
+import com.datadoghq.reggie.codegen.automaton.CharSet;
+import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -145,5 +150,91 @@ class StructuralHashTest {
         h1,
         h2,
         "(a)?b (PIKEVM_CAPTURE) and (a)b (DFA_WITH_GROUPS) must have distinct structural hashes");
+  }
+
+  // ── TagOperation membership / order (Phase C2 guard) ──
+
+  /** Builds a 2-state DFA (start→accept on 'a') with the given tag operations on the transition. */
+  private static DFA buildTwoStateDFA(List<DFA.TagOperation> tagOps) {
+    DFA.DFAState start = new DFA.DFAState(0, Collections.emptySet(), false);
+    DFA.DFAState accept = new DFA.DFAState(1, Collections.emptySet(), true);
+    start.addTransition(CharSet.of('a'), accept, tagOps);
+    return new DFA(start, Set.of(accept), List.of(start, accept));
+  }
+
+  @Test
+  void tagOpMembership_changesHash() throws Exception {
+    RegexNode sharedAst = new RegexParser().parse("(a)b");
+    NFA sharedNfa = new ThompsonBuilder().build(sharedAst, 1);
+
+    DFA dfa1 =
+        buildTwoStateDFA(List.of(new DFA.TagOperation(2, 1, DFA.TagOperation.ActionType.START, 0)));
+    DFA dfa2 =
+        buildTwoStateDFA(
+            List.of(
+                new DFA.TagOperation(2, 1, DFA.TagOperation.ActionType.START, 0),
+                new DFA.TagOperation(3, 1, DFA.TagOperation.ActionType.END, 0)));
+
+    PatternAnalyzer.MatchingStrategyResult r1 =
+        new PatternAnalyzer.MatchingStrategyResult(
+            PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS, dfa1);
+    PatternAnalyzer.MatchingStrategyResult r2 =
+        new PatternAnalyzer.MatchingStrategyResult(
+            PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS, dfa2);
+
+    long h1 = StructuralHash.compute(r1, sharedNfa, false);
+    long h2 = StructuralHash.compute(r2, sharedNfa, false);
+    assertNotEquals(h1, h2, "adding a tagOp to the list must change the structural hash");
+  }
+
+  @Test
+  void tagOpOrder_changesHash() throws Exception {
+    RegexNode sharedAst = new RegexParser().parse("(a)b");
+    NFA sharedNfa = new ThompsonBuilder().build(sharedAst, 1);
+
+    DFA dfa1 =
+        buildTwoStateDFA(
+            List.of(
+                new DFA.TagOperation(2, 1, DFA.TagOperation.ActionType.START, 0),
+                new DFA.TagOperation(3, 1, DFA.TagOperation.ActionType.END, 0)));
+    DFA dfa2 =
+        buildTwoStateDFA(
+            List.of(
+                new DFA.TagOperation(3, 1, DFA.TagOperation.ActionType.END, 0),
+                new DFA.TagOperation(2, 1, DFA.TagOperation.ActionType.START, 0)));
+
+    PatternAnalyzer.MatchingStrategyResult r1 =
+        new PatternAnalyzer.MatchingStrategyResult(
+            PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS, dfa1);
+    PatternAnalyzer.MatchingStrategyResult r2 =
+        new PatternAnalyzer.MatchingStrategyResult(
+            PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS, dfa2);
+
+    long h1 = StructuralHash.compute(r1, sharedNfa, false);
+    long h2 = StructuralHash.compute(r2, sharedNfa, false);
+    assertNotEquals(h1, h2, "reversing tagOp order must change the structural hash");
+  }
+
+  @Test
+  void tagOpPriorityOnly_sameHash() throws Exception {
+    RegexNode sharedAst = new RegexParser().parse("(a)b");
+    NFA sharedNfa = new ThompsonBuilder().build(sharedAst, 1);
+
+    DFA dfa1 =
+        buildTwoStateDFA(List.of(new DFA.TagOperation(2, 1, DFA.TagOperation.ActionType.START, 0)));
+    DFA dfa2 =
+        buildTwoStateDFA(
+            List.of(new DFA.TagOperation(2, 1, DFA.TagOperation.ActionType.START, 99)));
+
+    PatternAnalyzer.MatchingStrategyResult r1 =
+        new PatternAnalyzer.MatchingStrategyResult(
+            PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS, dfa1);
+    PatternAnalyzer.MatchingStrategyResult r2 =
+        new PatternAnalyzer.MatchingStrategyResult(
+            PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS, dfa2);
+
+    long h1 = StructuralHash.compute(r1, sharedNfa, false);
+    long h2 = StructuralHash.compute(r2, sharedNfa, false);
+    assertEquals(h1, h2, "priority-only difference must not change the structural hash");
   }
 }
