@@ -28,6 +28,9 @@ public class SubsetConstructor {
   private int nextStateId;
   private boolean anchorConditionDiluted;
   private boolean captureAmbiguous;
+  // Maps each DFA state's NFA-state set to the priority-ordered list of those NFA states.
+  // Lower index = higher priority (Perl thread semantics). Populated by buildDFA.
+  private Map<Set<NFA.NFAState>, List<NFA.NFAState>> dfaStateOrdering;
 
   public DFA buildDFA(NFA nfa) throws StateExplosionException {
     return buildDFA(nfa, false);
@@ -47,6 +50,7 @@ public class SubsetConstructor {
     this.nextStateId = 0;
     this.anchorConditionDiluted = false;
     this.captureAmbiguous = false;
+    this.dfaStateOrdering = new HashMap<>();
 
     // Pre-compute anchor-aware epsilon closures for all NFA states. Each entry maps a reachable
     // NFA state to the weakest conjunction of anchors that must hold at the current input
@@ -68,7 +72,8 @@ public class SubsetConstructor {
     Map<NFA.NFAState, EnumSet<NFA.AnchorType>> startClosure =
         anchoredClosures.get(nfa.getStartState());
     Set<NFA.NFAState> startClosureSet = startClosure.keySet();
-    List<DFA.GroupAction> startGroupActions = computeGroupActions(startClosureSet);
+    List<DFA.GroupAction> startGroupActions =
+        computeGroupActions(startClosureSet, nfa.getAcceptStates());
     EnumSet<NFA.AnchorType> startAcceptConditions =
         computeAcceptanceConditions(startClosure, nfa.getAcceptStates());
     boolean startAccepting =
@@ -87,6 +92,8 @@ public class SubsetConstructor {
     }
     stateCache.put(startClosureSet, start);
     allStates.add(start);
+    dfaStateOrdering.put(
+        startClosureSet, computeInitialOrdering(nfa.getStartState(), startClosureSet));
 
     Queue<DFA.DFAState> worklist = new ArrayDeque<>();
     worklist.add(start);
@@ -99,6 +106,7 @@ public class SubsetConstructor {
       DFA.DFAState current = worklist.poll();
       Map<NFA.NFAState, EnumSet<NFA.AnchorType>> currentConditions =
           dfaStateConditions.get(current);
+      List<NFA.NFAState> currentOrdering = dfaStateOrdering.get(current.nfaStates);
 
       // Compute disjoint partition of outgoing character sets
       List<CharSet> partition = computeDisjointPartition(current.nfaStates);
@@ -147,7 +155,7 @@ public class SubsetConstructor {
           boolean accepting =
               containsAcceptState(targets, nfa.getAcceptStates())
                   || !targetAcceptConditions.isEmpty();
-          List<DFA.GroupAction> groupActions = computeGroupActions(targets);
+          List<DFA.GroupAction> groupActions = computeGroupActions(targets, nfa.getAcceptStates());
           target =
               new DFA.DFAState(
                   nextStateId++,
@@ -162,6 +170,7 @@ public class SubsetConstructor {
           stateCache.put(targets, target);
           allStates.add(target);
           dfaStateConditions.put(target, targetsWithCond);
+          dfaStateOrdering.put(targets, computeTransitionOrdering(currentOrdering, targets, chars));
           worklist.add(target);
         }
 
@@ -169,7 +178,11 @@ public class SubsetConstructor {
         if (computeTags && nfa.getGroupCount() > 0) {
           List<DFA.TagOperation> tagOps =
               computeTagOperations(
-                  current.nfaStates, targets, chars, flattenClosure(anchoredClosures));
+                  current.nfaStates,
+                  targets,
+                  chars,
+                  flattenClosure(anchoredClosures),
+                  nfa.getAcceptStates());
           current.addTransition(chars, target, tagOps, transitionGuard);
         } else {
           current.addTransition(chars, target, Collections.emptyList(), transitionGuard);
@@ -210,6 +223,59 @@ public class SubsetConstructor {
     for (NFA.NFAState next : current.getEpsilonTransitions()) {
       orderedEpsilonClosureDfs(next, seen);
     }
+  }
+
+  /**
+   * Computes the priority-ordered NFA state list for the initial DFA state. Filters the ordered
+   * epsilon closure of the NFA start state to those NFA states that are actually in startClosure
+   * (anchored closure may exclude some).
+   */
+  private List<NFA.NFAState> computeInitialOrdering(
+      NFA.NFAState nfaStart, Set<NFA.NFAState> startClosure) {
+    List<NFA.NFAState> ordered = orderedEpsilonClosure(nfaStart);
+    List<NFA.NFAState> result = new ArrayList<>();
+    for (NFA.NFAState s : ordered) {
+      if (startClosure.contains(s)) result.add(s);
+    }
+    return result;
+  }
+
+  /**
+   * Derives the priority-ordered NFA state list for a target DFA state, given the source DFA
+   * state's ordered list and the character set of the transition. For each source NFA state in
+   * priority order, follows character transitions that intersect {@code chars}, computes the
+   * ordered epsilon closure of each transition target, and appends new states (deduplicating,
+   * first-occurrence-wins) that are in {@code targetSet}.
+   */
+  private List<NFA.NFAState> computeTransitionOrdering(
+      List<NFA.NFAState> sourceOrdering, Set<NFA.NFAState> targetSet, CharSet chars) {
+    Set<NFA.NFAState> seen = new LinkedHashSet<>();
+    for (NFA.NFAState source : sourceOrdering) {
+      for (NFA.Transition t : source.getTransitions()) {
+        if (!t.chars.intersects(chars)) continue;
+        for (NFA.NFAState reachable : orderedEpsilonClosure(t.target)) {
+          if (targetSet.contains(reachable)) seen.add(reachable);
+        }
+      }
+    }
+    return new ArrayList<>(seen);
+  }
+
+  /** Returns a map from NFA state to its priority rank (index) in the given ordered list. */
+  static Map<NFA.NFAState, Integer> buildRankMap(List<NFA.NFAState> ordered) {
+    Map<NFA.NFAState, Integer> ranks = new HashMap<>();
+    for (int i = 0; i < ordered.size(); i++) {
+      ranks.put(ordered.get(i), i);
+    }
+    return ranks;
+  }
+
+  /**
+   * Returns the priority-ordered NFA state list for the given DFA state's NFA set, as computed
+   * during DFA construction. Lower index = higher priority. Returns null if not known.
+   */
+  public List<NFA.NFAState> getOrdering(Set<NFA.NFAState> nfaStates) {
+    return dfaStateOrdering != null ? dfaStateOrdering.get(nfaStates) : null;
   }
 
   private Map<NFA.NFAState, Set<NFA.NFAState>> precomputeEpsilonClosures(NFA nfa) {
@@ -483,47 +549,70 @@ public class SubsetConstructor {
     return false;
   }
 
-  /**
-   * Compute group actions for a DFA state based on its constituent NFA states. Uses
-   * leftmost-longest semantics: lower NFA state IDs have higher priority.
-   *
-   * @param nfaStates Set of NFA states that make up this DFA state
-   * @return List of group actions, deduplicated by (groupId, actionType) with highest priority
-   */
+  /** Legacy overload: no accept-state filter (used by buildDFAWithAssertions). */
   private List<DFA.GroupAction> computeGroupActions(Set<NFA.NFAState> nfaStates) {
-    // Collect all group markers from NFA states
-    List<DFA.GroupAction> actions = new ArrayList<>();
+    return computeGroupActions(nfaStates, Collections.emptySet());
+  }
 
+  /**
+   * Compute group actions for a DFA state using priority-rank selection. Deduplicates by (groupId,
+   * actionType) keeping the marker from the highest-priority thread (lowest rank in the ordered
+   * closure). C2.4: at accepting DFA states, markers from threads with rank lower than the NFA
+   * accept state's rank are excluded — they lost the acceptance race.
+   */
+  private List<DFA.GroupAction> computeGroupActions(
+      Set<NFA.NFAState> nfaStates, Set<NFA.NFAState> nfaAcceptStates) {
+    List<NFA.NFAState> ordered =
+        (dfaStateOrdering != null)
+            ? dfaStateOrdering.getOrDefault(nfaStates, Collections.emptyList())
+            : Collections.emptyList();
+    Map<NFA.NFAState, Integer> rankMap = buildRankMap(ordered);
+
+    // C2.4: find the lowest rank (highest priority) NFA accept state in this DFA state.
+    int minAcceptRank = Integer.MAX_VALUE;
+    if (!nfaAcceptStates.isEmpty()) {
+      for (NFA.NFAState s : nfaStates) {
+        if (nfaAcceptStates.contains(s)) {
+          minAcceptRank = Math.min(minAcceptRank, rankMap.getOrDefault(s, Integer.MAX_VALUE));
+        }
+      }
+    }
+
+    Map<String, DFA.GroupAction> deduped = new HashMap<>();
+    Map<String, Integer> dedupedRanks = new HashMap<>();
     for (NFA.NFAState nfaState : nfaStates) {
+      int rank = rankMap.getOrDefault(nfaState, Integer.MAX_VALUE);
+      if (minAcceptRank < Integer.MAX_VALUE && rank < minAcceptRank)
+        continue; // C2.4: thread lost acceptance race
       if (nfaState.enterGroup != null) {
-        actions.add(
-            new DFA.GroupAction(
-                nfaState.enterGroup, DFA.GroupAction.ActionType.ENTER, nfaState.id));
+        String key = nfaState.enterGroup + ":ENTER";
+        Integer existingRank = dedupedRanks.get(key);
+        if (existingRank == null || rank < existingRank) {
+          deduped.put(
+              key,
+              new DFA.GroupAction(
+                  nfaState.enterGroup, DFA.GroupAction.ActionType.ENTER, nfaState.id));
+          dedupedRanks.put(key, rank);
+        }
       }
       if (nfaState.exitGroup != null) {
-        actions.add(
-            new DFA.GroupAction(nfaState.exitGroup, DFA.GroupAction.ActionType.EXIT, nfaState.id));
+        String key = nfaState.exitGroup + ":EXIT";
+        Integer existingRank = dedupedRanks.get(key);
+        if (existingRank == null || rank < existingRank) {
+          deduped.put(
+              key,
+              new DFA.GroupAction(
+                  nfaState.exitGroup, DFA.GroupAction.ActionType.EXIT, nfaState.id));
+          dedupedRanks.put(key, rank);
+        }
       }
     }
 
-    if (actions.isEmpty()) {
-      return Collections.emptyList();
-    }
-
-    // Deduplicate: keep only the action with highest priority (lowest NFA state ID)
-    // for each (groupId, actionType) pair
-    Map<String, DFA.GroupAction> deduped = new HashMap<>();
-    for (DFA.GroupAction action : actions) {
-      String key = action.groupId + ":" + action.type;
-      DFA.GroupAction existing = deduped.get(key);
-      if (existing == null || action.priority < existing.priority) {
-        deduped.put(key, action);
-      }
-    }
-
-    // Sort by priority for deterministic ordering
+    if (deduped.isEmpty()) return Collections.emptyList();
     List<DFA.GroupAction> result = new ArrayList<>(deduped.values());
-    result.sort(Comparator.comparingInt(a -> a.priority));
+    result.sort(
+        Comparator.comparingInt(
+            a -> dedupedRanks.getOrDefault(a.groupId + ":" + a.type.name(), Integer.MAX_VALUE)));
     return result;
   }
 
@@ -701,69 +790,94 @@ public class SubsetConstructor {
   }
 
   /**
-   * Compute tag operations for a DFA transition (Tagged DFA / Laurikari's algorithm). Tracks which
-   * group boundaries are crossed when transitioning from source NFA states to target NFA states via
-   * a character transition and epsilon closure.
-   *
-   * @param sourceNFAStates NFA states in the source DFA state
-   * @param targetNFAStates NFA states in the target DFA state
-   * @param charSet Character set for this transition
-   * @param epsilonClosures Pre-computed epsilon closures
-   * @return List of tag operations to perform on this transition
+   * Compute tag operations for a DFA transition using priority-rank selection. C2.4: when the
+   * target DFA state is accepting, only emits ops from source threads whose rank is ≥ the rank of
+   * the source that contributed the NFA accept state — higher-priority threads that failed to
+   * accept are excluded.
    */
   private List<DFA.TagOperation> computeTagOperations(
       Set<NFA.NFAState> sourceNFAStates,
       Set<NFA.NFAState> targetNFAStates,
       CharSet charSet,
-      Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures) {
+      Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures,
+      Set<NFA.NFAState> nfaAcceptStates) {
 
-    // Collect all tag operations encountered along paths from source to target
+    List<NFA.NFAState> sourceOrdered =
+        (dfaStateOrdering != null)
+            ? dfaStateOrdering.getOrDefault(sourceNFAStates, Collections.emptyList())
+            : Collections.emptyList();
+    Map<NFA.NFAState, Integer> sourceRankMap = buildRankMap(sourceOrdered);
+
+    // C2.4: find the lowest-rank source whose transition reaches an NFA accept state in the target.
+    // Only suppress competing threads when multiple distinct source threads contribute char
+    // transitions (contributingSourceCount > 1). When only one source contributes all target
+    // states, every NFA state in the source DFA state is from the same thread — no filtering.
+    int minAcceptingSourceRank = Integer.MAX_VALUE;
+    int contributingSourceCount = 0;
+    if (!nfaAcceptStates.isEmpty()) {
+      for (NFA.NFAState source : sourceNFAStates) {
+        int srcRank = sourceRankMap.getOrDefault(source, Integer.MAX_VALUE);
+        for (NFA.Transition t : source.getTransitions()) {
+          if (!t.chars.intersects(charSet)) continue;
+          Set<NFA.NFAState> closure = epsilonClosures.get(t.target);
+          if (closure == null) continue;
+          boolean contributes = false;
+          for (NFA.NFAState reach : closure) {
+            if (!targetNFAStates.contains(reach)) continue;
+            contributes = true;
+            if (nfaAcceptStates.contains(reach)) {
+              minAcceptingSourceRank = Math.min(minAcceptingSourceRank, srcRank);
+            }
+          }
+          if (contributes) {
+            contributingSourceCount++;
+            break; // count once per source NFA state
+          }
+        }
+      }
+    }
+    // Apply C2.4 only when genuinely multiple threads compete (contributingSourceCount > 1).
+    final boolean applyC24Filter =
+        minAcceptingSourceRank < Integer.MAX_VALUE && contributingSourceCount > 1;
+
     Map<Integer, DFA.TagOperation> tagOps = new HashMap<>();
+    Map<Integer, Integer> tagOpRanks = new HashMap<>(); // tagId → best source rank so far
 
     // FIRST: Check for group ENTER markers in source states
-    // Only emit these if the transition actually enters the group (not bypassing it)
     for (NFA.NFAState sourceState : sourceNFAStates) {
-      if (sourceState.enterGroup != null) {
-        // Check if the target states include any states that come AFTER this ENTER marker
-        // This indicates we're actually entering the group, not bypassing it via epsilon
-        boolean actuallyEntering =
-            isGroupActuallyEntered(
-                sourceState,
-                sourceState.enterGroup,
-                sourceNFAStates,
-                targetNFAStates,
-                charSet,
-                epsilonClosures);
-
-        if (actuallyEntering) {
-          int tagId = DFA.TagOperation.tagIdForGroupStart(sourceState.enterGroup);
-          DFA.TagOperation op =
-              new DFA.TagOperation(
-                  tagId, sourceState.enterGroup, DFA.TagOperation.ActionType.START, sourceState.id);
-          // Keep highest priority (lowest NFA state ID)
-          DFA.TagOperation existing = tagOps.get(tagId);
-          if (existing == null || op.priority < existing.priority) {
-            tagOps.put(tagId, op);
-          }
+      if (sourceState.enterGroup == null) continue;
+      int srcRank = sourceRankMap.getOrDefault(sourceState, Integer.MAX_VALUE);
+      if (applyC24Filter && srcRank < minAcceptingSourceRank) continue; // C2.4
+      boolean actuallyEntering =
+          isGroupActuallyEntered(
+              sourceState,
+              sourceState.enterGroup,
+              sourceNFAStates,
+              targetNFAStates,
+              charSet,
+              epsilonClosures);
+      if (actuallyEntering) {
+        int tagId = DFA.TagOperation.tagIdForGroupStart(sourceState.enterGroup);
+        DFA.TagOperation op =
+            new DFA.TagOperation(
+                tagId, sourceState.enterGroup, DFA.TagOperation.ActionType.START, sourceState.id);
+        Integer existingRank = tagOpRanks.get(tagId);
+        if (existingRank == null || srcRank < existingRank) {
+          tagOps.put(tagId, op);
+          tagOpRanks.put(tagId, srcRank);
         }
       }
     }
 
     // SECOND: Track tag operations along character transitions
     for (NFA.NFAState source : sourceNFAStates) {
-      // For each character transition from this source state
+      int srcRank = sourceRankMap.getOrDefault(source, Integer.MAX_VALUE);
+      if (applyC24Filter && srcRank < minAcceptingSourceRank) continue; // C2.4
       for (NFA.Transition trans : source.getTransitions()) {
         if (!trans.chars.intersects(charSet)) continue;
-
-        // Follow epsilon closure to find all reachable states
         Set<NFA.NFAState> closure = epsilonClosures.get(trans.target);
-
-        // Only consider paths that lead to states in the target DFA state
         for (NFA.NFAState reachable : closure) {
           if (!targetNFAStates.contains(reachable)) continue;
-
-          // Track tag operations along this path
-          // 1. Group operations on the character transition target
           if (trans.target.enterGroup != null) {
             int tagId = DFA.TagOperation.tagIdForGroupStart(trans.target.enterGroup);
             DFA.TagOperation op =
@@ -772,13 +886,12 @@ public class SubsetConstructor {
                     trans.target.enterGroup,
                     DFA.TagOperation.ActionType.START,
                     trans.target.id);
-            // Keep highest priority (lowest NFA state ID)
-            DFA.TagOperation existing = tagOps.get(tagId);
-            if (existing == null || op.priority < existing.priority) {
+            Integer existingRank = tagOpRanks.get(tagId);
+            if (existingRank == null || srcRank < existingRank) {
               tagOps.put(tagId, op);
+              tagOpRanks.put(tagId, srcRank);
             }
           }
-
           if (trans.target.exitGroup != null) {
             int tagId = DFA.TagOperation.tagIdForGroupEnd(trans.target.exitGroup);
             DFA.TagOperation op =
@@ -787,34 +900,36 @@ public class SubsetConstructor {
                     trans.target.exitGroup,
                     DFA.TagOperation.ActionType.END,
                     trans.target.id);
-            DFA.TagOperation existing = tagOps.get(tagId);
-            if (existing == null || op.priority < existing.priority) {
+            Integer existingRank = tagOpRanks.get(tagId);
+            if (existingRank == null || srcRank < existingRank) {
               tagOps.put(tagId, op);
+              tagOpRanks.put(tagId, srcRank);
             }
           }
-
-          // 2. Group operations along the epsilon closure path
-          // We need to track which states we visited to reach 'reachable'
-          trackEpsilonPathTags(trans.target, reachable, tagOps);
+          trackEpsilonPathTags(trans.target, reachable, tagOps, tagOpRanks, srcRank);
         }
       }
     }
 
-    // Sort by priority for deterministic ordering
     List<DFA.TagOperation> result = new ArrayList<>(tagOps.values());
-    result.sort(Comparator.comparingInt(op -> op.priority));
+    result.sort(
+        Comparator.comparingInt(op -> tagOpRanks.getOrDefault(op.tagId, Integer.MAX_VALUE)));
     return result;
   }
 
   /**
-   * Track tag operations along an epsilon path from start to end. Uses BFS to find the path and
-   * collect group operations.
+   * Track tag operations along an epsilon path from {@code start} to {@code end}. Uses BFS. {@code
+   * sourceRank} is the priority rank of the source NFA state that took the character transition
+   * leading to this epsilon path; it is used as the tiebreak rank for all ops emitted here.
    */
   private void trackEpsilonPathTags(
-      NFA.NFAState start, NFA.NFAState end, Map<Integer, DFA.TagOperation> tagOps) {
+      NFA.NFAState start,
+      NFA.NFAState end,
+      Map<Integer, DFA.TagOperation> tagOps,
+      Map<Integer, Integer> tagOpRanks,
+      int sourceRank) {
     if (start == end) return;
 
-    // BFS to find path and collect group operations
     Queue<NFA.NFAState> queue = new ArrayDeque<>();
     Set<NFA.NFAState> visited = new HashSet<>();
     queue.add(start);
@@ -828,15 +943,15 @@ public class SubsetConstructor {
         visited.add(next);
         queue.add(next);
 
-        // Collect group operations on this epsilon transition
         if (next.enterGroup != null) {
           int tagId = DFA.TagOperation.tagIdForGroupStart(next.enterGroup);
           DFA.TagOperation op =
               new DFA.TagOperation(
                   tagId, next.enterGroup, DFA.TagOperation.ActionType.START, next.id);
-          DFA.TagOperation existing = tagOps.get(tagId);
-          if (existing == null || op.priority < existing.priority) {
+          Integer existingRank = tagOpRanks.get(tagId);
+          if (existingRank == null || sourceRank < existingRank) {
             tagOps.put(tagId, op);
+            tagOpRanks.put(tagId, sourceRank);
           }
         }
 
@@ -844,13 +959,14 @@ public class SubsetConstructor {
           int tagId = DFA.TagOperation.tagIdForGroupEnd(next.exitGroup);
           DFA.TagOperation op =
               new DFA.TagOperation(tagId, next.exitGroup, DFA.TagOperation.ActionType.END, next.id);
-          DFA.TagOperation existing = tagOps.get(tagId);
-          if (existing == null || op.priority < existing.priority) {
+          Integer existingRank = tagOpRanks.get(tagId);
+          if (existingRank == null || sourceRank < existingRank) {
             tagOps.put(tagId, op);
+            tagOpRanks.put(tagId, sourceRank);
           }
         }
 
-        if (next == end) return; // Found the end, stop searching
+        if (next == end) return;
       }
     }
   }
