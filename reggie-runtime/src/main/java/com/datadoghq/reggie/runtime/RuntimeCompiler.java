@@ -327,6 +327,16 @@ public class RuntimeCompiler {
         }
         return fallback;
       }
+      if (result.captureAmbiguous) {
+        ReggieMatcher fallback =
+            new JavaRegexFallbackMatcher(
+                pattern,
+                "capture-ambiguous group bindings: group spans require java.util.regex semantics");
+        if (!nameMap.isEmpty()) {
+          fallback.setNameToIndex(nameMap);
+        }
+        return fallback;
+      }
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
         ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, fallbackReason);

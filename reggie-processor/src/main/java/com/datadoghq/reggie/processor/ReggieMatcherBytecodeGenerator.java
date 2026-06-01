@@ -123,6 +123,14 @@ public class ReggieMatcherBytecodeGenerator {
               + " conflict — DFA longest-match vs NFA first-alternative semantics. Use"
               + " Reggie.compile() for runtime compilation with automatic fallback.");
     }
+    if (result.captureAmbiguous) {
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' cannot be compiled at annotation-processing time: capture-ambiguous group"
+              + " bindings — the DFA cannot determine the correct group spans. Use"
+              + " Reggie.compile() for runtime compilation with automatic fallback.");
+    }
     String fallbackReason = FallbackPatternDetector.needsFallback(ast, strategy);
     if (fallbackReason != null) {
       throw new UnsupportedOperationException(

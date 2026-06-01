@@ -27,6 +27,7 @@ public class SubsetConstructor {
   private List<DFA.DFAState> allStates;
   private int nextStateId;
   private boolean anchorConditionDiluted;
+  private boolean captureAmbiguous;
 
   public DFA buildDFA(NFA nfa) throws StateExplosionException {
     return buildDFA(nfa, false);
@@ -45,12 +46,23 @@ public class SubsetConstructor {
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
     this.anchorConditionDiluted = false;
+    this.captureAmbiguous = false;
 
     // Pre-compute anchor-aware epsilon closures for all NFA states. Each entry maps a reachable
     // NFA state to the weakest conjunction of anchors that must hold at the current input
     // position for that state to be live.
     Map<NFA.NFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> anchoredClosures =
         precomputeAnchoredClosures(nfa);
+
+    // Pre-compute flat epsilon closures (for group-bypass reachability analysis)
+    Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures = precomputeEpsilonClosures(nfa);
+
+    // For each capturing group g, determine whether there is a path from NFA start to any
+    // NFA accept state that does NOT pass through group g's enter marker.  If such a bypass
+    // exists, a DFA state that ALSO contains an exit_g NFA state (from the group-taking
+    // thread) is capture-ambiguous: computeGroupActions will record g's bounds from the
+    // group-taking thread even when the priority-winning thread bypassed it.
+    Set<Integer> groupsWithBypass = computeGroupsWithBypass(nfa, epsilonClosures);
 
     // Start with anchored epsilon-closure of NFA start state
     Map<NFA.NFAState, EnumSet<NFA.AnchorType>> startClosure =
@@ -70,6 +82,9 @@ public class SubsetConstructor {
             new ArrayList<>(),
             startGroupActions,
             startAcceptConditions);
+    if (!captureAmbiguous) {
+      captureAmbiguous = hasCaptureAmbiguity(startClosureSet, groupsWithBypass);
+    }
     stateCache.put(startClosureSet, start);
     allStates.add(start);
 
@@ -141,6 +156,9 @@ public class SubsetConstructor {
                   new ArrayList<>(),
                   groupActions,
                   targetAcceptConditions);
+          if (accepting && !captureAmbiguous) {
+            captureAmbiguous = hasCaptureAmbiguity(targets, groupsWithBypass);
+          }
           stateCache.put(targets, target);
           allStates.add(target);
           dfaStateConditions.put(target, targetsWithCond);
@@ -167,7 +185,7 @@ public class SubsetConstructor {
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
 
-    return new DFA(start, acceptStates, allStates, anchorConditionDiluted);
+    return new DFA(start, acceptStates, allStates, anchorConditionDiluted, captureAmbiguous);
   }
 
   /**
@@ -487,6 +505,96 @@ public class SubsetConstructor {
     List<DFA.GroupAction> result = new ArrayList<>(deduped.values());
     result.sort(Comparator.comparingInt(a -> a.priority));
     return result;
+  }
+
+  /**
+   * Returns true when the accepting NFA-state set has a capture-ambiguity for any group: there is a
+   * thread that exits group {@code g} (participated) alongside a direct accept state that did not
+   * exit group {@code g} (bypassed it). The lowest-state-id heuristic in {@link
+   * #computeGroupActions} cannot choose the correct binding in this case.
+   *
+   * <p>Conservative: may over-detect (false positives cause unnecessary JDK fallback;
+   * under-detection would silently produce wrong answers). Always prefer false positives here.
+   */
+  /**
+   * Returns true when the given DFA-state NFA-set is capture-ambiguous for any capturing group g:
+   * it contains an exit_g NFA state (the group was completed by some thread) AND group g has a
+   * bypass path in the NFA (there is a way to accept without entering g at all). When both are
+   * true, {@code computeGroupActions} will emit spurious START/END tags for g from the group-taking
+   * thread even though the priority-winning thread may have bypassed g — producing wrong group
+   * spans.
+   */
+  private boolean hasCaptureAmbiguity(Set<NFA.NFAState> nfaStates, Set<Integer> groupsWithBypass) {
+    if (groupsWithBypass.isEmpty()) return false;
+    for (NFA.NFAState s : nfaStates) {
+      // exitGroup: the group was completed by some thread. When a bypass also exists, the
+      // lowest-id heuristic may pick the wrong thread's binding.
+      if (s.exitGroup != null && groupsWithBypass.contains(s.exitGroup)) {
+        return true;
+      }
+      // enterGroup: the group was entered by some thread. If a bypass also exists and this
+      // enter is in a DFA state where the bypass thread can also win, computeGroupActions
+      // records a spurious START at the current position even though the bypass thread
+      // never exits the group — leaving the span's END unset and producing a [start,-1) span.
+      if (s.enterGroup != null && groupsWithBypass.contains(s.enterGroup)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * For each capturing group g (1..nfa.getGroupCount()), determines whether there is a path from
+   * the NFA start state to any accept state that does NOT pass through group g's enter marker. Uses
+   * a BFS over NFA transitions (both epsilon and character), tracking which groups have been
+   * entered.
+   */
+  private Set<Integer> computeGroupsWithBypass(
+      NFA nfa, Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures) {
+    int groupCount = nfa.getGroupCount();
+    if (groupCount == 0) return Collections.emptySet();
+
+    Set<Integer> result = new HashSet<>();
+    Set<NFA.NFAState> acceptStates = nfa.getAcceptStates();
+
+    for (int g = 1; g <= groupCount; g++) {
+      if (canReachAcceptWithoutEnteringGroup(
+          nfa.getStartState(), g, acceptStates, epsilonClosures)) {
+        result.add(g);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Step-by-step BFS (epsilon + character). Blocks any branch at a state with {@code enterGroup ==
+   * g} to avoid false bypasses from pre-computed transitive closures (which include states inside
+   * the group reachable through the blocked entry). Returns true only if an accept state is
+   * reachable without crossing group g's enter marker.
+   */
+  private boolean canReachAcceptWithoutEnteringGroup(
+      NFA.NFAState start,
+      int g,
+      Set<NFA.NFAState> acceptStates,
+      Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures) {
+    Set<NFA.NFAState> visited = new HashSet<>();
+    Queue<NFA.NFAState> queue = new ArrayDeque<>();
+    queue.add(start);
+    while (!queue.isEmpty()) {
+      NFA.NFAState cur = queue.poll();
+      if (!visited.add(cur)) continue;
+      // Block on entering group g — do not traverse through this state's entry marker
+      if (cur.enterGroup != null && cur.enterGroup == g) continue;
+      if (acceptStates.contains(cur)) return true;
+      // Follow epsilon transitions one step at a time (not transitive closure)
+      for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+        if (!visited.contains(eps)) queue.add(eps);
+      }
+      for (NFA.Transition t : cur.getTransitions()) {
+        if (!visited.contains(t.target)) queue.add(t.target);
+      }
+    }
+    return false;
   }
 
   /**

@@ -34,6 +34,15 @@ public final class DFA {
    */
   private final boolean anchorConditionDiluted;
 
+  /**
+   * True when subset construction detected a capture ambiguity: an accepting DFA state contains NFA
+   * threads that disagree about a capturing group's participation — one thread entered and exited
+   * the group, another bypassed it, and both are accepting. The lowest-state-id merge in {@code
+   * SubsetConstructor.computeGroupActions} cannot choose the correct binding. Callers should route
+   * to a correct fallback engine (e.g. {@code JavaRegexFallbackMatcher}).
+   */
+  private final boolean captureAmbiguous;
+
   public DFA(DFAState startState, Set<DFAState> acceptStates, List<DFAState> allStates) {
     this(startState, acceptStates, allStates, false);
   }
@@ -43,14 +52,28 @@ public final class DFA {
       Set<DFAState> acceptStates,
       List<DFAState> allStates,
       boolean anchorConditionDiluted) {
+    this(startState, acceptStates, allStates, anchorConditionDiluted, false);
+  }
+
+  public DFA(
+      DFAState startState,
+      Set<DFAState> acceptStates,
+      List<DFAState> allStates,
+      boolean anchorConditionDiluted,
+      boolean captureAmbiguous) {
     this.startState = startState;
     this.acceptStates = acceptStates;
     this.allStates = allStates;
     this.anchorConditionDiluted = anchorConditionDiluted;
+    this.captureAmbiguous = captureAmbiguous;
   }
 
   public boolean isAnchorConditionDiluted() {
     return anchorConditionDiluted;
+  }
+
+  public boolean isCaptureAmbiguous() {
+    return captureAmbiguous;
   }
 
   public DFAState getStartState() {

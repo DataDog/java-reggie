@@ -596,6 +596,18 @@ public class PatternAnalyzer {
 
     // Check for features requiring special handling
     if (hasBackrefs) {
+      // Guard: if any capturing group has a bypass path through the NFA (i.e., there is an
+      // execution path that reaches acceptance WITHOUT entering that group), the group's spans
+      // are ambiguous — the native backref strategies cannot reliably resolve which thread
+      // binding is the priority winner. Route to JDK so group spans are always correct.
+      if (nfa != null && nfa.getGroupCount() > 0 && hasNfaCaptureAmbiguity(nfa)) {
+        MatchingStrategyResult r =
+            new MatchingStrategyResult(
+                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+        r.captureAmbiguous = true;
+        return r;
+      }
+
       // Try to detect fixed-repetition backreference patterns: (a)\1{8,}, (abc)\1{3}
       // These don't require backtracking - just verification loop
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
@@ -760,6 +772,20 @@ public class PatternAnalyzer {
           return r;
         }
 
+        if (dfa.isCaptureAmbiguous()) {
+          MatchingStrategyResult r =
+              new MatchingStrategyResult(
+                  MatchingStrategy.OPTIMIZED_NFA,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+          r.captureAmbiguous = true;
+          return r;
+        }
+
         // DFA with groups: choose strategy based on state count
         int stateCount = dfa.getStateCount();
         if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
@@ -888,6 +914,55 @@ public class PatternAnalyzer {
   private boolean hasCapturingGroups(RegexNode node) {
     CapturingGroupDetector detector = new CapturingGroupDetector();
     return node.accept(detector);
+  }
+
+  /**
+   * Returns true if any capturing group in the NFA has a "bypass path" — a route from the start
+   * state to an accept state that does not pass through that group's enter marker. When a bypass
+   * exists, native strategies cannot reliably determine which thread's group binding wins; the
+   * pattern must be delegated to java.util.regex.
+   */
+  /**
+   * Returns true if any capturing group in the NFA has a "bypass path" — a route from the NFA start
+   * to an accept state that does not cross that group's enter marker. When a bypass exists, native
+   * strategies cannot reliably resolve which thread's group binding wins, so the pattern must be
+   * delegated to java.util.regex.
+   */
+  private boolean hasNfaCaptureAmbiguity(NFA nfa) {
+    Set<NFA.NFAState> acceptStates = nfa.getAcceptStates();
+    int groupCount = nfa.getGroupCount();
+    for (int g = 1; g <= groupCount; g++) {
+      if (canReachAcceptWithoutEnteringGroupNfa(nfa.getStartState(), g, acceptStates)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Step-by-step BFS (epsilon + character transitions). Stops expanding any branch at a state with
+   * {@code enterGroup == g}. Returns true if an accept state is reachable without ever crossing
+   * group g's enter marker — i.e., the NFA can accept with group g never entered.
+   */
+  private boolean canReachAcceptWithoutEnteringGroupNfa(
+      NFA.NFAState start, int g, Set<NFA.NFAState> acceptStates) {
+    Set<NFA.NFAState> visited = new java.util.HashSet<>();
+    java.util.Queue<NFA.NFAState> queue = new java.util.ArrayDeque<>();
+    queue.add(start);
+    while (!queue.isEmpty()) {
+      NFA.NFAState cur = queue.poll();
+      if (!visited.add(cur)) continue;
+      // Block on entering group g — this branch took the group, not a bypass
+      if (cur.enterGroup != null && cur.enterGroup == g) continue;
+      if (acceptStates.contains(cur)) return true;
+      for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+        if (!visited.contains(eps)) queue.add(eps);
+      }
+      for (NFA.Transition t : cur.getTransitions()) {
+        if (!visited.contains(t.target)) queue.add(t.target);
+      }
+    }
+    return false;
   }
 
   private boolean isDFATableEligible(DFA dfa) {
@@ -2128,6 +2203,15 @@ public class PatternAnalyzer {
      * engine (e.g. {@code JavaRegexFallbackMatcher}) rather than using the DFA.
      */
     public boolean alternationPriorityConflict;
+
+    /**
+     * True when subset construction detected that an accepting DFA state has constituent NFA
+     * threads that disagree about a capturing group's participation — one thread entered and exited
+     * the group, another bypassed it, and both are accepting. The lowest-state-id merge in {@code
+     * SubsetConstructor.computeGroupActions} cannot choose the correct binding; callers should
+     * route to a correct fallback engine (e.g. {@code JavaRegexFallbackMatcher}).
+     */
+    public boolean captureAmbiguous;
 
     public MatchingStrategyResult(MatchingStrategy strategy, DFA dfa) {
       this(strategy, dfa, null, false, java.util.Collections.emptySet(), null, false);

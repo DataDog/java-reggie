@@ -37,8 +37,13 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
     return DUPLICATE_WORD;
   }
 
-  @RegexPattern("([a-z]{3}).*\\1")
-  public abstract ReggieMatcher backrefWithContent();
+  // Uses runtime compilation: capture-ambiguous group spans cannot be determined at
+  // annotation-processing time. Reggie.compile() routes to java.util.regex at runtime.
+  private static final ReggieMatcher BACKREF_WITH_CONTENT = Reggie.compile("([a-z]{3}).*\\1");
+
+  public ReggieMatcher backrefWithContent() {
+    return BACKREF_WITH_CONTENT;
+  }
 
   // Uses runtime compilation: VARIABLE_CAPTURE_BACKREF (FULL_FALLBACK).
   public ReggieMatcher repeatedSequence() {
@@ -94,15 +99,25 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   // These might force NFA if DFA state count exceeds thresholds
   // ====================
 
-  @RegexPattern("(a|b|c|d|e|f|g|h|i|j)*(x|y|z)")
-  public abstract ReggieMatcher largeAlternationWithStar();
+  // Capture-ambiguous at compile time (group in * quantifier). Runtime compilation routes to JDK.
+  private static final ReggieMatcher LARGE_ALTERNATION_WITH_STAR =
+      Reggie.compile("(a|b|c|d|e|f|g|h|i|j)*(x|y|z)");
+
+  public ReggieMatcher largeAlternationWithStar() {
+    return LARGE_ALTERNATION_WITH_STAR;
+  }
 
   @RegexPattern("[a-z]*[0-9]*[A-Z]*[!@#$]*")
   public abstract ReggieMatcher multipleCharClassStars();
 
   // Exponential blowup: (a|ab)* can cause DFA state explosion
-  @RegexPattern("(a|ab|abc|abcd|abcde)*x")
-  public abstract ReggieMatcher overlappingAlternation();
+  // Capture-ambiguous at compile time (group in * quantifier). Runtime compilation routes to JDK.
+  private static final ReggieMatcher OVERLAPPING_ALTERNATION =
+      Reggie.compile("(a|ab|abc|abcd|abcde)*x");
+
+  public ReggieMatcher overlappingAlternation() {
+    return OVERLAPPING_ALTERNATION;
+  }
 
   // ====================
   // SHOULD STILL USE DFA (for comparison)

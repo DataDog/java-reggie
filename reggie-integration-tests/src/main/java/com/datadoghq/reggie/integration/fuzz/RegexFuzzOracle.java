@@ -109,6 +109,40 @@ public final class RegexFuzzOracle {
       return Result.skipped("matches() threw: " + t);
     }
 
+    // match() — whole-input match with group spans
+    try {
+      java.util.regex.Matcher jmFull = jdk.matcher(input);
+      boolean jdkMatchFull = jmFull.matches();
+      MatchResult rm = reggie.match(input);
+      boolean reggieMatchFull = rm != null;
+      if (jdkMatchFull != reggieMatchFull) {
+        findings.add(
+            new Finding(
+                pattern,
+                input,
+                String.format(
+                    "match() boolean differs: jdk=%s reggie=%s", jdkMatchFull, reggieMatchFull)));
+      } else if (jdkMatchFull) {
+        for (int g = 0; g <= jmFull.groupCount(); g++) {
+          int js = jmFull.start(g);
+          int je = jmFull.end(g);
+          int rs = rm.start(g);
+          int re = rm.end(g);
+          if (js != rs || je != re) {
+            findings.add(
+                new Finding(
+                    pattern,
+                    input,
+                    String.format(
+                        "match() group %d span differs: jdk=[%d,%d) reggie=[%d,%d)",
+                        g, js, je, rs, re)));
+          }
+        }
+      }
+    } catch (Throwable t) {
+      return Result.skipped("match() threw: " + t);
+    }
+
     // findMatch() — leftmost match
     try {
       Matcher jm = jdk.matcher(input);
