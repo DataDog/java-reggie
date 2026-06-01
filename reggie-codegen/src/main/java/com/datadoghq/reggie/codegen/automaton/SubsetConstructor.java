@@ -192,6 +192,26 @@ public class SubsetConstructor {
    * Pre-compute epsilon closures for all NFA states. This is done once at DFA construction time,
    * not at runtime.
    */
+
+  /**
+   * Returns the epsilon-closure of {@code start} as a priority-ordered list. Thread priority is
+   * encoded in epsilon insertion order (see NFA.NFAState.getEpsilonTransitions): the first
+   * occurrence of a state wins; lower-index = higher priority (PikeVM rule). Used by the PikeVM
+   * capture generator and the priority-correct TDFA rework.
+   */
+  List<NFA.NFAState> orderedEpsilonClosure(NFA.NFAState start) {
+    Set<NFA.NFAState> seen = new LinkedHashSet<>();
+    orderedEpsilonClosureDfs(start, seen);
+    return new ArrayList<>(seen);
+  }
+
+  private void orderedEpsilonClosureDfs(NFA.NFAState current, Set<NFA.NFAState> seen) {
+    if (!seen.add(current)) return; // already visited (first occurrence wins)
+    for (NFA.NFAState next : current.getEpsilonTransitions()) {
+      orderedEpsilonClosureDfs(next, seen);
+    }
+  }
+
   private Map<NFA.NFAState, Set<NFA.NFAState>> precomputeEpsilonClosures(NFA nfa) {
     Map<NFA.NFAState, Set<NFA.NFAState>> closures = new HashMap<>();
 

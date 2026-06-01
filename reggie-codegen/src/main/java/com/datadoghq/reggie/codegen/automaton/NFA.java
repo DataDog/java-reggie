@@ -369,6 +369,12 @@ public final class NFA {
       return Collections.unmodifiableList(transitions);
     }
 
+    /**
+     * Returns epsilon transitions in Perl thread priority order: first in list = highest priority.
+     * This ordering is load-bearing: it encodes left-first alternation and greedy-match-first
+     * quantifier semantics. The insertion order set by ThompsonBuilder MUST NOT be changed without
+     * updating SubsetConstructor.orderedEpsilonClosure accordingly.
+     */
     public List<NFAState> getEpsilonTransitions() {
       return Collections.unmodifiableList(epsilonTransitions);
     }

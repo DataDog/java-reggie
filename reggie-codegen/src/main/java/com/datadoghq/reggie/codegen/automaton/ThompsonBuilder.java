@@ -122,7 +122,8 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   @Override
   public NFAFragment visitAlternation(AlternationNode node) {
-    // Create new entry with epsilon to each alternative
+    // Epsilons are added left-to-right: first alternative = highest Perl thread priority.
+    // This ordering is load-bearing for SubsetConstructor.orderedEpsilonClosure — do not reorder.
     NFA.NFAState entry = createState();
     Set<NFA.NFAState> allExits = new HashSet<>();
 
@@ -140,7 +141,9 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     NFAFragment child = node.child.accept(this);
 
     if (node.min == 0 && node.max == 1) {
-      // ? : optional
+      // ? : greedy optional — try-match epsilon added first (higher priority than skip).
+      // Skip path (newEntry itself in exits) gets its epsilon appended later by build().
+      // This ordering is load-bearing for SubsetConstructor.orderedEpsilonClosure.
       NFA.NFAState newEntry = createState();
       newEntry.addEpsilonTransition(child.entry);
 
@@ -150,7 +153,8 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       return new NFAFragment(newEntry, exits);
 
     } else if (node.min == 0 && node.max == -1) {
-      // * : zero or more
+      // * : greedy zero-or-more — try-match epsilon added first (higher priority than skip).
+      // This ordering is load-bearing for SubsetConstructor.orderedEpsilonClosure.
       NFA.NFAState newEntry = createState();
       newEntry.addEpsilonTransition(child.entry);
 

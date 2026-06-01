@@ -350,6 +350,11 @@ public class PatternAnalyzer {
     // Check for pure literal alternation: keyword1|keyword2|...|keywordN
     LiteralAlternationInfo literalAltInfo = detectLiteralAlternation(ast);
     if (literalAltInfo != null) {
+      if (nfa != null && nfa.getGroupCount() > 0) {
+        // Pattern has capturing groups: use PikeVM for native group-span extraction.
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+      }
       return new MatchingStrategyResult(
           MatchingStrategy.SPECIALIZED_LITERAL_ALTERNATION,
           null,
@@ -773,6 +778,18 @@ public class PatternAnalyzer {
         }
 
         if (dfa.isCaptureAmbiguous()) {
+          if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
+            // Pure-regular, anchor-free: PikeVM gives correct native group spans.
+            return new MatchingStrategyResult(
+                MatchingStrategy.PIKEVM_CAPTURE,
+                null,
+                null,
+                false,
+                requiredLiterals,
+                null,
+                needsPosixSemantics);
+          }
+          // Fallback: named groups or anchors — PikeVMMatcher doesn't handle these yet.
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
@@ -914,6 +931,26 @@ public class PatternAnalyzer {
   private boolean hasCapturingGroups(RegexNode node) {
     CapturingGroupDetector detector = new CapturingGroupDetector();
     return node.accept(detector);
+  }
+
+  private boolean hasAnchorInNfa(NFA nfa) {
+    if (nfa == null) return false;
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.anchor != null) return true;
+    }
+    return false;
+  }
+
+  private boolean hasNamedGroups(RegexNode node) {
+    if (node instanceof GroupNode g && g.name != null) return true;
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) if (hasNamedGroups(child)) return true;
+    }
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) if (hasNamedGroups(alt)) return true;
+    }
+    if (node instanceof QuantifierNode q) return hasNamedGroups(q.child);
+    return false;
   }
 
   /**
@@ -2170,7 +2207,11 @@ public class PatternAnalyzer {
     HYBRID_DFA_LOOKAHEAD, // Hybrid: DFA for lookahead sub-patterns, NFA for main pattern
 
     // Context-free strategies (for features beyond regular languages)
-    RECURSIVE_DESCENT // Subroutines, conditionals, branch reset - requires recursive descent parser
+    RECURSIVE_DESCENT, // Subroutines, conditionals, branch reset - requires recursive descent
+    // parser
+
+    /** PikeVM NFA-with-capture: O(n·m) native group extraction, leftmost-greedy, ReDoS-safe. */
+    PIKEVM_CAPTURE
   }
 
   /** Result of pattern analysis containing strategy and optional DFA. */

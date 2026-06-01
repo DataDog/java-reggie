@@ -133,6 +133,11 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<String, NfaMatcherFactory> NFA_CLASS_CACHE =
       new ConcurrentHashMap<>();
 
+  // Level 1c: Pattern string → NFA for PIKEVM_CAPTURE patterns.
+  // PikeVMMatcher carries mutable per-call buffers and must be freshly instantiated on every
+  // compile() call; only the NFA (immutable after construction) is cached.
+  private static final ConcurrentHashMap<String, NFA> PIKEVM_NFA_CACHE = new ConcurrentHashMap<>();
+
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
   // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
   // sets; an int key was observed to cause structural-cache false-hits with wrong match semantics.
@@ -161,6 +166,13 @@ public class RuntimeCompiler {
             ? pattern
             : pattern + "\u0000capturePolicy=" + options.capturePolicy();
 
+    // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh PikeVMMatcher.
+    // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
+    NFA pikevmNfa = PIKEVM_NFA_CACHE.get(cacheKey);
+    if (pikevmNfa != null) {
+      return new PikeVMMatcher(pikevmNfa, pattern);
+    }
+
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
     // NFA matchers mutate shared instance fields during matching and cannot be shared across
     // threads or calls; we cache a factory and instantiate per-call instead.
@@ -179,6 +191,14 @@ public class RuntimeCompiler {
                 options.capturePolicy() == CapturePolicy.ALL
                     ? compileInternal(pattern, ReggieOptions.DEFAULT, k)
                     : compileInternal(pattern, options, k));
+
+    // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
+    // remove it from L1 and return a fresh PikeVMMatcher so callers never share mutable state.
+    pikevmNfa = PIKEVM_NFA_CACHE.get(cacheKey);
+    if (pikevmNfa != null) {
+      PATTERN_CACHE.remove(cacheKey, compiled);
+      return new PikeVMMatcher(pikevmNfa, pattern);
+    }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
     // remove it from L1 and return a fresh instance so callers never share NFA state.
@@ -233,6 +253,7 @@ public class RuntimeCompiler {
   public static void clearCache() {
     PATTERN_CACHE.clear();
     NFA_CLASS_CACHE.clear();
+    PIKEVM_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
     HYBRID_WARNED.clear();
   }
@@ -337,6 +358,20 @@ public class RuntimeCompiler {
         }
         return fallback;
       }
+
+      // 3.6. PIKEVM_CAPTURE: return a fresh PikeVMMatcher backed by the already-built NFA.
+      // PikeVMMatcher has mutable per-call buffers; cache only the NFA so each compile() call
+      // produces a fresh instance without rebuilding the NFA.
+      if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+        PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, nfa);
+        ReggieMatcher m = new PikeVMMatcher(PIKEVM_NFA_CACHE.get(cacheKey), pattern);
+        if (!nameMap.isEmpty()) {
+          m.setNameToIndex(nameMap);
+          m = new NameEnrichingMatcher(m);
+        }
+        return m;
+      }
+
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
         ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, fallbackReason);

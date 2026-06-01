@@ -131,6 +131,13 @@ public class ReggieMatcherBytecodeGenerator {
               + " bindings — the DFA cannot determine the correct group spans. Use"
               + " Reggie.compile() for runtime compilation with automatic fallback.");
     }
+    if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' cannot be compiled at annotation-processing time: PIKEVM_CAPTURE requires a"
+              + " PikeVMMatcher instance at runtime. Use Reggie.compile() instead.");
+    }
     String fallbackReason = FallbackPatternDetector.needsFallback(ast, strategy);
     if (fallbackReason != null) {
       throw new UnsupportedOperationException(

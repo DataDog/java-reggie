@@ -194,6 +194,11 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT,
         new Spec("a([bc]*)(c+d)", List.of("abcd", "x abccd y", "axd", "", "abcdé")));
+    // PIKEVM_CAPTURE: capture-ambiguous pure-regular pattern; PikeVM gives correct native group
+    // spans with O(n·m) leftmost-greedy semantics.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        new Spec("(.)?b", List.of("b", "xby", "ab", "", "bé")));
 
     return m;
   }
