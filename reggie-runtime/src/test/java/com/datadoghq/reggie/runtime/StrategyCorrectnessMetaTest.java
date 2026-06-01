@@ -148,9 +148,11 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS,
         new Spec("(?=ab)(?=cd)(?=ef)gh", List.of("gh", "x gh", "ab", "", "ghé")));
+    // (.)?b is capture-ambiguous (optional group bypass); after C4 it routes to
+    // DFA_UNROLLED_WITH_GROUPS via the C2 priority-ordered TDFA, exercising that path end-to-end.
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
-        new Spec("(a|b)c(d|e)", List.of("acd", "x bce y", "acf", "", "acdé")));
+        new Spec("(.)?b", List.of("b", "xby", "ab", "", "bé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_SWITCH,
         new Spec("a.*b.*c.*d.*e.*f", List.of("abcdef", "x a1b2c3d4e5f y", "abcde", "", "aébcdef")));
@@ -194,11 +196,12 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT,
         new Spec("a([bc]*)(c+d)", List.of("abcd", "x abccd y", "axd", "", "abcdé")));
-    // PIKEVM_CAPTURE: capture-ambiguous pure-regular pattern; PikeVM gives correct native group
-    // spans with O(n·m) leftmost-greedy semantics.
+    // PIKEVM_CAPTURE: now an explosion-only fallback (C4); no compact pattern routes here at
+    // normal state counts. (a)?b is the canonical capture-ambiguous form — kept for behavioral
+    // correctness coverage; routing is skipped via captureAmbiguousIntercepted below.
     m.put(
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        new Spec("(.)?b", List.of("b", "xby", "ab", "", "bé")));
+        new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
 
     return m;
   }
@@ -302,7 +305,11 @@ public class StrategyCorrectnessMetaTest {
     // and routed to JDK via OPTIMIZED_NFA. These strategies still exist in code but are
     // unreachable at runtime; their representatives are kept for correctness coverage.
     Set<PatternAnalyzer.MatchingStrategy> captureAmbiguousIntercepted =
-        java.util.EnumSet.of(PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF);
+        java.util.EnumSet.of(
+            PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
+            // PIKEVM_CAPTURE is an explosion-only fallback after C4; no compact pattern routes
+            // here at normal state counts, so routing confirmation is skipped.
+            PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
 
     // Confirm routing of each representative pattern.
     List<String> misrouted = new ArrayList<>();

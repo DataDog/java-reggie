@@ -779,7 +779,28 @@ public class PatternAnalyzer {
 
         if (dfa.isCaptureAmbiguous()) {
           if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
-            // Pure-regular, anchor-free: PikeVM gives correct native group spans.
+            // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
+            int stateCount = dfa.getStateCount();
+            if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+                  dfa,
+                  null,
+                  true,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.DFA_SWITCH_WITH_GROUPS,
+                  dfa,
+                  null,
+                  true,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // Too many states for inline DFA: PikeVM gives correct O(n·m) spans.
             return new MatchingStrategyResult(
                 MatchingStrategy.PIKEVM_CAPTURE,
                 null,
@@ -836,8 +857,20 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
       } catch (StateExplosionException e) {
-        // DFA construction failed, fall back to NFA with per-config tracking
-        // Enable POSIX last-match semantics for correct group capture in loops
+        // Tagged-DFA determinization failed (>10k states). isCaptureAmbiguous() is unavailable
+        // (DFA not built), so pure-regular anchor-free patterns — ambiguous or not — fall to
+        // PikeVM, which gives correct O(n·m) spans for all of them. Named-group/anchor
+        // patterns fall back to JDK.
+        if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
         return new MatchingStrategyResult(
             MatchingStrategy.OPTIMIZED_NFA,
             null,

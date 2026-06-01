@@ -24,23 +24,23 @@ import org.junit.jupiter.api.Test;
 class PikeVMRoutingTest {
 
   @Test
-  void captureAmbiguousRoutes_toPikeVMCapture() throws Exception {
+  void captureAmbiguousRoutes_toDfaWithGroups() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
         StrategyCorrectnessMetaTest.routeOf("(a)?b"),
-        "(a)?b must route to PIKEVM_CAPTURE");
+        "(a)?b must route to DFA_UNROLLED_WITH_GROUPS");
   }
 
   @Test
   void captureAmbiguousRoutes_dotOptionalB() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
         StrategyCorrectnessMetaTest.routeOf("(.)?b"),
-        "(.)?b must route to PIKEVM_CAPTURE");
+        "(.)?b must route to DFA_UNROLLED_WITH_GROUPS");
   }
 
   @Test
-  void pikeVMCaptureMatcher_matchesCorrectly() {
+  void captureAmbiguousMatcher_matchesCorrectly() {
     ReggieMatcher m = Reggie.compile("(a)?b");
     assertTrue(m.matches("ab"), "should match 'ab'");
     assertTrue(m.matches("b"), "should match 'b'");

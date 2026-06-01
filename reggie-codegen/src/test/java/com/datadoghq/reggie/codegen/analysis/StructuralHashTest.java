@@ -137,19 +137,17 @@ class StructuralHashTest {
         "lookbehind assertions with different literals must have distinct structural hashes");
   }
 
-  // ── Strategy distinctness (PIKEVM_CAPTURE) ───────────────────────────────────
+  // ── Strategy / topology distinctness ─────────────────────────────────────────
 
   @Test
-  void pikevmCapture_producesDistinctHashFromDfaWithGroups() throws Exception {
-    // (a)?b routes to PIKEVM_CAPTURE (capture-ambiguous optional group)
-    // (a)b  routes to DFA_UNROLLED_WITH_GROUPS (non-ambiguous mandatory group)
-    // If the strategy is hashed, these must differ.
+  void captureAmbiguousOptional_producesDistinctHashFromMandatoryGroup() throws Exception {
+    // (a)?b and (a)b both route to DFA_UNROLLED_WITH_GROUPS after C4 (the optional bypass
+    // makes (a)?b capture-ambiguous, but the C2 priority-ordered TDFA is span-correct).
+    // Their tagged-DFA topologies are structurally distinct; the hash must reflect that.
     long h1 = hashFor("(a)?b");
     long h2 = hashFor("(a)b");
     assertNotEquals(
-        h1,
-        h2,
-        "(a)?b (PIKEVM_CAPTURE) and (a)b (DFA_WITH_GROUPS) must have distinct structural hashes");
+        h1, h2, "(a)?b and (a)b have distinct DFA topologies and must produce distinct hashes");
   }
 
   // ── TagOperation membership / order (Phase C2 guard) ──
