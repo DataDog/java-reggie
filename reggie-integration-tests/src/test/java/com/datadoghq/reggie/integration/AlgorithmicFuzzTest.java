@@ -15,7 +15,6 @@
  */
 package com.datadoghq.reggie.integration;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -127,6 +126,12 @@ public class AlgorithmicFuzzTest {
   /**
    * Companion entry point that is <em>not</em> {@code @Disabled}: it self-skips unless {@code
    * -Dreggie.fuzz.enforceZero=true} is set, letting CI exercise the gate without editing source.
+   *
+   * <p>An optional budget can be set via {@code -Dreggie.fuzz.maxFindings=N} (default 0). A budget
+   * greater than 0 allows a known number of pre-existing divergences to pass without failing the
+   * gate — new regressions still fail because they push the count above the budget. Always pair a
+   * non-zero budget with a comment in {@code doc/temp/prod-readiness/fuzz-inventory.md} explaining
+   * the known finding.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
@@ -158,12 +163,18 @@ public class AlgorithmicFuzzTest {
               + s.input);
     }
 
-    assertEquals(
-        0,
-        report.findings.size(),
+    int maxFindings = Integer.getInteger("reggie.fuzz.maxFindings", 0);
+    if (maxFindings > 0) {
+      System.out.println(
+          "[zero-divergence-gate] budget=" + maxFindings + " (known pre-existing findings)");
+    }
+    assertTrue(
+        report.findings.size() <= maxFindings,
         "Zero-divergence gate found "
             + report.findings.size()
-            + " divergences ("
+            + " divergences (budget="
+            + maxFindings
+            + ", "
             + repros.size()
             + " unique minimal repros). See printed repros and"
             + " doc/temp/prod-readiness/fuzz-inventory.md.");

@@ -1187,14 +1187,13 @@ public class DFAUnrolledBytecodeGenerator {
             null);
     mv.visitCode();
 
-    // If using Tagged DFA with groups, run the tag-based search anchored at position 0 and accept
-    // it only when it spans the whole input. match() is whole-input (see ReggieMatcher#match);
-    // delegating straight to findMatch() returned embedded matches (e.g. "x bce y" for
-    // (a|b)c(d|e)).
-    // findFrom returns the leftmost match start, so a whole-input match (if any) starts at 0; the
-    // start()==0 && end()==length() guard rejects embedded and prefix-only matches.
+    // For Tagged DFA with groups, use the no-priority-cut TDFA variant for match(). Priority-cut
+    // is correct for scanning (findMatchFrom) but wrong for match(): if the first-priority
+    // alternative produces a prefix match (e.g. "fo" on "foo" for (fo|foo)), we must continue
+    // consuming to check whether the longer alternative spans the whole input.
+    // NOTE: We intentionally do NOT delegate to jdkMatch() here — JDK's regex can have
+    // catastrophic backtracking O(2^n) on some patterns, which would break the O(n) DFA guarantee.
     if (useTaggedDFA && groupCount > 0) {
-      // MatchResult r = findMatchFrom(input, 0);
       int rVar = 2;
       mv.visitVarInsn(ALOAD, 0);
       mv.visitVarInsn(ALOAD, 1);
@@ -1202,28 +1201,24 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitMethodInsn(
           INVOKEVIRTUAL,
           className.replace('.', '/'),
-          "findMatchFrom",
+          "findMatchFromForMatch",
           "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
           false);
       mv.visitVarInsn(ASTORE, rVar);
 
       Label returnNull = new Label();
-      // if (r == null) return null;
       mv.visitVarInsn(ALOAD, rVar);
       mv.visitJumpInsn(IFNULL, returnNull);
-      // if (r.start() != 0) return null;
       mv.visitVarInsn(ALOAD, rVar);
       mv.visitMethodInsn(
           INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "start", "()I", true);
       mv.visitJumpInsn(IFNE, returnNull);
-      // if (r.end() != input.length()) return null;
       mv.visitVarInsn(ALOAD, rVar);
       mv.visitMethodInsn(
           INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "end", "()I", true);
       mv.visitVarInsn(ALOAD, 1);
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
       mv.visitJumpInsn(IF_ICMPNE, returnNull);
-      // return r;
       mv.visitVarInsn(ALOAD, rVar);
       mv.visitInsn(ARETURN);
 
@@ -1352,10 +1347,26 @@ public class DFAUnrolledBytecodeGenerator {
    * group positions during DFA execution.
    */
   private void generateFindMatchFromMethodTagged(ClassWriter cw, String className) {
+    generateFindMatchFromMethodTaggedImpl(cw, className, "findMatchFrom", ACC_PUBLIC, true);
+  }
+
+  /**
+   * Generates a private {@code findMatchFromForMatch} variant that uses the tagged DFA WITHOUT
+   * priority-cut. Used by {@link #generateMatchMethod} for full-input (match()) semantics: the
+   * caller must verify that the returned match spans the entire input, but the TDFA must not commit
+   * early to a shorter high-priority prefix match.
+   */
+  public void generateFindMatchFromMethodTaggedNoCut(ClassWriter cw, String className) {
+    generateFindMatchFromMethodTaggedImpl(
+        cw, className, "findMatchFromForMatch", ACC_PRIVATE, false);
+  }
+
+  private void generateFindMatchFromMethodTaggedImpl(
+      ClassWriter cw, String className, String methodName, int accessFlags, boolean priorityCut) {
     MethodVisitor mv =
         cw.visitMethod(
-            ACC_PUBLIC,
-            "findMatchFrom",
+            accessFlags,
+            methodName,
             "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
             null,
             null);
@@ -1416,21 +1427,30 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ILOAD, matchStartVar);
     mv.visitInsn(IASTORE);
 
-    // Process zero-width group actions at start state
-    // This handles empty alternatives like (a|)b where group 1 is entered/exited at position 0
+    // Process zero-width group actions at start state — only for groups that have BOTH an ENTER
+    // and an EXIT in the start state's group-action list (i.e. the group matches the empty string
+    // at the match-start position). A lone ENTER without a corresponding EXIT means the group is
+    // only optional at this point and its close-tag will be set by a later transition tag-op; if
+    // we set tags[2*g]=matchStart here without a close, the result would have start≠-1, end=-1
+    // which MatchResultImpl reports as start(g)=matchStart but group(g)=null — diverging from JDK
+    // which reports start(g)=-1 for an unmatched group.
     DFA.DFAState startState = dfa.getStartState();
+    java.util.Set<Integer> completedGroups = new java.util.HashSet<>();
+    java.util.Set<Integer> enteredGroups = new java.util.HashSet<>();
     for (DFA.GroupAction action : startState.groupActions) {
-      // S: [] -> [A:tags, I:tagId, I:matchStart]
+      if (action.type == DFA.GroupAction.ActionType.ENTER) enteredGroups.add(action.groupId);
+      else completedGroups.add(action.groupId);
+    }
+    completedGroups.retainAll(enteredGroups);
+    for (DFA.GroupAction action : startState.groupActions) {
+      if (!completedGroups.contains(action.groupId)) continue; // skip unpaired ENTER
       mv.visitVarInsn(ALOAD, tagsVar);
       if (action.type == DFA.GroupAction.ActionType.ENTER) {
-        // tags[2*groupId] = matchStart
         pushInt(mv, 2 * action.groupId);
       } else {
-        // tags[2*groupId + 1] = matchStart
         pushInt(mv, 2 * action.groupId + 1);
       }
       mv.visitVarInsn(ILOAD, matchStartVar);
-      // S: [A:tags, I:tagId, I:matchStart] -> []
       mv.visitInsn(IASTORE);
     }
 
@@ -1446,8 +1466,9 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ACONST_NULL);
     mv.visitVarInsn(ASTORE, savedTagsVar);
 
-    // Generate inline DFA matching with tag updates
-    generateTaggedDFAMatching(mv, inputVar, posVar, chVar, tagsVar, longestPosVar, savedTagsVar);
+    // Generate inline DFA matching with tag updates (priority-cut controlled by caller)
+    generateTaggedDFAMatching(
+        mv, inputVar, posVar, chVar, tagsVar, longestPosVar, savedTagsVar, priorityCut);
 
     // After DFA matching completes:
     // if (longestPos < 0) return null; (no match found)
@@ -1518,6 +1539,12 @@ public class DFAUnrolledBytecodeGenerator {
   /**
    * Generate inline DFA matching with tag updates. Generates unrolled state machine where each
    * state emits tag operations.
+   *
+   * @param priorityCutEnabled when true, accepting states flagged as {@link
+   *     DFA.DFAState#acceptIsPriorityCut} jump to exit immediately after saving position and tags
+   *     (scanning/find semantics). When false, always falls through to consume more input (full-
+   *     input/match semantics — priority-cut must not terminate early because the caller needs to
+   *     verify the match spans the entire input).
    */
   private void generateTaggedDFAMatching(
       MethodVisitor mv,
@@ -1526,7 +1553,8 @@ public class DFAUnrolledBytecodeGenerator {
       int chVar,
       int tagsVar,
       int longestPosVar,
-      int savedTagsVar) {
+      int savedTagsVar,
+      boolean priorityCutEnabled) {
     // Create labels for all states
     Map<DFA.DFAState, Label> stateLabels = new HashMap<>();
     for (DFA.DFAState state : dfa.getAllStates()) {
@@ -1547,6 +1575,8 @@ public class DFAUnrolledBytecodeGenerator {
 
       // If this is an accepting state, save current position and tags (gated on anchor
       // conditions — e.g. a state accepting only at ^ must not record mid-input positions).
+      // If the state is a priority-cut state, commit immediately after saving (the accepting
+      // thread wins over any loop-back or continuation thread).
       if (state.accepting) {
         if (state.acceptanceAnchorConditions.isEmpty()) {
           mv.visitVarInsn(ILOAD, posVar);
@@ -1555,6 +1585,9 @@ public class DFAUnrolledBytecodeGenerator {
           mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
           mv.visitTypeInsn(CHECKCAST, "[I");
           mv.visitVarInsn(ASTORE, savedTagsVar);
+          if (priorityCutEnabled && state.acceptIsPriorityCut) {
+            mv.visitJumpInsn(GOTO, exitLabel);
+          }
         } else {
           Label skipSave = new Label();
           emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipSave);
@@ -1564,6 +1597,9 @@ public class DFAUnrolledBytecodeGenerator {
           mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
           mv.visitTypeInsn(CHECKCAST, "[I");
           mv.visitVarInsn(ASTORE, savedTagsVar);
+          if (priorityCutEnabled && state.acceptIsPriorityCut) {
+            mv.visitJumpInsn(GOTO, exitLabel);
+          }
           mv.visitLabel(skipSave);
         }
       }
@@ -1936,15 +1972,24 @@ public class DFAUnrolledBytecodeGenerator {
 
     // If this is an accepting state, record current position (after assertions pass).
     // Per-state acceptance conditions must be satisfied before recording the position.
+    // Priority-cut states return immediately after recording (accepting thread wins).
     if (state.accepting) {
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ISTORE, longestMatchEndVar);
+        if (state.acceptIsPriorityCut) {
+          mv.visitVarInsn(ILOAD, longestMatchEndVar);
+          mv.visitInsn(IRETURN);
+        }
       } else {
         Label skipRecord = new Label();
         emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecord);
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ISTORE, longestMatchEndVar);
+        if (state.acceptIsPriorityCut) {
+          mv.visitVarInsn(ILOAD, longestMatchEndVar);
+          mv.visitInsn(IRETURN);
+        }
         mv.visitLabel(skipRecord);
       }
     }
@@ -2699,11 +2744,17 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
 
-    // If this is an accepting state, update lastAcceptingPos = pos (unless skippable)
-    // Done after assertions so a failed assertion does not advance lastAcceptingPos.
-    if (state.accepting && !skippableStates.contains(state)) {
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ISTORE, lastAcceptingVar);
+    // If this is an accepting state, update lastAcceptingPos = pos (unless skippable).
+    // Priority-cut states always record (override skippability) and stop scanning immediately.
+    if (state.accepting) {
+      if (state.acceptIsPriorityCut) {
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, lastAcceptingVar);
+        mv.visitJumpInsn(GOTO, scanComplete);
+      } else if (!skippableStates.contains(state)) {
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, lastAcceptingVar);
+      }
     }
 
     // if (pos >= len) goto scanComplete (end of input)

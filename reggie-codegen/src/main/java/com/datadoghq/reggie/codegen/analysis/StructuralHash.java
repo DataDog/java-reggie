@@ -130,6 +130,7 @@ public final class StructuralHash {
     for (DFA.DFAState state : dfa.getAllStates()) {
       hash = 31L * hash + state.transitions.size();
       hash = 31L * hash + (state.accepting ? 1 : 0);
+      hash = 31L * hash + (state.acceptIsPriorityCut ? 1 : 0);
 
       // Acceptance anchor conditions: use ordinal bitmask, not EnumSet.hashCode(), because
       // System.identityHashCode() can return 0, making {END} look the same as {}.

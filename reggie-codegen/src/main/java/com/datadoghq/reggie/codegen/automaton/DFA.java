@@ -254,6 +254,25 @@ public final class DFA {
     public final List<GroupAction> groupActions; // Group capture actions when entering this state
 
     /**
+     * True when, at this accepting state, the highest-priority live NFA thread is the one that
+     * accepts — i.e. the lowest-rank accepting NFA state has rank ≤ the lowest-rank NFA state with
+     * a consuming out-transition. When true the executor must commit immediately (priority cut)
+     * rather than continuing to the longest match. Set by SubsetConstructor.buildDFA after the C1
+     * ordered closure is available; false by default for non-accepting or non-determinable states.
+     */
+    public boolean acceptIsPriorityCut = false;
+
+    /**
+     * True when this accepting state contains at least one NFA state with consuming transitions
+     * whose rank is strictly greater than the minimum accept rank (lower priority than the accept
+     * thread). Such a consuming thread can fire in the DFA and override a higher-priority empty
+     * match with a longer, lower-priority match. Patterns with such states need to be declined when
+     * the DFA's longest-match cannot be corrected by acceptIsPriorityCut alone. Set by
+     * SubsetConstructor.buildDFA; false by default.
+     */
+    public boolean hasPriorityConflictTransition = false;
+
+    /**
      * Anchor preconditions that must hold *at the current input position* for this state to be
      * considered accepting. Empty = unconditional (existing {@link #accepting} flag semantics).
      * Populated when the only paths to an NFA accept state cross END-class anchors (END /

@@ -137,6 +137,31 @@ class StructuralHashTest {
         "lookbehind assertions with different literals must have distinct structural hashes");
   }
 
+  // ── acceptIsPriorityCut distinctness (HARD RULE: fail-on-revert) ────────────────
+
+  /**
+   * Two patterns with different acceptIsPriorityCut polarity must produce different structural
+   * hashes. This test fails when the hash line for acceptIsPriorityCut is removed from
+   * StructuralHash.computeDFATopologyHash — making it the fail-on-revert guard for this invariant.
+   *
+   * <p>{@code (fo|foo)} has a priority-cut accepting state (the 'fo'-branch wins over 'foo');
+   * {@code (a)+} has only greedy-continue accepting states (loop-back wins over stop). Both have
+   * accepting states with outgoing transitions, so the topology shapes are similar but the flag
+   * values differ.
+   */
+  @Test
+  void priorityCutVsGreedyContinue_produceDifferentHashes() throws Exception {
+    // (fo|foo): has priority-cut accepting state (cut=true on the state after "fo")
+    long h1 = hashFor("(fo|foo)");
+    // (a)+: has only greedy-continue accepting state (cut=false on the self-loop state)
+    long h2 = hashFor("(a)+");
+    assertNotEquals(
+        h1,
+        h2,
+        "(fo|foo) and (a)+ differ in acceptIsPriorityCut; their structural hashes must differ — "
+            + "this test fails when the acceptIsPriorityCut hash line is removed");
+  }
+
   // ── Strategy / topology distinctness ─────────────────────────────────────────
 
   @Test

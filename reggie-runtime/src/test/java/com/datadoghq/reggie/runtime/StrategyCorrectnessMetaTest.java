@@ -148,11 +148,12 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS,
         new Spec("(?=ab)(?=cd)(?=ef)gh", List.of("gh", "x gh", "ab", "", "ghé")));
-    // (.)?b is capture-ambiguous (optional group bypass); after C4 it routes to
-    // DFA_UNROLLED_WITH_GROUPS via the C2 priority-ordered TDFA, exercising that path end-to-end.
+    // (fo|foo) is the canonical alternation-priority cut case: it routes to
+    // DFA_UNROLLED_WITH_GROUPS via the C2 priority-ordered TDFA with acceptIsPriorityCut=true
+    // on the "after-fo" accepting state, giving leftmost-greedy-correct find() spans.
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
-        new Spec("(.)?b", List.of("b", "xby", "ab", "", "bé")));
+        new Spec("(fo|foo)", List.of("fo", "xfooy", "bar", "", "foé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_SWITCH,
         new Spec("a.*b.*c.*d.*e.*f", List.of("abcdef", "x a1b2c3d4e5f y", "abcde", "", "aébcdef")));
@@ -170,9 +171,11 @@ public class StrategyCorrectnessMetaTest {
             "(?:abc){100}",
             List.of(
                 "abc".repeat(100), "x" + "abc".repeat(100) + "y", "abc".repeat(99), "", "abcé")));
+    // Named capture group + capture-ambiguous (optional bypass) → captureAmbiguous=true and
+    // hasNamedGroups=true, so the DFA_WITH_GROUPS path is blocked → OPTIMIZED_NFA (JDK fallback).
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-        new Spec("(a*)+", List.of("aaaa", "xaaay", "bbbb", "", "aaaé")));
+        new Spec("(?<x>a)?b", List.of("ab", "xaby", "xyz", "", "abé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.LAZY_DFA,
         new Spec(
@@ -689,6 +692,74 @@ public class StrategyCorrectnessMetaTest {
     System.out.println(sb);
 
     if (ENFORCE) {
+      fail(sb.toString());
+    }
+  }
+
+  /**
+   * Correctness coverage for the alternation-boundary class (priority-cut) and the greedy non-cut
+   * class (longest-match preserving). Always enforced (not gated behind the property).
+   *
+   * <p>Priority-cut patterns (accepting thread wins over continuation): {@code (fo|foo)}, {@code
+   * (a|ab)}, {@code (a|ab)(bc|c)}, {@code (aa|a)a}.
+   *
+   * <p>Greedy non-cut patterns (loop-back thread wins — longest-match preserved): {@code (a)+}.
+   */
+  @Test
+  void alternationBoundaryAndGreedyContinue_agreeWithJdk() {
+    // Pattern, inputs: (full match, embedded, non-match, empty, non-ASCII)
+    List<Map.Entry<String, List<String>>> cases =
+        List.of(
+            // priority-cut class
+            Map.entry("(fo|foo)", List.of("fo", "xfooy", "bar", "", "foé")),
+            Map.entry("(a|ab)", List.of("a", "xaby", "cd", "", "aé")),
+            Map.entry("(a|ab)(bc|c)", List.of("ac", "xabcy", "zz", "", "acé")),
+            Map.entry("(aa|a)a", List.of("aa", "xaay", "a", "", "aàa")),
+            // greedy non-cut lock: (a)+ must use longest-match (NOT cut at first 'a')
+            Map.entry("(a)+", List.of("a", "xaaay", "b", "", "aé")),
+            Map.entry("(ab)+", List.of("ab", "xababy", "b", "", "abé")));
+
+    List<Mismatch> mismatches = new ArrayList<>();
+    for (Map.Entry<String, List<String>> c : cases) {
+      String pattern = c.getKey();
+      PatternAnalyzer.MatchingStrategy strategy;
+      try {
+        strategy = routeOf(pattern);
+      } catch (Exception ex) {
+        mismatches.add(new Mismatch(null, pattern, "<route>", "routeOf", "success", "threw " + ex));
+        continue;
+      }
+      ReggieMatcher reggie;
+      Pattern jdk;
+      try {
+        reggie = Reggie.compile(pattern);
+        jdk = Pattern.compile(pattern);
+      } catch (Throwable ex) {
+        mismatches.add(
+            new Mismatch(strategy, pattern, "<compile>", "compile", "compiles", "threw " + ex));
+        continue;
+      }
+      for (String input : c.getValue()) {
+        checkInput(strategy, pattern, input, reggie, jdk, mismatches);
+      }
+    }
+    // Always enforced — these patterns are the correctness target for alternation-priority
+    // handling.
+    if (!mismatches.isEmpty()) {
+      StringBuilder sb = new StringBuilder("Alternation-boundary mismatches:\n");
+      for (Mismatch mm : mismatches) {
+        sb.append("  pattern='")
+            .append(mm.pattern())
+            .append("' input='")
+            .append(mm.input())
+            .append("' method=")
+            .append(mm.method())
+            .append(" expected=")
+            .append(mm.expected())
+            .append(" actual=")
+            .append(mm.actual())
+            .append('\n');
+      }
       fail(sb.toString());
     }
   }

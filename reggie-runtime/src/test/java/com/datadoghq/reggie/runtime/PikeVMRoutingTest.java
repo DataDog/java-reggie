@@ -48,4 +48,56 @@ class PikeVMRoutingTest {
     assertTrue(m.find("xaby"), "should find in 'xaby'");
     assertTrue(m.find("xby"), "should find in 'xby'");
   }
+
+  // ── Alternation-priority patterns now route to native DFA (declined guard retired) ──
+
+  @Test
+  void foOrFoo_routesToDfaWithGroups() throws Exception {
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("(fo|foo)"),
+        "(fo|foo) must route to DFA_UNROLLED_WITH_GROUPS");
+  }
+
+  @Test
+  void aOrAb_routesToDfaWithGroups() throws Exception {
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("(a|ab)"),
+        "(a|ab) must route to DFA_UNROLLED_WITH_GROUPS");
+  }
+
+  @Test
+  void aaOrAThenA_routesToDfaWithGroups() throws Exception {
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("(aa|a)a"),
+        "(aa|a)a must route to DFA_UNROLLED_WITH_GROUPS");
+  }
+
+  @Test
+  void foOrFoo_findMatchCorrect() {
+    ReggieMatcher m = Reggie.compile("(fo|foo)");
+    // find() must return leftmost first-alternative match (priority-cut: "fo" wins over "foo")
+    assertTrue(m.find("foo"));
+    assertEquals(
+        "fo",
+        m.findMatch("foo").group(0),
+        "(fo|foo) find on 'foo' must return 'fo' (first alternative wins)");
+    // match() must match the full input — 'foo' alternative covers "foo"
+    assertNotNull(m.match("foo"), "(fo|foo) match on 'foo' must succeed (full-input match)");
+    assertEquals(
+        "foo", m.match("foo").group(0), "(fo|foo) match on 'foo' must return 'foo' (full-input)");
+  }
+
+  @Test
+  void aOrAb_findMatchCorrect() {
+    ReggieMatcher m = Reggie.compile("(a|ab)");
+    // "a" wins over "ab" in scanning (priority-cut)
+    assertTrue(m.find("ab"));
+    assertEquals(
+        "a",
+        m.findMatch("ab").group(0),
+        "(a|ab) find on 'ab' must return 'a' (first alternative wins)");
+  }
 }

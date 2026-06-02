@@ -1843,7 +1843,12 @@ public class DFASwitchBytecodeGenerator {
         mv.visitVarInsn(ISTORE, lastAcceptingVar);
       }
 
-      mv.visitJumpInsn(GOTO, loopStart);
+      // Priority-cut accepting states commit immediately instead of continuing the scan loop.
+      if (isAccepting && target.acceptIsPriorityCut) {
+        mv.visitJumpInsn(GOTO, loopEnd);
+      } else {
+        mv.visitJumpInsn(GOTO, loopStart);
+      }
 
       mv.visitLabel(nextCheck);
     }

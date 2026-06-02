@@ -94,6 +94,15 @@ public class SubsetConstructor {
     allStates.add(start);
     dfaStateOrdering.put(
         startClosureSet, computeInitialOrdering(nfa.getStartState(), startClosureSet));
+    if (startAccepting) {
+      List<NFA.NFAState> startOrdering = dfaStateOrdering.get(startClosureSet);
+      start.acceptIsPriorityCut =
+          computeAcceptIsPriorityCut(
+              startClosureSet, startClosure, startOrdering, nfa.getAcceptStates());
+      start.hasPriorityConflictTransition =
+          computeHasPriorityConflictTransition(
+              startClosureSet, startClosure, startOrdering, nfa.getAcceptStates());
+    }
 
     Queue<DFA.DFAState> worklist = new ArrayDeque<>();
     worklist.add(start);
@@ -171,6 +180,15 @@ public class SubsetConstructor {
           allStates.add(target);
           dfaStateConditions.put(target, targetsWithCond);
           dfaStateOrdering.put(targets, computeTransitionOrdering(currentOrdering, targets, chars));
+          if (accepting) {
+            List<NFA.NFAState> targetOrdering = dfaStateOrdering.get(targets);
+            target.acceptIsPriorityCut =
+                computeAcceptIsPriorityCut(
+                    targets, targetsWithCond, targetOrdering, nfa.getAcceptStates());
+            target.hasPriorityConflictTransition =
+                computeHasPriorityConflictTransition(
+                    targets, targetsWithCond, targetOrdering, nfa.getAcceptStates());
+          }
           worklist.add(target);
         }
 
@@ -259,6 +277,99 @@ public class SubsetConstructor {
       }
     }
     return new ArrayList<>(seen);
+  }
+
+  /**
+   * Returns true when the accepting DFA state contains an NFA state with consuming transitions
+   * whose rank is strictly greater than the minimum accept rank. Such a lower-priority consuming
+   * thread can fire in the DFA and select a longer, lower-priority match over the accept — which is
+   * wrong. Patterns with such states must be declined when acceptIsPriorityCut is false.
+   */
+  /**
+   * Returns the minimum rank of NFA accept states that are either unconditionally reachable or
+   * reachable under START-class anchor conditions (START / STRING_START / START_MULTILINE). Such
+   * states DO fire at the match-start position where the greedy scan begins.
+   *
+   * <p>Accept states conditioned exclusively on END-class anchors (END / STRING_END /
+   * STRING_END_ABSOLUTE / END_MULTILINE) are excluded: they fire only at end-of-input and should
+   * not drive the priority-cut decision at intermediate positions during the scan.
+   */
+  private int acceptRankForPriorityCut(
+      Set<NFA.NFAState> nfaStates,
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> conds,
+      Map<NFA.NFAState, Integer> rankMap,
+      Set<NFA.NFAState> nfaAcceptStates) {
+    int minRank = Integer.MAX_VALUE;
+    for (NFA.NFAState s : nfaStates) {
+      if (!nfaAcceptStates.contains(s)) continue;
+      EnumSet<NFA.AnchorType> c = conds != null ? conds.get(s) : null;
+      if (c != null && !c.isEmpty() && isEndClassOnly(c)) continue; // END-class only — skip
+      minRank = Math.min(minRank, rankMap.getOrDefault(s, Integer.MAX_VALUE));
+    }
+    return minRank;
+  }
+
+  /**
+   * Returns true when every anchor in the set is an END-class anchor (fires only at end-of-input).
+   */
+  private static boolean isEndClassOnly(EnumSet<NFA.AnchorType> anchors) {
+    for (NFA.AnchorType a : anchors) {
+      switch (a) {
+        case END:
+        case STRING_END:
+        case STRING_END_ABSOLUTE:
+        case END_MULTILINE:
+          break; // END-class: OK
+        default:
+          return false; // contains a non-END-class anchor
+      }
+    }
+    return true;
+  }
+
+  private boolean computeHasPriorityConflictTransition(
+      Set<NFA.NFAState> nfaStates,
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> stateConditions,
+      List<NFA.NFAState> ordering,
+      Set<NFA.NFAState> nfaAcceptStates) {
+    if (ordering == null || ordering.isEmpty()) return false;
+    Map<NFA.NFAState, Integer> rankMap = buildRankMap(ordering);
+    int acceptRank = acceptRankForPriorityCut(nfaStates, stateConditions, rankMap, nfaAcceptStates);
+    if (acceptRank == Integer.MAX_VALUE) return false;
+
+    for (NFA.NFAState s : nfaStates) {
+      if (!s.getTransitions().isEmpty()) {
+        if (rankMap.getOrDefault(s, Integer.MAX_VALUE) > acceptRank) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Computes whether an accepting DFA state is a priority-cut state. Only unconditionally reachable
+   * accept states are considered as the reference rank — conditionally reachable accepts (e.g. via
+   * `$`) may not fire at the current position and must not drive the cut decision.
+   *
+   * <p>True iff the lowest rank unconditional accept NFA state has rank ≤ the lowest rank NFA state
+   * with a consuming out-transition. When true the executor must commit immediately.
+   */
+  private boolean computeAcceptIsPriorityCut(
+      Set<NFA.NFAState> nfaStates,
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> stateConditions,
+      List<NFA.NFAState> ordering,
+      Set<NFA.NFAState> nfaAcceptStates) {
+    if (ordering == null || ordering.isEmpty()) return false;
+    Map<NFA.NFAState, Integer> rankMap = buildRankMap(ordering);
+    int acceptRank = acceptRankForPriorityCut(nfaStates, stateConditions, rankMap, nfaAcceptStates);
+    if (acceptRank == Integer.MAX_VALUE) return false;
+
+    int continueRank = Integer.MAX_VALUE;
+    for (NFA.NFAState s : nfaStates) {
+      if (!s.getTransitions().isEmpty()) {
+        continueRank = Math.min(continueRank, rankMap.getOrDefault(s, Integer.MAX_VALUE));
+      }
+    }
+    return acceptRank <= continueRank;
   }
 
   /** Returns a map from NFA state to its priority rank (index) in the given ordered list. */
@@ -872,6 +983,9 @@ public class SubsetConstructor {
     // SECOND: Track tag operations along character transitions
     for (NFA.NFAState source : sourceNFAStates) {
       int srcRank = sourceRankMap.getOrDefault(source, Integer.MAX_VALUE);
+      // C2.4: only skip sources that (a) have lower rank (higher priority) AND (b) actually
+      // contribute to NFA acceptance in the target. Non-accepting higher-priority sources must
+      // not be excluded — they carry tag ops for continuation paths beyond this state.
       if (applyC24Filter && srcRank < minAcceptingSourceRank) continue; // C2.4
       for (NFA.Transition trans : source.getTransitions()) {
         if (!trans.chars.intersects(charSet)) continue;

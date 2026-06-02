@@ -762,8 +762,27 @@ public class PatternAnalyzer {
           return r;
         }
 
+        // Residual decline: the acceptIsPriorityCut ordering computation is reliable only for
+        // patterns with no quantifiers anywhere (pure fixed-length alternations like (fo|foo),
+        // (a|ab), (aa|a)a) AND where the DFA start state is not accepting (no empty-matching
+        // alternative like () or (.)? at the start). When either condition fails, NFA-sharing
+        // artifacts or accepting-start-state group-action problems produce wrong results.
+        // Additionally decline unnamed non-captureAmbiguous patterns with both alternation and
+        // quantifiers: the TDFA priority-ordering computation is unreliable for these because
+        // optional leading elements (e.g. -?(-?.{3}b).) cause incorrect group-END positions.
+        // Capture-ambiguous patterns (already handled via the C2 priority-ordered TDFA) and
+        // named-group patterns are exempt.
+        boolean quantifiedAltWithGroupBug =
+            containsAlternation(ast)
+                && containsAnyQuantifier(ast)
+                && !hasNamedGroups(ast)
+                && !dfa.isCaptureAmbiguous();
         if ((containsAlternation(ast) || containsOptionalQuantifier(ast))
-            && dfaHasAcceptingStateWithTransitions(dfa)) {
+            && (quantifiedAltWithGroupBug
+                || (containsAnyQuantifier(ast)
+                    ? dfaHasAcceptingStateWithTransitions(dfa)
+                    : (dfa.getStartState().accepting
+                        || hasUnresolvedAcceptingTransitionState(dfa))))) {
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
@@ -901,11 +920,10 @@ public class PatternAnalyzer {
         return r;
       }
 
-      // Alternation priority: Java NFA semantics pick the first alternative that matches at a
-      // position; DFA semantics pick the longest match. When the pattern has explicit alternation
-      // AND the DFA has an unconditionally-accepting state that has further outgoing transitions,
-      // the DFA will return a longer match than the NFA would for the same position — violating
-      // Java regex semantics. Flag for caller to route to JDK fallback.
+      // Alternation priority for non-capturing DFA: the priority-cut flag is unreliable for
+      // non-capturing patterns (the ordering computation has NFA-sharing artifacts for several
+      // pattern classes). Restore the original conservative decline for the non-capturing path;
+      // the capturing path (above) handles the target alternation-boundary class correctly.
       if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
@@ -1125,6 +1143,23 @@ public class PatternAnalyzer {
     return false;
   }
 
+  /** Returns true when the AST contains any quantifier node (*, +, ?, {n,m}). */
+  private boolean containsAnyQuantifier(RegexNode node) {
+    if (node instanceof QuantifierNode) return true;
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children)
+        if (containsAnyQuantifier(child)) return true;
+      return false;
+    }
+    if (node instanceof GroupNode) return containsAnyQuantifier(((GroupNode) node).child);
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives)
+        if (containsAnyQuantifier(alt)) return true;
+      return false;
+    }
+    return false;
+  }
+
   private boolean containsAlternation(RegexNode node) {
     if (node instanceof AlternationNode) return true;
     if (node instanceof ConcatNode) {
@@ -1264,6 +1299,36 @@ public class PatternAnalyzer {
         // (where ^/\A fire) the DFA can still advance via transitions, diverging
         // from NFA first-alternative semantics. END-class anchors are safe because
         // transitions cannot fire at end-of-input.
+        for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+          if (a == NFA.AnchorType.START
+              || a == NFA.AnchorType.STRING_START
+              || a == NFA.AnchorType.START_MULTILINE) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true when any accepting DFA state with outgoing transitions has {@link
+   * DFA.DFAState#acceptIsPriorityCut} set to {@code false}. When this is true, the generator's
+   * longest-match semantics cannot be corrected by the priority-cut flag alone — the consuming
+   * thread(s) with higher priority than the accept thread may or may not succeed at runtime, and
+   * the DFA cannot distinguish the two cases statically. Such patterns must be declined (routed to
+   * a correct fallback). When false, every accepting state with outgoing transitions is a
+   * priority-cut state and the generator handles it correctly.
+   */
+  private boolean hasUnresolvedAcceptingTransitionState(DFA dfa) {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      // acceptIsPriorityCut=true: generator cuts immediately — priority conflict resolved.
+      // acceptIsPriorityCut=false + hasPriorityConflictTransition=true: lower-priority thread
+      // can fire and override the accept — DFA longest-match is wrong.
+      if (state.accepting && state.hasPriorityConflictTransition && !state.acceptIsPriorityCut) {
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          return true;
+        }
         for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
           if (a == NFA.AnchorType.START
               || a == NFA.AnchorType.STRING_START

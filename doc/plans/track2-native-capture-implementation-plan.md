@@ -186,19 +186,37 @@ result is used as a second oracle (PikeVM spans == TDFA spans == JDK spans).
 
 ## Phase D — Phase 1a: native alternation-priority matches()/match()/find()
 
-**Goal:** retire the `alternationPriorityConflict` decline (`PatternAnalyzer` lines ~771, ~863).
-With Phase C's priority-correct TDFA, alternation-boundary patterns (`(fo|foo)`, `(a|ab)`) get
-correct group bindings, so native `matches()`/`match()`/`find()`/`findMatch()` become safe.
+**Goal:** retire the `alternationPriorityConflict` decline at **both** sites
+(`PatternAnalyzer` ~765 capturing/tagged, ~909 non-capturing) so alternation-boundary patterns
+(`(fo|foo)`, `(a|ab)`, `(a|ab)(bc|c)`, `(aa|a)a`) match on the native O(n) DFA path with
+leftmost-greedy-correct spans.
 
-**Files:** `PatternAnalyzer.java` (remove/narrow the `alternationPriorityConflict` guard),
-`StrategyCorrectnessMetaTest` (add alternation-priority representatives), oracle already covers it.
+**Not a guard deletion.** Phase C made the TDFA's group *bindings* priority-correct, but the
+generated match-end paths (`generateTaggedDFAMatching`, `findLongestMatchEnd`, the switch
+generator's `findMatchEnd`) still take the **longest** accept. `(fo|foo)` on `"foo"` needs the
+**first** accept (cut at `[0,2)`); `(a)+` on `"aaa"` has the identical "accepting state with
+outgoing transitions" topology yet needs the **longest** accept (`[0,3)`). Boolean
+`DFAState.accepting` cannot separate them — D1 requires a per-state **`acceptIsPriorityCut`** flag
+(PikeVM's accept-cut rule made static: cut iff `acceptRank ≤ continueRank`), the "Outcome B" the C5
+plan anticipated. (C5.2's "Outcome A — no DFAState signal needed" is refuted; its probe sampled only
+cut-cases.) Detailed breakdown: `doc/plans/phase-d-native-alternation-priority-tasks.md`.
+
+**Files:** `SubsetConstructor.java` (compute the flag from C1 ordered-closure ranks), `DFA.java`
+(new `DFAState.acceptIsPriorityCut` field), `StructuralHash.java` (hash it — HARD RULE),
+`DFAUnrolledBytecodeGenerator.java` + switch generator (honor flag: cut → commit+exit, non-cut →
+keep longest-match), `PatternAnalyzer.java` (narrow/retire both declines, re-point routing),
+`StrategyCorrectnessMetaTest` (representatives).
 
 **Tasks:**
-- D1. Remove the `alternationPriorityConflict` decline for cases Phase C proves correct; keep it
-  only where still unproven.
-- D2. Meta-test + fuzzer representatives for `(fo|foo)`, `(a|ab)`, `(a|ab)(bc|c)`, `(aa|a)a`.
+- D1 (#42). Honor priority-cut natively: D1.0 RED counterexample (`(a)+` greedy vs `(fo|foo)` cut);
+  D1.1 compute `acceptIsPriorityCut` in `SubsetConstructor`; D1.2 hash it + `StructuralHashTest`
+  distinctness; D1.3 honor it in both generators at every accept site; D1.4 retire both declines and
+  re-point routing to `DFA_*_WITH_GROUPS` (PikeVM = explosion fallback).
+- D2 (#43). Meta-test representatives — `(fo|foo)`, `(a|ab)`, `(a|ab)(bc|c)`, `(aa|a)a` **plus a
+  greedy non-cut lock** (`(a)+`) — and the full gate run.
 
-**Gate:** fuzzer 0, meta-test 0, build green, benchmark showing native find() recovers speed.
+**Gate:** meta-test 0, fuzzer 0 (≥76k checks), `StructuralHashTest` green, oracle cross-check
+(PikeVM == TDFA == JDK), build green, benchmark showing native find() recovers DFA speed.
 
 ---
 

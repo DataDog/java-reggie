@@ -916,6 +916,11 @@ public class RuntimeCompiler {
         unrolled.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateMatchesAtStartMethod(cw); // Required by findFrom
         unrolled.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        // Private helper for match(): no priority-cut, used when scanPath would stop too early.
+        if (result.useTaggedDFA && nfa.getGroupCount() > 0) {
+          unrolled.generateFindMatchFromMethodTaggedNoCut(
+              cw, "com/datadoghq/reggie/runtime/" + className);
+        }
         unrolled.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);

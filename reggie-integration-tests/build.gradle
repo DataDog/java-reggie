@@ -30,8 +30,17 @@ test {
         events "passed", "skipped", "failed"
         showStandardStreams = true
     }
-    // Forward all -Dreggie.* system properties from the Gradle JVM to the test JVM
-    systemProperties System.properties.findAll { k, v -> k.toString().startsWith("reggie.") }
+    // Forward all -Dreggie.* system properties from the Gradle JVM to the test JVM.
+    // Evaluated lazily at task execution time (not at configuration time) so that
+    // properties added on the command line are always picked up regardless of whether
+    // a configuration cache entry is reused.
+    doFirst {
+        System.properties.each { k, v ->
+            if (k.toString().startsWith("reggie.")) {
+                systemProperty k.toString(), v.toString()
+            }
+        }
+    }
 }
 
 // Custom task to run correctness validation standalone
