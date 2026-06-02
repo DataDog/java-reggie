@@ -45,6 +45,11 @@ class DFAStateBudgetFallbackTest {
     assertTrue(bounds[0] == 2 && bounds[1] == 302);
   }
 
+  // C5.1.b: explosion fallback for pure-regular capturing patterns (PatternAnalyzer.java:859-872,
+  // PIKEVM_CAPTURE route) is exercised by code review only (C4.3). No deterministic unit-test
+  // pattern exists that both contains a capture group and reliably triggers StateExplosionException
+  // without constructing a multi-kilobyte pattern.
+
   @Test
   void largeAlternationQuantifierDoesNotFailCompilation() {
     ReggieMatcher matcher = Reggie.compile("(?:a|b|c|d|e|f){100}");

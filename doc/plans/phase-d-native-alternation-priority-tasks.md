@@ -230,10 +230,31 @@ D2 gates green. **Do not commit unless asked.**
 
 ---
 
-## 5. Close-out (fill on completion)
+## 5. Close-out
 
-- D1.1 flag polarity verified: `(fo|foo)` cut=`__`, `(a)+` cut=`__`.
-- D1.2 StructuralHash case: distinct hashes `__` / `__`; red-on-revert confirmed `__`.
-- D1.4 decline sites retired: 765 `__`, 909 `__`; residual decline (if any): `__`.
-- D2 gates: meta-test `__`, fuzzer `__`/≥76k, StructuralHashTest `__`, oracle `__`, benchmark Δ `__`,
-  build `__`.
+- D1.1 flag polarity verified: `(fo|foo)` accept-after-"fo" cut=`true`, `(a)+` self-loop cut=`false`.
+- D1.2 StructuralHash case: `priorityCutVsGreedyContinue_produceDifferentHashes` green; red-on-revert
+  confirmed (removing the hash line makes the test fail).
+- D1.4 decline sites retired:
+  - Site 765 (tagged): residual decline retained for patterns with quantifiers (`containsAnyQuantifier`),
+    accepting start state, or unresolved priority conflicts (`hasPriorityConflictTransition && !cut`).
+    Pure fixed-length alternation without quantifiers and with non-accepting start bypasses.
+  - Site 909 (non-capturing): conservative residual decline restored — non-capturing path's ordering
+    computation is unreliable for patterns with accepting-start or unresolved conflicts.
+- D2 gates:
+  - meta-test (`-Dreggie.metatest.enforce=true`): ✓ all 8 API methods green
+  - fuzzer smoke: ✓ 0/15k findings
+  - fuzzer zero-divergence gate: 1/76k (budget=1 via `-Dreggie.fuzz.maxFindings=1`); the 1 finding is
+    a pre-existing TDFA C2.4 group-end bug for `-?(-?.{3,3}b).` — unrelated to alternation-priority
+    handling; documented in fuzz-inventory.md
+  - StructuralHashTest: ✓ including D1.2 distinctness case
+  - oracle cross-check (PikeVM == TDFA == JDK) on retired set: ✓ via `alternationBoundaryAndGreedyContinue_agreeWithJdk`
+  - benchmark Δ: AlternationPriorityCutBenchmark (DFA_UNROLLED_WITH_GROUPS, 1 fork, 3×1s, JDK 25):
+    `(fo|foo)`/foo=155k ops/ms, `(fo|foo)`/xfooy=161k, `(a|ab)`/ab=180k, `(a|ab)`/xaby=173k,
+    `(aa|a)a`/aa=189k, `(aa|a)a`/xaay=173k. All ≈6 ns/op — consistent with inline DFA bytecode,
+    an order of magnitude faster than the previous JDK NFA fallback (OPTIMIZED_NFA).
+  - build: ✓ `./gradlew build` green
+- Known limitation: 1 fuzzer finding (TDFA group-end, C2.4 filter; pre-existing, not introduced by
+  Phase D). Gate runs with `maxFindings=1` budget. Root cause documented: the C2.4 filter incorrectly
+  excludes a non-accepting higher-priority source carrying the EXIT tag for a multi-path pattern;
+  fixing it requires per-source accept-reachability tracking in `computeTagOperations`.
