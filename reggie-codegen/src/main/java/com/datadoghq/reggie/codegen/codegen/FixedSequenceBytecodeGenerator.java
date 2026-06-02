@@ -523,13 +523,19 @@ public class FixedSequenceBytecodeGenerator {
     groupStarts[0] = 0;
     groupEnds[0] = info.totalLength != -1 ? info.totalLength : info.minLength;
 
-    // Calculate positions for capturing groups
+    // Calculate positions for capturing groups.
+    // Multiple elements can share the same group number when a multi-char literal group
+    // like (foo) is flattened into individual LiteralElements. Set groupStarts[g] from the
+    // FIRST element and groupEnds[g] from the LAST element belonging to group g.
     int currentPos = 0;
+    boolean[] groupStartSet = new boolean[arraySize];
     for (SequenceElement elem : info.elements) {
       int groupNum = elem.getGroupNumber();
       if (groupNum > 0) {
-        // This element is inside a capturing group
-        groupStarts[groupNum] = currentPos;
+        if (!groupStartSet[groupNum]) {
+          groupStarts[groupNum] = currentPos;
+          groupStartSet[groupNum] = true;
+        }
         groupEnds[groupNum] = currentPos + elem.minLength();
       }
       currentPos += elem.minLength();
@@ -661,12 +667,17 @@ public class FixedSequenceBytecodeGenerator {
     groupStartOffsets[0] = 0;
     groupEndOffsets[0] = matchLength;
 
-    // Calculate offsets for capturing groups
+    // Calculate offsets for capturing groups.
+    // Multiple elements can share the same group number when (foo) is flattened to literals.
     int currentPos = 0;
+    boolean[] groupStartSet = new boolean[arraySize];
     for (SequenceElement elem : info.elements) {
       int groupNum = elem.getGroupNumber();
       if (groupNum > 0) {
-        groupStartOffsets[groupNum] = currentPos;
+        if (!groupStartSet[groupNum]) {
+          groupStartOffsets[groupNum] = currentPos;
+          groupStartSet[groupNum] = true;
+        }
         groupEndOffsets[groupNum] = currentPos + elem.minLength();
       }
       currentPos += elem.minLength();

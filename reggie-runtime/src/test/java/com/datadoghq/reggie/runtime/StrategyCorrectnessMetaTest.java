@@ -139,9 +139,11 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.NESTED_QUANTIFIED_GROUPS,
         new Spec("((a|bc)+)*", List.of("abcabc", "xabcy", "zzz", "", "abcé")));
+    // (foo)(bar) now routes to SPECIALIZED_FIXED_SEQUENCE (fixed literal concat — faster path).
+    // Use a char-class group to keep a genuine ONEPASS_NFA representative.
     m.put(
         PatternAnalyzer.MatchingStrategy.ONEPASS_NFA,
-        new Spec("(foo)(bar)", List.of("foobar", "x foobar y", "foobaz", "", "foobár")));
+        new Spec("([a-z])(bar)", List.of("xbar", "x xbar y", "zfoo", "", "xbár")));
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_UNROLLED,
         new Spec("[ab]c", List.of("ac", "x bc y", "dc", "", "ác")));
@@ -165,12 +167,13 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(a|b|c|d|e|f|g)(h|i|j|k|l|m)(n|o|p|q|r)(s|t|u|v)",
             List.of("ahns", "x bios y", "aaaa", "", "ahnsé")));
+    // (?:abc){100} now routes to SPECIALIZED_FIXED_SEQUENCE (literal repeat expansion).
+    // Use a char-class repeat to keep a genuine DFA_TABLE representative.
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         new Spec(
-            "(?:abc){100}",
-            List.of(
-                "abc".repeat(100), "x" + "abc".repeat(100) + "y", "abc".repeat(99), "", "abcé")));
+            "(?:[a-z][0-9]){150}",
+            List.of("a0".repeat(150), "x" + "a0".repeat(150) + "y", "a0".repeat(149), "", "a0é")));
     // Named capture group + capture-ambiguous (optional bypass) → captureAmbiguous=true and
     // hasNamedGroups=true, so the DFA_WITH_GROUPS path is blocked → OPTIMIZED_NFA (JDK fallback).
     m.put(

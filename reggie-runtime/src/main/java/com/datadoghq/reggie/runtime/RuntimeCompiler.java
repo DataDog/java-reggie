@@ -1127,7 +1127,8 @@ public class RuntimeCompiler {
           lazyGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           lazyGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           lazyGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-          // find* methods use the standard NFA implementation (no capturing groups involved).
+          // find/findFrom use the DFA cache for O(n) scanning; match-span methods that need
+          // the exact match end still delegate to the NFA for findLongestMatchEnd.
           NFABytecodeGenerator nfaDelegate =
               new NFABytecodeGenerator(
                   nfa,
@@ -1140,8 +1141,8 @@ public class RuntimeCompiler {
           // String overload of matchBounded called internally by findMatchFrom/findMatch.
           // Uses a compact stub (no NFA bytecode) to avoid the 64 KB method size limit.
           lazyGen.generateMatchBoundedStringMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-          nfaDelegate.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-          nfaDelegate.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          lazyGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+          lazyGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
           nfaDelegate.generateFindLongestMatchEndMethod(
               cw, "com/datadoghq/reggie/runtime/" + className);
           nfaDelegate.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);

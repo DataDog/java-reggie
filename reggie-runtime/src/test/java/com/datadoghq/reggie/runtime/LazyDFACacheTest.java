@@ -243,4 +243,51 @@ class LazyDFACacheTest {
     assertTrue(r1.get());
     assertTrue(r2.get());
   }
+
+  // ── findFrom coverage ─────────────────────────────────────────────────────
+
+  @Test
+  void testFindFromExactMatch() {
+    // "ab" at position 0
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
+    assertEquals(0, cache.findFrom("ab", 0, TWO_STEP));
+  }
+
+  @Test
+  void testFindFromEmbedded() {
+    // "xxab" — match starts at position 2
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
+    assertEquals(2, cache.findFrom("xxab", 0, TWO_STEP));
+  }
+
+  @Test
+  void testFindFromNoMatch() {
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
+    assertEquals(-1, cache.findFrom("xxxx", 0, TWO_STEP));
+  }
+
+  @Test
+  void testFindFromStartOffsetSkipsEarlierMatch() {
+    // "abab" — match at 0 and 2; starting from 1 should find match at 2
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
+    assertEquals(2, cache.findFrom("abab", 1, TWO_STEP));
+  }
+
+  @Test
+  void testFindFromNullInput() {
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
+    assertEquals(-1, cache.findFrom(null, 0, TWO_STEP));
+  }
+
+  @Test
+  void testFindFromFrozenFallback() {
+    // cap=1 forces immediate freeze; nfaFallbackFindFrom must find the match
+    int cap = 1;
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2}, cap);
+    assertEquals(0, cache.findFrom("ab", 0, TWO_STEP));
+    assertTrue(cache.isFrozen());
+    // Second call also works (frozen path)
+    LazyDFACache cache2 = new LazyDFACache(new int[] {0}, new int[] {2}, cap);
+    assertEquals(2, cache2.findFrom("xxab", 0, TWO_STEP));
+  }
 }

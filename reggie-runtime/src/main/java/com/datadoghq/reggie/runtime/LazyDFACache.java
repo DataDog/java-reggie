@@ -129,6 +129,52 @@ public final class LazyDFACache {
     return accepting[dfaState];
   }
 
+  /**
+   * O(n) DFA-based search for the leftmost match start position in {@code input[start, len)}.
+   *
+   * <p>Scans left-to-right maintaining a single DFA state. When the DFA reaches a DEAD transition,
+   * the current match attempt has failed and the scan restarts from DFA state 0 at the next input
+   * position. The first position at which {@link #accepting}{@code [dfaState]} is true is returned
+   * as the match start.
+   *
+   * <p>If the cache freezes mid-scan (FALLBACK transition), the remainder of the input is handed
+   * off to an O(n²) NFA fallback that tries each remaining start position in turn.
+   *
+   * @return the leftmost match start position (0-based), or {@code -1} if no match exists
+   */
+  public int findFrom(String input, int start, NfaStep nfaStep) {
+    if (input == null) return -1;
+    int len = input.length();
+    int matchStart = start;
+    int dfaState = 0;
+    for (int pos = start; pos < len; pos++) {
+      int c = input.charAt(pos);
+      int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
+      int next =
+          (table != null && c < 128)
+              ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
+              : UNCACHED;
+      if (next == UNCACHED) {
+        next = lookupOrCompute(dfaState, c, nfaStep);
+      }
+      if (next == FALLBACK) {
+        // Cache is frozen; delegate remaining scan to NFA.
+        return nfaFallbackFindFrom(input, matchStart, pos, nfaStateSets[dfaState], nfaStep);
+      }
+      if (next == DEAD) {
+        // Current match attempt failed at 'pos'; restart from next position.
+        matchStart = pos + 1;
+        dfaState = 0;
+        continue;
+      }
+      dfaState = next;
+      if (accepting[dfaState]) {
+        return matchStart;
+      }
+    }
+    return -1;
+  }
+
   int lookupOrCompute(int state, int c, NfaStep nfaStep) {
     int[] nextSet = nfaStep.apply(nfaStateSets[state], c);
     if (nextSet.length == 0) {
@@ -226,6 +272,45 @@ public final class LazyDFACache {
       states = nfaStep.apply(states, input.charAt(pos));
     }
     return states.length > 0 && containsAny(states, acceptStateIds);
+  }
+
+  /**
+   * NFA fallback for {@link #findFrom} when the cache is frozen. Tries to complete the in-progress
+   * match (starting at {@code scanFrom}, already advanced to {@code frozenPos} via the DFA), then
+   * scans each subsequent start position with plain NFA stepping.
+   *
+   * @param scanFrom first candidate start position being attempted when the DFA froze
+   * @param frozenPos position in the input where the FALLBACK transition was encountered
+   * @param nfaSet NFA state-set at {@code frozenPos} (the partially-consumed DFA state's NFA set)
+   */
+  private int nfaFallbackFindFrom(
+      String input, int scanFrom, int frozenPos, int[] nfaSet, NfaStep nfaStep) {
+    int len = input.length();
+    // Try to finish the match already in progress at frozenPos.
+    int[] states = nfaStep.apply(nfaSet, input.charAt(frozenPos));
+    for (int pos = frozenPos + 1; pos < len; pos++) {
+      if (states.length == 0) break;
+      states = nfaStep.apply(states, input.charAt(pos));
+    }
+    if (states.length > 0 && containsAny(states, acceptStateIds)) {
+      return scanFrom;
+    }
+    // Retry from each subsequent start position using plain NFA simulation.
+    for (int start = scanFrom + 1; start < len; start++) {
+      int[] cur = nfaStep.apply(nfaStateSets[0], input.charAt(start));
+      boolean found = false;
+      for (int pos = start + 1; pos < len; pos++) {
+        if (cur.length == 0) break;
+        cur = nfaStep.apply(cur, input.charAt(pos));
+        if (containsAny(cur, acceptStateIds)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found && cur.length > 0 && containsAny(cur, acceptStateIds)) found = true;
+      if (found) return start;
+    }
+    return -1;
   }
 
   // package-private for tests

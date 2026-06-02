@@ -5667,6 +5667,28 @@ public class PatternAnalyzer {
     List<SequenceElement> elements = new ArrayList<>();
     int[] groupCounter = {0}; // Mutable counter for group numbers
 
+    // Handle exact-count literal group repetition: (?:abc){n} → expand to n×|body| literals.
+    // This bypasses the maxLength guard below because inlined char comparisons are always faster
+    // than DFA_TABLE dispatch for pure-literal repeated patterns.
+    if (ast instanceof QuantifierNode) {
+      QuantifierNode quant = (QuantifierNode) ast;
+      if (quant.min == quant.max && quant.min >= 1 && quant.min <= 1000) {
+        List<Character> body = extractLiteralBody(quant.child);
+        if (body != null && !body.isEmpty()) {
+          int totalLen = quant.min * body.size();
+          if (totalLen >= 2) {
+            List<SequenceElement> expanded = new ArrayList<>(totalLen);
+            for (int rep = 0; rep < quant.min; rep++) {
+              for (char ch : body) {
+                expanded.add(new LiteralElement(ch, -1));
+              }
+            }
+            return new FixedSequenceInfo(expanded, 0);
+          }
+        }
+      }
+    }
+
     // Handle single element (not a sequence, but could be a single fixed element)
     if (!(ast instanceof ConcatNode)) {
       // Try to analyze as single element
@@ -5681,17 +5703,19 @@ public class PatternAnalyzer {
 
     ConcatNode concat = (ConcatNode) ast;
 
-    // Analyze each child element
+    // Analyze each child element, using flattenElement to handle multi-char literal groups
+    // like (foo)(bar) which analyzeElement alone cannot decompose.
     for (RegexNode child : concat.children) {
-      SequenceElement elem = analyzeElement(child, -1, groupCounter);
-      if (elem == null) {
+      int prevSize = elements.size();
+      if (!flattenElement(child, -1, groupCounter, elements)) {
         return null; // Contains unsupported element
       }
       // Reject patterns with optional elements - let BoundedQuantifier or NFA handle them
-      if (elem instanceof OptionalLiteralElement) {
-        return null; // Optional elements require dynamic position tracking
+      for (int i = prevSize; i < elements.size(); i++) {
+        if (elements.get(i) instanceof OptionalLiteralElement) {
+          return null;
+        }
       }
-      elements.add(elem);
     }
 
     // Must have at least 2 elements to be worth optimizing as a sequence
@@ -6271,6 +6295,68 @@ public class PatternAnalyzer {
         suffix,
         quantifierCharSet,
         quantifierLiteral);
+  }
+
+  /**
+   * Flattens {@code node} into zero or more fixed {@link SequenceElement}s appended to {@code out}.
+   * Unlike {@link #analyzeElement}, this recurses into {@link ConcatNode} children of {@link
+   * GroupNode}s, enabling patterns like {@code (foo)(bar)} to route to {@link
+   * MatchingStrategy#SPECIALIZED_FIXED_SEQUENCE}.
+   *
+   * @return true on success; false if the subtree contains any unsupported construct (out may be
+   *     partially modified — callers must discard on failure)
+   */
+  private boolean flattenElement(
+      RegexNode node, int currentGroup, int[] groupCounter, List<SequenceElement> out) {
+    if (node instanceof GroupNode) {
+      GroupNode group = (GroupNode) node;
+      int groupNum = currentGroup;
+      if (group.capturing) {
+        groupNum = ++groupCounter[0];
+      }
+      return flattenElement(group.child, groupNum, groupCounter, out);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (!flattenElement(child, currentGroup, groupCounter, out)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    SequenceElement elem = analyzeElement(node, currentGroup, groupCounter);
+    if (elem == null) {
+      return false;
+    }
+    out.add(elem);
+    return true;
+  }
+
+  /**
+   * Extracts the literal characters from a pure-literal subtree (LiteralNodes and non-capturing
+   * GroupNodes / ConcatNodes only). Returns null if {@code node} contains anything else.
+   */
+  private List<Character> extractLiteralBody(RegexNode node) {
+    if (node instanceof LiteralNode) {
+      List<Character> r = new ArrayList<>();
+      r.add(((LiteralNode) node).ch);
+      return r;
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing) return null;
+      return extractLiteralBody(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      List<Character> r = new ArrayList<>();
+      for (RegexNode child : ((ConcatNode) node).children) {
+        List<Character> sub = extractLiteralBody(child);
+        if (sub == null) return null;
+        r.addAll(sub);
+      }
+      return r;
+    }
+    return null;
   }
 
   /** Check if a node is simple fixed-width (literal or char class without quantifier). */

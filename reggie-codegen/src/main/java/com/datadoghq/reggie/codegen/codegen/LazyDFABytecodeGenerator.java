@@ -708,6 +708,60 @@ public class LazyDFABytecodeGenerator {
     mv.visitEnd();
   }
 
+  /**
+   * Emits {@code public boolean find(String input)}: returns true if a match exists anywhere in
+   * {@code input}. Delegates to {@code findFrom(input, 0) >= 0}.
+   *
+   * <p>Variable layout: 0=this, 1=input.
+   */
+  public void generateFindMethod(ClassWriter cw, String className) {
+    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "find", "(Ljava/lang/String;)Z", null, null);
+    mv.visitCode();
+    // if (input == null) return false
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notNull);
+    // return findFrom(input, 0) >= 0
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "findFrom", "(Ljava/lang/String;I)I", false);
+    Label returnTrue = new Label(), end = new Label();
+    mv.visitJumpInsn(IFGE, returnTrue);
+    mv.visitInsn(ICONST_0);
+    mv.visitJumpInsn(GOTO, end);
+    mv.visitLabel(returnTrue);
+    mv.visitInsn(ICONST_1);
+    mv.visitLabel(end);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Emits {@code public int findFrom(String input, int start)}: returns the leftmost match start
+   * position at or after {@code start}, or {@code -1} if no match exists. Delegates to {@code
+   * CACHE.findFrom(input, start, this)}.
+   *
+   * <p>Variable layout: 0=this, 1=input, 2=start.
+   */
+  public void generateFindFromMethod(ClassWriter cw, String className) {
+    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
+    mv.visitCode();
+    mv.visitFieldInsn(GETSTATIC, className, "CACHE", "L" + LAZY_CACHE + ";");
+    mv.visitVarInsn(ALOAD, 1); // input
+    mv.visitVarInsn(ILOAD, 2); // start
+    mv.visitVarInsn(ALOAD, 0); // this (NfaStep)
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, LAZY_CACHE, "findFrom", "(Ljava/lang/String;IL" + NFA_STEP + ";)I", false);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
   // ── private helpers ──────────────────────────────────────────────────────
 
   // Maximum bytecode bytes per helper method (conservative, well under 64 KB limit).

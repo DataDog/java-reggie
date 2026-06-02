@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
+import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Measurement;
 import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
@@ -29,20 +30,20 @@ import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.annotations.Level;
 
 /**
  * Comprehensive Reggie-vs-JDK throughput benchmark covering all supported matching strategies.
  *
  * <p>Each strategy is represented by a canonical pattern taken from {@code
- * StrategyCorrectnessMetaTest}. The input used for every pair of benchmarks is the "embedded
- * match" input (index 1 in each Spec list), which exercises the full {@code find()} scan path
- * rather than a trivial anchored match.
+ * StrategyCorrectnessMetaTest}. The input used for every pair of benchmarks is the "embedded match"
+ * input (index 1 in each Spec list), which exercises the full {@code find()} scan path rather than
+ * a trivial anchored match.
  *
- * <p>Patterns are compiled once per trial in {@link #setup()} and never inside a
- * {@code @Benchmark} method, so compilation cost is excluded from measurements.
+ * <p>Patterns are compiled once per trial in {@link #setup()} and never inside a {@code @Benchmark}
+ * method, so compilation cost is excluded from measurements.
  *
  * <p>Strategies covered:
+ *
  * <ul>
  *   <li>STATELESS_LOOP: {@code \w+}
  *   <li>SPECIALIZED_GREEDY_CHARCLASS: {@code (\d+)}
