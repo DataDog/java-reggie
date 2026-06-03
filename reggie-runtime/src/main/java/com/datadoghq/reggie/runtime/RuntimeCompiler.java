@@ -37,9 +37,11 @@ import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
+import com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.codegen.BackreferenceBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.BitParallelGlushkovBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatGreedyGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatQuantifiedGroupsBytecodeGenerator;
@@ -962,6 +964,22 @@ public class RuntimeCompiler {
         tableGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         tableGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         tableGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case BITPARALLEL_GLUSHKOV:
+        BitParallelGlushkovBytecodeGenerator glushkovGen =
+            new BitParallelGlushkovBytecodeGenerator(GlushkovAutomaton.from(nfa));
+        glushkovGen.generateStaticData(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        glushkovGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case FIXED_REPETITION_BACKREF:

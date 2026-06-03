@@ -19,6 +19,7 @@ import com.datadoghq.reggie.codegen.ast.*;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.DFATableData;
+import com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.StateExplosionException;
 import com.datadoghq.reggie.codegen.automaton.SubsetConstructor;
@@ -941,6 +942,12 @@ public class PatternAnalyzer {
         // Use switch-based DFA for medium state counts (better cache behavior)
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_SWITCH, dfa, null, false, requiredLiterals);
+      } else if (GlushkovAutomaton.from(nfa) != null) {
+        // Large DFA but a small (<=63-position) NFA: run it as a single-word bit-parallel
+        // simulation instead of a table walk. Reaching here means the alternation priority-cut
+        // decline above did not fire, so leftmost-longest coincides with leftmost-first.
+        return new MatchingStrategyResult(
+            MatchingStrategy.BITPARALLEL_GLUSHKOV, null, null, false, requiredLiterals);
       } else if (isDFATableEligible(dfa)) {
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_TABLE, dfa, null, false, requiredLiterals);
@@ -951,7 +958,13 @@ public class PatternAnalyzer {
                 MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
     } catch (StateExplosionException e) {
-      // DFA too large to construct; fall through to LAZY_DFA promotion check.
+      // DFA too large to construct. An alternation-free pattern is greedy-only and therefore
+      // leftmost-longest-safe even without the DFA priority-cut analysis, so a small-NFA one can
+      // still take the bit-parallel path; otherwise fall through to LAZY_DFA promotion.
+      if (!containsAlternation(ast) && GlushkovAutomaton.from(nfa) != null) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.BITPARALLEL_GLUSHKOV, null, null, false, requiredLiterals);
+      }
       result =
           new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
@@ -2298,6 +2311,7 @@ public class PatternAnalyzer {
     DFA_SWITCH_WITH_ASSERTIONS, // 20-300 states - switch with fixed-width assertions
     DFA_SWITCH_WITH_GROUPS, // 20-300 states - switch with inline group tracking
     DFA_TABLE, // >300 states - table-driven
+    BITPARALLEL_GLUSHKOV, // >300 states, <=63 positions - single-word bit-parallel NFA simulation
     OPTIMIZED_NFA, // DFA state explosion - optimized NFA
     LAZY_DFA, // Large anchor-free group-free NFA - on-the-fly DFA construction
     OPTIMIZED_NFA_WITH_BACKREFS, // Has backreferences

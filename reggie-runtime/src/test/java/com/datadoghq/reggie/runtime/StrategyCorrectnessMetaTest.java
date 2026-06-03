@@ -174,6 +174,11 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(?:[a-z][0-9]){150}",
             List.of("a0".repeat(150), "x" + "a0".repeat(150) + "y", "a0".repeat(149), "", "a0é")));
+    // Large DFA (513 states) but small NFA (<=63 positions) → bit-parallel Glushkov simulation.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.BITPARALLEL_GLUSHKOV,
+        new Spec(
+            ".*a.{9}", List.of("a123456789", "zza123456789zz", "nomatchhere", "", "xa12345678é")));
     // Named capture group + capture-ambiguous (optional bypass) → captureAmbiguous=true and
     // hasNamedGroups=true, so the DFA_WITH_GROUPS path is blocked → OPTIMIZED_NFA (JDK fallback).
     m.put(
