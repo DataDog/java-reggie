@@ -159,7 +159,7 @@ public final class BitParallelGlushkovBytecodeGenerator {
     mv.visitCode();
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 2);
-    pushScalarArgs(mv);
+    pushScalarArgsFind(mv);
     pushArrayArgs(mv, className, true);
     mv.visitMethodInsn(INVOKESTATIC, RUNTIME, "findFrom", findFromDescriptor(), false);
     mv.visitInsn(IRETURN);
@@ -384,7 +384,7 @@ public final class BitParallelGlushkovBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ALOAD, 3);
-    pushScalarArgs(mv);
+    pushScalarArgsFind(mv);
     pushArrayArgs(mv, className, true);
     mv.visitMethodInsn(INVOKESTATIC, RUNTIME, "findBoundsFrom", findBoundsFromDescriptor(), false);
     mv.visitInsn(IRETURN);
@@ -397,13 +397,24 @@ public final class BitParallelGlushkovBytecodeGenerator {
   // -------------------------------------------------------------------------
 
   /**
-   * Push the three scalar automaton constants: initial (long), accept (long), nullable (boolean).
-   * These are inlined as LDC/ICONST in every method rather than stored as static fields.
+   * Push scalar automaton constants for methods that don't use the reverse scan: initial (long),
+   * accept (long), nullable (boolean).
    */
   private void pushScalarArgs(MethodVisitor mv) {
     mv.visitLdcInsn(g.initial);
     mv.visitLdcInsn(g.accept);
     mv.visitInsn(g.nullable ? ICONST_1 : ICONST_0);
+  }
+
+  /**
+   * Push scalar automaton constants for find methods that may use the reverse scan: initial (long),
+   * accept (long), nullable (boolean), startsAnywhere (boolean).
+   */
+  private void pushScalarArgsFind(MethodVisitor mv) {
+    mv.visitLdcInsn(g.initial);
+    mv.visitLdcInsn(g.accept);
+    mv.visitInsn(g.nullable ? ICONST_1 : ICONST_0);
+    mv.visitInsn(g.startsAnywhere ? ICONST_1 : ICONST_0);
   }
 
   /**
@@ -445,19 +456,19 @@ public final class BitParallelGlushkovBytecodeGenerator {
   }
 
   /**
-   * findFrom(CharSequence, int, long, long, boolean, long[], long[], int[], char[], char[], int[],
-   * long[])I
+   * findFrom(CharSequence, int, long, long, boolean, boolean, long[], long[], int[], char[],
+   * char[], int[], long[])I — the extra Z is startsAnywhere
    */
   private static String findFromDescriptor() {
-    return "(Ljava/lang/CharSequence;IJJZ[J[J[I[C[C[I[J)I";
+    return "(Ljava/lang/CharSequence;IJJZZ[J[J[I[C[C[I[J)I";
   }
 
   /**
-   * findBoundsFrom(CharSequence, int, int[], long, long, boolean, long[], long[], int[], char[],
-   * char[], int[], long[])Z
+   * findBoundsFrom(CharSequence, int, int[], long, long, boolean, boolean, long[], long[], int[],
+   * char[], char[], int[], long[])Z — the extra Z is startsAnywhere
    */
   private static String findBoundsFromDescriptor() {
-    return "(Ljava/lang/CharSequence;I[IJJZ[J[J[I[C[C[I[J)Z";
+    return "(Ljava/lang/CharSequence;I[IJJZZ[J[J[I[C[C[I[J)Z";
   }
 
   // -------------------------------------------------------------------------

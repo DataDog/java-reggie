@@ -81,6 +81,14 @@ public final class GlushkovAutomaton {
   /** {@code entry[cls]} = bitmask of positions whose character set contains class {@code cls}. */
   public final long[] entry;
 
+  /**
+   * {@code true} when every equivalence class activates at least one initial position, i.e. {@code
+   * (initial & entry[c]) != 0} for all {@code c}. When true the leftmost match start is always
+   * {@code from}, so the reverse scan in {@code findBoundsFrom} can be skipped — only a single
+   * forward pass is needed. Typical for patterns with a {@code .*} prefix.
+   */
+  public final boolean startsAnywhere;
+
   private GlushkovAutomaton(
       int positionCount,
       boolean nullable,
@@ -108,6 +116,14 @@ public final class GlushkovAutomaton {
     this.rangeEnds = rangeEnds;
     this.rangeClasses = rangeClasses;
     this.entry = entry;
+    boolean sa = true;
+    for (long e : entry) {
+      if ((initial & e) == 0L) {
+        sa = false;
+        break;
+      }
+    }
+    this.startsAnywhere = sa;
   }
 
   /**

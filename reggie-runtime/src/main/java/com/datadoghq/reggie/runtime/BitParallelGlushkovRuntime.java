@@ -189,13 +189,19 @@ public final class BitParallelGlushkovRuntime {
     return leftmost;
   }
 
-  /** Leftmost match start position {@code >= from}, or {@code -1} if no match exists. */
+  /**
+   * Leftmost match start position {@code >= from}, or {@code -1} if no match exists.
+   *
+   * @param startsAnywhere when {@code true} every character activates an initial position, so the
+   *     leftmost match start is always {@code from} — the reverse scan is skipped
+   */
   public static int findFrom(
       CharSequence input,
       int from,
       long initial,
       long accept,
       boolean nullable,
+      boolean startsAnywhere,
       long[] follow,
       long[] followReverse,
       int[] asciiClasses,
@@ -211,7 +217,27 @@ public final class BitParallelGlushkovRuntime {
     if (start > len) {
       return -1;
     }
-    if (nullable) {
+    if (nullable || startsAnywhere) {
+      // For nullable, start=from is trivially correct.
+      // For startsAnywhere, any character can begin a match, so the leftmost start is from;
+      // we still need to verify a match exists — longestEndFrom returns -1 if none does.
+      if (startsAnywhere && !nullable) {
+        int end =
+            longestEndFrom(
+                input,
+                start,
+                len,
+                initial,
+                accept,
+                false,
+                follow,
+                asciiClasses,
+                rangeStarts,
+                rangeEnds,
+                rangeClasses,
+                entry);
+        return end < 0 ? -1 : start;
+      }
       return start;
     }
     return leftmostStart(
@@ -230,6 +256,9 @@ public final class BitParallelGlushkovRuntime {
   /**
    * Leftmost-longest match bounds {@code >= from}. On success writes {@code [start, end)} into
    * {@code bounds} and returns {@code true}; otherwise returns {@code false}.
+   *
+   * @param startsAnywhere when {@code true} every character activates an initial position, so the
+   *     reverse scan is skipped and only a single forward pass is performed
    */
   public static boolean findBoundsFrom(
       CharSequence input,
@@ -238,6 +267,7 @@ public final class BitParallelGlushkovRuntime {
       long initial,
       long accept,
       boolean nullable,
+      boolean startsAnywhere,
       long[] follow,
       long[] followReverse,
       int[] asciiClasses,
@@ -253,20 +283,26 @@ public final class BitParallelGlushkovRuntime {
     if (from0 > len) {
       return false;
     }
-    int start =
-        nullable
-            ? from0
-            : leftmostStart(
-                input,
-                from0,
-                initial,
-                accept,
-                followReverse,
-                asciiClasses,
-                rangeStarts,
-                rangeEnds,
-                rangeClasses,
-                entry);
+    // When startsAnywhere, the leftmost start is always from0 — skip the reverse scan entirely.
+    int start;
+    if (nullable) {
+      start = from0;
+    } else if (startsAnywhere) {
+      start = from0; // reverse scan not needed; longestEndFrom will return -1 if no match exists
+    } else {
+      start =
+          leftmostStart(
+              input,
+              from0,
+              initial,
+              accept,
+              followReverse,
+              asciiClasses,
+              rangeStarts,
+              rangeEnds,
+              rangeClasses,
+              entry);
+    }
     if (start < 0) {
       return false;
     }
