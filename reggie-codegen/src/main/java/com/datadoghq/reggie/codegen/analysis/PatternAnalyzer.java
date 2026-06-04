@@ -5969,8 +5969,10 @@ public class PatternAnalyzer {
       GroupNode group = (GroupNode) node;
       int groupNum = currentGroup;
       if (group.capturing) {
-        // Assign a new group number
-        groupNum = ++groupCounter[0];
+        // Preserve original group number (set by the parser) when available; a sequential
+        // counter would renumber named groups when NAMED_ONLY strips unnamed ones.
+        groupNum = group.groupNumber > 0 ? group.groupNumber : ++groupCounter[0];
+        groupCounter[0] = Math.max(groupCounter[0], groupNum);
       }
       // Recursively analyze the group's content with the group number
       SequenceElement elem = analyzeElement(group.child, groupNum, groupCounter);
@@ -6326,7 +6328,8 @@ public class PatternAnalyzer {
       GroupNode group = (GroupNode) node;
       int groupNum = currentGroup;
       if (group.capturing) {
-        groupNum = ++groupCounter[0];
+        groupNum = group.groupNumber > 0 ? group.groupNumber : ++groupCounter[0];
+        groupCounter[0] = Math.max(groupCounter[0], groupNum);
       }
       return flattenElement(group.child, groupNum, groupCounter, out);
     }

@@ -541,17 +541,17 @@ public class FixedSequenceBytecodeGenerator {
       currentPos += elem.minLength();
     }
 
-    // Generate starts array
+    // Generate starts array (-1 for groups not present in the match, e.g. NAMED_ONLY holes)
     pushInt(mv, arraySize);
     mv.visitIntInsn(NEWARRAY, T_INT);
     for (int i = 0; i < arraySize; i++) {
       mv.visitInsn(DUP);
       pushInt(mv, i);
-      pushInt(mv, groupStarts[i]);
+      pushInt(mv, (i == 0 || groupStartSet[i]) ? groupStarts[i] : -1);
       mv.visitInsn(IASTORE);
     }
 
-    // Generate ends array
+    // Generate ends array (-1 for groups not present in the match)
     pushInt(mv, arraySize);
     mv.visitIntInsn(NEWARRAY, T_INT);
     for (int i = 0; i < arraySize; i++) {
@@ -562,7 +562,7 @@ public class FixedSequenceBytecodeGenerator {
         mv.visitVarInsn(ALOAD, 1);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
       } else {
-        pushInt(mv, groupEnds[i]);
+        pushInt(mv, (i == 0 || groupStartSet[i]) ? groupEnds[i] : -1);
       }
       mv.visitInsn(IASTORE);
     }
@@ -683,31 +683,39 @@ public class FixedSequenceBytecodeGenerator {
       currentPos += elem.minLength();
     }
 
-    // Generate starts array (matchStart + offset for each group)
+    // Generate starts array (matchStart + offset for each group; -1 for holes)
     pushInt(mv, arraySize);
     mv.visitIntInsn(NEWARRAY, T_INT);
     for (int i = 0; i < arraySize; i++) {
       mv.visitInsn(DUP);
       pushInt(mv, i);
-      // starts[i] = matchStart + groupStartOffsets[i]
-      mv.visitVarInsn(ILOAD, matchStartVar);
-      if (groupStartOffsets[i] > 0) {
-        pushInt(mv, groupStartOffsets[i]);
-        mv.visitInsn(IADD);
+      if (i == 0 || groupStartSet[i]) {
+        // starts[i] = matchStart + groupStartOffsets[i]
+        mv.visitVarInsn(ILOAD, matchStartVar);
+        if (groupStartOffsets[i] > 0) {
+          pushInt(mv, groupStartOffsets[i]);
+          mv.visitInsn(IADD);
+        }
+      } else {
+        pushInt(mv, -1); // non-participating group (e.g. stripped by NAMED_ONLY)
       }
       mv.visitInsn(IASTORE);
     }
 
-    // Generate ends array (matchStart + offset for each group)
+    // Generate ends array (matchStart + offset for each group; -1 for holes)
     pushInt(mv, arraySize);
     mv.visitIntInsn(NEWARRAY, T_INT);
     for (int i = 0; i < arraySize; i++) {
       mv.visitInsn(DUP);
       pushInt(mv, i);
-      // ends[i] = matchStart + groupEndOffsets[i]
-      mv.visitVarInsn(ILOAD, matchStartVar);
-      pushInt(mv, groupEndOffsets[i]);
-      mv.visitInsn(IADD);
+      if (i == 0 || groupStartSet[i]) {
+        // ends[i] = matchStart + groupEndOffsets[i]
+        mv.visitVarInsn(ILOAD, matchStartVar);
+        pushInt(mv, groupEndOffsets[i]);
+        mv.visitInsn(IADD);
+      } else {
+        pushInt(mv, -1); // non-participating group
+      }
       mv.visitInsn(IASTORE);
     }
 
