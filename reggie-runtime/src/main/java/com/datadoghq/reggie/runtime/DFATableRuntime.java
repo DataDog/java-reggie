@@ -242,11 +242,7 @@ public final class DFATableRuntime {
       if (state < 0) {
         continue;
       }
-      if (state < accepting.length && accepting[state]) {
-        bounds[0] = candidate;
-        bounds[1] = candidate + 1;
-        return true;
-      }
+      int lastAcceptEnd = (state < accepting.length && accepting[state]) ? candidate + 1 : -1;
       for (int pos = candidate + 1; pos < length; pos++) {
         state =
             nextState(
@@ -262,10 +258,13 @@ public final class DFATableRuntime {
           break;
         }
         if (state < accepting.length && accepting[state]) {
-          bounds[0] = candidate;
-          bounds[1] = pos + 1;
-          return true;
+          lastAcceptEnd = pos + 1;
         }
+      }
+      if (lastAcceptEnd >= 0) {
+        bounds[0] = candidate;
+        bounds[1] = lastAcceptEnd;
+        return true;
       }
     }
     return false;

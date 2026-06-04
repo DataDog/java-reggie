@@ -317,12 +317,6 @@ public class MultiGroupGreedyBytecodeGenerator {
           mv.visitVarInsn(ILOAD, lenVar);
           mv.visitJumpInsn(IF_ICMPLT, hasChar);
 
-          // DEBUG
-          mv.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
-          mv.visitLdcInsn("FAIL: min match - pos >= len");
-          mv.visitMethodInsn(
-              INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
-
           mv.visitInsn(ACONST_NULL);
           mv.visitInsn(ARETURN);
           mv.visitLabel(hasChar);
@@ -1907,64 +1901,6 @@ public class MultiGroupGreedyBytecodeGenerator {
 
       mv.visitIincInsn(posVar, len);
     }
-  }
-
-  /** Utility method to generate debug logging bytecode. Generates: System.out.println(message); */
-  private void debugLog(MethodVisitor mv, String message) {
-    mv.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
-    mv.visitLdcInsn(message);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
-  }
-
-  /**
-   * Utility method to generate debug logging bytecode with a dynamic value. Generates:
-   * System.out.println(prefix + value);
-   */
-  private void debugLogWithValue(MethodVisitor mv, String prefix, int varSlot, String type) {
-    mv.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
-    mv.visitTypeInsn(NEW, "java/lang/StringBuilder");
-    mv.visitInsn(DUP);
-    mv.visitMethodInsn(INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false);
-    mv.visitLdcInsn(prefix);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        "java/lang/StringBuilder",
-        "append",
-        "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
-        false);
-
-    // Load the variable and append based on type
-    if ("I".equals(type)) {
-      mv.visitVarInsn(ILOAD, varSlot);
-      mv.visitMethodInsn(
-          INVOKEVIRTUAL,
-          "java/lang/StringBuilder",
-          "append",
-          "(I)Ljava/lang/StringBuilder;",
-          false);
-    } else if ("C".equals(type)) {
-      mv.visitVarInsn(ILOAD, varSlot);
-      mv.visitMethodInsn(
-          INVOKEVIRTUAL,
-          "java/lang/StringBuilder",
-          "append",
-          "(C)Ljava/lang/StringBuilder;",
-          false);
-    } else if ("Ljava/lang/String;".equals(type)) {
-      mv.visitVarInsn(ALOAD, varSlot);
-      mv.visitMethodInsn(
-          INVOKEVIRTUAL,
-          "java/lang/StringBuilder",
-          "append",
-          "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
-          false);
-    }
-
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
   }
 
   /**
