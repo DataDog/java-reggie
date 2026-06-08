@@ -131,8 +131,7 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(\\w+)\\s+\\1",
             List.of("hello hello", "x hello hello y", "hello world", "", "héllo héllo")));
-    // OPTIONAL_GROUP_BACKREF: all patterns with (X)? + backref now route via captureAmbiguous
-    // to OPTIMIZED_NFA (JDK fallback). Use the canonical pattern but expect OPTIMIZED_NFA routing.
+    // OPTIONAL_GROUP_BACKREF: (a)?\1 now routes natively (fixed in Wave 4C).
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
         new Spec("(a)?\\1", List.of("aa", "xaay", "ab", "", "aaé")));
@@ -312,12 +311,9 @@ public class StrategyCorrectnessMetaTest {
         missing.isEmpty(),
         "Every MatchingStrategy must have a representative pattern; missing: " + missing);
 
-    // Strategies whose ALL patterns are now intercepted by the capture-ambiguity guard (Track 1)
-    // and routed to JDK via OPTIMIZED_NFA. These strategies still exist in code but are
-    // unreachable at runtime; their representatives are kept for correctness coverage.
+    // Strategies that are explosion-only fallbacks or otherwise not directly routable in tests.
     Set<PatternAnalyzer.MatchingStrategy> captureAmbiguousIntercepted =
         java.util.EnumSet.of(
-            PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
             // PIKEVM_CAPTURE is an explosion-only fallback after C4; no compact pattern routes
             // here at normal state counts, so routing confirmation is skipped.
             PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);

@@ -29,6 +29,7 @@ import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -59,17 +60,18 @@ public final class FallbackPatternDetector {
       return "lookahead inside quantified group";
     }
 
-    // Anchor inside a quantifier (e.g. ${2}, \z{n}) creates unusual NFA/DFA shapes that the
-    // current generators don't handle correctly.
-    if (v.hasAnchorInQuantifier) {
-      return "anchor inside quantifier: ${n}, \\z{n}, etc.";
+    // Anchor inside a quantifier that is itself inside a capturing group: the generators do not
+    // correctly track per-iteration capture boundaries when a zero-width anchor is repeated.
+    // Patterns like (${0,3}) produce wrong match spans or false matches.
+    if (hasAnchorInQuantifierInCapturingGroup(ast)) {
+      return "anchor inside quantifier within capturing group: capture span tracking incorrect";
     }
 
-    // END-type anchor ($, \Z) immediately before a char consumer within a concat: Reggie's DFA
-    // prunes consuming transitions from END-conditioned states, missing the valid "$ then consume
-    // final \\n" path that Java regex allows. Route to JDK for correct semantics.
-    if (hasEndAnchorBeforeConsumer(ast)) {
-      return "end-anchor before consumer: $ or \\Z followed by char-consuming element";
+    // END/STRING_END anchor ($, \Z) immediately before a non-newline char consumer: while the
+    // "$ then consume terminal \\n" path is handled correctly, other combinations (e.g. \\Z[^c])
+    // are not modeled by the DFA and produce wrong boolean or span results.
+    if (hasEndAnchorBeforeNonNewlineConsumer(ast)) {
+      return "end-anchor before non-newline consumer: DFA does not model this path correctly";
     }
 
     // RECURSIVE_DESCENT uses a greedy-first descent parser with limited backtracking (quantifiers
@@ -107,15 +109,66 @@ public final class FallbackPatternDetector {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
-    // OptionalGroupBackref generator has a bug in the "group did not participate" path:
-    // it treats \N as vacuously satisfied (matching empty) when the optional group was skipped.
-    // Java semantics: \N to a non-participating group FAILS.
-    // The bug only manifests for (X)? forms where X is non-nullable (the group might not
-    // participate at all). The (X|) empty-alt form always captures something, so no bug there.
-    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF
-        && hasNonNullableQuantifiedOptionalGroupWithBackref(ast)) {
-      return "optional group backref with non-nullable (X)? form: unmatched group wrongly "
-          + "treated as empty";
+    // VARIABLE_CAPTURE_BACKREF generator does not handle nullable groups correctly: when the
+    // group content can capture the empty string (e.g. (-?)), the backtracking logic produces
+    // spurious matches. Route to JDK for correct semantics.
+    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
+        && hasNullableBackrefGroup(ast)) {
+      return "variable-capture backref to nullable group: empty-capture path handled incorrectly";
+    }
+
+    // NESTED_QUANTIFIED_GROUPS bytecode generator falls through to an "accept any char" stub
+    // when the innermost quantifier level contains an AlternationNode. Patterns like ((a|b)+)*
+    // match characters they should not.
+    if (strategy == PatternAnalyzer.MatchingStrategy.NESTED_QUANTIFIED_GROUPS
+        && hasAlternationInNestedQuantifierContent(ast)) {
+      return "nested quantified groups with alternation in inner content: "
+          + "generator uses accept-any-char stub instead of alternation matching";
+    }
+
+    // OPTIMIZED_NFA_WITH_LOOKAROUND NFA simulation produces wrong results when a lookahead
+    // assertion appears inside an alternation branch. The NFA thread scheduler does not correctly
+    // isolate assertion evaluation per branch.
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
+        && hasLookaheadInAlternation(ast)) {
+      return "lookahead inside alternation branch: "
+          + "NFA thread scheduler does not correctly isolate assertions per branch";
+    }
+
+    // VARIABLE_CAPTURE_BACKREF uses a backtracking search over the captured group's possible
+    // lengths. When the group's content is itself a bounded quantifier (e.g. (-?), (\w{0,3})),
+    // the inner bound limits the actual match length in a way the outer loop cannot model.
+    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
+        && hasBoundedQuantifierInBackrefGroup(ast)) {
+      return "variable-capture backref with bounded inner quantifier: "
+          + "backtracking loop cannot model bounded-length group content";
+    }
+
+    // VARIABLE_CAPTURE_BACKREF bytecode generator has no prefix support: when the pattern has
+    // non-anchor nodes before the capturing group (e.g. c(-*)\1), the generated code ignores them
+    // and starts matching from position 0, producing false matches.
+    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
+        && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
+      return "variable-capture backref with non-anchor prefix: "
+          + "generator ignores prefix nodes, producing wrong match positions";
+    }
+
+    // DFA generators track the boolean match result but do not track capturing-group span
+    // boundaries during execution. When a capturing group appears inside a quantifier (min≠max or
+    // max>1), the DFA cannot tell which loop iteration captured what, so the generated findMatch /
+    // match methods return wrong group spans. Route to JDK for correct capture semantics.
+    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
+            || strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS)
+        && hasCapturingGroupInQuantifiedSection(ast)) {
+      return "DFA with capturing group inside quantifier: DFA cannot track per-iteration spans";
+    }
+
+    // OPTIMIZED_NFA with overlapping literal alternatives: the NFA simulation takes the first
+    // matching branch (leftmost-first) rather than the longest, diverging from JDK's semantics
+    // when one alternative is a literal prefix of another (e.g. fo|foo on 'foo').
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
+        && hasAlternationWithPrefixOverlap(ast)) {
+      return "alternation with prefix-overlap: leftmost-first ordering diverges from JDK longest-match";
     }
 
     return null;
@@ -197,48 +250,6 @@ public final class FallbackPatternDetector {
   }
 
   /**
-   * Returns true if the pattern has a (X)? optional group (not an (X|) empty-alt group) AND a
-   * backref to that group. The (X)? form can result in the group not participating at all; when X
-   * is non-nullable, backref \N to the non-participating group should fail per Java semantics, but
-   * OptionalGroupBackrefBytecodeGenerator incorrectly treats it as empty.
-   */
-  private static boolean hasNonNullableQuantifiedOptionalGroupWithBackref(RegexNode ast) {
-    Set<Integer> backrefs = new HashSet<>();
-    collectBackrefsInSubtree(ast, backrefs);
-    if (backrefs.isEmpty()) return false;
-    return hasQuantifiedOptionalGroupForBackref(ast, backrefs);
-  }
-
-  /**
-   * Walk the AST looking for QuantifierNode(min=0,max=1,child=GroupNode(N,...)) where N is in the
-   * backref set and the group content is non-nullable.
-   */
-  private static boolean hasQuantifiedOptionalGroupForBackref(
-      RegexNode node, Set<Integer> backrefs) {
-    if (node instanceof QuantifierNode) {
-      QuantifierNode q = (QuantifierNode) node;
-      if (q.min == 0 && q.max == 1 && q.child instanceof GroupNode) {
-        GroupNode g = (GroupNode) q.child;
-        if (g.capturing && backrefs.contains(g.groupNumber) && !subtreeIsNullable(g.child)) {
-          return true;
-        }
-      }
-      return hasQuantifiedOptionalGroupForBackref(q.child, backrefs);
-    }
-    if (node instanceof ConcatNode) {
-      for (RegexNode c : ((ConcatNode) node).children)
-        if (hasQuantifiedOptionalGroupForBackref(c, backrefs)) return true;
-    }
-    if (node instanceof GroupNode)
-      return hasQuantifiedOptionalGroupForBackref(((GroupNode) node).child, backrefs);
-    if (node instanceof AlternationNode) {
-      for (RegexNode a : ((AlternationNode) node).alternatives)
-        if (hasQuantifiedOptionalGroupForBackref(a, backrefs)) return true;
-    }
-    return false;
-  }
-
-  /**
    * Returns true if any backref \N references a group whose content is nullable (can match the
    * empty string). In parallel NFA simulation, when such a group exists, the shared group-capture
    * arrays may be overwritten by the greedy (non-empty) path before the empty-capture path's
@@ -306,13 +317,63 @@ public final class FallbackPatternDetector {
   }
 
   /**
-   * Returns true if the AST contains an END-type anchor ($, \Z, \z) immediately before a
-   * char-consuming element within the same ConcatNode. Such patterns rely on `$` matching "before
-   * final newline" and then the subsequent element consuming that newline — a semantic that
-   * Reggie's DFA cannot express because it prunes consuming transitions from END-conditioned states
-   * without tracking whether the end-char is a newline at runtime.
+   * Returns true if any anchor node appears inside a quantifier (with range != {1}) that is itself
+   * inside a capturing group. The generators do not correctly track per-iteration capture
+   * boundaries when a zero-width anchor is repeated inside a group.
    */
-  private static boolean hasEndAnchorBeforeConsumer(RegexNode ast) {
+  private static boolean hasAnchorInQuantifierInCapturingGroup(RegexNode ast) {
+    return hasAnchorInQuantifierInCapturingGroupHelper(ast, false);
+  }
+
+  private static boolean hasAnchorInQuantifierInCapturingGroupHelper(
+      RegexNode node, boolean inCapturing) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (inCapturing && (q.min != 1 || q.max != 1) && containsAnchor(q.child)) return true;
+      return hasAnchorInQuantifierInCapturingGroupHelper(q.child, inCapturing);
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      return hasAnchorInQuantifierInCapturingGroupHelper(g.child, inCapturing || g.capturing);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (hasAnchorInQuantifierInCapturingGroupHelper(c, inCapturing)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasAnchorInQuantifierInCapturingGroupHelper(a, inCapturing)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  private static boolean containsAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) return true;
+    if (node instanceof GroupNode) return containsAnchor(((GroupNode) node).child);
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (containsAnchor(c)) return true;
+      }
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsAnchor(alt)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the AST contains an END-type anchor ($, \Z) immediately before a char-consuming
+   * element within the same ConcatNode, where the consuming element can match characters other than
+   * {@code \n}. The "$ before terminal \n" path is handled correctly by the DFA (4B fix), but
+   * patterns like {@code \Z[^c]} produce wrong results.
+   */
+  private static boolean hasEndAnchorBeforeNonNewlineConsumer(RegexNode ast) {
     if (ast instanceof ConcatNode) {
       ConcatNode concat = (ConcatNode) ast;
       for (int i = 0; i < concat.children.size() - 1; i++) {
@@ -320,19 +381,33 @@ public final class FallbackPatternDetector {
         if (child instanceof AnchorNode) {
           AnchorNode anchor = (AnchorNode) child;
           if (anchor.type == AnchorNode.Type.END || anchor.type == AnchorNode.Type.STRING_END) {
-            // Next sibling is a char consumer — this pattern needs JDK
-            return true;
+            RegexNode next = concat.children.get(i + 1);
+            if (!isNewlineOnlyConsumer(next)) return true;
           }
         }
       }
-      for (RegexNode c : concat.children) if (hasEndAnchorBeforeConsumer(c)) return true;
+      for (RegexNode c : concat.children) if (hasEndAnchorBeforeNonNewlineConsumer(c)) return true;
     }
-    if (ast instanceof GroupNode) return hasEndAnchorBeforeConsumer(((GroupNode) ast).child);
+    if (ast instanceof GroupNode)
+      return hasEndAnchorBeforeNonNewlineConsumer(((GroupNode) ast).child);
     if (ast instanceof QuantifierNode)
-      return hasEndAnchorBeforeConsumer(((QuantifierNode) ast).child);
+      return hasEndAnchorBeforeNonNewlineConsumer(((QuantifierNode) ast).child);
     if (ast instanceof AlternationNode) {
       for (RegexNode a : ((AlternationNode) ast).alternatives)
-        if (hasEndAnchorBeforeConsumer(a)) return true;
+        if (hasEndAnchorBeforeNonNewlineConsumer(a)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if {@code node} can ONLY match the single character {@code \n} (the terminal
+   * newline path handled by the 4B DFA fix).
+   */
+  private static boolean isNewlineOnlyConsumer(RegexNode node) {
+    if (node instanceof LiteralNode) return ((LiteralNode) node).ch == '\n';
+    if (node instanceof CharClassNode) {
+      CharClassNode cc = (CharClassNode) node;
+      return cc.chars.isSingleChar() && cc.chars.getSingleChar() == '\n';
     }
     return false;
   }
@@ -362,26 +437,239 @@ public final class FallbackPatternDetector {
     return false;
   }
 
-  private static boolean containsAnchor(RegexNode node) {
-    if (node instanceof AnchorNode) return true;
-    if (node instanceof GroupNode) return containsAnchor(((GroupNode) node).child);
+  /**
+   * Returns true if the NESTED_QUANTIFIED_GROUPS pattern has an alternation as the content of any
+   * quantifier level. The bytecode generator falls through to an "accept any char" stub for {@link
+   * AlternationNode} content, producing wrong matches.
+   */
+  private static boolean hasAlternationInNestedQuantifierContent(RegexNode ast) {
+    return hasAlternationInQuantifierContentHelper(ast, false);
+  }
+
+  private static boolean hasAlternationInQuantifierContentHelper(
+      RegexNode node, boolean insideQuantifier) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (insideQuantifier && q.child instanceof GroupNode) {
+        RegexNode content = ((GroupNode) q.child).child;
+        if (content instanceof AlternationNode) return true;
+        return hasAlternationInQuantifierContentHelper(content, true);
+      }
+      return hasAlternationInQuantifierContentHelper(q.child, true);
+    }
+    if (node instanceof GroupNode) {
+      return hasAlternationInQuantifierContentHelper(((GroupNode) node).child, insideQuantifier);
+    }
     if (node instanceof ConcatNode) {
       for (RegexNode c : ((ConcatNode) node).children) {
-        if (containsAnchor(c)) return true;
+        if (hasAlternationInQuantifierContentHelper(c, insideQuantifier)) return true;
       }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasAlternationInQuantifierContentHelper(a, insideQuantifier)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any lookahead assertion appears inside an {@link AlternationNode} alternative.
+   * The OPTIMIZED_NFA engine's thread scheduler does not correctly isolate assertion evaluation per
+   * branch when assertions are embedded in alternation alternatives.
+   */
+  private static boolean hasLookaheadInAlternation(RegexNode ast) {
+    return hasLookaheadInAlternationHelper(ast, false);
+  }
+
+  private static boolean hasLookaheadInAlternationHelper(RegexNode node, boolean insideAlt) {
+    if (node instanceof AssertionNode) {
+      AssertionNode a = (AssertionNode) node;
+      if (insideAlt && isLookahead(a.type)) return true;
+      return hasLookaheadInAlternationHelper(a.subPattern, insideAlt);
     }
     if (node instanceof AlternationNode) {
       for (RegexNode alt : ((AlternationNode) node).alternatives) {
-        if (containsAnchor(alt)) return true;
+        if (hasLookaheadInAlternationHelper(alt, true)) return true;
       }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return hasLookaheadInAlternationHelper(((GroupNode) node).child, insideAlt);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (hasLookaheadInAlternationHelper(c, insideAlt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return hasLookaheadInAlternationHelper(((QuantifierNode) node).child, insideAlt);
     }
     return false;
+  }
+
+  /**
+   * Returns true if any capturing group referenced by a backref has a bounded-max QuantifierNode as
+   * its direct child. The VARIABLE_CAPTURE_BACKREF generator's backtracking loop over lengths only
+   * works for unbounded groups; a bounded inner quantifier caps the capture length in a way the
+   * loop cannot model correctly.
+   */
+  private static boolean hasBoundedQuantifierInBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    return hasBoundedQuantifierInBackrefGroupHelper(ast, backrefNums);
+  }
+
+  private static boolean hasBoundedQuantifierInBackrefGroupHelper(
+      RegexNode node, Set<Integer> backrefNums) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && backrefNums.contains(g.groupNumber) && g.child instanceof QuantifierNode) {
+        QuantifierNode q = (QuantifierNode) g.child;
+        if (q.max != -1 && q.max != Integer.MAX_VALUE) return true;
+      }
+      return hasBoundedQuantifierInBackrefGroupHelper(g.child, backrefNums);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (hasBoundedQuantifierInBackrefGroupHelper(c, backrefNums)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasBoundedQuantifierInBackrefGroupHelper(a, backrefNums)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return hasBoundedQuantifierInBackrefGroupHelper(((QuantifierNode) node).child, backrefNums);
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the VARIABLE_CAPTURE_BACKREF pattern has char-consuming (non-anchor) nodes
+   * before the first capturing group referenced by a backref. The generator's {@code
+   * generateMatchesMethod} starts from position 0 with "no prefix support", so any literal prefix
+   * is silently ignored, producing false matches.
+   */
+  private static boolean hasNonAnchorPrefixBeforeBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    if (!(ast instanceof ConcatNode)) return false;
+    ConcatNode concat = (ConcatNode) ast;
+    for (RegexNode child : concat.children) {
+      if (child instanceof AnchorNode) {
+        // All anchor types are zero-width; the generator handles them. Skip.
+        continue;
+      }
+      if (child instanceof GroupNode) {
+        GroupNode g = (GroupNode) child;
+        if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
+      }
+      if (child instanceof QuantifierNode) {
+        QuantifierNode q = (QuantifierNode) child;
+        if (q.child instanceof GroupNode) {
+          GroupNode g = (GroupNode) q.child;
+          if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing group in {@code ast} is nested inside a quantifier whose range
+   * allows more than one repetition (min != max, or max > 1, or max == -1/MAX_VALUE meaning
+   * unbounded). DFA generators cannot track per-iteration capture boundaries for such groups.
+   */
+  private static boolean hasCapturingGroupInQuantifiedSection(RegexNode ast) {
+    return hasCapturingGroupInQuantifiedHelper(ast, false);
+  }
+
+  private static boolean hasCapturingGroupInQuantifiedHelper(RegexNode node, boolean inRepeat) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && inRepeat) return true;
+      return hasCapturingGroupInQuantifiedHelper(g.child, inRepeat);
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      boolean repeats = (q.max != 1) || (q.min != q.max);
+      return hasCapturingGroupInQuantifiedHelper(q.child, inRepeat || repeats);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (hasCapturingGroupInQuantifiedHelper(c, inRepeat)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasCapturingGroupInQuantifiedHelper(a, inRepeat)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any {@link AlternationNode} in {@code ast} has two literal-string alternatives
+   * where one is a strict prefix of the other (e.g., {@code fo|foo}). The OPTIMIZED_NFA engine
+   * takes the first matching branch (leftmost-first), but JDK uses a simulation that can prefer the
+   * longer branch, leading to different group-capture positions.
+   */
+  private static boolean hasAlternationWithPrefixOverlap(RegexNode ast) {
+    if (ast instanceof AlternationNode) {
+      List<String> lits = new ArrayList<>();
+      for (RegexNode alt : ((AlternationNode) ast).alternatives) {
+        String s = extractLiteralStringFpd(alt);
+        if (s != null) lits.add(s);
+      }
+      for (int i = 0; i < lits.size(); i++) {
+        for (int j = 0; j < lits.size(); j++) {
+          if (i != j && lits.get(j).startsWith(lits.get(i)) && !lits.get(j).equals(lits.get(i))) {
+            return true;
+          }
+        }
+      }
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasAlternationWithPrefixOverlap(c)) return true;
+      }
+    }
+    if (ast instanceof GroupNode) return hasAlternationWithPrefixOverlap(((GroupNode) ast).child);
+    if (ast instanceof QuantifierNode)
+      return hasAlternationWithPrefixOverlap(((QuantifierNode) ast).child);
+    return false;
+  }
+
+  /** Extracts a literal string from an AST node if it consists solely of literal characters. */
+  private static String extractLiteralStringFpd(RegexNode node) {
+    if (node instanceof LiteralNode) return String.valueOf(((LiteralNode) node).ch);
+    if (node instanceof ConcatNode) {
+      StringBuilder sb = new StringBuilder();
+      for (RegexNode c : ((ConcatNode) node).children) {
+        String s = extractLiteralStringFpd(c);
+        if (s == null) return null;
+        sb.append(s);
+      }
+      return sb.toString();
+    }
+    return null;
   }
 
   private static final class Visitor implements RegexVisitor<Void> {
     boolean lookaheadInQuantifier = false;
     boolean hasLazyQuantifier = false;
-    boolean hasAnchorInQuantifier = false;
 
     @Override
     public Void visitAssertion(AssertionNode node) {
@@ -396,12 +684,6 @@ public final class FallbackPatternDetector {
       }
       if (!node.greedy) {
         hasLazyQuantifier = true;
-      }
-      if (containsAnchor(node.child) && (node.min != 1 || node.max != 1)) {
-        // Anchor inside a quantifier (other than {1}): the quantifier tries to repeat a
-        // zero-width assertion. This creates unusual NFA/DFA shapes that the current
-        // generators don't handle correctly (e.g. ${2}, ${0,3}, \z{2}).
-        hasAnchorInQuantifier = true;
       }
       node.child.accept(this);
       return null;

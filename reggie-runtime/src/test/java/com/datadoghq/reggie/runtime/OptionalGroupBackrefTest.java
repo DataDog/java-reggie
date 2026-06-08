@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -28,6 +29,11 @@ import org.junit.jupiter.api.Test;
  * captured content - If optional group did NOT participate (was skipped): backref FAILS to match
  */
 class OptionalGroupBackrefTest {
+
+  @BeforeEach
+  void clearCache() {
+    RuntimeCompiler.clearCache();
+  }
 
   @Test
   void testSimpleOptionalBackref() {
@@ -119,5 +125,21 @@ class OptionalGroupBackrefTest {
     assertFalse(m.matches("ba"), "Should NOT match 'ba' (backref \\2 needs 'b' but finds 'a')");
     assertFalse(m.matches("bb"), "Should NOT match 'bb' (group1 unmatched → \\1 fails)");
     assertTrue(m.matches("abba"), "Should match 'abba'");
+  }
+
+  @Test
+  void nonParticipatingGroupBackrefFails() {
+    // Java semantics: when (a)? skips, \1 fails
+    ReggieMatcher m = Reggie.compile("(a)?\\1");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("(a)?\\1");
+    assertEquals(jdk.matcher("").matches(), m.matches(""), "empty string");
+    assertEquals(jdk.matcher("aa").matches(), m.matches("aa"), "'aa'");
+    assertEquals(jdk.matcher("a").matches(), m.matches("a"), "single 'a'");
+  }
+
+  @Test
+  void nonNullableOptionalGroupIsNative() {
+    ReggieMatcher m = Reggie.compile("(a)?\\1");
+    assertFalse(m instanceof JavaRegexFallbackMatcher, "(a)?\\1 must be native");
   }
 }

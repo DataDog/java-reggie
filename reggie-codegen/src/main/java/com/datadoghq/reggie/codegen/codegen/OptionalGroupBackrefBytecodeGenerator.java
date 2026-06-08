@@ -32,23 +32,35 @@ import static org.objectweb.asm.Opcodes.*;
 /**
  * Bytecode generator for OPTIONAL_GROUP_BACKREF strategy.
  *
- * Generates optimized matching code for patterns where optional capturing
- * groups are followed by backreferences to those groups.
+ * <p>Generates optimized matching code for patterns where optional capturing groups are followed by
+ * backreferences to those groups. Two group forms are supported:
+ *
+ * <ul>
+ *   <li>{@code (X)?} — quantified optional: group may not participate at all. When skipped, the
+ *       backref {@code \N} FAILS (Java semantics: non-participating group makes backref fail).
+ *   <li>{@code (X|)} — empty-alt form: group always participates, capturing either {@code X} or
+ *       the empty string. Backref matches empty when the empty alt was taken.
+ * </ul>
  *
  * <h3>Supported Pattern Examples</h3>
+ *
  * <ul>
- *   <li>{@code (a)?\1} - optional 'a', then backref</li>
- *   <li>{@code (foo)?bar\1} - optional group, literal, backref</li>
- *   <li>{@code ^(a)?(b)?\1\2$} - multiple optional groups with backrefs</li>
+ *   <li>{@code (a)?\1} - quantified optional 'a', then backref
+ *   <li>{@code (a|)\1} - empty-alt 'a', then backref
+ *   <li>{@code (foo)?bar\1} - optional group, literal, backref
+ *   <li>{@code ^(a)?(b)?\1\2$} - multiple optional groups with backrefs
  * </ul>
  *
- * <h3>PCRE Semantics</h3>
+ * <h3>Java Semantics</h3>
+ *
  * <ul>
- *   <li>If optional group matched: backref must match the captured content</li>
- *   <li>If optional group didn't match: backref matches empty string</li>
+ *   <li>Group matched (captured non-empty or empty via empty-alt): backref must match the captured
+ *       content
+ *   <li>Group did not participate ({@code (X)?} form, skipped): backref FAILS
  * </ul>
  *
- * <h3>Generated Algorithm</h3>
+ * <h3>Generated Algorithm (for (a)?\\1)</h3>
+ *
  * <pre>{@code
  * boolean matches(String input) {
  *     int len = input.length();
@@ -63,16 +75,17 @@ import static org.objectweb.asm.Opcodes.*;
  *         pos++;
  *         group1End = pos;
  *     }
+ *     // group1Matched stays false if 'a' not present — group did NOT participate
  *
  *     // Match backref
- *     if (group1Matched) {
- *         // Must match captured content
- *         int groupLen = group1End - group1Start;
+ *     if (!group1Matched) return false;  // non-participating group: backref fails
+ *     int groupLen = group1End - group1Start;
+ *     if (groupLen > 0) {
  *         if (pos + groupLen > len) return false;
  *         if (!input.regionMatches(pos, input, group1Start, groupLen)) return false;
  *         pos += groupLen;
  *     }
- *     // else: group didn't match, backref matches empty (do nothing)
+ *     // else: group captured empty — backref matches empty (do nothing)
  *
  *     return pos == len;
  * }
@@ -97,10 +110,9 @@ public class OptionalGroupBackrefBytecodeGenerator {
         generateFindFromMethod(cw);
         generateMatchMethod(cw);
         generateFindMatchMethod(cw);
-        // Generate stub methods for bounded variants (less commonly used)
-        generateMatchesBoundedStubMethod(cw);
-        generateMatchBoundedStubMethod(cw);
-        generateFindMatchFromStubMethod(cw);
+        // matchesBounded, matchBounded, findMatchFrom: handled by base-class defaults
+        // (matchesBounded → matches(substring), matchBounded → match(substring),
+        //  findMatchFrom → jdkFindMatchFrom)
     }
 
     /**
@@ -192,13 +204,12 @@ public class OptionalGroupBackrefBytecodeGenerator {
         for (OptionalGroupEntry entry : info.optionalGroups) {
             if (entry.isSingleChar && entry.literalChar >= 0) {
                 Label charMatched = new Label();
-                Label charNotMatched = new Label();
                 Label groupEnd = new Label();
 
                 // Check if char matches
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGE, charNotMatched);
+                mv.visitJumpInsn(IF_ICMPGE, groupEnd);
 
                 mv.visitVarInsn(ALOAD, 1);
                 mv.visitVarInsn(ILOAD, posVar);
@@ -206,16 +217,18 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 pushInt(mv, entry.literalChar);
                 mv.visitJumpInsn(IF_ICMPEQ, charMatched);
 
-                // Char not matched - capture empty (starts = pos, ends = pos)
-                mv.visitLabel(charNotMatched);
-                mv.visitVarInsn(ALOAD, startsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-                mv.visitVarInsn(ALOAD, endsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
+                if (entry.alwaysCaptures) {
+                    // (X|) form: char not matched — capture empty (starts = pos, ends = pos)
+                    mv.visitVarInsn(ALOAD, startsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                    mv.visitVarInsn(ALOAD, endsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                }
+                // (X)? form: char not matched — starts[]/ends[] remain -1 (group did not participate)
                 mv.visitJumpInsn(GOTO, groupEnd);
 
                 // Char matched - capture it
@@ -234,7 +247,6 @@ public class OptionalGroupBackrefBytecodeGenerator {
             } else if (entry.literalString != null) {
                 // Multi-char literal string (e.g., "cow" in (cow|))
                 Label stringMatched = new Label();
-                Label stringNotMatched = new Label();
                 Label groupEnd = new Label();
 
                 int strLen = entry.literalString.length();
@@ -244,7 +256,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 pushInt(mv, strLen);
                 mv.visitInsn(IADD);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGT, stringNotMatched);
+                mv.visitJumpInsn(IF_ICMPGT, groupEnd);
 
                 // Use String.regionMatches(int, String, int, int)
                 // input.regionMatches(pos, literalString, 0, strLen)
@@ -256,16 +268,18 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
                 mv.visitJumpInsn(IFNE, stringMatched);  // IFNE = if not equal to 0 (i.e., true)
 
-                // String not matched - capture empty (starts = pos, ends = pos)
-                mv.visitLabel(stringNotMatched);
-                mv.visitVarInsn(ALOAD, startsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-                mv.visitVarInsn(ALOAD, endsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
+                if (entry.alwaysCaptures) {
+                    // (X|) form: string not matched — capture empty (starts = pos, ends = pos)
+                    mv.visitVarInsn(ALOAD, startsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                    mv.visitVarInsn(ALOAD, endsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                }
+                // (X)? form: string not matched — starts[]/ends[] remain -1 (group did not participate)
                 mv.visitJumpInsn(GOTO, groupEnd);
 
                 // String matched - capture it
@@ -288,8 +302,10 @@ public class OptionalGroupBackrefBytecodeGenerator {
         for (BackrefEntry entry : info.backrefEntries) {
             Label backrefEnd = new Label();
             Label groupNotMatched = new Label();
+            OptionalGroupEntry groupEntry = info.getGroupEntry(entry.groupNumber);
+            boolean alwaysCaptures = groupEntry != null && groupEntry.alwaysCaptures;
 
-            // if (starts[groupNum] < 0) skip backref check (shouldn't happen for (X|) groups)
+            // starts[groupNum] < 0 means group did not participate
             mv.visitVarInsn(ALOAD, startsVar);
             pushInt(mv, entry.groupNumber);
             mv.visitInsn(IALOAD);
@@ -363,7 +379,11 @@ public class OptionalGroupBackrefBytecodeGenerator {
             mv.visitJumpInsn(GOTO, backrefEnd);
 
             mv.visitLabel(groupNotMatched);
-            // Group captured empty - backref satisfied
+            if (!alwaysCaptures) {
+                // (X)? form: group did not participate — Java semantics: backref FAILS
+                mv.visitJumpInsn(GOTO, returnNull);
+            }
+            // (X|) form: group always captures empty — backref matches empty (vacuously satisfied)
 
             mv.visitLabel(backrefEnd);
         }
@@ -667,22 +687,37 @@ public class OptionalGroupBackrefBytecodeGenerator {
             Label groupEnd = new Label();
 
             if (entry.isSingleChar && entry.literalChar >= 0) {
-                Label captureEmpty = new Label();
-                Label nonEmptyMatched = new Label();
+                Label charMatched = new Label();
 
-                // Check bounds: if (pos >= len) goto captureEmpty
+                // Check bounds: if (pos >= len) goto groupEnd (no capture for this iteration)
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGE, captureEmpty);
+                mv.visitJumpInsn(IF_ICMPGE, groupEnd);
 
-                // Check char match: if (input.charAt(pos) != literalChar) goto captureEmpty
+                // Check char: if (input.charAt(pos) == literalChar) goto charMatched
                 mv.visitVarInsn(ALOAD, 1);
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
                 pushInt(mv, entry.literalChar);
-                mv.visitJumpInsn(IF_ICMPNE, captureEmpty);
+                mv.visitJumpInsn(IF_ICMPEQ, charMatched);
 
-                // Non-empty matched: capture it
+                // Char not matched
+                if (entry.alwaysCaptures) {
+                    // (X|) form: capture empty (starts[]=pos, ends[]=pos)
+                    mv.visitVarInsn(ALOAD, startsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                    mv.visitVarInsn(ALOAD, endsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                }
+                // (X)? form: starts[]/ends[] stay -1 (group did not participate)
+                mv.visitJumpInsn(GOTO, groupEnd);
+
+                // Char matched: capture it
+                mv.visitLabel(charMatched);
                 mv.visitVarInsn(ALOAD, startsVar);
                 pushInt(mv, entry.groupNumber);
                 mv.visitVarInsn(ILOAD, posVar);
@@ -695,34 +730,18 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitInsn(IASTORE);
 
-                mv.visitJumpInsn(GOTO, nonEmptyMatched);
-
-                // Capture empty alternative: starts[groupNum] = pos, ends[groupNum] = pos
-                mv.visitLabel(captureEmpty);
-                mv.visitVarInsn(ALOAD, startsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitVarInsn(ALOAD, endsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitLabel(nonEmptyMatched);
             } else if (entry.literalString != null) {
                 // Multi-char literal string (e.g., "cow" in (cow|))
-                Label captureEmptyMultiChar = new Label();
-                Label nonEmptyMatchedMultiChar = new Label();
+                Label stringMatched = new Label();
 
                 int strLen = entry.literalString.length();
 
-                // Check if enough characters remain: if (pos + strLen > len) goto captureEmptyMultiChar
+                // Check bounds: if (pos + strLen > len) goto groupEnd (no capture)
                 mv.visitVarInsn(ILOAD, posVar);
                 pushInt(mv, strLen);
                 mv.visitInsn(IADD);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGT, captureEmptyMultiChar);
+                mv.visitJumpInsn(IF_ICMPGT, groupEnd);
 
                 // Use String.regionMatches(int, String, int, int)
                 mv.visitVarInsn(ALOAD, 1);  // input string
@@ -731,9 +750,25 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 mv.visitInsn(ICONST_0);  // ooffset
                 pushInt(mv, strLen);  // len
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-                mv.visitJumpInsn(IFEQ, captureEmptyMultiChar);  // If false (0), capture empty
+                mv.visitJumpInsn(IFNE, stringMatched);
+
+                // String not matched
+                if (entry.alwaysCaptures) {
+                    // (X|) form: capture empty (starts[]=pos, ends[]=pos)
+                    mv.visitVarInsn(ALOAD, startsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                    mv.visitVarInsn(ALOAD, endsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                }
+                // (X)? form: starts[]/ends[] stay -1
+                mv.visitJumpInsn(GOTO, groupEnd);
 
                 // String matched - capture it
+                mv.visitLabel(stringMatched);
                 mv.visitVarInsn(ALOAD, startsVar);
                 pushInt(mv, entry.groupNumber);
                 mv.visitVarInsn(ILOAD, posVar);
@@ -745,22 +780,6 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 pushInt(mv, entry.groupNumber);
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitInsn(IASTORE);
-
-                mv.visitJumpInsn(GOTO, nonEmptyMatchedMultiChar);
-
-                // Capture empty alternative: starts[groupNum] = pos, ends[groupNum] = pos
-                mv.visitLabel(captureEmptyMultiChar);
-                mv.visitVarInsn(ALOAD, startsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitVarInsn(ALOAD, endsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitLabel(nonEmptyMatchedMultiChar);
             }
 
             mv.visitLabel(groupEnd);
@@ -770,7 +789,10 @@ public class OptionalGroupBackrefBytecodeGenerator {
         for (BackrefEntry entry : info.backrefEntries) {
             Label backrefEnd = new Label();
             Label groupNotMatched = new Label();
+            OptionalGroupEntry groupEntry = info.getGroupEntry(entry.groupNumber);
+            boolean alwaysCaptures = groupEntry != null && groupEntry.alwaysCaptures;
 
+            // starts[groupNum] < 0 means group did not participate
             mv.visitVarInsn(ALOAD, startsVar);
             pushInt(mv, entry.groupNumber);
             mv.visitInsn(IALOAD);
@@ -786,7 +808,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
             mv.visitVarInsn(ISTORE, grpLenVar);
 
             // Handle zero-width backref (empty group capture)
-            // PCRE semantics: empty string repeated N times is still empty (always matches)
+            // Empty repeated any number of times is still empty — always satisfies
             Label nonZeroWidth = new Label();
             mv.visitVarInsn(ILOAD, grpLenVar);
             mv.visitJumpInsn(IFNE, nonZeroWidth);
@@ -843,6 +865,11 @@ public class OptionalGroupBackrefBytecodeGenerator {
             mv.visitJumpInsn(GOTO, backrefEnd);
 
             mv.visitLabel(groupNotMatched);
+            if (!alwaysCaptures) {
+                // (X)? form: group did not participate — Java semantics: backref FAILS
+                mv.visitJumpInsn(GOTO, failLabel);
+            }
+            // (X|) form: group always captures empty — backref matches empty (vacuously satisfied)
 
             mv.visitLabel(backrefEnd);
         }
@@ -918,22 +945,37 @@ public class OptionalGroupBackrefBytecodeGenerator {
             Label groupEnd = new Label();
 
             if (entry.isSingleChar && entry.literalChar >= 0) {
-                Label captureEmpty = new Label();
-                Label nonEmptyMatched = new Label();
+                Label charMatched = new Label();
 
-                // Check bounds: if (pos >= len) goto captureEmpty
+                // Check bounds: if (pos >= len) goto groupEnd (no capture)
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGE, captureEmpty);
+                mv.visitJumpInsn(IF_ICMPGE, groupEnd);
 
-                // Check char match: if (input.charAt(pos) != literalChar) goto captureEmpty
+                // Check char: if (input.charAt(pos) == literalChar) goto charMatched
                 mv.visitVarInsn(ALOAD, 1);
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
                 pushInt(mv, entry.literalChar);
-                mv.visitJumpInsn(IF_ICMPNE, captureEmpty);
+                mv.visitJumpInsn(IF_ICMPEQ, charMatched);
 
-                // Non-empty matched: capture it
+                // Char not matched
+                if (entry.alwaysCaptures) {
+                    // (X|) form: capture empty (starts[]=pos, ends[]=pos)
+                    mv.visitVarInsn(ALOAD, startsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                    mv.visitVarInsn(ALOAD, endsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                }
+                // (X)? form: starts[]/ends[] stay -1 (group did not participate)
+                mv.visitJumpInsn(GOTO, groupEnd);
+
+                // Char matched: capture it
+                mv.visitLabel(charMatched);
                 mv.visitVarInsn(ALOAD, startsVar);
                 pushInt(mv, entry.groupNumber);
                 mv.visitVarInsn(ILOAD, posVar);
@@ -946,33 +988,17 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitInsn(IASTORE);
 
-                mv.visitJumpInsn(GOTO, nonEmptyMatched);
-
-                // Capture empty alternative: starts[groupNum] = pos, ends[groupNum] = pos
-                mv.visitLabel(captureEmpty);
-                mv.visitVarInsn(ALOAD, startsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitVarInsn(ALOAD, endsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitLabel(nonEmptyMatched);
             } else if (entry.literalString != null) {
                 // Multi-char literal string (e.g., "cow" in (cow|))
-                Label captureEmptyMultiChar = new Label();
-                Label nonEmptyMatchedMultiChar = new Label();
+                Label stringMatched = new Label();
                 int strLen = entry.literalString.length();
 
-                // Check if enough characters remain: if (pos + strLen > len) goto captureEmptyMultiChar
+                // Check bounds: if (pos + strLen > len) goto groupEnd (no capture)
                 mv.visitVarInsn(ILOAD, posVar);
                 pushInt(mv, strLen);
                 mv.visitInsn(IADD);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGT, captureEmptyMultiChar);
+                mv.visitJumpInsn(IF_ICMPGT, groupEnd);
 
                 // Use String.regionMatches(int, String, int, int)
                 mv.visitVarInsn(ALOAD, 1);  // input string
@@ -981,9 +1007,25 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 mv.visitInsn(ICONST_0);  // ooffset
                 pushInt(mv, strLen);  // len
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-                mv.visitJumpInsn(IFEQ, captureEmptyMultiChar);  // If false (0), capture empty
+                mv.visitJumpInsn(IFNE, stringMatched);
+
+                // String not matched
+                if (entry.alwaysCaptures) {
+                    // (X|) form: capture empty (starts[]=pos, ends[]=pos)
+                    mv.visitVarInsn(ALOAD, startsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                    mv.visitVarInsn(ALOAD, endsVar);
+                    pushInt(mv, entry.groupNumber);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitInsn(IASTORE);
+                }
+                // (X)? form: starts[]/ends[] stay -1
+                mv.visitJumpInsn(GOTO, groupEnd);
 
                 // String matched - capture it
+                mv.visitLabel(stringMatched);
                 mv.visitVarInsn(ALOAD, startsVar);
                 pushInt(mv, entry.groupNumber);
                 mv.visitVarInsn(ILOAD, posVar);
@@ -995,22 +1037,6 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 pushInt(mv, entry.groupNumber);
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitInsn(IASTORE);
-
-                mv.visitJumpInsn(GOTO, nonEmptyMatchedMultiChar);
-
-                // Capture empty alternative: starts[groupNum] = pos, ends[groupNum] = pos
-                mv.visitLabel(captureEmptyMultiChar);
-                mv.visitVarInsn(ALOAD, startsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitVarInsn(ALOAD, endsVar);
-                pushInt(mv, entry.groupNumber);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitInsn(IASTORE);
-
-                mv.visitLabel(nonEmptyMatchedMultiChar);
             }
 
             mv.visitLabel(groupEnd);
@@ -1020,7 +1046,10 @@ public class OptionalGroupBackrefBytecodeGenerator {
         for (BackrefEntry entry : info.backrefEntries) {
             Label backrefEnd = new Label();
             Label groupNotMatched = new Label();
+            OptionalGroupEntry groupEntry = info.getGroupEntry(entry.groupNumber);
+            boolean alwaysCaptures = groupEntry != null && groupEntry.alwaysCaptures;
 
+            // starts[groupNum] < 0 means group did not participate
             mv.visitVarInsn(ALOAD, startsVar);
             pushInt(mv, entry.groupNumber);
             mv.visitInsn(IALOAD);
@@ -1036,7 +1065,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
             mv.visitVarInsn(ISTORE, grpLenVar);
 
             // Handle zero-width backref (empty group capture)
-            // PCRE semantics: empty string repeated N times is still empty (always matches)
+            // Empty repeated any number of times is still empty — always satisfies
             Label nonZeroWidth = new Label();
             mv.visitVarInsn(ILOAD, grpLenVar);
             mv.visitJumpInsn(IFNE, nonZeroWidth);
@@ -1093,6 +1122,11 @@ public class OptionalGroupBackrefBytecodeGenerator {
             mv.visitJumpInsn(GOTO, backrefEnd);
 
             mv.visitLabel(groupNotMatched);
+            if (!alwaysCaptures) {
+                // (X)? form: group did not participate — Java semantics: backref FAILS
+                mv.visitJumpInsn(GOTO, failLabel);
+            }
+            // (X|) form: group always captures empty — backref matches empty (vacuously satisfied)
 
             mv.visitLabel(backrefEnd);
         }
@@ -1234,13 +1268,12 @@ public class OptionalGroupBackrefBytecodeGenerator {
 
             if (entry.isSingleChar && entry.literalChar >= 0) {
                 Label charMatched = new Label();
-                Label charNotMatched = new Label();
                 Label groupEnd = new Label();
 
                 // Check if char matches
                 mv.visitVarInsn(ILOAD, posVar);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGE, charNotMatched);
+                mv.visitJumpInsn(IF_ICMPGE, groupEnd);
 
                 mv.visitVarInsn(ALOAD, 1);
                 mv.visitVarInsn(ILOAD, posVar);
@@ -1248,14 +1281,16 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 pushInt(mv, entry.literalChar);
                 mv.visitJumpInsn(IF_ICMPEQ, charMatched);
 
-                // Char not matched - capture empty (matched=true, start=pos, end=pos)
-                mv.visitLabel(charNotMatched);
-                mv.visitInsn(ICONST_1);
-                mv.visitVarInsn(ISTORE, matchedVar);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitVarInsn(ISTORE, startVar);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitVarInsn(ISTORE, endVar);
+                if (entry.alwaysCaptures) {
+                    // (X|) form: char not matched — capture empty (matched=true, start=pos, end=pos)
+                    mv.visitInsn(ICONST_1);
+                    mv.visitVarInsn(ISTORE, matchedVar);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitVarInsn(ISTORE, startVar);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitVarInsn(ISTORE, endVar);
+                }
+                // (X)? form: char not matched — matchedVar stays 0, group did not participate
                 mv.visitJumpInsn(GOTO, groupEnd);
 
                 // Char matched - capture it
@@ -1272,7 +1307,6 @@ public class OptionalGroupBackrefBytecodeGenerator {
             } else if (entry.literalString != null) {
                 // Multi-char literal string (e.g., "cow" in (cow|))
                 Label stringMatched = new Label();
-                Label stringNotMatched = new Label();
                 Label groupEnd = new Label();
 
                 int strLen = entry.literalString.length();
@@ -1282,7 +1316,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 pushInt(mv, strLen);
                 mv.visitInsn(IADD);
                 mv.visitVarInsn(ILOAD, lenVar);
-                mv.visitJumpInsn(IF_ICMPGT, stringNotMatched);
+                mv.visitJumpInsn(IF_ICMPGT, groupEnd);
 
                 // Use String.regionMatches(int, String, int, int)
                 mv.visitVarInsn(ALOAD, 1);  // input string
@@ -1293,14 +1327,16 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
                 mv.visitJumpInsn(IFNE, stringMatched);  // IFNE = if not equal to 0 (i.e., true)
 
-                // String not matched - capture empty (matched=true, start=pos, end=pos)
-                mv.visitLabel(stringNotMatched);
-                mv.visitInsn(ICONST_1);
-                mv.visitVarInsn(ISTORE, matchedVar);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitVarInsn(ISTORE, startVar);
-                mv.visitVarInsn(ILOAD, posVar);
-                mv.visitVarInsn(ISTORE, endVar);
+                if (entry.alwaysCaptures) {
+                    // (X|) form: string not matched — capture empty (matched=true, start=pos, end=pos)
+                    mv.visitInsn(ICONST_1);
+                    mv.visitVarInsn(ISTORE, matchedVar);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitVarInsn(ISTORE, startVar);
+                    mv.visitVarInsn(ILOAD, posVar);
+                    mv.visitVarInsn(ISTORE, endVar);
+                }
+                // (X)? form: string not matched — matchedVar stays 0, group did not participate
                 mv.visitJumpInsn(GOTO, groupEnd);
 
                 // String matched - capture it
@@ -1316,7 +1352,6 @@ public class OptionalGroupBackrefBytecodeGenerator {
                 mv.visitLabel(groupEnd);
             } else {
                 // Complex group content - for now, skip (needs more work)
-                // TODO: Handle charset and complex groups
             }
         }
 
@@ -1335,11 +1370,12 @@ public class OptionalGroupBackrefBytecodeGenerator {
             int startVar = vars[1];
             int endVar = vars[2];
             int groupLenVar = vars[3];
+            OptionalGroupEntry groupEntry = info.getGroupEntry(entry.groupNumber);
+            boolean alwaysCaptures = groupEntry != null && groupEntry.alwaysCaptures;
 
             Label backrefEnd = new Label();
             Label groupNotMatched = new Label();
 
-            // if (!groupMatched) skip backref - shouldn't happen for (X|) patterns now
             mv.visitVarInsn(ILOAD, matchedVar);
             mv.visitJumpInsn(IFEQ, groupNotMatched);
 
@@ -1405,8 +1441,12 @@ public class OptionalGroupBackrefBytecodeGenerator {
 
             mv.visitJumpInsn(GOTO, backrefEnd);
 
-            // Group captured empty: backref matches empty (any quantifier is satisfied)
             mv.visitLabel(groupNotMatched);
+            if (!alwaysCaptures) {
+                // (X)? form: group did not participate — Java semantics: backref FAILS
+                mv.visitJumpInsn(GOTO, returnFalse);
+            }
+            // (X|) form: group always captures empty — backref matches empty (vacuously satisfied)
 
             mv.visitLabel(backrefEnd);
         }

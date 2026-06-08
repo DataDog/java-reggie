@@ -94,8 +94,9 @@ class HybridDiagnosticProcessorTest {
   }
 
   @Test
-  void hybridPatternEmitsCompileTimeWarning(@TempDir Path out) throws IOException {
-    // Literal alternation -> SPECIALIZED_LITERAL_ALTERNATION -> RICH_API_HYBRID.
+  void hybridPatternNativeNoWarning(@TempDir Path out) throws IOException {
+    // Literal alternation -> SPECIALIZED_LITERAL_ALTERNATION -> NATIVE (promoted in Wave 2).
+    // No hybrid warning expected.
     String code =
         "package t;\n"
             + "import com.datadoghq.reggie.annotations.RegexPattern;\n"
@@ -106,8 +107,9 @@ class HybridDiagnosticProcessorTest {
             + "}\n";
     DiagnosticCollector<JavaFileObject> diagnostics = compile("t.HybridPatterns", code, out);
     assertTrue(
-        hasWarningContaining(diagnostics, "HYBRID matcher"),
-        () -> "expected hybrid warning; got " + diagnostics.getDiagnostics());
+        !hasWarningContaining(diagnostics, "HYBRID matcher")
+            && !hasErrorContaining(diagnostics, "requires java.util.regex fallback"),
+        () -> "unexpected warning/error for NATIVE strategy; got " + diagnostics.getDiagnostics());
   }
 
   @Test
@@ -129,8 +131,8 @@ class HybridDiagnosticProcessorTest {
   }
 
   @Test
-  void fullFallbackMultipleLookaheadsRejectedAtCompileTime(@TempDir Path out) throws IOException {
-    // Multiple lookaheads -> SPECIALIZED_MULTIPLE_LOOKAHEADS -> FULL_FALLBACK -> build ERROR.
+  void multipleLookaheadsNativeNoError(@TempDir Path out) throws IOException {
+    // Multiple lookaheads -> SPECIALIZED_MULTIPLE_LOOKAHEADS -> NATIVE (Wave 3 fixed engine).
     String code =
         "package t;\n"
             + "import com.datadoghq.reggie.annotations.RegexPattern;\n"
@@ -141,20 +143,14 @@ class HybridDiagnosticProcessorTest {
             + "}\n";
     DiagnosticCollector<JavaFileObject> diagnostics = compile("t.FallbackPatterns", code, out);
     assertTrue(
-        hasErrorContaining(diagnostics, "requires java.util.regex fallback"),
-        () -> "expected FULL_FALLBACK rejection error; got " + diagnostics.getDiagnostics());
-    // It must be rejected, not silently warned-and-generated.
-    assertTrue(
-        !hasWarningContaining(diagnostics, "delegates the whole matcher"),
+        !hasErrorContaining(diagnostics, "requires java.util.regex fallback"),
         () ->
-            "FULL_FALLBACK must be a build error, not a mandatory warning; got "
-                + diagnostics.getDiagnostics());
+            "unexpected rejection error for NATIVE strategy; got " + diagnostics.getDiagnostics());
   }
 
   @Test
-  void fullFallbackBackrefRejectedAtCompileTime(@TempDir Path out) throws IOException {
-    // Variable-length capture + backref -> VARIABLE_CAPTURE_BACKREF -> FULL_FALLBACK -> build
-    // ERROR.
+  void variableCaptureBackrefNativeNoError(@TempDir Path out) throws IOException {
+    // Variable-length capture + backref -> VARIABLE_CAPTURE_BACKREF -> NATIVE (Wave 2).
     String code =
         "package t;\n"
             + "import com.datadoghq.reggie.annotations.RegexPattern;\n"
@@ -165,7 +161,8 @@ class HybridDiagnosticProcessorTest {
             + "}\n";
     DiagnosticCollector<JavaFileObject> diagnostics = compile("t.BackrefPatterns", code, out);
     assertTrue(
-        hasErrorContaining(diagnostics, "requires java.util.regex fallback"),
-        () -> "expected FULL_FALLBACK rejection error; got " + diagnostics.getDiagnostics());
+        !hasErrorContaining(diagnostics, "requires java.util.regex fallback"),
+        () ->
+            "unexpected rejection error for NATIVE strategy; got " + diagnostics.getDiagnostics());
   }
 }

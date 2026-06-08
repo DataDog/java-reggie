@@ -165,16 +165,12 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testVariableCaptureBackrefStrategyRejected() {
-    // VARIABLE_CAPTURE_BACKREF is a FULL_FALLBACK strategy: the runtime path routes it to
-    // java.util.regex, but a fixed @RegexPattern class cannot fall back, so the generator rejects
-    // it at compile time rather than emitting a known-incorrect matcher.
-    assertThrows(
-        UnsupportedOperationException.class,
-        () ->
-            new ReggieMatcherBytecodeGenerator(
-                    "test.generated", "VarCaptureBackrefMatcher", "(\\w+)\\s+\\1")
-                .generate());
+  void testVariableCaptureBackrefStrategyNative() throws Exception {
+    // VARIABLE_CAPTURE_BACKREF is now NATIVE (promoted in Wave 2).
+    Object matcher = compile("(\\w+)\\s+\\1", "VarCaptureBackrefMatcher");
+    Method matches = matcher.getClass().getMethod("matches", String.class);
+    assertTrue((Boolean) matches.invoke(matcher, "hello hello"));
+    assertFalse((Boolean) matches.invoke(matcher, "hello world"));
   }
 
   @Test
@@ -195,15 +191,12 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testWordBoundaryBackrefStrategyRejected() {
-    // \b(\w+)\s+\1\b resolves to VARIABLE_CAPTURE_BACKREF (FULL_FALLBACK) and is rejected at
-    // compile time; the runtime path (Reggie.compile()) handles it via java.util.regex.
-    assertThrows(
-        UnsupportedOperationException.class,
-        () ->
-            new ReggieMatcherBytecodeGenerator(
-                    "test.generated", "BackrefMatcher", "\\b(\\w+)\\s+\\1\\b")
-                .generate());
+  void testWordBoundaryBackrefStrategyNative() throws Exception {
+    // \b(\w+)\s+\1\b resolves to VARIABLE_CAPTURE_BACKREF, now NATIVE (Wave 2).
+    Object matcher = compile("\\b(\\w+)\\s+\\1\\b", "BackrefMatcher");
+    Method find = matcher.getClass().getMethod("find", String.class);
+    assertTrue((Boolean) find.invoke(matcher, "say hello hello world"));
+    assertFalse((Boolean) find.invoke(matcher, "hello world"));
   }
 
   @Test
@@ -349,26 +342,24 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testSpecializedMultipleLookaheadsStrategyRejected() {
-    // SPECIALIZED_MULTIPLE_LOOKAHEADS is FULL_FALLBACK (the native lookahead boolean engine is not
-    // provably correct). Rejected at compile time; Reggie.compile() handles it at runtime.
-    assertThrows(
-        UnsupportedOperationException.class,
-        () ->
-            new ReggieMatcherBytecodeGenerator(
-                    "test.generated", "MultipleLookaheadsMatcher", "(?=.*[A-Z])(?=.*\\d).{8,}")
-                .generate());
+  void testSpecializedMultipleLookaheadsStrategyNative() throws Exception {
+    // SPECIALIZED_MULTIPLE_LOOKAHEADS is now NATIVE (Wave 3 fixed the lookahead boolean engine).
+    Object matcher = compile("(?=.*[A-Z])(?=.*\\d).{8,}", "MultipleLookaheadsMatcher");
+    Method matches = matcher.getClass().getMethod("matches", String.class);
+    assertTrue((Boolean) matches.invoke(matcher, "Password1"));
+    assertFalse((Boolean) matches.invoke(matcher, "password1")); // no uppercase
+    assertFalse((Boolean) matches.invoke(matcher, "PASSWORDX")); // no digit
   }
 
   @Test
-  void testHybridDfaLookaheadStrategyRejected() {
-    // HYBRID_DFA_LOOKAHEAD is FULL_FALLBACK. Rejected at compile time; Reggie.compile() handles it.
-    assertThrows(
-        UnsupportedOperationException.class,
-        () ->
-            new ReggieMatcherBytecodeGenerator(
-                    "test.generated", "HybridLookaheadMatcher", "(?=.*[A-Z])abc")
-                .generate());
+  void testHybridDfaLookaheadStrategyNative() throws Exception {
+    // HYBRID_DFA_LOOKAHEAD is now NATIVE (Wave 3 fixed the lookahead boolean engine).
+    // (?=.*[A-Z])abc: lookahead must see uppercase, then abc must follow at current pos
+    Object matcher = compile("(?=.*[A-Z])abc", "HybridLookaheadMatcher");
+    Method find = matcher.getClass().getMethod("find", String.class);
+    assertTrue(
+        (Boolean) find.invoke(matcher, "abcX")); // at pos 0: lookahead "abcX" has X, abc matches
+    assertFalse((Boolean) find.invoke(matcher, "abc")); // no uppercase anywhere
   }
 
   @Test

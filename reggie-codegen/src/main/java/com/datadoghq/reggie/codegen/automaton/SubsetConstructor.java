@@ -130,8 +130,7 @@ public class SubsetConstructor {
         for (NFA.NFAState nfaState : current.nfaStates) {
           EnumSet<NFA.AnchorType> srcCond = currentConditions.get(nfaState);
           if (srcCond == null) continue; // unreachable
-          // END-class anchors require pos == length; they cannot gate a consuming transition.
-          if (containsConsumeKillingAnchor(srcCond)) continue;
+          if (containsConsumeKillingAnchor(srcCond, chars)) continue;
           for (NFA.Transition trans : nfaState.getTransitions()) {
             if (trans.chars.intersects(chars)) {
               transitionHasContributor = true;
@@ -501,14 +500,25 @@ public class SubsetConstructor {
   }
 
   /**
-   * Returns true if any anchor in the set requires {@code pos == length} (or near-end), which makes
-   * a consuming char-transition impossible. Used to prune dead transitions.
+   * Returns true if the anchor conditions in {@code conds} prevent consuming any character in
+   * {@code chars}.
+   *
+   * <ul>
+   *   <li>{@code STRING_END_ABSOLUTE} (\z) requires {@code pos == length} exactly, so no char can
+   *       be consumed.
+   *   <li>{@code END} ($) and {@code STRING_END} (\Z) match at {@code pos == length} OR at {@code
+   *       pos == length-1} when {@code charAt(pos) == '\n'}. They allow consuming a {@code \n}-only
+   *       transition (the "$ before terminal newline" path) but block everything else.
+   * </ul>
    */
-  private static boolean containsConsumeKillingAnchor(EnumSet<NFA.AnchorType> conds) {
-    return conds.contains(NFA.AnchorType.END) || conds.contains(NFA.AnchorType.STRING_END_ABSOLUTE);
-    // Note: STRING_END (\Z) and END_MULTILINE allow consuming a final newline, but precise
-    // handling there would require char-set intersection. Conservative pruning is safe for
-    // the present scope; an extension can refine if needed.
+  private static boolean containsConsumeKillingAnchor(
+      EnumSet<NFA.AnchorType> conds, CharSet chars) {
+    if (conds.contains(NFA.AnchorType.STRING_END_ABSOLUTE)) return true;
+    if (conds.contains(NFA.AnchorType.END) || conds.contains(NFA.AnchorType.STRING_END)) {
+      // Allow only if chars is strictly {'\n'} — i.e., newline is the only character.
+      return !(chars.isSingleChar() && chars.getSingleChar() == '\n');
+    }
+    return false;
   }
 
   /**
@@ -1147,7 +1157,7 @@ public class SubsetConstructor {
         for (NFA.NFAState nfaState : current.nfaStates) {
           EnumSet<NFA.AnchorType> srcCond = currentConditions.get(nfaState);
           if (srcCond == null) continue;
-          if (containsConsumeKillingAnchor(srcCond)) continue;
+          if (containsConsumeKillingAnchor(srcCond, chars)) continue;
           for (NFA.Transition trans : nfaState.getTransitions()) {
             if (trans.chars.intersects(chars)) {
               hasContributor = true;

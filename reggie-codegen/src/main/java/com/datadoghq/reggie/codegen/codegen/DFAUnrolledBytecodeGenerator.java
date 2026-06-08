@@ -3498,11 +3498,18 @@ public class DFAUnrolledBytecodeGenerator {
             break;
           }
         case END:
-        case STRING_END_ABSOLUTE:
         case STRING_END:
+          // $ / \Z allows a \n transition when the newline is the last char in the string.
+          // After consuming the char, posVar == src_pos + 1. The condition is src_pos == len-1,
+          // i.e. posVar == len. The charset already constrains the char to '\n'.
+          mv.visitVarInsn(ILOAD, posVar);
+          access.loadLength.run();
+          mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+          break;
+        case STRING_END_ABSOLUTE:
         case END_MULTILINE:
-          // END-class anchors are pruned at construction; if one slipped through, kill the
-          // transition unconditionally.
+          // \z requires strict end of input; no consuming transition is valid.
+          // END_MULTILINE anchors are pruned at construction; kill the transition unconditionally.
           mv.visitJumpInsn(GOTO, skipTransition);
           break;
         default:

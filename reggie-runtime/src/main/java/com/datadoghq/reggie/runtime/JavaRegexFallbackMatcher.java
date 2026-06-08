@@ -83,6 +83,7 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult match(String input) {
+    if (input == null) return null;
     java.util.regex.Matcher m = javaPattern.matcher(input);
     return m.matches() ? toMatchResult(input, m) : null;
   }

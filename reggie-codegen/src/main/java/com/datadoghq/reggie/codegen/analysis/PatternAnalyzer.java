@@ -602,6 +602,19 @@ public class PatternAnalyzer {
 
     // Check for features requiring special handling
     if (hasBackrefs) {
+      // Try to detect optional group backreference patterns: (a)?\1, ^(a)?(b)?\1\2$
+      // These patterns have NFA capture ambiguity by design (optional group may not participate),
+      // but OPTIONAL_GROUP_BACKREF handles this correctly — check before the ambiguity guard.
+      OptionalGroupBackrefInfo optGroupBackrefInfo = detectOptionalGroupBackref(ast);
+      if (optGroupBackrefInfo != null) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.OPTIONAL_GROUP_BACKREF,
+            null,
+            optGroupBackrefInfo,
+            false,
+            requiredLiterals);
+      }
+
       // Guard: if any capturing group has a bypass path through the NFA (i.e., there is an
       // execution path that reaches acceptance WITHOUT entering that group), the group's spans
       // are ambiguous — the native backref strategies cannot reliably resolve which thread
@@ -634,18 +647,6 @@ public class PatternAnalyzer {
             MatchingStrategy.VARIABLE_CAPTURE_BACKREF,
             null,
             varCaptureBackrefInfo,
-            false,
-            requiredLiterals);
-      }
-
-      // Try to detect optional group backreference patterns: (a)?\1, ^(a)?(b)?\1\2$
-      // Backreference to unmatched optional group matches empty string
-      OptionalGroupBackrefInfo optGroupBackrefInfo = detectOptionalGroupBackref(ast);
-      if (optGroupBackrefInfo != null) {
-        return new MatchingStrategyResult(
-            MatchingStrategy.OPTIONAL_GROUP_BACKREF,
-            null,
-            optGroupBackrefInfo,
             false,
             requiredLiterals);
       }
@@ -3103,14 +3104,19 @@ public class PatternAnalyzer {
         if (quant.min == 0 && quant.max == 1 && quant.child instanceof GroupNode) {
           GroupNode group = (GroupNode) quant.child;
           if (group.capturing) {
-            // Found optional capturing group
+            // Found optional capturing group: (X)? form — group may not participate
             boolean isSingleChar = isSingleCharOrCharClass(group.child);
             int literalChar = extractLiteralChar(group.child);
             String literalString = extractLiteralString(group.child);
 
             optionalGroups.add(
                 new OptionalGroupBackrefInfo.OptionalGroupEntry(
-                    group.groupNumber, group.child, isSingleChar, literalChar, literalString));
+                    group.groupNumber,
+                    group.child,
+                    isSingleChar,
+                    literalChar,
+                    literalString,
+                    false));
             optionalGroupNumbers.add(group.groupNumber);
             foundOptionalGroup = true;
             lastOptionalGroupIdx = i;
@@ -3126,14 +3132,19 @@ public class PatternAnalyzer {
         if (group.capturing) {
           RegexNode nonEmptyContent = extractNonEmptyAlternative(group.child);
           if (nonEmptyContent != null) {
-            // Found capturing group with empty alternation
+            // Found capturing group with empty alternation: (X|) form — always captures
             boolean isSingleChar = isSingleCharOrCharClass(nonEmptyContent);
             int literalChar = extractLiteralChar(nonEmptyContent);
             String literalString = extractLiteralString(nonEmptyContent);
 
             optionalGroups.add(
                 new OptionalGroupBackrefInfo.OptionalGroupEntry(
-                    group.groupNumber, nonEmptyContent, isSingleChar, literalChar, literalString));
+                    group.groupNumber,
+                    nonEmptyContent,
+                    isSingleChar,
+                    literalChar,
+                    literalString,
+                    true));
             optionalGroupNumbers.add(group.groupNumber);
             foundOptionalGroup = true;
             lastOptionalGroupIdx = i;

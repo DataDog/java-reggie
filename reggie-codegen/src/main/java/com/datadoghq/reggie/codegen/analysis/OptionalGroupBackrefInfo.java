@@ -24,17 +24,18 @@ import java.util.Set;
  * Pattern information for OPTIONAL_GROUP_BACKREF strategy.
  *
  * <p>Handles patterns where an optional capturing group is followed by a backreference to that
- * group. The key semantic is PCRE behavior: a backreference to an unmatched group matches the empty
- * string.
+ * group.
  *
- * <p>Examples: - (a)?\1 - optional 'a', then backref (matches "" or "aa") - ^(a)?(b)?\1\2 -
- * multiple optional groups with backrefs - (foo)?bar\1 - optional group, literal, backref
+ * <p>Examples: - (a|)\1 - always-capturing group, backref - (a)?\1 - quantified optional, backref -
+ * ^(a)?(b)?\1\2 - multiple optional groups with backrefs
  *
  * <p>Algorithm: 1. Try to match optional group (track if matched) 2. Match any middle elements 3.
- * For backref: if group matched, verify content; else match empty
+ * For backref: if group matched, verify content; else (for alwaysCaptures groups) match empty, or
+ * (for quantified optional groups) fail
  *
- * <p>PCRE Semantics: - Group matched: backref must match captured content - Group not matched:
- * backref matches empty string (length 0)
+ * <p>Java Semantics: - Group matched: backref must match captured content - Group did not
+ * participate ((X)? form, not matched): backref FAILS - Group always captures ((X|) form, empty
+ * alt): backref matches empty string
  */
 public class OptionalGroupBackrefInfo implements PatternInfo {
 
@@ -55,17 +56,26 @@ public class OptionalGroupBackrefInfo implements PatternInfo {
     /** If literal string, the string value (null if not a simple literal sequence) */
     public final String literalString;
 
+    /**
+     * True if the group always captures (e.g. (X|) empty-alt form). False for (X)? quantified
+     * optional form. When false and the group did not participate, the backref fails rather than
+     * matching empty.
+     */
+    public final boolean alwaysCaptures;
+
     public OptionalGroupEntry(
         int groupNumber,
         RegexNode groupContent,
         boolean isSingleChar,
         int literalChar,
-        String literalString) {
+        String literalString,
+        boolean alwaysCaptures) {
       this.groupNumber = groupNumber;
       this.groupContent = groupContent;
       this.isSingleChar = isSingleChar;
       this.literalChar = literalChar;
       this.literalString = literalString;
+      this.alwaysCaptures = alwaysCaptures;
     }
   }
 
@@ -204,6 +214,7 @@ public class OptionalGroupBackrefInfo implements PatternInfo {
       hash = 31 * hash + (entry.isSingleChar ? 1 : 0);
       hash = 31 * hash + entry.literalChar;
       hash = 31 * hash + (entry.literalString != null ? entry.literalString.hashCode() : 0);
+      hash = 31 * hash + (entry.alwaysCaptures ? 1 : 0);
     }
     hash = 31 * hash + middle.size();
     hash = 31 * hash + backrefEntries.hashCode();

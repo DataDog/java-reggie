@@ -556,13 +556,11 @@ public class ReggieMatcherBytecodeGenerator {
         fixedRepGen.generateMatchesMethod(cw);
         fixedRepGen.generateFindMethod(cw);
         fixedRepGen.generateFindFromMethod(cw);
-        // Generate match() with full group capture support
         fixedRepGen.generateMatchMethod(cw);
-        // Generate stub methods for remaining MatchResult-returning methods
-        fixedRepGen.generateMatchesBoundedStubMethod(cw);
-        fixedRepGen.generateMatchBoundedStubMethod(cw);
-        fixedRepGen.generateFindMatchStubMethod(cw);
-        fixedRepGen.generateFindMatchFromStubMethod(cw);
+        fixedRepGen.generateMatchesBoundedMethod(cw);
+        fixedRepGen.generateMatchBoundedMethod(cw);
+        fixedRepGen.generateFindMatchMethod(cw);
+        fixedRepGen.generateFindMatchFromMethod(cw);
         break;
 
       case NESTED_QUANTIFIED_GROUPS:
