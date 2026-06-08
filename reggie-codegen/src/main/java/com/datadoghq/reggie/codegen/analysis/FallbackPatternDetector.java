@@ -667,6 +667,86 @@ public final class FallbackPatternDetector {
     return null;
   }
 
+  /**
+   * Returns true if {@code node} can match the empty string (zero-width match possible). Used to
+   * distinguish lazy quantifiers whose child is always consuming (safe to run natively) from those
+   * whose child can produce a zero-width match (broken in the greedy pre-scan path).
+   */
+  static boolean isNullable(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      return q.min == 0 || isNullable(q.child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (isNullable(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (!isNullable(child)) return false;
+      }
+      return true;
+    }
+    if (node instanceof GroupNode) {
+      return isNullable(((GroupNode) node).child);
+    }
+    if (node instanceof LiteralNode) {
+      return ((LiteralNode) node).ch == 0; // epsilon (empty string literal)
+    }
+    if (node instanceof AssertionNode || node instanceof AnchorNode) {
+      return true; // zero-width
+    }
+    return false; // CharClassNode, BackreferenceNode, etc.
+  }
+
+  private static boolean containsLazyQuantifier(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      return !q.greedy || containsLazyQuantifier(q.child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsLazyQuantifier(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (containsLazyQuantifier(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return containsLazyQuantifier(((GroupNode) node).child);
+    }
+    return false;
+  }
+
+  private static boolean containsBackreference(RegexNode node) {
+    if (node instanceof BackreferenceNode) return true;
+    if (node instanceof QuantifierNode) {
+      return containsBackreference(((QuantifierNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsBackreference(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (containsBackreference(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return containsBackreference(((GroupNode) node).child);
+    }
+    return false;
+  }
+
   private static final class Visitor implements RegexVisitor<Void> {
     boolean lookaheadInQuantifier = false;
     boolean hasLazyQuantifier = false;
