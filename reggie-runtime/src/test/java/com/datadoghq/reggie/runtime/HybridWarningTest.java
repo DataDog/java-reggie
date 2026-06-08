@@ -38,8 +38,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Verifies the JDK-dependency classification and empirically confirms NATIVE matchers never build
- * the JDK rich-API delegate (no backstop warning). All former RICH_API_HYBRID strategies
- * (SPECIALIZED_LITERAL_ALTERNATION and FIXED_REPETITION_BACKREF) have been promoted to NATIVE.
+ * the JDK rich-API delegate (no backstop warning). No strategy is currently RICH_API_HYBRID.
  */
 class HybridWarningTest {
 
@@ -87,7 +86,7 @@ class HybridWarningTest {
     return messages().stream().anyMatch(m -> m.contains(needle));
   }
 
-  /** {@code (a)\1{8,}} resolves to FIXED_REPETITION_BACKREF (now NATIVE after promotion). */
+  /** {@code (a)\1{8,}} resolves to FIXED_REPETITION_BACKREF — NATIVE with full rich API. */
   @Test
   void fixedRepetitionBackrefIsNativeAfterPromotion() {
     String pattern = "(a)\\1{8,}";
@@ -103,7 +102,7 @@ class HybridWarningTest {
     assertFalse(anyContains("classified NATIVE but built"));
   }
 
-  /** {@code keyword1|keyword2|...} resolves to SPECIALIZED_LITERAL_ALTERNATION (now NATIVE). */
+  /** {@code keyword1|keyword2|...} resolves to SPECIALIZED_LITERAL_ALTERNATION — NATIVE. */
   @Test
   void literalAlternationIsNativeAfterPromotion() {
     String pattern = "alpha|bravo|charlie|delta|echo";
@@ -154,8 +153,8 @@ class HybridWarningTest {
       "<(\\w+)>.*</\\1>", // SPECIALIZED_BACKREFERENCE
       "abc", // DFA_UNROLLED
       "(.*)bar", // GREEDY_BACKTRACK
-      "foo|bar|baz|qux|quux", // SPECIALIZED_LITERAL_ALTERNATION (promoted to NATIVE)
-      "(a)\\1{8,}", // FIXED_REPETITION_BACKREF (promoted to NATIVE)
+      "foo|bar|baz|qux|quux", // SPECIALIZED_LITERAL_ALTERNATION
+      "(a)\\1{8,}", // FIXED_REPETITION_BACKREF
     };
     for (String p : nativePatterns) {
       assertEquals(

@@ -43,9 +43,8 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy;
  * generateFindMatchFromMethod}; {@code RICH_API_HYBRID} if it emits the booleans but not those rich
  * methods (inheriting the base JDK-backed defaults).
  *
- * <p>Currently no strategy is classified as {@code RICH_API_HYBRID}: both former hybrids ({@code
- * SPECIALIZED_LITERAL_ALTERNATION} and {@code FIXED_REPETITION_BACKREF}) have been promoted to
- * {@code NATIVE} after their rich MatchResult methods were implemented.
+ * <p>Currently no strategy is classified as {@code RICH_API_HYBRID}: every strategy that emits
+ * boolean-only methods also emits the full rich MatchResult API.
  *
  * <p>This classification reflects the <strong>runtime path</strong> ({@code Reggie.compile()}). On
  * the compile-time annotation-processor path the {@code FULL_FALLBACK} set is rejected: {@code
