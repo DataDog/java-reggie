@@ -366,7 +366,7 @@ public class RegexParser {
     List<CharSet.Range> ranges = new ArrayList<>();
 
     while (hasMore() && peek() != ']') {
-      // Check for character class escapes like \d, \w, \s
+      // Check for character class escapes like \d, \w, \s, \p{...}, \P{...}
       if (peek() == '\\' && hasMore() && pos + 1 < pattern.length()) {
         char nextChar = pattern.charAt(pos + 1);
         if (nextChar == 'd'
@@ -380,6 +380,14 @@ public class RegexParser {
           consume(); // consume the class character
           CharSet charSet = getCharSetForEscape(nextChar);
           ranges.addAll(charSet.getRanges());
+          continue;
+        }
+        if (nextChar == 'p' || nextChar == 'P') {
+          consume(); // consume '\'
+          consume(); // consume 'p' or 'P'
+          boolean propNegated = nextChar == 'P';
+          CharSet propSet = parseUnicodeCategoryRanges(propNegated);
+          ranges.addAll(propSet.getRanges());
           continue;
         }
       }
@@ -424,6 +432,32 @@ public class RegexParser {
       quotedRanges.add(new CharSet.Range(ch, ch));
     }
     return quotedRanges;
+  }
+
+  /**
+   * Parse a Unicode property category from {Name} (the '\p' or '\P' has already been consumed) and
+   * return the effective CharSet, applying negation when {@code negated} is true. Used when inside
+   * a character class.
+   */
+  private CharSet parseUnicodeCategoryRanges(boolean negated) throws ParseException {
+    if (!hasMore() || peek() != '{') {
+      throw new ParseException("Expected '{' after \\p/\\P in character class at position " + pos);
+    }
+    consume('{');
+    StringBuilder name = new StringBuilder();
+    while (hasMore() && peek() != '}') {
+      name.append(consume());
+    }
+    if (!hasMore()) {
+      throw new ParseException("Unclosed \\p{...} in character class at position " + pos);
+    }
+    consume('}');
+    String category = name.toString();
+    CharSet cs = CharSet.ofUnicodeCategory(category);
+    if (cs == null) {
+      throw new UnsupportedPatternException("Unsupported Unicode property: \\p{" + category + "}");
+    }
+    return negated ? cs.complement() : cs;
   }
 
   private CharSet getCharSetForEscape(char escapeChar) {
@@ -557,10 +591,39 @@ public class RegexParser {
       case 'Q':
         // Quoted literal: \Q...\E
         return parseQuotedLiteral();
+      case 'p':
+        return parseUnicodeProperty(false);
+      case 'P':
+        return parseUnicodeProperty(true);
       default:
         // Escaped literal (e.g., \., \*, \+)
         return new LiteralNode(ch);
     }
+  }
+
+  /**
+   * Parse \p{Category} or \P{Category} (negated). The leading '\' and 'p'/'P' have already been
+   * consumed.
+   */
+  private RegexNode parseUnicodeProperty(boolean negated) throws ParseException {
+    if (!hasMore() || peek() != '{') {
+      throw new ParseException("Expected '{' after \\p/\\P at position " + pos);
+    }
+    consume('{');
+    StringBuilder name = new StringBuilder();
+    while (hasMore() && peek() != '}') {
+      name.append(consume());
+    }
+    if (!hasMore()) {
+      throw new ParseException("Unclosed \\p{...} at position " + pos);
+    }
+    consume('}');
+    String category = name.toString();
+    CharSet cs = CharSet.ofUnicodeCategory(category);
+    if (cs == null) {
+      throw new UnsupportedPatternException("Unsupported Unicode property: \\p{" + category + "}");
+    }
+    return new CharClassNode(cs, negated);
   }
 
   /** Parse hex escape in character class context and return the character. */

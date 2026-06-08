@@ -43,11 +43,14 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy;
  * generateFindMatchFromMethod}; {@code RICH_API_HYBRID} if it emits the booleans but not those rich
  * methods (inheriting the base JDK-backed defaults).
  *
+ * <p>Currently no strategy is classified as {@code RICH_API_HYBRID}: both former hybrids ({@code
+ * SPECIALIZED_LITERAL_ALTERNATION} and {@code FIXED_REPETITION_BACKREF}) have been promoted to
+ * {@code NATIVE} after their rich MatchResult methods were implemented.
+ *
  * <p>This classification reflects the <strong>runtime path</strong> ({@code Reggie.compile()}). On
- * the compile-time annotation-processor path the {@code RICH_API_HYBRID} set is identical and still
- * generates (with a {@code MANDATORY_WARNING}), while the {@code FULL_FALLBACK} set is rejected:
- * {@code ReggieMatcherBytecodeGenerator.generate()} throws {@code UnsupportedOperationException}
- * for every {@code FULL_FALLBACK} strategy (alongside the AST-level fallbacks), which {@code
+ * the compile-time annotation-processor path the {@code FULL_FALLBACK} set is rejected: {@code
+ * ReggieMatcherBytecodeGenerator.generate()} throws {@code UnsupportedOperationException} for every
+ * {@code FULL_FALLBACK} strategy (alongside the AST-level fallbacks), which {@code
  * RegexPatternProcessor} surfaces as a build error. A fixed {@code @RegexPattern} class cannot fall
  * back to {@code java.util.regex} at runtime, so the (known-incorrect) native bytecode is never
  * emitted; {@code Reggie.compile()} must be used for those patterns instead.
@@ -83,12 +86,6 @@ public final class StrategyJdkClassifier {
       case VARIABLE_CAPTURE_BACKREF:
       case NESTED_QUANTIFIED_GROUPS:
         return StrategyJdkClass.FULL_FALLBACK;
-
-      // RICH_API_HYBRID: generated booleans, inherits JDK-backed rich MatchResult defaults.
-      // Their generators emit matches/find/findFrom but NOT match/findMatch/findMatchFrom.
-      case SPECIALIZED_LITERAL_ALTERNATION:
-      case FIXED_REPETITION_BACKREF:
-        return StrategyJdkClass.RICH_API_HYBRID;
 
       // NATIVE: generator emits its own match/findMatch/findMatchFrom (correct rich API).
       default:

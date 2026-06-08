@@ -17,7 +17,9 @@ package com.datadoghq.reggie.codegen.automaton;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -156,6 +158,238 @@ public final class CharSet {
 
   /** All characters except newline (\n). Used for . in non-dotall mode. */
   public static final CharSet ANY_EXCEPT_NEWLINE = ANY.minus(of('\n'));
+
+  // Unicode general category CharSets, computed from BMP (U+0000..U+FFFF)
+
+  /** \p{Lu} — uppercase letters */
+  public static final CharSet UNICODE_Lu = buildUnicodeCategoryRanges(Character.UPPERCASE_LETTER);
+
+  /** \p{Ll} — lowercase letters */
+  public static final CharSet UNICODE_Ll = buildUnicodeCategoryRanges(Character.LOWERCASE_LETTER);
+
+  /** \p{Lt} — titlecase letters */
+  public static final CharSet UNICODE_Lt = buildUnicodeCategoryRanges(Character.TITLECASE_LETTER);
+
+  /** \p{Lm} — modifier letters */
+  public static final CharSet UNICODE_Lm = buildUnicodeCategoryRanges(Character.MODIFIER_LETTER);
+
+  /** \p{Lo} — other letters */
+  public static final CharSet UNICODE_Lo = buildUnicodeCategoryRanges(Character.OTHER_LETTER);
+
+  /** \p{L} — any letter */
+  public static final CharSet UNICODE_L =
+      buildUnicodeCategoryRanges(
+          Character.UPPERCASE_LETTER,
+          Character.LOWERCASE_LETTER,
+          Character.TITLECASE_LETTER,
+          Character.MODIFIER_LETTER,
+          Character.OTHER_LETTER);
+
+  /** \p{Nd} — decimal digit numbers */
+  public static final CharSet UNICODE_Nd =
+      buildUnicodeCategoryRanges(Character.DECIMAL_DIGIT_NUMBER);
+
+  /** \p{Nl} — letter numbers */
+  public static final CharSet UNICODE_Nl = buildUnicodeCategoryRanges(Character.LETTER_NUMBER);
+
+  /** \p{No} — other numbers */
+  public static final CharSet UNICODE_No = buildUnicodeCategoryRanges(Character.OTHER_NUMBER);
+
+  /** \p{N} — any number */
+  public static final CharSet UNICODE_N =
+      buildUnicodeCategoryRanges(
+          Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER, Character.OTHER_NUMBER);
+
+  /** \p{Zs} — space separators */
+  public static final CharSet UNICODE_Zs = buildUnicodeCategoryRanges(Character.SPACE_SEPARATOR);
+
+  /** \p{Zl} — line separators */
+  public static final CharSet UNICODE_Zl = buildUnicodeCategoryRanges(Character.LINE_SEPARATOR);
+
+  /** \p{Zp} — paragraph separators */
+  public static final CharSet UNICODE_Zp =
+      buildUnicodeCategoryRanges(Character.PARAGRAPH_SEPARATOR);
+
+  /** \p{Z} — any separator */
+  public static final CharSet UNICODE_Z =
+      buildUnicodeCategoryRanges(
+          Character.SPACE_SEPARATOR, Character.LINE_SEPARATOR, Character.PARAGRAPH_SEPARATOR);
+
+  /** \p{Sm} — math symbols */
+  public static final CharSet UNICODE_Sm = buildUnicodeCategoryRanges(Character.MATH_SYMBOL);
+
+  /** \p{Sc} — currency symbols */
+  public static final CharSet UNICODE_Sc = buildUnicodeCategoryRanges(Character.CURRENCY_SYMBOL);
+
+  /** \p{Sk} — modifier symbols */
+  public static final CharSet UNICODE_Sk = buildUnicodeCategoryRanges(Character.MODIFIER_SYMBOL);
+
+  /** \p{So} — other symbols */
+  public static final CharSet UNICODE_So = buildUnicodeCategoryRanges(Character.OTHER_SYMBOL);
+
+  /** \p{S} — any symbol */
+  public static final CharSet UNICODE_S =
+      buildUnicodeCategoryRanges(
+          Character.MATH_SYMBOL,
+          Character.CURRENCY_SYMBOL,
+          Character.MODIFIER_SYMBOL,
+          Character.OTHER_SYMBOL);
+
+  /** \p{Pc} — connector punctuation */
+  public static final CharSet UNICODE_Pc =
+      buildUnicodeCategoryRanges(Character.CONNECTOR_PUNCTUATION);
+
+  /** \p{Pd} — dash punctuation */
+  public static final CharSet UNICODE_Pd = buildUnicodeCategoryRanges(Character.DASH_PUNCTUATION);
+
+  /** \p{Ps} — start punctuation */
+  public static final CharSet UNICODE_Ps = buildUnicodeCategoryRanges(Character.START_PUNCTUATION);
+
+  /** \p{Pe} — end punctuation */
+  public static final CharSet UNICODE_Pe = buildUnicodeCategoryRanges(Character.END_PUNCTUATION);
+
+  /** \p{Pi} — initial quote punctuation */
+  public static final CharSet UNICODE_Pi =
+      buildUnicodeCategoryRanges(Character.INITIAL_QUOTE_PUNCTUATION);
+
+  /** \p{Pf} — final quote punctuation */
+  public static final CharSet UNICODE_Pf =
+      buildUnicodeCategoryRanges(Character.FINAL_QUOTE_PUNCTUATION);
+
+  /** \p{Po} — other punctuation */
+  public static final CharSet UNICODE_Po = buildUnicodeCategoryRanges(Character.OTHER_PUNCTUATION);
+
+  /** \p{P} — any punctuation */
+  public static final CharSet UNICODE_P =
+      buildUnicodeCategoryRanges(
+          Character.CONNECTOR_PUNCTUATION,
+          Character.DASH_PUNCTUATION,
+          Character.START_PUNCTUATION,
+          Character.END_PUNCTUATION,
+          Character.INITIAL_QUOTE_PUNCTUATION,
+          Character.FINAL_QUOTE_PUNCTUATION,
+          Character.OTHER_PUNCTUATION);
+
+  /** \p{Mn} — non-spacing marks */
+  public static final CharSet UNICODE_Mn = buildUnicodeCategoryRanges(Character.NON_SPACING_MARK);
+
+  /** \p{Mc} — combining spacing marks */
+  public static final CharSet UNICODE_Mc =
+      buildUnicodeCategoryRanges(Character.COMBINING_SPACING_MARK);
+
+  /** \p{Me} — enclosing marks */
+  public static final CharSet UNICODE_Me = buildUnicodeCategoryRanges(Character.ENCLOSING_MARK);
+
+  /** \p{M} — any mark */
+  public static final CharSet UNICODE_M =
+      buildUnicodeCategoryRanges(
+          Character.NON_SPACING_MARK, Character.COMBINING_SPACING_MARK, Character.ENCLOSING_MARK);
+
+  /** \p{Cc} — control characters */
+  public static final CharSet UNICODE_Cc = buildUnicodeCategoryRanges(Character.CONTROL);
+
+  /** \p{Cf} — format characters */
+  public static final CharSet UNICODE_Cf = buildUnicodeCategoryRanges(Character.FORMAT);
+
+  /** \p{Cs} — surrogate characters */
+  public static final CharSet UNICODE_Cs = buildUnicodeCategoryRanges(Character.SURROGATE);
+
+  /** \p{Co} — private use characters */
+  public static final CharSet UNICODE_Co = buildUnicodeCategoryRanges(Character.PRIVATE_USE);
+
+  /** \p{Cn} — unassigned characters */
+  public static final CharSet UNICODE_Cn = buildUnicodeCategoryRanges(Character.UNASSIGNED);
+
+  /** \p{C} — any control/other character */
+  public static final CharSet UNICODE_C =
+      buildUnicodeCategoryRanges(
+          Character.CONTROL,
+          Character.FORMAT,
+          Character.SURROGATE,
+          Character.PRIVATE_USE,
+          Character.UNASSIGNED);
+
+  private static final Map<String, CharSet> UNICODE_CATEGORIES = buildCategoryMap();
+
+  private static Map<String, CharSet> buildCategoryMap() {
+    Map<String, CharSet> map = new HashMap<>();
+    map.put("L", UNICODE_L);
+    map.put("Lu", UNICODE_Lu);
+    map.put("Ll", UNICODE_Ll);
+    map.put("Lt", UNICODE_Lt);
+    map.put("Lm", UNICODE_Lm);
+    map.put("Lo", UNICODE_Lo);
+    map.put("N", UNICODE_N);
+    map.put("Nd", UNICODE_Nd);
+    map.put("Nl", UNICODE_Nl);
+    map.put("No", UNICODE_No);
+    map.put("Z", UNICODE_Z);
+    map.put("Zs", UNICODE_Zs);
+    map.put("Zl", UNICODE_Zl);
+    map.put("Zp", UNICODE_Zp);
+    map.put("S", UNICODE_S);
+    map.put("Sm", UNICODE_Sm);
+    map.put("Sc", UNICODE_Sc);
+    map.put("Sk", UNICODE_Sk);
+    map.put("So", UNICODE_So);
+    map.put("P", UNICODE_P);
+    map.put("Pc", UNICODE_Pc);
+    map.put("Pd", UNICODE_Pd);
+    map.put("Ps", UNICODE_Ps);
+    map.put("Pe", UNICODE_Pe);
+    map.put("Pi", UNICODE_Pi);
+    map.put("Pf", UNICODE_Pf);
+    map.put("Po", UNICODE_Po);
+    map.put("M", UNICODE_M);
+    map.put("Mn", UNICODE_Mn);
+    map.put("Mc", UNICODE_Mc);
+    map.put("Me", UNICODE_Me);
+    map.put("C", UNICODE_C);
+    map.put("Cc", UNICODE_Cc);
+    map.put("Cf", UNICODE_Cf);
+    map.put("Cs", UNICODE_Cs);
+    map.put("Co", UNICODE_Co);
+    map.put("Cn", UNICODE_Cn);
+    return Collections.unmodifiableMap(map);
+  }
+
+  /**
+   * Returns the CharSet for a Unicode general category name (e.g. "L", "Lu", "N", "Nd").
+   *
+   * @param category the PCRE Unicode category name
+   * @return the CharSet for that category, or {@code null} if unknown
+   */
+  public static CharSet ofUnicodeCategory(String category) {
+    return UNICODE_CATEGORIES.get(category);
+  }
+
+  private static CharSet buildUnicodeCategoryRanges(int... javaCharTypes) {
+    List<Range> result = new ArrayList<>();
+    int start = -1;
+    for (int c = 0; c <= 0xFFFF; c++) {
+      int type = Character.getType(c);
+      boolean matches = false;
+      for (int t : javaCharTypes) {
+        if (type == t) {
+          matches = true;
+          break;
+        }
+      }
+      if (matches && start < 0) {
+        start = c;
+      } else if (!matches && start >= 0) {
+        result.add(new Range((char) start, (char) (c - 1)));
+        start = -1;
+      }
+    }
+    if (start >= 0) {
+      result.add(new Range((char) start, (char) 0xFFFF));
+    }
+    if (result.isEmpty()) {
+      return empty();
+    }
+    return new CharSet(List.copyOf(result));
+  }
 
   // Query methods
 

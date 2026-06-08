@@ -17,7 +17,6 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
@@ -38,9 +37,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Verifies the loud "uses java.util.regex under the hood" warnings and empirically confirms the
- * NATIVE vs RICH_API_HYBRID classification: NATIVE matchers never build the JDK rich-API delegate
- * (no backstop warning), while RICH_API_HYBRID matchers log the hybrid warning at compile.
+ * Verifies the JDK-dependency classification and empirically confirms NATIVE matchers never build
+ * the JDK rich-API delegate (no backstop warning). All former RICH_API_HYBRID strategies
+ * (SPECIALIZED_LITERAL_ALTERNATION and FIXED_REPETITION_BACKREF) have been promoted to NATIVE.
  */
 class HybridWarningTest {
 
@@ -88,19 +87,37 @@ class HybridWarningTest {
     return messages().stream().anyMatch(m -> m.contains(needle));
   }
 
-  /**
-   * {@code keyword1|keyword2|...} resolves to SPECIALIZED_LITERAL_ALTERNATION (RICH_API_HYBRID).
-   */
+  /** {@code (a)\1{8,}} resolves to FIXED_REPETITION_BACKREF (now NATIVE after promotion). */
   @Test
-  void hybridPatternLogsHybridWarningAtCompile() {
+  void fixedRepetitionBackrefIsNativeAfterPromotion() {
+    String pattern = "(a)\\1{8,}";
+    assertEquals("FIXED_REPETITION_BACKREF", strategyOf(pattern));
+    assertEquals(StrategyJdkClass.NATIVE, jdkClassOf(pattern));
+
+    ReggieMatcher m = Reggie.compile(pattern);
+    m.match("aaaaaaaaa"); // 9 chars: 1 capture + 8 backrefs
+    m.findMatch("xaaaaaaaaa");
+    m.findMatchFrom("xaaaaaaaaa", 0);
+
+    assertFalse(anyContains("HYBRID matcher"));
+    assertFalse(anyContains("classified NATIVE but built"));
+  }
+
+  /** {@code keyword1|keyword2|...} resolves to SPECIALIZED_LITERAL_ALTERNATION (now NATIVE). */
+  @Test
+  void literalAlternationIsNativeAfterPromotion() {
     String pattern = "alpha|bravo|charlie|delta|echo";
     assertEquals("SPECIALIZED_LITERAL_ALTERNATION", strategyOf(pattern));
-    assertEquals(StrategyJdkClass.RICH_API_HYBRID, jdkClassOf(pattern));
+    assertEquals(StrategyJdkClass.NATIVE, jdkClassOf(pattern));
 
-    Reggie.compile(pattern);
+    ReggieMatcher m = Reggie.compile(pattern);
+    // Exercising the rich API must not trigger the JDK delegate backstop.
+    m.match("alpha");
+    m.findMatch("the echo is loud");
+    m.findMatchFrom("bravo team", 0);
 
-    assertTrue(anyContains("HYBRID matcher"), () -> "no hybrid warning; logs=" + messages());
-    assertTrue(anyContains(pattern));
+    assertFalse(anyContains("HYBRID matcher"));
+    assertFalse(anyContains("classified NATIVE but built"));
   }
 
   /** {@code \d{3}-\d{3}-\d{4}} is a NATIVE strategy — no hybrid warning, no delegate backstop. */
@@ -137,6 +154,8 @@ class HybridWarningTest {
       "<(\\w+)>.*</\\1>", // SPECIALIZED_BACKREFERENCE
       "abc", // DFA_UNROLLED
       "(.*)bar", // GREEDY_BACKTRACK
+      "foo|bar|baz|qux|quux", // SPECIALIZED_LITERAL_ALTERNATION (promoted to NATIVE)
+      "(a)\\1{8,}", // FIXED_REPETITION_BACKREF (promoted to NATIVE)
     };
     for (String p : nativePatterns) {
       assertEquals(

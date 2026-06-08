@@ -705,6 +705,11 @@ public class FixedRepetitionBackrefBytecodeGenerator {
       mv.visitInsn(IASTORE);
     }
 
+    // For match(), require pos == len (consumed entire input)
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPNE, returnNull);
+
     // ends[0] = pos (entire match ends here)
     mv.visitVarInsn(ALOAD, endsArrayVar);
     mv.visitInsn(ICONST_0);
@@ -735,27 +740,48 @@ public class FixedRepetitionBackrefBytecodeGenerator {
     mv.visitEnd();
   }
 
-  /** Generate stub for matchesBounded(CharSequence, int, int). */
-  public void generateMatchesBoundedStubMethod(ClassWriter cw) {
+  /**
+   * Generate matchesBounded(CharSequence, int, int) — extracts the bounded region and delegates to
+   * matches(String).
+   */
+  public void generateMatchesBoundedMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("matchesBounded() not yet implemented for FIXED_REPETITION_BACKREF strategy");
+
+    // Local vars: 0=this, 1=input, 2=start, 3=end
+    LocalVarAllocator alloc = new LocalVarAllocator(4);
+    int subStringVar = alloc.allocate();
+
+    // String sub = input.subSequence(start, end).toString();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
-        false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 4);
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ASTORE, subStringVar);
+
+    // return this.matches(sub);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, subStringVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(3, alloc.peek());
     mv.visitEnd();
   }
 
-  /** Generate stub for matchBounded(CharSequence, int, int). */
-  public void generateMatchBoundedStubMethod(ClassWriter cw) {
+  /**
+   * Generate matchBounded(CharSequence, int, int) — extracts the bounded region, delegates to
+   * match(String), and returns the raw result (spans are relative to the region substring).
+   */
+  public void generateMatchBoundedMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -764,22 +790,42 @@ public class FixedRepetitionBackrefBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("matchBounded() not yet implemented for FIXED_REPETITION_BACKREF strategy");
+
+    // Local vars: 0=this, 1=input, 2=start, 3=end
+    LocalVarAllocator alloc = new LocalVarAllocator(4);
+    int subStringVar = alloc.allocate();
+
+    // String sub = input.subSequence(start, end).toString();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ASTORE, subStringVar);
+
+    // return this.match(sub);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, subStringVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className,
+        "match",
+        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 4);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(3, alloc.peek());
     mv.visitEnd();
   }
 
-  /** Generate stub for findMatch(String). */
-  public void generateFindMatchStubMethod(ClassWriter cw) {
+  /** Generate findMatch(String) — delegates to findMatchFrom(input, 0). */
+  public void generateFindMatchMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -788,22 +834,29 @@ public class FixedRepetitionBackrefBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("findMatch() not yet implemented for FIXED_REPETITION_BACKREF strategy");
+
+    // return findMatchFrom(input, 0);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
+        INVOKEVIRTUAL,
+        className,
+        "findMatchFrom",
+        "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
         false);
-    mv.visitInsn(ATHROW);
+    mv.visitInsn(ARETURN);
+
     mv.visitMaxs(3, 2);
     mv.visitEnd();
   }
 
-  /** Generate stub for findMatchFrom(String, int). */
-  public void generateFindMatchFromStubMethod(ClassWriter cw) {
+  /**
+   * Generate findMatchFrom(String, int) — iterates starting positions from startPos, at each
+   * position tries to match (same logic as generateMatchMethod but starting at a given offset and
+   * not requiring full-input consumption), and returns a MatchResult on success.
+   */
+  public void generateFindMatchFromMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -812,17 +865,232 @@ public class FixedRepetitionBackrefBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
+
+    // Local variable allocation: slot 0=this, 1=input, 2=startPos
+    LocalVarAllocator alloc = new LocalVarAllocator(3);
+    int lenVar = alloc.allocate();
+    int startVar = alloc.allocate();
+    int posVar = alloc.allocate();
+    int groupStartVar = alloc.allocate();
+    int groupEndVar = alloc.allocate();
+    int groupLenVar = alloc.allocate();
+    int repsVar = alloc.allocate();
+    int capturedCharVar = info.isSingleCharGroup ? alloc.allocate() : -1;
+    int startsArrayVar = alloc.allocate();
+    int endsArrayVar = alloc.allocate();
+
+    Label returnNull = new Label();
+
+    // Null check
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(notNull);
+
+    // int len = input.length();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    // int start = startPos;
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ISTORE, startVar);
+
+    // Allocate arrays once outside the outer loop (we only return on success)
+    // int[] starts = new int[totalGroupCount + 1];
+    BytecodeUtil.pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, startsArrayVar);
+
+    // int[] ends = new int[totalGroupCount + 1];
+    BytecodeUtil.pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, endsArrayVar);
+
+    // Outer loop: try each starting position
+    Label outerLoop = new Label();
+    Label outerEnd = new Label();
+    mv.visitLabel(outerLoop);
+
+    // Minimum length check: need at least 1 (group) + minReps chars from start
+    // if (start + 1 + minReps > len) break;
+    mv.visitVarInsn(ILOAD, startVar);
+    BytecodeUtil.pushInt(mv, 1 + info.backrefMinReps);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, outerEnd);
+
+    // pos = start
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    // starts[0] = start
+    mv.visitVarInsn(ALOAD, startsArrayVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitInsn(IASTORE);
+
+    // starts[referencedGroupNumber] = pos
+    mv.visitVarInsn(ALOAD, startsArrayVar);
+    BytecodeUtil.pushInt(mv, info.referencedGroupNumber);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(IASTORE);
+
+    // groupStart = pos
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ISTORE, groupStartVar);
+
+    Label tryNextStart = new Label();
+
+    // Match group content
+    if (info.isSingleCharGroup) {
+      // char capturedChar = input.charAt(pos);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      mv.visitVarInsn(ISTORE, capturedCharVar);
+
+      if (info.literalChar >= 0) {
+        mv.visitVarInsn(ILOAD, capturedCharVar);
+        BytecodeUtil.pushInt(mv, info.literalChar);
+        mv.visitJumpInsn(IF_ICMPNE, tryNextStart);
+      } else if (info.groupCharSet != null) {
+        generateCharSetCheck(mv, capturedCharVar, info.groupCharSet, tryNextStart);
+      }
+
+      // pos++
+      mv.visitIincInsn(posVar, 1);
+    } else {
+      mv.visitIincInsn(posVar, 1);
+    }
+
+    // groupEnd = pos
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ISTORE, groupEndVar);
+
+    // ends[referencedGroupNumber] = pos
+    mv.visitVarInsn(ALOAD, endsArrayVar);
+    BytecodeUtil.pushInt(mv, info.referencedGroupNumber);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(IASTORE);
+
+    // groupLen = groupEnd - groupStart
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, groupLenVar);
+
+    // reps = 0
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, repsVar);
+
+    // Inner loop: count repetitions
+    Label innerLoop = new Label();
+    Label innerEnd = new Label();
+    mv.visitLabel(innerLoop);
+
+    // if (pos + groupLen > len) break
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, innerEnd);
+
+    if (info.isSingleCharGroup && capturedCharVar >= 0) {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      mv.visitVarInsn(ILOAD, capturedCharVar);
+      mv.visitJumpInsn(IF_ICMPNE, innerEnd);
+    } else {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, groupStartVar);
+      mv.visitVarInsn(ILOAD, groupLenVar);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
+      mv.visitJumpInsn(IFEQ, innerEnd);
+    }
+
+    // pos += groupLen
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    // reps++
+    mv.visitIincInsn(repsVar, 1);
+
+    if (info.backrefMaxReps >= 0) {
+      mv.visitVarInsn(ILOAD, repsVar);
+      BytecodeUtil.pushInt(mv, info.backrefMaxReps);
+      mv.visitJumpInsn(IF_ICMPGE, innerEnd);
+    }
+
+    mv.visitJumpInsn(GOTO, innerLoop);
+    mv.visitLabel(innerEnd);
+
+    // if (reps < minReps) try next start
+    mv.visitVarInsn(ILOAD, repsVar);
+    BytecodeUtil.pushInt(mv, info.backrefMinReps);
+    mv.visitJumpInsn(IF_ICMPLT, tryNextStart);
+
+    // Match suffix groups (same pattern as generateMatchMethod)
+    if (!info.suffix.isEmpty()) {
+      int suffixGroupNum = info.totalGroupCount;
+
+      mv.visitVarInsn(ALOAD, startsArrayVar);
+      BytecodeUtil.pushInt(mv, suffixGroupNum);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPGE, tryNextStart);
+
+      mv.visitIincInsn(posVar, 1);
+
+      mv.visitVarInsn(ALOAD, endsArrayVar);
+      BytecodeUtil.pushInt(mv, suffixGroupNum);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(IASTORE);
+    }
+
+    // ends[0] = pos
+    mv.visitVarInsn(ALOAD, endsArrayVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(IASTORE);
+
+    // return new MatchResultImpl(input, starts, ends, totalGroupCount)
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
     mv.visitInsn(DUP);
-    mv.visitLdcInsn("findMatchFrom() not yet implemented for FIXED_REPETITION_BACKREF strategy");
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ALOAD, startsArrayVar);
+    mv.visitVarInsn(ALOAD, endsArrayVar);
+    BytecodeUtil.pushInt(mv, info.totalGroupCount);
     mv.visitMethodInsn(
         INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
+        "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
-        "(Ljava/lang/String;)V",
+        "(Ljava/lang/String;[I[II)V",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 3);
+    mv.visitInsn(ARETURN);
+
+    // Try next starting position
+    mv.visitLabel(tryNextStart);
+    mv.visitIincInsn(startVar, 1);
+    mv.visitJumpInsn(GOTO, outerLoop);
+
+    mv.visitLabel(outerEnd);
+    mv.visitLabel(returnNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
   }
 }

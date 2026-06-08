@@ -795,10 +795,12 @@ public class RuntimeCompiler {
         literalAltGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalAltGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         literalAltGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        // Rich MatchResult methods (match/findMatch/findMatchFrom and bounded variants) are
-        // inherited from the JDK-backed defaults in ReggieMatcher; the generated trie versions
-        // returned null spans. Boolean fast path (matches/find/findFrom) stays generated.
         literalAltGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        literalAltGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        literalAltGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        literalAltGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        literalAltGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        literalAltGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case SPECIALIZED_GREEDY_CHARCLASS:
@@ -991,10 +993,11 @@ public class RuntimeCompiler {
         fixedRepGen.generateMatchesMethod(cw);
         fixedRepGen.generateFindMethod(cw);
         fixedRepGen.generateFindFromMethod(cw);
-        // Rich MatchResult methods (match/findMatch/findMatchFrom and bounded variants) are
-        // inherited from the JDK-backed defaults in ReggieMatcher. The generated match() reported
-        // a whole-input match even when the input had unmatched trailing characters, and the other
-        // rich methods were UnsupportedOperationException stubs. Boolean fast path stays generated.
+        fixedRepGen.generateMatchMethod(cw);
+        fixedRepGen.generateFindMatchMethod(cw);
+        fixedRepGen.generateFindMatchFromMethod(cw);
+        fixedRepGen.generateMatchesBoundedMethod(cw);
+        fixedRepGen.generateMatchBoundedMethod(cw);
         break;
 
       case VARIABLE_CAPTURE_BACKREF:

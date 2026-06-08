@@ -883,35 +883,261 @@ public class LiteralAlternationTrieGenerator {
     }
   }
 
-  // Group extraction methods - not supported yet (no capturing groups)
+  private static final String MATCH_RESULT_IMPL = "com/datadoghq/reggie/runtime/MatchResultImpl";
+  private static final String MATCH_RESULT = "com/datadoghq/reggie/runtime/MatchResult";
+
+  /**
+   * Generate match() - whole-input match returning a MatchResult. Calls this.matches(input); if
+   * true, constructs MatchResultImpl(input, {0}, {len}, 0).
+   */
   public void generateMatchMethod(ClassWriter cw, String className) {
-    generateUnsupportedMethod(
-        cw, "match", "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;");
-  }
-
-  public void generateFindMatchMethod(ClassWriter cw, String className) {
-    generateUnsupportedMethod(
-        cw, "findMatch", "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;");
-  }
-
-  public void generateFindMatchFromMethod(ClassWriter cw, String className) {
-    generateUnsupportedMethod(
-        cw, "findMatchFrom", "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;");
-  }
-
-  public void generateMatchBoundedMethod(ClassWriter cw, String className) {
-    generateUnsupportedMethod(
-        cw,
-        "matchBounded",
-        "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;");
-  }
-
-  private void generateUnsupportedMethod(ClassWriter cw, String methodName, String descriptor) {
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, methodName, descriptor, null, null);
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "match", "(Ljava/lang/String;)L" + MATCH_RESULT + ";", null, null);
     mv.visitCode();
+
+    Label returnNull = new Label();
+
+    // if (input == null) return null;
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNULL, returnNull);
+
+    // if (!this.matches(input)) return null;
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitJumpInsn(IFEQ, returnNull);
+
+    // int len = input.length();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    int lenVar = 2;
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    // new MatchResultImpl(input, new int[]{0}, new int[]{len}, 0)
+    mv.visitTypeInsn(NEW, MATCH_RESULT_IMPL);
+    mv.visitInsn(DUP);
+    mv.visitVarInsn(ALOAD, 1); // input
+    // starts = new int[]{0}
+    mv.visitInsn(ICONST_1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+    // ends = new int[]{len}
+    mv.visitInsn(ICONST_1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitInsn(IASTORE);
+    // groupCount = 0
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, MATCH_RESULT_IMPL, "<init>", "(Ljava/lang/String;[I[II)V", false);
+    mv.visitInsn(ARETURN);
+
+    mv.visitLabel(returnNull);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
+
     mv.visitMaxs(0, 0);
     mv.visitEnd();
+  }
+
+  /**
+   * Generate findMatch() - first match anywhere in input. Delegates to findBoundsFrom(input, 0,
+   * bounds) then constructs MatchResultImpl from bounds.
+   */
+  public void generateFindMatchMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "findMatch", "(Ljava/lang/String;)L" + MATCH_RESULT + ";", null, null);
+    mv.visitCode();
+
+    Label returnNull = new Label();
+
+    // if (input == null) return null;
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNULL, returnNull);
+
+    // int[] bounds = new int[2];
+    mv.visitInsn(ICONST_2);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    int boundsVar = 2;
+    mv.visitVarInsn(ASTORE, boundsVar);
+
+    // if (!this.findBoundsFrom(input, 0, bounds)) return null;
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, boundsVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", false);
+    mv.visitJumpInsn(IFEQ, returnNull);
+
+    // new MatchResultImpl(input, new int[]{bounds[0]}, new int[]{bounds[1]}, 0)
+    emitMatchResultFromBounds(mv, boundsVar, 1);
+
+    mv.visitLabel(returnNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Generate findMatchFrom() - first match at or after startPos. Delegates to findBoundsFrom(input,
+   * startPos, bounds) then constructs MatchResultImpl.
+   */
+  public void generateFindMatchFromMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "findMatchFrom", "(Ljava/lang/String;I)L" + MATCH_RESULT + ";", null, null);
+    mv.visitCode();
+
+    Label returnNull = new Label();
+
+    // if (input == null) return null;
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNULL, returnNull);
+
+    // int[] bounds = new int[2];
+    mv.visitInsn(ICONST_2);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    int boundsVar = 3;
+    mv.visitVarInsn(ASTORE, boundsVar);
+
+    // if (!this.findBoundsFrom(input, startPos, bounds)) return null;
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2); // startPos
+    mv.visitVarInsn(ALOAD, boundsVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", false);
+    mv.visitJumpInsn(IFEQ, returnNull);
+
+    // new MatchResultImpl(input, new int[]{bounds[0]}, new int[]{bounds[1]}, 0)
+    emitMatchResultFromBounds(mv, boundsVar, 1);
+
+    mv.visitLabel(returnNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Generate matchBounded() - whole-input match within [start, end) window. Calls
+   * this.matchesBounded(input, start, end); if true, constructs MatchResultImpl with those bounds.
+   */
+  public void generateMatchBoundedMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PUBLIC,
+            "matchBounded",
+            "(Ljava/lang/CharSequence;II)L" + MATCH_RESULT + ";",
+            null,
+            null);
+    mv.visitCode();
+
+    Label returnNull = new Label();
+
+    // if (input == null) return null;
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNULL, returnNull);
+
+    // if (!this.matchesBounded(input, start, end)) return null;
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2); // start
+    mv.visitVarInsn(ILOAD, 3); // end
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", false);
+    mv.visitJumpInsn(IFEQ, returnNull);
+
+    // String str = input.subSequence(start, end).toString();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    int strVar = 4;
+    mv.visitVarInsn(ASTORE, strVar);
+
+    // new MatchResultImpl(str, new int[]{start}, new int[]{end}, 0)
+    mv.visitTypeInsn(NEW, MATCH_RESULT_IMPL);
+    mv.visitInsn(DUP);
+    mv.visitVarInsn(ALOAD, strVar); // input text (the matched substring)
+    // starts = new int[]{start}
+    mv.visitInsn(ICONST_1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0); // starts[0] = 0 (relative to substring)
+    mv.visitInsn(IASTORE);
+    // ends = new int[]{end - start}
+    mv.visitInsn(ICONST_1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitInsn(ISUB); // end - start = substring length
+    mv.visitInsn(IASTORE);
+    // groupCount = 0
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, MATCH_RESULT_IMPL, "<init>", "(Ljava/lang/String;[I[II)V", false);
+    mv.visitInsn(ARETURN);
+
+    mv.visitLabel(returnNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Emits bytecode to construct and return a MatchResultImpl from bounds array. Assumes inputVar
+   * (ALOAD) holds the String input.
+   */
+  private void emitMatchResultFromBounds(MethodVisitor mv, int boundsVar, int inputVar) {
+    mv.visitTypeInsn(NEW, MATCH_RESULT_IMPL);
+    mv.visitInsn(DUP);
+    mv.visitVarInsn(ALOAD, inputVar); // input
+    // starts = new int[]{bounds[0]}
+    mv.visitInsn(ICONST_1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, boundsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IALOAD); // bounds[0]
+    mv.visitInsn(IASTORE);
+    // ends = new int[]{bounds[1]}
+    mv.visitInsn(ICONST_1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, boundsVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IALOAD); // bounds[1]
+    mv.visitInsn(IASTORE);
+    // groupCount = 0
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, MATCH_RESULT_IMPL, "<init>", "(Ljava/lang/String;[I[II)V", false);
+    mv.visitInsn(ARETURN);
   }
 }
