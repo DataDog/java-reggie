@@ -53,7 +53,8 @@ public final class FallbackPatternDetector {
     Visitor v = new Visitor();
     ast.accept(v);
 
-    // Bug 2: lookahead inside a quantified group
+    // Lookahead inside a quantified group (issue #28): the NFA engine still produces wrong
+    // results for assertions evaluated across loop iterations.
     if (v.lookaheadInQuantifier) {
       return "lookahead inside quantified group";
     }
@@ -340,27 +341,6 @@ public final class FallbackPatternDetector {
     return t == AssertionNode.Type.POSITIVE_LOOKAHEAD || t == AssertionNode.Type.NEGATIVE_LOOKAHEAD;
   }
 
-  private static boolean isLookbehind(AssertionNode.Type t) {
-    return t == AssertionNode.Type.POSITIVE_LOOKBEHIND
-        || t == AssertionNode.Type.NEGATIVE_LOOKBEHIND;
-  }
-
-  private static boolean containsAnchor(RegexNode node) {
-    if (node instanceof AnchorNode) return true;
-    if (node instanceof GroupNode) return containsAnchor(((GroupNode) node).child);
-    if (node instanceof ConcatNode) {
-      for (RegexNode c : ((ConcatNode) node).children) {
-        if (containsAnchor(c)) return true;
-      }
-    }
-    if (node instanceof AlternationNode) {
-      for (RegexNode alt : ((AlternationNode) node).alternatives) {
-        if (containsAnchor(alt)) return true;
-      }
-    }
-    return false;
-  }
-
   /** Returns true if {@code node} is or recursively contains a lookahead AssertionNode. */
   private static boolean containsLookahead(RegexNode node) {
     if (node instanceof AssertionNode) {
@@ -382,21 +362,29 @@ public final class FallbackPatternDetector {
     return false;
   }
 
+  private static boolean containsAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) return true;
+    if (node instanceof GroupNode) return containsAnchor(((GroupNode) node).child);
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (containsAnchor(c)) return true;
+      }
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsAnchor(alt)) return true;
+      }
+    }
+    return false;
+  }
+
   private static final class Visitor implements RegexVisitor<Void> {
     boolean lookaheadInQuantifier = false;
-    boolean hasLookahead = false;
-    boolean hasLookbehind = false;
     boolean hasLazyQuantifier = false;
     boolean hasAnchorInQuantifier = false;
 
     @Override
     public Void visitAssertion(AssertionNode node) {
-      if (isLookahead(node.type)) {
-        hasLookahead = true;
-      }
-      if (isLookbehind(node.type)) {
-        hasLookbehind = true;
-      }
       node.subPattern.accept(this);
       return null;
     }

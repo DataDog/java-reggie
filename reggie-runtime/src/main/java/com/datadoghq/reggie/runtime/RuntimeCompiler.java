@@ -568,19 +568,7 @@ public class RuntimeCompiler {
    */
   private static String lookaheadBooleanEngineDefectReason(
       PatternAnalyzer.MatchingStrategy strategy) {
-    switch (strategy) {
-      case SPECIALIZED_MULTIPLE_LOOKAHEADS:
-        return "boolean engine incorrect for SPECIALIZED_MULTIPLE_LOOKAHEADS strategy"
-            + " (find/findFrom never match, matches accepts embedded matches)";
-      case SPECIALIZED_LITERAL_LOOKAHEADS:
-        return "boolean engine incorrect for SPECIALIZED_LITERAL_LOOKAHEADS strategy"
-            + " (find/findFrom never match, matches accepts embedded matches)";
-      case HYBRID_DFA_LOOKAHEAD:
-        return "boolean engine incorrect for HYBRID_DFA_LOOKAHEAD strategy"
-            + " (find/findFrom never match)";
-      default:
-        return null;
-    }
+    return null;
   }
 
   /**

@@ -2118,6 +2118,9 @@ public class NFABytecodeGenerator {
           // No group tracking in this context (-1, -1)
           generateAssertionCheck(
               mv, state, inputVar, posVar, statesVar, worklistVar, stateIdVar, -1, -1, allocator);
+          // Prevent fall-through to the next switch case, which would incorrectly add
+          // epsilon targets for a different state regardless of whether this assertion passed.
+          mv.visitJumpInsn(GOTO, worklistLoop);
         } else if (state.anchor != null) {
           // Inline position guard: only follow epsilon transitions if anchor passes
           Label anchorPassed = new Label();
@@ -2813,8 +2816,12 @@ public class NFABytecodeGenerator {
     // position
     // IMPORTANT: Skip indexOf optimization for anchored patterns - they must try position 0 first
 
-    // Try to extract multi-character literal first (Tier 1 optimization)
-    String longestLiteral = skipLiteralOptimization ? null : extractLongestRequiredLiteral(nfa);
+    // Try to extract multi-character literal first (Tier 1 optimization).
+    // Suppress when hybridInfo != null: the match can start BEFORE the required literal
+    // (the lookahead assertion is at the pattern start), so using indexOf to skip ahead
+    // to where the literal appears would bypass valid starting positions.
+    String longestLiteral =
+        (skipLiteralOptimization || hybridInfo != null) ? null : extractLongestRequiredLiteral(nfa);
 
     // Skip indexOf optimization for:
     // 1. Patterns that require start anchor (^ or \A) - indexOf would skip position 0
@@ -2822,11 +2829,15 @@ public class NFABytecodeGenerator {
     //    earlier position, indexOf would skip to where the literal suffix appears
     // 3. skipLiteralOptimization=true (e.g. OPTIMIZED_NFA_WITH_BACKREFS) - the required literal
     //    appears after a variable-length prefix so indexOf would skip valid start positions
+    // 4. hybridInfo != null (HYBRID_DFA_LOOKAHEAD / SPECIALIZED_MULTIPLE_LOOKAHEADS) - the match
+    //    can start before the required literal (the lookahead assertion is at the start), so
+    //    jumping to where the literal appears would skip valid start positions
     boolean skipIndexOfOptimization =
         requiresStartAnchor
             || hasStringStartAnchor
             || hasBackrefToLookaheadCapture
-            || skipLiteralOptimization;
+            || skipLiteralOptimization
+            || hybridInfo != null;
 
     if (!skipIndexOfOptimization && longestLiteral != null && longestLiteral.length() >= 3) {
       // Use multi-character indexOf for better performance
@@ -3115,8 +3126,8 @@ public class NFABytecodeGenerator {
 
       // Continue to outerLoopStart (will check tryPos <= len there)
       mv.visitJumpInsn(GOTO, outerLoopStart);
-    } else if (requiredLiterals.size() == 1) {
-      // Fall back to single-character indexOf
+    } else if (!skipIndexOfOptimization && requiredLiterals.size() == 1) {
+      // Fall back to single-character indexOf (only when indexOf optimisation is not suppressed)
       char requiredChar = requiredLiterals.iterator().next();
 
       // tryPos = input.indexOf(requiredChar, tryPos + 1)
@@ -3350,6 +3361,7 @@ public class NFABytecodeGenerator {
     states.sort(Comparator.comparingInt(s -> s.id));
 
     Label defaultLabel = new Label();
+    Label afterSwitch = new Label();
     Label[] caseLabels = new Label[states.size()];
     int[] caseKeys = new int[states.size()];
 
@@ -3383,26 +3395,25 @@ public class NFABytecodeGenerator {
           mv.visitJumpInsn(IFEQ, notMatch); // If 0 (false), skip this transition
           pushInt(mv, trans.target.id);
           mv.visitVarInsn(ISTORE, stateVar);
+          mv.visitJumpInsn(GOTO, afterSwitch); // Match found — jump past entire switch
           mv.visitLabel(notMatch);
         }
 
-        // If no transition matched, set to dead state
-        Label endCase = new Label();
+        // No transition matched - set to dead state
         mv.visitInsn(ICONST_M1);
         mv.visitVarInsn(ISTORE, stateVar);
-        mv.visitLabel(endCase);
       }
 
-      // Break from switch
-      Label breakLabel = new Label();
-      mv.visitJumpInsn(GOTO, breakLabel);
-      mv.visitLabel(breakLabel);
+      // Each case must break out of the switch to prevent fall-through
+      mv.visitJumpInsn(GOTO, afterSwitch);
     }
 
-    // Default case (should not happen)
+    // Default case (should not happen, but required by LOOKUPSWITCH)
     mv.visitLabel(defaultLabel);
     mv.visitInsn(ICONST_M1);
     mv.visitVarInsn(ISTORE, stateVar);
+
+    mv.visitLabel(afterSwitch);
   }
 
   /**
@@ -5490,13 +5501,17 @@ public class NFABytecodeGenerator {
     reachable.add(current);
 
     boolean hasAnyCharTransitions = false;
+    boolean hasSpecificCharTransitions = false;
     while (!queue.isEmpty()) {
       NFA.NFAState state = queue.poll();
 
       for (NFA.Transition trans : state.getTransitions()) {
-        // Check if this is an "any char" transition (includes . which is ANY_EXCEPT_NEWLINE)
         if (trans.chars.isAnyChar()) {
+          // "any char" transition (includes . which is ANY_EXCEPT_NEWLINE)
           hasAnyCharTransitions = true;
+        } else {
+          // Specific character class (e.g. 'e', 'n', 'd' in ".*end")
+          hasSpecificCharTransitions = true;
         }
 
         if (reachable.add(trans.target)) {
@@ -5511,8 +5526,9 @@ public class NFABytecodeGenerator {
       }
     }
 
-    if (!hasAnyCharTransitions) {
-      return null; // Not a .{n,m} pattern
+    if (!hasAnyCharTransitions || hasSpecificCharTransitions) {
+      // Not a pure .{n,m} pattern — specific chars (e.g. "end") require real NFA simulation
+      return null;
     }
 
     // Extract minLength by finding shortest path to accept state
@@ -5701,13 +5717,20 @@ public class NFABytecodeGenerator {
   }
 
   /**
-   * Extract character class from .*[CharClass] pattern in sub-NFA. Returns null if pattern is not
-   * of this form.
+   * Extract character class from {@code .*[CharClass]} pattern in sub-NFA. Returns null if the
+   * sub-NFA is not of the form {@code .*[CharClass]} — i.e. every non-accept transition must match
+   * ANY character (like {@code .}), and exactly the transitions leading to an accept state carry
+   * the specific character class being extracted.
+   *
+   * <p>Patterns such as {@code [a-z]+\d} are rejected because the prefix {@code [a-z]+} is NOT "any
+   * char", so the character class \d would NOT appear at an arbitrary position in the input.
    */
   private CharSet extractDotStarCharClass(NFA.NFAState start, Set<NFA.NFAState> acceptStates) {
 
     // For .*[CharClass] pattern, we need to explore all reachable states and find
-    // transitions that lead to accept states with specific character classes
+    // transitions that lead to accept states with specific character classes.
+    // All OTHER (non-accept) transitions must be "any char" — otherwise the prefix is not .*
+    // and the optimization would be semantically incorrect.
     Set<NFA.NFAState> reachable = new HashSet<>();
     Queue<NFA.NFAState> queue = new LinkedList<>();
     queue.add(start);
@@ -5721,12 +5744,16 @@ public class NFABytecodeGenerator {
 
       // Check all character transitions
       for (NFA.Transition trans : current.getTransitions()) {
-        // Found a transition to accept state - check if it's a specific character class (not "any")
         if (acceptStates.contains(trans.target)) {
-          // Check if this is a specific charset (not "any char" which includes ANY_EXCEPT_NEWLINE)
+          // Transition to accept state — must carry a specific charset (not "any")
           if (!trans.chars.isAnyChar()) {
             acceptCharSet =
                 (acceptCharSet == null) ? trans.chars : acceptCharSet.union(trans.chars);
+          }
+        } else {
+          // Non-accept transition — must be "any char" for the .*[CharClass] form to hold
+          if (!trans.chars.isAnyChar()) {
+            return null; // Prefix is not .* — pattern is not .*[CharClass]
           }
         }
 
@@ -9354,7 +9381,7 @@ public class NFABytecodeGenerator {
         Label nextTransition = new Label();
 
         mv.visitVarInsn(ILOAD, chVar);
-        generateCharSetMatchCheck(mv, chars, nextTransition);
+        generateCharSetMatchCheck(mv, chars, nextTransition, chVar);
 
         mv.visitJumpInsn(GOTO, stateLabels.get(target.id));
 
@@ -9408,6 +9435,10 @@ public class NFABytecodeGenerator {
     // Start at DFA start state
     mv.visitJumpInsn(GOTO, stateLabels.get(dfa.getStartState().id));
 
+    // Label placed after all state code: the caller's "no match" path
+    // Using a fresh label here; after all states, we fall out naturally (caller placed label next).
+    Label noMatch = new Label();
+
     // Generate code for each DFA state
     for (DFA.DFAState state : dfa.getAllStates()) {
       mv.visitLabel(stateLabels.get(state.id));
@@ -9440,17 +9471,20 @@ public class NFABytecodeGenerator {
         Label nextTransition = new Label();
 
         mv.visitVarInsn(ILOAD, chVar);
-        generateCharSetMatchCheck(mv, chars, nextTransition);
+        generateCharSetMatchCheck(mv, chars, nextTransition, chVar);
 
         mv.visitJumpInsn(GOTO, stateLabels.get(target.id));
 
         mv.visitLabel(nextTransition);
       }
 
+      // No transition matched (or end of input) — main pattern failed from this position.
       mv.visitLabel(endOfInput);
-      // Not in accept state and no valid transition - main pattern failed
-      // Don't jump anywhere, just fall through (caller will handle failure)
+      mv.visitJumpInsn(GOTO, noMatch); // prevent fall-through to the next state's code
     }
+
+    // All states exhausted without accepting: the caller's code is placed here.
+    mv.visitLabel(noMatch);
   }
 
   /**
@@ -9492,6 +9526,8 @@ public class NFABytecodeGenerator {
     for (DFA.DFAState state : dfa.getAllStates()) {
       stateLabels.put(state.id, new Label());
     }
+    // Label to jump to when this tryPos attempt fails (no match found starting here)
+    Label tryNextPos = new Label();
 
     // Local variables for DFA execution
     int posVar = 4; // Current position in input during DFA simulation
@@ -9541,7 +9577,7 @@ public class NFABytecodeGenerator {
 
         // Check if ch matches this character set
         mv.visitVarInsn(ILOAD, chVar);
-        generateCharSetMatchCheck(mv, chars, nextTransition);
+        generateCharSetMatchCheck(mv, chars, nextTransition, chVar);
 
         // Match - jump to target state
         mv.visitJumpInsn(GOTO, stateLabels.get(target.id));
@@ -9549,11 +9585,13 @@ public class NFABytecodeGenerator {
         mv.visitLabel(nextTransition);
       }
 
-      // No transition matched - try next starting position
+      // No transition matched (or end of input): this tryPos did not lead to a match
       mv.visitLabel(endOfInput);
+      mv.visitJumpInsn(GOTO, tryNextPos); // prevent fall-through to next state's code
     }
 
     // No match from this position - try next
+    mv.visitLabel(tryNextPos);
     mv.visitIincInsn(tryPosVar, 1);
     mv.visitJumpInsn(GOTO, outerLoop);
 
@@ -9564,9 +9602,12 @@ public class NFABytecodeGenerator {
 
   /**
    * Generate bytecode to check if a character matches a CharSet. Jumps to noMatchLabel if character
-   * does NOT match.
+   * does NOT match. The character value must already be loaded on the stack before calling this
+   * method, and {@code chVar} must be the local-variable slot that holds the same character (needed
+   * to reload the value when the IF_ICMPLT comparison consumes it on the last range check).
    */
-  private void generateCharSetMatchCheck(MethodVisitor mv, CharSet charSet, Label noMatchLabel) {
+  private void generateCharSetMatchCheck(
+      MethodVisitor mv, CharSet charSet, Label noMatchLabel, int chVar) {
     // ch is already loaded on stack
     // Check each range in the charset
     List<CharSet.Range> ranges = charSet.getRanges();
@@ -9596,8 +9637,8 @@ public class NFABytecodeGenerator {
       if (i < ranges.size() - 1) {
         mv.visitInsn(DUP);
       } else {
-        // Last range - load ch from chVar
-        mv.visitVarInsn(ILOAD, 5); // chVar
+        // Last range - reload ch from its local-variable slot
+        mv.visitVarInsn(ILOAD, chVar);
       }
 
       // if (ch <= range.end) match found (don't jump to noMatchLabel)

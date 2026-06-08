@@ -76,13 +76,6 @@ public final class StrategyJdkClassifier {
    */
   public static StrategyJdkClass classifyJdkDependency(MatchingStrategy strategy) {
     switch (strategy) {
-      // FULL_FALLBACK: RuntimeCompiler returns JavaRegexFallbackMatcher for these strategies.
-      // Lookahead boolean-engine defects (lookaheadBooleanEngineDefectReason):
-      case SPECIALIZED_MULTIPLE_LOOKAHEADS:
-      case SPECIALIZED_LITERAL_LOOKAHEADS:
-      case HYBRID_DFA_LOOKAHEAD:
-        return StrategyJdkClass.FULL_FALLBACK;
-
       // NATIVE: generator emits its own match/findMatch/findMatchFrom (correct rich API).
       default:
         return StrategyJdkClass.NATIVE;

@@ -1860,6 +1860,11 @@ public class PatternAnalyzer {
    */
   private List<LiteralLookaheadInfo> extractLiteralLookaheads() {
     List<LiteralLookaheadInfo> literalLookaheads = new ArrayList<>();
+    // Track which AssertionNode AST objects have already been matched to avoid
+    // assigning the same AST node to multiple NFA assertion states when the pattern
+    // contains sequential lookaheads of the same type (e.g. (?=.*foo)(?=.*bar)).
+    java.util.IdentityHashMap<AssertionNode, Boolean> matchedAssertionNodes =
+        new java.util.IdentityHashMap<>();
 
     // Walk through NFA to find assertion states
     for (NFA.NFAState state : nfa.getStates()) {
@@ -1872,11 +1877,13 @@ public class PatternAnalyzer {
         continue;
       }
 
-      // Get the assertion sub-pattern from AST
-      AssertionNode astNode = findAssertionNodeInAST(ast, state);
+      // Get the assertion sub-pattern from AST, skipping already-matched nodes so that
+      // two sequential lookaheads of the same type do not both map to the first AST node.
+      AssertionNode astNode = findAssertionNodeInAST(ast, state, matchedAssertionNodes);
       if (astNode == null || astNode.subPattern == null) {
         continue; // No AST node found
       }
+      matchedAssertionNodes.put(astNode, Boolean.TRUE); // mark as used
 
       // PHASE 3: Build NFA for lookahead pattern (for separated atomic execution)
       NFA lookaheadNFA = null;
@@ -2214,10 +2221,22 @@ public class PatternAnalyzer {
    * best-effort search; may return null if not found.
    */
   private AssertionNode findAssertionNodeInAST(RegexNode node, NFA.NFAState targetState) {
+    return findAssertionNodeInAST(node, targetState, null);
+  }
+
+  /**
+   * Find an AssertionNode in the AST that corresponds to the given NFA assertion state, skipping
+   * any nodes already present in {@code alreadyMatched} (identity-based). Pass {@code null} to skip
+   * the deduplication check (backward-compatible behaviour).
+   */
+  private AssertionNode findAssertionNodeInAST(
+      RegexNode node,
+      NFA.NFAState targetState,
+      java.util.IdentityHashMap<AssertionNode, Boolean> alreadyMatched) {
     if (node instanceof AssertionNode) {
       AssertionNode assertion = (AssertionNode) node;
-      // Check if this assertion matches the target state type
-      if (isMatchingAssertion(assertion, targetState)) {
+      if (isMatchingAssertion(assertion, targetState)
+          && (alreadyMatched == null || !alreadyMatched.containsKey(assertion))) {
         return assertion;
       }
     }
@@ -2225,18 +2244,18 @@ public class PatternAnalyzer {
     // Recursively search child nodes
     if (node instanceof ConcatNode) {
       for (RegexNode child : ((ConcatNode) node).children) {
-        AssertionNode result = findAssertionNodeInAST(child, targetState);
+        AssertionNode result = findAssertionNodeInAST(child, targetState, alreadyMatched);
         if (result != null) return result;
       }
     } else if (node instanceof AlternationNode) {
       for (RegexNode child : ((AlternationNode) node).alternatives) {
-        AssertionNode result = findAssertionNodeInAST(child, targetState);
+        AssertionNode result = findAssertionNodeInAST(child, targetState, alreadyMatched);
         if (result != null) return result;
       }
     } else if (node instanceof GroupNode) {
-      return findAssertionNodeInAST(((GroupNode) node).child, targetState);
+      return findAssertionNodeInAST(((GroupNode) node).child, targetState, alreadyMatched);
     } else if (node instanceof QuantifierNode) {
-      return findAssertionNodeInAST(((QuantifierNode) node).child, targetState);
+      return findAssertionNodeInAST(((QuantifierNode) node).child, targetState, alreadyMatched);
     }
 
     return null;
