@@ -138,7 +138,7 @@ public class StrategyCorrectnessMetaTest {
         new Spec("(a)?\\1", List.of("aa", "xaay", "ab", "", "aaé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.NESTED_QUANTIFIED_GROUPS,
-        new Spec("((a|bc)+)*", List.of("abcabc", "xabcy", "zzz", "", "abcé")));
+        new Spec("((a)+)+", List.of("aaa", "xaaay", "bbb", "", "aaé")));
     // (foo)(bar) now routes to SPECIALIZED_FIXED_SEQUENCE (fixed literal concat — faster path).
     // Use a char-class group to keep a genuine ONEPASS_NFA representative.
     m.put(

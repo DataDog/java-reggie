@@ -110,7 +110,7 @@ public class NestedQuantifiedGroupsInfo implements PatternInfo {
     }
 
     public boolean isUnbounded() {
-      return max == Integer.MAX_VALUE;
+      return max == Integer.MAX_VALUE || max == -1;
     }
   }
 

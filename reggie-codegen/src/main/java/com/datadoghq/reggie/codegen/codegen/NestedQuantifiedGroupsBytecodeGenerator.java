@@ -99,12 +99,11 @@ public class NestedQuantifiedGroupsBytecodeGenerator {
     generateMatchesMethod(cw);
     generateFindMethod(cw);
     generateFindFromMethod(cw);
-    // Generate stub methods for MatchResult-returning methods
-    generateMatchStubMethod(cw);
-    generateMatchesBoundedStubMethod(cw);
-    generateMatchBoundedStubMethod(cw);
-    generateFindMatchStubMethod(cw);
-    generateFindMatchFromStubMethod(cw);
+    generateMatchMethod(cw);
+    generateMatchesBoundedMethod(cw);
+    generateMatchBoundedMethod(cw);
+    generateFindMatchMethod(cw);
+    generateFindMatchFromMethod(cw);
   }
 
   /** Generate matches() method with nested loops for quantifiers. */
@@ -562,9 +561,11 @@ public class NestedQuantifiedGroupsBytecodeGenerator {
     mv.visitLabel(loopEnd);
   }
 
-  // Stub methods for MatchResult-returning operations
-
-  private void generateMatchStubMethod(ClassWriter cw) {
+  /**
+   * Generate match(String) method — same algorithm as {@link #generateMatchesMethod} but returns a
+   * {@code MatchResultImpl} on success instead of {@code true}.
+   */
+  private void generateMatchMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -573,39 +574,172 @@ public class NestedQuantifiedGroupsBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
+
+    // Local vars: 0=this, 1=input
+    LocalVarAllocator alloc = new LocalVarAllocator(2);
+    int lenVar = alloc.allocate();
+    int posVar = alloc.allocate();
+
+    int[] groupStartVars = new int[info.totalGroupCount + 1];
+    int[] groupEndVars = new int[info.totalGroupCount + 1];
+    for (int i = 1; i <= info.totalGroupCount; i++) {
+      groupStartVars[i] = alloc.allocate();
+      groupEndVars[i] = alloc.allocate();
+    }
+
+    int[] countVars = new int[info.levels.size()];
+    int[] iterStartVars = new int[info.levels.size()];
+    for (int i = 0; i < info.levels.size(); i++) {
+      countVars[i] = alloc.allocate();
+      iterStartVars[i] = alloc.allocate();
+    }
+
+    int startsArrayVar = alloc.allocate();
+    int endsArrayVar = alloc.allocate();
+
+    Label returnNull = new Label();
+
+    // Null check
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(notNull);
+
+    // int len = input.length();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    // int pos = 0;
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    // Initialize group vars to -1
+    for (int i = 1; i <= info.totalGroupCount; i++) {
+      mv.visitInsn(ICONST_M1);
+      mv.visitVarInsn(ISTORE, groupStartVars[i]);
+      mv.visitInsn(ICONST_M1);
+      mv.visitVarInsn(ISTORE, groupEndVars[i]);
+    }
+
+    // Generate nested loops
+    if (info.levels.size() >= 2) {
+      generateNestedLoops(
+          mv,
+          alloc,
+          posVar,
+          lenVar,
+          countVars,
+          iterStartVars,
+          groupStartVars,
+          groupEndVars,
+          returnNull,
+          0);
+    }
+
+    // Check outer quantifier min
+    QuantifierLevel outerLevel = info.getOuterLevel();
+    if (outerLevel != null && outerLevel.min > 0) {
+      mv.visitVarInsn(ILOAD, countVars[0]);
+      pushInt(mv, outerLevel.min);
+      mv.visitJumpInsn(IF_ICMPLT, returnNull);
+    }
+
+    // For match(), require pos == len
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPNE, returnNull);
+
+    // Build int[] starts = new int[totalGroupCount + 1]
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, startsArrayVar);
+
+    // Build int[] ends = new int[totalGroupCount + 1]
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, endsArrayVar);
+
+    // starts[0] = 0, ends[0] = pos
+    mv.visitVarInsn(ALOAD, startsArrayVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+
+    mv.visitVarInsn(ALOAD, endsArrayVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(IASTORE);
+
+    // Fill group spans
+    for (int i = 1; i <= info.totalGroupCount; i++) {
+      mv.visitVarInsn(ALOAD, startsArrayVar);
+      pushInt(mv, i);
+      mv.visitVarInsn(ILOAD, groupStartVars[i]);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, endsArrayVar);
+      pushInt(mv, i);
+      mv.visitVarInsn(ILOAD, groupEndVars[i]);
+      mv.visitInsn(IASTORE);
+    }
+
+    // return new MatchResultImpl(input, starts, ends, totalGroupCount)
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
     mv.visitInsn(DUP);
-    mv.visitLdcInsn("match() not yet implemented for NESTED_QUANTIFIED_GROUPS strategy");
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ALOAD, startsArrayVar);
+    mv.visitVarInsn(ALOAD, endsArrayVar);
+    pushInt(mv, info.totalGroupCount);
     mv.visitMethodInsn(
         INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
+        "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
-        "(Ljava/lang/String;)V",
+        "(Ljava/lang/String;[I[II)V",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 2);
+    mv.visitInsn(ARETURN);
+
+    mv.visitLabel(returnNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
   }
 
-  private void generateMatchesBoundedStubMethod(ClassWriter cw) {
+  /**
+   * Generate matchesBounded(CharSequence, int, int) — extracts sub-sequence and delegates to {@code
+   * matches(String)}.
+   */
+  private void generateMatchesBoundedMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("matchesBounded() not yet implemented for NESTED_QUANTIFIED_GROUPS strategy");
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
-        false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 4);
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
 
-  private void generateMatchBoundedStubMethod(ClassWriter cw) {
+  /**
+   * Generate matchBounded(CharSequence, int, int) — delegates to {@code matchesBounded} for the
+   * check then to {@code findMatchFrom} for group extraction.
+   */
+  private void generateMatchBoundedMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -614,21 +748,35 @@ public class NestedQuantifiedGroupsBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("matchBounded() not yet implemented for NESTED_QUANTIFIED_GROUPS strategy");
+    Label matched = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
+        INVOKEVIRTUAL, className, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", false);
+    mv.visitJumpInsn(IFNE, matched);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(matched);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className,
+        "findMatchFrom",
+        "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 4);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
 
-  private void generateFindMatchStubMethod(ClassWriter cw) {
+  /** Generate findMatch(String) — delegates to {@code findMatchFrom(input, 0)}. */
+  private void generateFindMatchMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -637,21 +785,25 @@ public class NestedQuantifiedGroupsBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("findMatch() not yet implemented for NESTED_QUANTIFIED_GROUPS strategy");
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
+        INVOKEVIRTUAL,
+        className,
+        "findMatchFrom",
+        "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 2);
+    mv.visitInsn(ARETURN);
+    mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
 
-  private void generateFindMatchFromStubMethod(ClassWriter cw) {
+  /**
+   * Generate findMatchFrom(String, int) — outer search loop that tries each start position; on
+   * match, constructs and returns a {@code MatchResultImpl} with group spans.
+   */
+  private void generateFindMatchFromMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -660,17 +812,153 @@ public class NestedQuantifiedGroupsBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
+
+    // Local vars: 0=this, 1=input, 2=startPos
+    LocalVarAllocator alloc = new LocalVarAllocator(3);
+    int lenVar = alloc.allocate();
+    int searchPosVar = alloc.allocate();
+    int posVar = alloc.allocate();
+
+    int[] groupStartVars = new int[info.totalGroupCount + 1];
+    int[] groupEndVars = new int[info.totalGroupCount + 1];
+    for (int i = 1; i <= info.totalGroupCount; i++) {
+      groupStartVars[i] = alloc.allocate();
+      groupEndVars[i] = alloc.allocate();
+    }
+
+    int[] countVars = new int[info.levels.size()];
+    int[] iterStartVars = new int[info.levels.size()];
+    for (int i = 0; i < info.levels.size(); i++) {
+      countVars[i] = alloc.allocate();
+      iterStartVars[i] = alloc.allocate();
+    }
+
+    int startsArrayVar = alloc.allocate();
+    int endsArrayVar = alloc.allocate();
+
+    // Null check
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(notNull);
+
+    // int len = input.length();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    // int searchPos = startPos;
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ISTORE, searchPosVar);
+
+    Label searchLoop = new Label();
+    Label searchEnd = new Label();
+    Label tryNext = new Label();
+
+    mv.visitLabel(searchLoop);
+
+    // Check searchPos <= len
+    mv.visitVarInsn(ILOAD, searchPosVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, searchEnd);
+
+    // pos = searchPos
+    mv.visitVarInsn(ILOAD, searchPosVar);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    // Initialize group vars to -1
+    for (int i = 1; i <= info.totalGroupCount; i++) {
+      mv.visitInsn(ICONST_M1);
+      mv.visitVarInsn(ISTORE, groupStartVars[i]);
+      mv.visitInsn(ICONST_M1);
+      mv.visitVarInsn(ISTORE, groupEndVars[i]);
+    }
+
+    // Initialize outer count
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, countVars[0]);
+
+    // Run nested matching loops with group tracking
+    if (info.levels.size() >= 2) {
+      generateNestedLoops(
+          mv,
+          alloc,
+          posVar,
+          lenVar,
+          countVars,
+          iterStartVars,
+          groupStartVars,
+          groupEndVars,
+          tryNext,
+          0);
+    }
+
+    // Check outer min is satisfied
+    QuantifierLevel outerLevel = info.getOuterLevel();
+    if (outerLevel != null && outerLevel.min > 0) {
+      mv.visitVarInsn(ILOAD, countVars[0]);
+      pushInt(mv, outerLevel.min);
+      mv.visitJumpInsn(IF_ICMPLT, tryNext);
+    }
+
+    // Found a match — build MatchResultImpl
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, startsArrayVar);
+
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, endsArrayVar);
+
+    // starts[0] = searchPos, ends[0] = pos
+    mv.visitVarInsn(ALOAD, startsArrayVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, searchPosVar);
+    mv.visitInsn(IASTORE);
+
+    mv.visitVarInsn(ALOAD, endsArrayVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(IASTORE);
+
+    for (int i = 1; i <= info.totalGroupCount; i++) {
+      mv.visitVarInsn(ALOAD, startsArrayVar);
+      pushInt(mv, i);
+      mv.visitVarInsn(ILOAD, groupStartVars[i]);
+      mv.visitInsn(IASTORE);
+
+      mv.visitVarInsn(ALOAD, endsArrayVar);
+      pushInt(mv, i);
+      mv.visitVarInsn(ILOAD, groupEndVars[i]);
+      mv.visitInsn(IASTORE);
+    }
+
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
     mv.visitInsn(DUP);
-    mv.visitLdcInsn("findMatchFrom() not yet implemented for NESTED_QUANTIFIED_GROUPS strategy");
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ALOAD, startsArrayVar);
+    mv.visitVarInsn(ALOAD, endsArrayVar);
+    pushInt(mv, info.totalGroupCount);
     mv.visitMethodInsn(
         INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
+        "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
-        "(Ljava/lang/String;)V",
+        "(Ljava/lang/String;[I[II)V",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 3);
+    mv.visitInsn(ARETURN);
+
+    // Try next start position
+    mv.visitLabel(tryNext);
+    mv.visitIincInsn(searchPosVar, 1);
+    mv.visitJumpInsn(GOTO, searchLoop);
+
+    mv.visitLabel(searchEnd);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
   }
 }

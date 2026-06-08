@@ -556,14 +556,7 @@ public class RuntimeCompiler {
    * API (match, findMatch, matchBounded, etc. not yet implemented). The caller falls back to JDK.
    */
   private static String incompleteMatchResultApiReason(PatternAnalyzer.MatchingStrategy strategy) {
-    switch (strategy) {
-      case VARIABLE_CAPTURE_BACKREF:
-        return "MatchResult API not yet implemented for VARIABLE_CAPTURE_BACKREF strategy";
-      case NESTED_QUANTIFIED_GROUPS:
-        return "MatchResult API not yet implemented for NESTED_QUANTIFIED_GROUPS strategy";
-      default:
-        return null;
-    }
+    return null;
   }
 
   /**

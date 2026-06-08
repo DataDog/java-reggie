@@ -35,6 +35,7 @@ public class RegexParser {
   private String pattern;
   private int pos;
   private int groupCount;
+  private int totalGroupCount;
   private Map<String, Integer> groupNameMap; // Maps group names to group numbers
   private RegexModifiers currentModifiers;
 
@@ -45,6 +46,7 @@ public class RegexParser {
     this.pattern = pattern;
     this.pos = 0;
     this.groupCount = 0;
+    this.totalGroupCount = countCapturingGroups(pattern);
     this.groupNameMap = new HashMap<>();
     this.currentModifiers = new RegexModifiers();
 
@@ -144,6 +146,11 @@ public class RegexParser {
     if (hasMore() && peek() == '?') {
       consume();
       return true;
+    }
+    // Possessive quantifier (+): consume and treat as greedy — DFA has no backtracking,
+    // so possessive and greedy are semantically equivalent.
+    if (hasMore() && peek() == '+') {
+      consume();
     }
     return false;
   }
@@ -568,20 +575,45 @@ public class RegexParser {
       case '5':
       case '6':
       case '7':
-        // Could be backreference (\1) or octal (\100)
-        // Check if followed by another digit
-        if (hasMore() && Character.isDigit(peek())) {
-          // Multi-digit: \1x where x is digit → octal escape
-          pos--; // Back up to the digit
-          return parseOctalEscape();
-        } else {
-          // Single digit: \1 → backreference
-          return new BackreferenceNode(ch - '0');
-        }
       case '8':
       case '9':
-        // \8 and \9 are backreferences (or invalid if no such group exists)
-        return new BackreferenceNode(ch - '0');
+        // PCRE backref/octal semantics for \N where N starts with digit 1-9:
+        // 1. Greedily collect up to 3 digits total.
+        // 2. If the resulting number <= totalGroupCount, it is a backreference.
+        // 3. Otherwise, if the first digit is 1-7, interpret as octal escape (up to 3 octal
+        //    digits). Non-octal digits (8, 9) terminate the octal sequence.
+        // 4. If first digit is 8 or 9 and not a valid multi-group backref, treat as \8 or \9.
+        {
+          // pos is now one past the first digit (ch). posBeforeFirst points to the first digit.
+          int posBeforeFirst = pos - 1;
+          int firstDigit = ch - '0';
+
+          // Greedily collect up to 3 digits total (PCRE limits backref/octal to 3 digits)
+          int refNum = firstDigit;
+          int digitsConsumed = 1;
+          while (hasMore() && Character.isDigit(peek()) && digitsConsumed < 3) {
+            refNum = refNum * 10 + (peek() - '0');
+            consume();
+            digitsConsumed++;
+          }
+
+          // If the full number is a valid backref, use it
+          if (refNum <= totalGroupCount) {
+            return new BackreferenceNode(refNum);
+          }
+
+          // Not a valid backref. Try to interpret as octal if first digit is 1-7:
+          if (firstDigit <= 7) {
+            // Backtrack to the first digit and re-parse as octal (up to 3 octal digits)
+            pos = posBeforeFirst;
+            return parseOctalEscape();
+          }
+
+          // First digit is 8 or 9: single-digit backreference (\8 or \9).
+          // Backtrack any extra digits consumed.
+          pos = posBeforeFirst + 1; // restore to position just after the first digit
+          return new BackreferenceNode(firstDigit);
+        }
       case 'k':
         // Named backreference: \k<name> or \k'name'
         return parseNamedBackreference();
@@ -1444,6 +1476,72 @@ public class RegexParser {
     groupCount = maxGroupNumber;
 
     return new BranchResetNode(alternatives, maxGroupNumber);
+  }
+
+  /**
+   * Pre-scans the pattern to count the total number of capturing groups. This is used to implement
+   * PCRE semantics for multi-digit backreferences: \NN where NN >= 10 is a backref when the total
+   * group count is at least NN, otherwise it is an octal escape.
+   */
+  private static int countCapturingGroups(String pat) {
+    int count = 0;
+    int i = 0;
+    int len = pat.length();
+    while (i < len) {
+      char c = pat.charAt(i);
+      if (c == '\\') {
+        i += 2; // skip escaped character
+      } else if (c == '[') {
+        // skip character class
+        i++;
+        while (i < len && pat.charAt(i) != ']') {
+          if (pat.charAt(i) == '\\') i++;
+          i++;
+        }
+        i++; // skip ']'
+      } else if (c == '(') {
+        i++;
+        if (i < len && pat.charAt(i) == '?') {
+          i++;
+          if (i < len) {
+            char next = pat.charAt(i);
+            if (next == ':'
+                || next == '='
+                || next == '!'
+                || next == '>'
+                || next == '|'
+                || next == '#'
+                || next == 'R'
+                || next == '&') {
+              // non-capturing: (?:), (?=), (?!), (?>), (?|), (?#), (?R), (?&name)
+            } else if (next == '<') {
+              i++;
+              if (i < len && (pat.charAt(i) == '=' || pat.charAt(i) == '!')) {
+                // lookbehind (?<= or (?<!
+              } else {
+                // named group (?<name>
+                count++;
+              }
+            } else if (next == '\'') {
+              // named group (?'name'
+              count++;
+            } else if (next == '(') {
+              // conditional (?(...)
+            } else if (Character.isDigit(next) || next == '-') {
+              // subroutine (?1) or (?-1)
+            } else {
+              // modifier group (?i etc.) - non-capturing
+            }
+          }
+        } else {
+          // plain capturing group
+          count++;
+        }
+      } else {
+        i++;
+      }
+    }
+    return count;
   }
 
   // Exception classes

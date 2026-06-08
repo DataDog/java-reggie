@@ -85,17 +85,20 @@ public class VariableCaptureBackrefBytecodeGenerator {
   /** Generate all required methods for ReggieMatcher. */
   public void generate(ClassWriter cw) {
     generateMatchesMethod(cw);
+    generateMatchMethod(cw);
     generateFindMethod(cw);
     generateFindFromMethod(cw);
-    // Generate stub methods for MatchResult-returning methods
-    generateMatchStubMethod(cw);
-    generateMatchesBoundedStubMethod(cw);
-    generateMatchBoundedStubMethod(cw);
-    generateFindMatchStubMethod(cw);
-    generateFindMatchFromStubMethod(cw);
+    generateMatchesBoundedMethod(cw);
+    generateMatchBoundedMethod(cw);
+    generateFindMatchMethod(cw);
+    generateFindMatchFromMethod(cw);
   }
 
-  private void generateMatchStubMethod(ClassWriter cw) {
+  /**
+   * Generate match() method — same backtracking algorithm as matches() but returns a
+   * MatchResultImpl on success or null on failure.
+   */
+  private void generateMatchMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -104,39 +107,234 @@ public class VariableCaptureBackrefBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
+
+    // Local vars: 0=this, 1=input
+    LocalVarAllocator alloc = new LocalVarAllocator(2);
+    int lenVar = alloc.allocate();
+    int groupEndVar = alloc.allocate();
+    int groupStartVar = alloc.allocate();
+    int sepStartVar = alloc.allocate();
+    int sepEndVar = alloc.allocate();
+    int backrefEndVar = alloc.allocate();
+    int iterationsVar = alloc.allocate();
+
+    Label returnNull = new Label();
+
+    // Null check
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(notNull);
+
+    // int len = input.length();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    // Minimum length check
+    int minLen = info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
+    mv.visitVarInsn(ILOAD, lenVar);
+    pushInt(mv, minLen);
+    mv.visitJumpInsn(IF_ICMPLT, returnNull);
+
+    // int groupStart = 0;
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, groupStartVar);
+
+    // int groupEnd = len - separatorMinLen;
+    mv.visitVarInsn(ILOAD, lenVar);
+    pushInt(mv, info.getSeparatorMinLength());
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, groupEndVar);
+
+    // int iterations = 0;
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, iterationsVar);
+
+    Label loopStart = new Label();
+    Label loopEnd = new Label();
+    Label continueLoop = new Label();
+
+    mv.visitLabel(loopStart);
+
+    // Check: groupEnd >= groupStart + groupMinCount
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
+    pushInt(mv, info.groupMinCount);
+    mv.visitInsn(IADD);
+    mv.visitJumpInsn(IF_ICMPLT, loopEnd);
+
+    // BacktrackConfig.checkLimit(iterations++)
+    mv.visitVarInsn(ILOAD, iterationsVar);
+    mv.visitMethodInsn(
+        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
+    mv.visitJumpInsn(IFNE, returnNull);
+    mv.visitIincInsn(iterationsVar, 1);
+
+    // Validate group content matches groupCharSet (if specified)
+    generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueLoop, alloc);
+
+    // int sepStart = groupEnd;
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitVarInsn(ISTORE, sepStartVar);
+
+    // Match separator
+    generateSeparatorMatch(mv, sepStartVar, sepEndVar, lenVar, continueLoop, alloc);
+
+    // int groupLen = groupEnd - groupStart;
+    int groupLenVar = alloc.allocate();
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, groupLenVar);
+
+    // Check: sepEnd + groupLen <= len
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, continueLoop);
+
+    // backrefEnd = sepEnd + groupLen
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ISTORE, backrefEndVar);
+
+    // Without end anchor: backrefEnd must equal len for match()
+    if (!info.hasEndAnchor) {
+      mv.visitVarInsn(ILOAD, backrefEndVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPNE, continueLoop);
+    }
+
+    // Match backref: input.regionMatches(sepEnd, input, groupStart, groupLen)
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, groupStartVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
+    mv.visitJumpInsn(IFEQ, continueLoop);
+
+    // Match found — build MatchResultImpl
+    // int[] starts = new int[totalGroupCount + 1]
+    int startsVar = alloc.allocate();
+    int endsVar = alloc.allocate();
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    // starts[0] = 0
     mv.visitInsn(DUP);
-    mv.visitLdcInsn("match() not yet implemented for VARIABLE_CAPTURE_BACKREF strategy");
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+    // starts[groupNumber] = groupStart
+    mv.visitInsn(DUP);
+    pushInt(mv, info.groupNumber);
+    mv.visitVarInsn(ILOAD, groupStartVar);
+    mv.visitInsn(IASTORE);
+    // starts[separatorGroupNumber] = sepStart  (if applicable)
+    if (info.separatorGroupNumber >= 0) {
+      mv.visitInsn(DUP);
+      pushInt(mv, info.separatorGroupNumber);
+      mv.visitVarInsn(ILOAD, sepStartVar);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitVarInsn(ASTORE, startsVar);
+
+    // int[] ends = new int[totalGroupCount + 1]
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    // ends[0] = len
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitInsn(IASTORE);
+    // ends[groupNumber] = groupEnd
+    mv.visitInsn(DUP);
+    pushInt(mv, info.groupNumber);
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitInsn(IASTORE);
+    // ends[separatorGroupNumber] = sepEnd  (if applicable)
+    if (info.separatorGroupNumber >= 0) {
+      mv.visitInsn(DUP);
+      pushInt(mv, info.separatorGroupNumber);
+      mv.visitVarInsn(ILOAD, sepEndVar);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitVarInsn(ASTORE, endsVar);
+
+    // return new MatchResultImpl(input, starts, ends, totalGroupCount)
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
+    mv.visitInsn(DUP);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ALOAD, startsVar);
+    mv.visitVarInsn(ALOAD, endsVar);
+    pushInt(mv, info.totalGroupCount);
     mv.visitMethodInsn(
         INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
+        "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
-        "(Ljava/lang/String;)V",
+        "(Ljava/lang/String;[I[II)V",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 2);
+    mv.visitInsn(ARETURN);
+
+    // Continue backtracking: groupEnd--
+    mv.visitLabel(continueLoop);
+    mv.visitIincInsn(groupEndVar, -1);
+    mv.visitJumpInsn(GOTO, loopStart);
+
+    mv.visitLabel(loopEnd);
+    mv.visitLabel(returnNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
   }
 
-  private void generateMatchesBoundedStubMethod(ClassWriter cw) {
+  /** Generate matchesBounded() — delegates to matches() on the subSequence substring. */
+  private void generateMatchesBoundedMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("matchesBounded() not yet implemented for VARIABLE_CAPTURE_BACKREF strategy");
+
+    // Local vars: 0=this, 1=input, 2=start, 3=end
+    LocalVarAllocator alloc = new LocalVarAllocator(4);
+    int subVar = alloc.allocate();
+
+    // String sub = input.subSequence(start, end).toString();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
-        false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 4);
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ASTORE, subVar);
+
+    // return this.matches(sub);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, subVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, className, "matches", "(Ljava/lang/String;)Z", false);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(0, alloc.peek());
     mv.visitEnd();
   }
 
-  private void generateMatchBoundedStubMethod(ClassWriter cw) {
+  /**
+   * Generate matchBounded() — delegates to match() on the subSequence, then adjusts spans by adding
+   * the start offset back.
+   */
+  private void generateMatchBoundedMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -145,21 +343,135 @@ public class VariableCaptureBackrefBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
+
+    // Local vars: 0=this, 1=input, 2=start, 3=end
+    LocalVarAllocator alloc = new LocalVarAllocator(4);
+    int subVar = alloc.allocate();
+    int resultVar = alloc.allocate();
+    int startsVar = alloc.allocate();
+    int endsVar = alloc.allocate();
+    int iVar = alloc.allocate();
+
+    // String sub = input.subSequence(start, end).toString();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ASTORE, subVar);
+
+    // MatchResultImpl inner = (MatchResultImpl) this.match(sub);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, subVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className,
+        "match",
+        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
+    mv.visitVarInsn(ASTORE, resultVar);
+
+    // if (inner == null) return null;
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, resultVar);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(notNull);
+
+    // Adjust spans: add start (param slot 2) to every valid entry
+    // starts and ends are arrays of length totalGroupCount+1 inside the MatchResultImpl;
+    // we build fresh arrays here using the same sub-string spans + offset.
+    //
+    // Build new starts[] and ends[] by calling inner.start(i)+offset / inner.end(i)+offset
+    int totalSlots = info.totalGroupCount + 1;
+    pushInt(mv, totalSlots);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, startsVar);
+
+    pushInt(mv, totalSlots);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, endsVar);
+
+    // Loop: for (int i = 0; i <= totalGroupCount; i++) { starts[i] = inner.start(i) + start; ... }
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, iVar);
+
+    Label loopCond = new Label();
+    Label loopBody = new Label();
+    mv.visitJumpInsn(GOTO, loopCond);
+    mv.visitLabel(loopBody);
+
+    // starts[i] = inner.start(i) + start
+    mv.visitVarInsn(ALOAD, startsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitVarInsn(ALOAD, resultVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "start", "(I)I", true);
+    mv.visitVarInsn(ILOAD, 2); // start param
+    mv.visitInsn(IADD);
+    mv.visitInsn(IASTORE);
+
+    // ends[i] = inner.end(i) + start
+    mv.visitVarInsn(ALOAD, endsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitVarInsn(ALOAD, resultVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "end", "(I)I", true);
+    mv.visitVarInsn(ILOAD, 2); // start param
+    mv.visitInsn(IADD);
+    mv.visitInsn(IASTORE);
+
+    mv.visitIincInsn(iVar, 1);
+
+    mv.visitLabel(loopCond);
+    mv.visitVarInsn(ILOAD, iVar);
+    pushInt(mv, info.totalGroupCount);
+    mv.visitJumpInsn(IF_ICMPLE, loopBody);
+
+    // The sub-string used in match() is different from the original input CharSequence.
+    // We need the original string for MatchResultImpl. Use sub as a proxy (already
+    // offset-adjusted).
+    // Actually we should return a MatchResult that reports group(i) from the original input.
+    // The simplest approach: pass the CharSequence.toString() as the "input" to MatchResultImpl
+    // but with adjusted spans. We use sub's toString which is a sub-sequence already.
+    // However MatchResultImpl.group(i) calls input.substring(starts[i], ends[i]).
+    // Since we've already added offset to starts/ends, we need the full input string.
+    int fullInputVar = alloc.allocate();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ASTORE, fullInputVar);
+
+    // return new MatchResultImpl(fullInput, starts, ends, totalGroupCount)
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
     mv.visitInsn(DUP);
-    mv.visitLdcInsn("matchBounded() not yet implemented for VARIABLE_CAPTURE_BACKREF strategy");
+    mv.visitVarInsn(ALOAD, fullInputVar);
+    mv.visitVarInsn(ALOAD, startsVar);
+    mv.visitVarInsn(ALOAD, endsVar);
+    pushInt(mv, info.totalGroupCount);
     mv.visitMethodInsn(
         INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
+        "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
-        "(Ljava/lang/String;)V",
+        "(Ljava/lang/String;[I[II)V",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 4);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(0, alloc.peek());
     mv.visitEnd();
   }
 
-  private void generateFindMatchStubMethod(ClassWriter cw) {
+  /** Generate findMatch() — delegates to findMatchFrom(input, 0). */
+  private void generateFindMatchMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -168,21 +480,28 @@ public class VariableCaptureBackrefBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-    mv.visitInsn(DUP);
-    mv.visitLdcInsn("findMatch() not yet implemented for VARIABLE_CAPTURE_BACKREF strategy");
+
+    // return this.findMatchFrom(input, 0);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitInsn(ICONST_0);
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
-        "<init>",
-        "(Ljava/lang/String;)V",
+        INVOKEVIRTUAL,
+        className,
+        "findMatchFrom",
+        "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
         false);
-    mv.visitInsn(ATHROW);
+    mv.visitInsn(ARETURN);
+
     mv.visitMaxs(3, 2);
     mv.visitEnd();
   }
 
-  private void generateFindMatchFromStubMethod(ClassWriter cw) {
+  /**
+   * Generate findMatchFrom() — same outer/inner loop as generateFindFromMethod but returns a
+   * MatchResultImpl with adjusted spans on success, or null if no match.
+   */
+  private void generateFindMatchFromMethod(ClassWriter cw) {
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -191,17 +510,195 @@ public class VariableCaptureBackrefBytecodeGenerator {
             null,
             null);
     mv.visitCode();
-    mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
+
+    // Local vars: 0=this, 1=input, 2=startPos
+    LocalVarAllocator alloc = new LocalVarAllocator(3);
+    int lenVar = alloc.allocate();
+    int startVar = alloc.allocate();
+    int groupEndVar = alloc.allocate();
+    int sepStartVar = alloc.allocate();
+    int sepEndVar = alloc.allocate();
+    int iterationsVar = alloc.allocate();
+
+    Label returnNull = new Label();
+
+    // Null check
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+    mv.visitLabel(notNull);
+
+    // int len = input.length();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    // int start = startPos;
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ISTORE, startVar);
+
+    Label outerLoop = new Label();
+    Label outerEnd = new Label();
+
+    mv.visitLabel(outerLoop);
+
+    int minLen = info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
+    mv.visitVarInsn(ILOAD, startVar);
+    pushInt(mv, minLen);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, outerEnd);
+
+    // groupEnd = len - separatorMinLen
+    mv.visitVarInsn(ILOAD, lenVar);
+    pushInt(mv, info.getSeparatorMinLength());
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, groupEndVar);
+
+    // iterations = 0
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, iterationsVar);
+
+    Label innerLoop = new Label();
+    Label innerEnd = new Label();
+    Label continueInner = new Label();
+
+    mv.visitLabel(innerLoop);
+
+    // Check: groupEnd >= start + groupMinCount
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitVarInsn(ILOAD, startVar);
+    pushInt(mv, info.groupMinCount);
+    mv.visitInsn(IADD);
+    mv.visitJumpInsn(IF_ICMPLT, innerEnd);
+
+    // BacktrackConfig.checkLimit
+    mv.visitVarInsn(ILOAD, iterationsVar);
+    mv.visitMethodInsn(
+        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
+    mv.visitJumpInsn(IFNE, returnNull);
+    mv.visitIincInsn(iterationsVar, 1);
+
+    // Validate group content matches groupCharSet (if specified)
+    generateGroupCharSetValidation(mv, startVar, groupEndVar, continueInner, alloc);
+
+    // sepStart = groupEnd
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitVarInsn(ISTORE, sepStartVar);
+
+    // Match separator
+    generateSeparatorMatch(mv, sepStartVar, sepEndVar, lenVar, continueInner, alloc);
+
+    int groupLenVar = alloc.allocate();
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, groupLenVar);
+
+    // Check: sepEnd + groupLen <= len
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, continueInner);
+
+    // Match backref
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
+    mv.visitJumpInsn(IFEQ, continueInner);
+
+    // Found — build MatchResultImpl
+    // matchEnd = sepEnd + groupLen
+    int matchEndVar = alloc.allocate();
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ISTORE, matchEndVar);
+
+    int startsVar = alloc.allocate();
+    int endsVar = alloc.allocate();
+
+    // starts array
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    // starts[0] = start (match start)
     mv.visitInsn(DUP);
-    mv.visitLdcInsn("findMatchFrom() not yet implemented for VARIABLE_CAPTURE_BACKREF strategy");
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitInsn(IASTORE);
+    // starts[groupNumber] = start (group start == outer start)
+    mv.visitInsn(DUP);
+    pushInt(mv, info.groupNumber);
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitInsn(IASTORE);
+    if (info.separatorGroupNumber >= 0) {
+      mv.visitInsn(DUP);
+      pushInt(mv, info.separatorGroupNumber);
+      mv.visitVarInsn(ILOAD, sepStartVar);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitVarInsn(ASTORE, startsVar);
+
+    // ends array
+    pushInt(mv, info.totalGroupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    // ends[0] = matchEnd
+    mv.visitInsn(DUP);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, matchEndVar);
+    mv.visitInsn(IASTORE);
+    // ends[groupNumber] = groupEnd
+    mv.visitInsn(DUP);
+    pushInt(mv, info.groupNumber);
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitInsn(IASTORE);
+    if (info.separatorGroupNumber >= 0) {
+      mv.visitInsn(DUP);
+      pushInt(mv, info.separatorGroupNumber);
+      mv.visitVarInsn(ILOAD, sepEndVar);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitVarInsn(ASTORE, endsVar);
+
+    // return new MatchResultImpl(input, starts, ends, totalGroupCount)
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
+    mv.visitInsn(DUP);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ALOAD, startsVar);
+    mv.visitVarInsn(ALOAD, endsVar);
+    pushInt(mv, info.totalGroupCount);
     mv.visitMethodInsn(
         INVOKESPECIAL,
-        "java/lang/UnsupportedOperationException",
+        "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
-        "(Ljava/lang/String;)V",
+        "(Ljava/lang/String;[I[II)V",
         false);
-    mv.visitInsn(ATHROW);
-    mv.visitMaxs(3, 3);
+    mv.visitInsn(ARETURN);
+
+    // Continue inner backtrack
+    mv.visitLabel(continueInner);
+    mv.visitIincInsn(groupEndVar, -1);
+    mv.visitJumpInsn(GOTO, innerLoop);
+
+    mv.visitLabel(innerEnd);
+
+    // Try next starting position
+    mv.visitIincInsn(startVar, 1);
+    mv.visitJumpInsn(GOTO, outerLoop);
+
+    mv.visitLabel(outerEnd);
+    mv.visitLabel(returnNull);
+    mv.visitInsn(ACONST_NULL);
+    mv.visitInsn(ARETURN);
+
+    mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
   }
 
@@ -282,10 +779,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitIincInsn(iterationsVar, 1);
 
     // Validate group content matches groupCharSet (if specified)
-    if (info.groupCharSet != null && !info.groupCharSet.equals(CharSet.ANY)) {
-      // For each char in group, verify it's in charset
-      // This is a simplification - for now, assume .* or similar
-    }
+    generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueLoop, alloc);
 
     // int sepStart = groupEnd;
     mv.visitVarInsn(ILOAD, groupEndVar);
@@ -352,6 +846,51 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
+  }
+
+  /**
+   * Validate that every character in input[groupStartVar..groupEndVar) is in the groupCharSet.
+   * Jumps to failLabel if any character fails. No-op when groupCharSet is null or ANY.
+   */
+  private void generateGroupCharSetValidation(
+      MethodVisitor mv,
+      int groupStartVar,
+      int groupEndVar,
+      Label failLabel,
+      LocalVarAllocator alloc) {
+    if (info.groupCharSet == null || info.groupCharSet.equals(CharSet.ANY)) {
+      return; // No constraint — all chars accepted
+    }
+
+    int iPosVar = alloc.allocate();
+    int charVar = alloc.allocate();
+
+    // int i = groupStart;
+    mv.visitVarInsn(ILOAD, groupStartVar);
+    mv.visitVarInsn(ISTORE, iPosVar);
+
+    Label loopCond = new Label();
+    Label loopBody = new Label();
+    mv.visitJumpInsn(GOTO, loopCond);
+
+    mv.visitLabel(loopBody);
+    // char c = input.charAt(i);
+    mv.visitVarInsn(ALOAD, 1); // input is always slot 1
+    mv.visitVarInsn(ILOAD, iPosVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, charVar);
+
+    // Check membership; jump to failLabel if NOT in charset
+    generateCharSetCheckFromLocal(mv, charVar, info.groupCharSet, failLabel);
+
+    // i++
+    mv.visitIincInsn(iPosVar, 1);
+
+    mv.visitLabel(loopCond);
+    // while (i < groupEnd)
+    mv.visitVarInsn(ILOAD, iPosVar);
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitJumpInsn(IF_ICMPLT, loopBody);
   }
 
   /**
@@ -698,6 +1237,9 @@ public class VariableCaptureBackrefBytecodeGenerator {
         INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
     mv.visitJumpInsn(IFNE, returnNotFound);
     mv.visitIincInsn(iterationsVar, 1);
+
+    // Validate group content matches groupCharSet (if specified)
+    generateGroupCharSetValidation(mv, startVar, groupEndVar, continueInner, alloc);
 
     // sepStart = groupEnd
     mv.visitVarInsn(ILOAD, groupEndVar);

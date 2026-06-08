@@ -81,9 +81,6 @@ public final class StrategyJdkClassifier {
       case SPECIALIZED_MULTIPLE_LOOKAHEADS:
       case SPECIALIZED_LITERAL_LOOKAHEADS:
       case HYBRID_DFA_LOOKAHEAD:
-      // Incomplete MatchResult API (incompleteMatchResultApiReason):
-      case VARIABLE_CAPTURE_BACKREF:
-      case NESTED_QUANTIFIED_GROUPS:
         return StrategyJdkClass.FULL_FALLBACK;
 
       // NATIVE: generator emits its own match/findMatch/findMatchFrom (correct rich API).
