@@ -11,14 +11,14 @@ dependencies {
     implementation project(':reggie-codegen')
 
     // ASM for ImplClass generation (minimal - main bytecode generation is in reggie-codegen)
-    implementation 'org.ow2.asm:asm:9.9.1'
+    implementation 'org.ow2.asm:asm:9.10.1'
 
     // Auto-service for annotation processor registration
     implementation 'com.google.auto.service:auto-service-annotations:1.1.1'
     annotationProcessor 'com.google.auto.service:auto-service:1.1.1'
 
     testImplementation project(':reggie-runtime')
-    testImplementation 'org.junit.jupiter:junit-jupiter:6.0.3'
+    testImplementation 'org.junit.jupiter:junit-jupiter:6.1.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
     // Enable annotation processor for test sources
