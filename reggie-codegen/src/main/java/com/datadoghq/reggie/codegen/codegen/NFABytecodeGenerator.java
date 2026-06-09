@@ -7097,6 +7097,12 @@ public class NFABytecodeGenerator {
     mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, groupLenLocal);
 
+    // Reject partially-captured group: enterGroup fired but exitGroup never ran (groupLen < 0).
+    // This happens in cross-alternative patterns like (a)|\1 where branch-0 fails after
+    // enterGroup(1) but before exitGroup(1), leaving groupEnds[1] = -1.
+    mv.visitVarInsn(ILOAD, groupLenLocal);
+    mv.visitJumpInsn(IFLT, backrefFailed);
+
     // Get input length for bounds checking
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
