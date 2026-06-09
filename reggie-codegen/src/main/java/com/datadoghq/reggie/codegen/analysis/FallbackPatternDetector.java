@@ -138,13 +138,12 @@ public final class FallbackPatternDetector {
     // Generator now caps the initial groupEnd to info.groupMaxCount when the group has a bounded
     // quantifier, so this fallback condition is no longer needed.
 
-    // VARIABLE_CAPTURE_BACKREF bytecode generator has no prefix support: when the pattern has
-    // non-anchor nodes before the capturing group (e.g. c(-*)\1), the generated code ignores them
-    // and starts matching from position 0, producing false matches.
+    // Generator handles LiteralNode and CharClassNode prefix nodes via emitPrefixMatch.
+    // Still fall back for patterns with complex prefix nodes the generator cannot handle.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
-      return "variable-capture backref with non-anchor prefix: "
-          + "generator ignores prefix nodes, producing wrong match positions";
+      return "variable-capture backref with unsupported prefix node type: "
+          + "generator only handles literal and char-class prefix nodes";
     }
 
     // DFA generators track the boolean match result but do not track capturing-group span
@@ -502,10 +501,9 @@ public final class FallbackPatternDetector {
   }
 
   /**
-   * Returns true if the VARIABLE_CAPTURE_BACKREF pattern has char-consuming (non-anchor) nodes
-   * before the first capturing group referenced by a backref. The generator's {@code
-   * generateMatchesMethod} starts from position 0 with "no prefix support", so any literal prefix
-   * is silently ignored, producing false matches.
+   * Returns true if the VARIABLE_CAPTURE_BACKREF pattern has a prefix node type that the bytecode
+   * generator cannot handle (QuantifierNode, non-capturing GroupNode, or unknown node type).
+   * LiteralNode and CharClassNode prefix nodes are now handled by emitPrefixMatch.
    */
   private static boolean hasNonAnchorPrefixBeforeBackrefGroup(RegexNode ast) {
     Set<Integer> backrefNums = new HashSet<>();
@@ -515,12 +513,12 @@ public final class FallbackPatternDetector {
     ConcatNode concat = (ConcatNode) ast;
     for (RegexNode child : concat.children) {
       if (child instanceof AnchorNode) {
-        // All anchor types are zero-width; the generator handles them. Skip.
         continue;
       }
       if (child instanceof GroupNode) {
         GroupNode g = (GroupNode) child;
         if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
+        return true; // non-capturing group in prefix: not handled
       }
       if (child instanceof QuantifierNode) {
         QuantifierNode q = (QuantifierNode) child;
@@ -528,8 +526,12 @@ public final class FallbackPatternDetector {
           GroupNode g = (GroupNode) q.child;
           if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
         }
+        return true; // quantified node in prefix: not handled
       }
-      return true;
+      if (child instanceof LiteralNode || child instanceof CharClassNode) {
+        continue; // handled by emitPrefixMatch
+      }
+      return true; // unknown prefix node type
     }
     return false;
   }

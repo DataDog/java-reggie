@@ -19,6 +19,10 @@ import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
+import com.datadoghq.reggie.codegen.ast.AnchorNode;
+import com.datadoghq.reggie.codegen.ast.CharClassNode;
+import com.datadoghq.reggie.codegen.ast.LiteralNode;
+import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
@@ -134,7 +138,8 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ISTORE, lenVar);
 
     // Minimum length check
-    int minLen = info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
+    int minLen =
+        getPrefixLength() + info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
     mv.visitVarInsn(ILOAD, lenVar);
     pushInt(mv, minLen);
     mv.visitJumpInsn(IF_ICMPLT, returnNull);
@@ -142,6 +147,8 @@ public class VariableCaptureBackrefBytecodeGenerator {
     // int groupStart = 0;
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, groupStartVar);
+
+    emitPrefixMatch(mv, groupStartVar, lenVar, returnNull, alloc);
 
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
@@ -515,6 +522,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
     int iterationsVar = alloc.allocate();
+    int groupStartVar = alloc.allocate();
 
     Label returnNull = new Label();
 
@@ -540,28 +548,33 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     mv.visitLabel(outerLoop);
 
-    int minLen = info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
+    int minLen =
+        getPrefixLength() + info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
     mv.visitVarInsn(ILOAD, startVar);
     pushInt(mv, minLen);
     mv.visitInsn(IADD);
     mv.visitVarInsn(ILOAD, lenVar);
     mv.visitJumpInsn(IF_ICMPGT, outerEnd);
 
-    emitGroupEndInit(mv, groupEndVar, lenVar, startVar);
+    // Initialize groupStart from start, then advance past prefix
+    Label innerEnd = new Label();
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ISTORE, groupStartVar);
+    emitPrefixMatch(mv, groupStartVar, lenVar, innerEnd, alloc);
+    emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
     // iterations = 0
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, iterationsVar);
 
     Label innerLoop = new Label();
-    Label innerEnd = new Label();
     Label continueInner = new Label();
 
     mv.visitLabel(innerLoop);
 
-    // Check: groupEnd >= start + groupMinCount
+    // Check: groupEnd >= groupStart + groupMinCount
     mv.visitVarInsn(ILOAD, groupEndVar);
-    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
     pushInt(mv, info.groupMinCount);
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, innerEnd);
@@ -574,7 +587,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitIincInsn(iterationsVar, 1);
 
     // Validate group content matches groupCharSet (if specified)
-    generateGroupCharSetValidation(mv, startVar, groupEndVar, continueInner, alloc);
+    generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueInner, alloc);
 
     // sepStart = groupEnd
     mv.visitVarInsn(ILOAD, groupEndVar);
@@ -585,7 +598,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     int groupLenVar = alloc.allocate();
     mv.visitVarInsn(ILOAD, groupEndVar);
-    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, groupLenVar);
 
@@ -600,7 +613,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, sepEndVar);
     mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
@@ -620,15 +633,15 @@ public class VariableCaptureBackrefBytecodeGenerator {
     // starts array
     pushInt(mv, info.totalGroupCount + 1);
     mv.visitIntInsn(NEWARRAY, T_INT);
-    // starts[0] = start (match start)
+    // starts[0] = start (full match start, before prefix)
     mv.visitInsn(DUP);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitInsn(IASTORE);
-    // starts[groupNumber] = start (group start == outer start)
+    // starts[groupNumber] = groupStart (group start, after prefix)
     mv.visitInsn(DUP);
     pushInt(mv, info.groupNumber);
-    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitInsn(IASTORE);
     if (info.separatorGroupNumber >= 0) {
       mv.visitInsn(DUP);
@@ -694,6 +707,87 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitEnd();
   }
 
+  private int getPrefixLength() {
+    int n = 0;
+    for (RegexNode node : info.prefix) {
+      if (!(node instanceof AnchorNode)) n++;
+    }
+    return n;
+  }
+
+  private void emitCharSetCheck(
+      MethodVisitor mv, int charVar, CharSet cs, boolean negated, Label failLabel) {
+    if (!negated) {
+      Label inSet = new Label();
+      for (CharSet.Range r : cs.getRanges()) {
+        if (r.start == r.end) {
+          mv.visitVarInsn(ILOAD, charVar);
+          pushInt(mv, r.start);
+          mv.visitJumpInsn(IF_ICMPEQ, inSet);
+        } else {
+          Label nextRange = new Label();
+          mv.visitVarInsn(ILOAD, charVar);
+          pushInt(mv, r.start);
+          mv.visitJumpInsn(IF_ICMPLT, nextRange);
+          mv.visitVarInsn(ILOAD, charVar);
+          pushInt(mv, r.end);
+          mv.visitJumpInsn(IF_ICMPLE, inSet);
+          mv.visitLabel(nextRange);
+        }
+      }
+      mv.visitJumpInsn(GOTO, failLabel);
+      mv.visitLabel(inSet);
+    } else {
+      for (CharSet.Range r : cs.getRanges()) {
+        if (r.start == r.end) {
+          mv.visitVarInsn(ILOAD, charVar);
+          pushInt(mv, r.start);
+          mv.visitJumpInsn(IF_ICMPEQ, failLabel);
+        } else {
+          Label notInRange = new Label();
+          mv.visitVarInsn(ILOAD, charVar);
+          pushInt(mv, r.start);
+          mv.visitJumpInsn(IF_ICMPLT, notInRange);
+          mv.visitVarInsn(ILOAD, charVar);
+          pushInt(mv, r.end);
+          mv.visitJumpInsn(IF_ICMPLE, failLabel);
+          mv.visitLabel(notInRange);
+        }
+      }
+    }
+  }
+
+  private void emitPrefixMatch(
+      MethodVisitor mv, int groupStartVar, int lenVar, Label failLabel, LocalVarAllocator alloc) {
+    for (RegexNode node : info.prefix) {
+      if (node instanceof AnchorNode) continue;
+      if (node instanceof LiteralNode) {
+        char ch = ((LiteralNode) node).ch;
+        mv.visitVarInsn(ILOAD, groupStartVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        mv.visitJumpInsn(IF_ICMPGE, failLabel);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, groupStartVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, ch);
+        mv.visitJumpInsn(IF_ICMPNE, failLabel);
+        mv.visitIincInsn(groupStartVar, 1);
+      } else if (node instanceof CharClassNode) {
+        CharClassNode ccn = (CharClassNode) node;
+        int charVar = alloc.allocate();
+        mv.visitVarInsn(ILOAD, groupStartVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        mv.visitJumpInsn(IF_ICMPGE, failLabel);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, groupStartVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitVarInsn(ISTORE, charVar);
+        emitCharSetCheck(mv, charVar, ccn.chars, ccn.negated, failLabel);
+        mv.visitIincInsn(groupStartVar, 1);
+      }
+    }
+  }
+
   private void emitGroupEndInit(MethodVisitor mv, int groupEndVar, int lenVar, int groupStartVar) {
     mv.visitVarInsn(ILOAD, lenVar);
     pushInt(mv, info.getSeparatorMinLength());
@@ -740,15 +834,18 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, lenVar);
 
-    // Minimum length check: groupMin + separatorMin + backrefGroupMin
-    int minLen = info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
+    // Minimum length check: prefixLen + groupMin + separatorMin + backrefGroupMin
+    int minLen =
+        getPrefixLength() + info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
     mv.visitVarInsn(ILOAD, lenVar);
     pushInt(mv, minLen);
     mv.visitJumpInsn(IF_ICMPLT, returnFalse);
 
-    // int groupStart = 0;  (for now, no prefix support)
+    // int groupStart = 0;
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, groupStartVar);
+
+    emitPrefixMatch(mv, groupStartVar, lenVar, returnFalse, alloc);
 
     // int groupEnd = len - separatorMinLen - groupMinLen;  (start with longest possible)
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
@@ -1172,6 +1269,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
     int iterationsVar = alloc.allocate();
+    int groupStartVar = alloc.allocate();
 
     Label returnNotFound = new Label();
 
@@ -1199,15 +1297,20 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitLabel(outerLoop);
 
     // Minimum length check from start
-    int minLen = info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
+    int minLen =
+        getPrefixLength() + info.groupMinCount + info.getSeparatorMinLength() + info.groupMinCount;
     mv.visitVarInsn(ILOAD, startVar);
     pushInt(mv, minLen);
     mv.visitInsn(IADD);
     mv.visitVarInsn(ILOAD, lenVar);
     mv.visitJumpInsn(IF_ICMPGT, outerEnd);
 
-    // Initialize for this starting position
-    emitGroupEndInit(mv, groupEndVar, lenVar, startVar);
+    // Initialize groupStart from start, then advance past prefix
+    Label innerEnd = new Label();
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ISTORE, groupStartVar);
+    emitPrefixMatch(mv, groupStartVar, lenVar, innerEnd, alloc);
+    emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
     // iterations = 0
     mv.visitInsn(ICONST_0);
@@ -1215,14 +1318,13 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     // Inner backtrack loop
     Label innerLoop = new Label();
-    Label innerEnd = new Label();
     Label continueInner = new Label();
 
     mv.visitLabel(innerLoop);
 
-    // Check: groupEnd >= start + groupMinCount
+    // Check: groupEnd >= groupStart + groupMinCount
     mv.visitVarInsn(ILOAD, groupEndVar);
-    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
     pushInt(mv, info.groupMinCount);
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, innerEnd);
@@ -1235,7 +1337,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitIincInsn(iterationsVar, 1);
 
     // Validate group content matches groupCharSet (if specified)
-    generateGroupCharSetValidation(mv, startVar, groupEndVar, continueInner, alloc);
+    generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueInner, alloc);
 
     // sepStart = groupEnd
     mv.visitVarInsn(ILOAD, groupEndVar);
@@ -1247,7 +1349,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     // Match backreference
     int groupLenVar = alloc.allocate();
     mv.visitVarInsn(ILOAD, groupEndVar);
-    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, groupLenVar);
 
@@ -1262,13 +1364,13 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, sepEndVar);
     mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
     mv.visitJumpInsn(IFEQ, continueInner);
 
-    // Found! Return start position
+    // Found! Return start position (outer loop counter, before prefix)
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitInsn(IRETURN);
 
