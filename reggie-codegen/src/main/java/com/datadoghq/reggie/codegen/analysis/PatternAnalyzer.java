@@ -453,7 +453,7 @@ public class PatternAnalyzer {
               false,
               requiredLiterals,
               lookaheadGreedyInfo,
-              true);
+              true /* groups in quantifier */);
         }
         int stateCount = dfa.getStateCount();
         if (stateCount < 20) {

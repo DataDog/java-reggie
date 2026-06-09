@@ -40,6 +40,11 @@ public class FallbackDetectorBugFixTest {
         Arguments.of("(?<=a)(x)+", "axx"),
         Arguments.of("(?<=a)(x)+", "bxx"),
         Arguments.of("(?<=a)(\\w)+", "ahello"),
+        // Lookbehind with larger DFA (>= 20 states, DFA_SWITCH_WITH_ASSERTIONS range) + group
+        // inside quantifier → now OPTIMIZED_NFA_WITH_LOOKAROUND (intercepted before DFA selection)
+        Arguments.of("(?<=[a-z0-9A-Z]{20})(\\w)+", "abcdefghijklmnopqrstuvwxyz"),
+        Arguments.of("(?<=[a-z0-9A-Z]{20})(\\w)+", "abcdefghijklmnopqrstu"),
+        Arguments.of("(?<=[a-z0-9A-Z]{20})(\\w)+", "abcdefghijklmnopqrst1"),
         // Non-assertion group inside quantifier → now PIKEVM_CAPTURE
         Arguments.of("(a)+b", "aaab"),
         Arguments.of("(a)+b", "b"));

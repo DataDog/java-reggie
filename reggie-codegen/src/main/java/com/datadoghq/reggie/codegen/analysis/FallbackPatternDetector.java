@@ -154,16 +154,10 @@ public final class FallbackPatternDetector {
     }
 
     // DFA generators track the boolean match result but do not track capturing-group span
-    // boundaries during execution. When a capturing group appears inside a quantifier (min≠max or
-    // max>1), the DFA cannot tell which loop iteration captured what, so the generated findMatch /
-    // match methods return wrong group spans. Route to JDK for correct capture semantics.
-    // REMOVED: now handled upstream in PatternAnalyzer by routing to PIKEVM_CAPTURE /
-    // OPTIMIZED_NFA_WITH_LOOKAROUND before these strategies are selected.
-    // if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
-    //         || strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS)
-    //     && hasCapturingGroupInQuantifiedSection(ast)) {
-    //   return "DFA with capturing group inside quantifier: DFA cannot track per-iteration spans";
-    // }
+    // boundaries during execution. When a capturing group appears inside a quantifier, the DFA
+    // cannot tell which loop iteration captured what. PatternAnalyzer routes such patterns to
+    // PIKEVM_CAPTURE (non-assertion path) or OPTIMIZED_NFA_WITH_LOOKAROUND (assertion path)
+    // before DFA strategies are selected, so this fallback condition is no longer needed.
 
     // OPTIMIZED_NFA with overlapping literal alternatives: the NFA simulation takes the first
     // matching branch (leftmost-first) rather than the longest, diverging from JDK's semantics
