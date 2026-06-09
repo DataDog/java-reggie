@@ -3388,10 +3388,10 @@ public class PatternAnalyzer {
       return null;
     }
 
-    // Route patterns with inner alternation to RECURSIVE_DESCENT.
-    // NestedQuantifiedGroupsBytecodeGenerator has no AlternationNode handler.
+    // Skip NESTED_QUANTIFIED_GROUPS when any level's content contains alternation.
+    // The generator has no AlternationNode handler and falls through to accept-any-char.
     for (NestedQuantifiedGroupsInfo.QuantifierLevel level : levels) {
-      if (level.content instanceof AlternationNode) {
+      if (containsAlternation(level.content)) {
         return null;
       }
     }

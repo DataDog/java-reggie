@@ -138,7 +138,8 @@ public class FallbackDetectorBugFixTest {
         Arguments.of("((a|bc)+)*", "abcabc"),
         Arguments.of("((a|bc)+)*x", "abcx"),
         Arguments.of("((a|b)*)+", "aab"),
-        Arguments.of("((a|b)+)*", ""));
+        Arguments.of("((a|b)+)*", ""),
+        Arguments.of("(((a|b)c)+)*", "acbc")); // alternation inside ConcatNode level
   }
 
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
