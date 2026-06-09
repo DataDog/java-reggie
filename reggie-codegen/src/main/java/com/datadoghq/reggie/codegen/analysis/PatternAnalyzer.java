@@ -6095,18 +6095,18 @@ public class PatternAnalyzer {
       return null; // No variable-length groups - let other optimizations handle it
     }
 
-    // Reject patterns where a .* (any-char) variable group is followed by more content.
-    // Such patterns require backtracking which SPECIALIZED_MULTI_GROUP_GREEDY can't handle.
-    // For example: (.*)\b(\d+)$ - the .* consumes everything, leaving nothing for \d+
+    // Reject when a variable group before other segments cannot guarantee those segments
+    // enough input, because the strategy has no inter-group backtracking:
+    //  - minMatches==0 (*): greedily consumes everything, may leave too few for next segment
+    //  - isAnyChar (. or .*): consumes every character, including literal separators
+    // Example: ([^c]*)([^d]{3,4}) on 'NOTccd' — [^c]* takes 'NOT', [^d]{3,4} needs >=3
+    // non-d chars but only 'cc' remain. Route to RECURSIVE_DESCENT.
     for (int i = 0; i < segments.size() - 1; i++) {
       Segment seg = segments.get(i);
       if (seg instanceof VariableGroupSegment) {
         VariableGroupSegment varSeg = (VariableGroupSegment) seg;
-        // Check if this is a .* pattern (matches any character)
-        // A negated charset that isAnyChar() would be [^\u0000-\uFFFF] which matches nothing,
-        // so we only check non-negated charsets
-        if (!varSeg.negated && varSeg.charset.isAnyChar()) {
-          return null; // Requires backtracking - let GREEDY_BACKTRACK handle it
+        if (varSeg.minMatches == 0 || (!varSeg.negated && varSeg.charset.isAnyChar())) {
+          return null; // requires inter-group backtracking
         }
       }
     }
