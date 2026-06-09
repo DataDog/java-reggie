@@ -2283,6 +2283,42 @@ public class RecursiveDescentBytecodeGenerator {
       return false;
     }
 
+    /** Returns true if the subroutine's target pattern contains a variable-length quantifier. */
+    private boolean hasVariableLengthTarget(SubroutineNode node) {
+      RegexNode targetNode;
+      if (node.groupNumber == -1) {
+        targetNode = ast;
+      } else if (node.groupNumber >= 0) {
+        RegexNode stored = groupNumberToNode.get(node.groupNumber);
+        if (stored == null) return false;
+        targetNode = (stored instanceof GroupNode) ? ((GroupNode) stored).child : stored;
+      } else {
+        return false;
+      }
+      return containsVariableLengthQuantifier(targetNode);
+    }
+
+    private boolean containsVariableLengthQuantifier(RegexNode node) {
+      if (node instanceof QuantifierNode) {
+        QuantifierNode q = (QuantifierNode) node;
+        return q.min != q.max;
+      }
+      if (node instanceof ConcatNode) {
+        for (RegexNode child : ((ConcatNode) node).children) {
+          if (containsVariableLengthQuantifier(child)) return true;
+        }
+      }
+      if (node instanceof AlternationNode) {
+        for (RegexNode alt : ((AlternationNode) node).alternatives) {
+          if (containsVariableLengthQuantifier(alt)) return true;
+        }
+      }
+      if (node instanceof GroupNode) {
+        return containsVariableLengthQuantifier(((GroupNode) node).child);
+      }
+      return false;
+    }
+
     /**
      * Extract the trailing optional backref quantifier from a concat or single node, if present.
      * Returns the QuantifierNode if the node ends with a greedy Quant(Backref, min=0, max=1) (i.e.,
@@ -2709,6 +2745,152 @@ public class RecursiveDescentBytecodeGenerator {
         // Simple case: no nested backtracking needed
         for (int i = backtrackChildIndex + 1; i < node.children.size(); i++) {
           RegexNode child = node.children.get(i);
+
+          // Special case: SubroutineNode with variable-length target not in last position —
+          // generate a retry loop so the subroutine can be retried with a smaller end bound
+          // if the continuation fails.
+          if (child instanceof SubroutineNode
+              && hasVariableLengthTarget((SubroutineNode) child)
+              && i + 1 < node.children.size()) {
+            SubroutineNode subroutineNode = (SubroutineNode) child;
+
+            // Resolve the subroutine target method
+            RegexNode targetNode;
+            if (subroutineNode.groupNumber == -1) {
+              targetNode = ast;
+            } else {
+              RegexNode stored = groupNumberToNode.get(subroutineNode.groupNumber);
+              targetNode = (stored instanceof GroupNode) ? ((GroupNode) stored).child : stored;
+            }
+            generateParserMethod(cw, className, targetNode);
+            String targetMethod = getMethodNameForNode(targetNode);
+
+            // Slots for retry loop (above the existing slot range 0-15):
+            //   100: savedGroupsForRetry (int[])
+            //   101: subResult (int)
+            //   102: maxSubEnd (int)
+            //   103: preSubroutinePos (int)
+
+            // preSubroutinePos = currentPos (slot 5)
+            mv.visitVarInsn(ILOAD, 5);
+            mv.visitVarInsn(ISTORE, 103);
+            // maxSubEnd = end (slot 3)
+            mv.visitVarInsn(ILOAD, 3);
+            mv.visitVarInsn(ISTORE, 102);
+            // savedGroupsForRetry = groups.clone()
+            mv.visitVarInsn(ALOAD, 4);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
+            mv.visitTypeInsn(CHECKCAST, "[I");
+            mv.visitVarInsn(ASTORE, 100);
+
+            Label retryLabel = new Label();
+            Label subroutineExhaustedLabel = new Label();
+            Label subroutineSuccessLabel = new Label();
+
+            mv.visitLabel(retryLabel);
+
+            // Guard: if maxSubEnd < preSubroutinePos, subroutine exhausted
+            mv.visitVarInsn(ILOAD, 102);
+            mv.visitVarInsn(ILOAD, 103);
+            mv.visitJumpInsn(IF_ICMPLT, subroutineExhaustedLabel);
+
+            // Restore groups to pre-subroutine state before each retry
+            mv.visitVarInsn(ALOAD, 100);
+            mv.visitInsn(ICONST_0);
+            mv.visitVarInsn(ALOAD, 4);
+            mv.visitInsn(ICONST_0);
+            mv.visitVarInsn(ALOAD, 100);
+            mv.visitInsn(ARRAYLENGTH);
+            mv.visitMethodInsn(
+                INVOKESTATIC,
+                "java/lang/System",
+                "arraycopy",
+                "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+                false);
+
+            // Call subroutine: subResult = targetMethod(input, preSubroutinePos, maxSubEnd, groups,
+            // depth+1)
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, 103); // preSubroutinePos
+            mv.visitVarInsn(ILOAD, 102); // maxSubEnd
+            mv.visitVarInsn(ALOAD, 4);
+            mv.visitVarInsn(ILOAD, depthSlot);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(IADD);
+            mv.visitMethodInsn(
+                INVOKESPECIAL, className, targetMethod, "(Ljava/lang/String;II[II)I", false);
+            mv.visitVarInsn(ISTORE, 101);
+
+            // PCRE semantics: restore groups after subroutine call
+            mv.visitVarInsn(ALOAD, 100);
+            mv.visitInsn(ICONST_0);
+            mv.visitVarInsn(ALOAD, 4);
+            mv.visitInsn(ICONST_0);
+            mv.visitVarInsn(ALOAD, 100);
+            mv.visitInsn(ARRAYLENGTH);
+            mv.visitMethodInsn(
+                INVOKESTATIC,
+                "java/lang/System",
+                "arraycopy",
+                "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+                false);
+
+            // If subroutine itself failed, exhaust
+            mv.visitVarInsn(ILOAD, 101);
+            mv.visitInsn(ICONST_M1);
+            mv.visitJumpInsn(IF_ICMPEQ, subroutineExhaustedLabel);
+
+            // Subroutine succeeded: update currentPos
+            mv.visitVarInsn(ILOAD, 101);
+            mv.visitVarInsn(ISTORE, 5);
+
+            // Try remaining children (j = i+1 ... end)
+            for (int j = i + 1; j < node.children.size(); j++) {
+              RegexNode childJ = node.children.get(j);
+              generateParserMethod(cw, className, childJ);
+              String childJMethod = getMethodNameForNode(childJ);
+
+              Label childJOk = new Label();
+
+              mv.visitVarInsn(ALOAD, 0);
+              mv.visitVarInsn(ALOAD, 1);
+              mv.visitVarInsn(ILOAD, 5);
+              mv.visitVarInsn(ILOAD, 3);
+              mv.visitVarInsn(ALOAD, 4);
+              mv.visitVarInsn(ILOAD, depthSlot);
+              mv.visitMethodInsn(
+                  INVOKESPECIAL, className, childJMethod, "(Ljava/lang/String;II[II)I", false);
+              mv.visitVarInsn(ISTORE, 5);
+
+              mv.visitVarInsn(ILOAD, 5);
+              mv.visitInsn(ICONST_M1);
+              mv.visitJumpInsn(IF_ICMPNE, childJOk);
+
+              // childJ failed: retry subroutine with smaller end (subResult - 1)
+              mv.visitVarInsn(ILOAD, 101);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(ISUB);
+              mv.visitVarInsn(ISTORE, 102);
+              mv.visitJumpInsn(GOTO, retryLabel);
+
+              mv.visitLabel(childJOk);
+            }
+
+            // All j-children succeeded
+            mv.visitJumpInsn(GOTO, subroutineSuccessLabel);
+
+            mv.visitLabel(subroutineExhaustedLabel);
+            // Subroutine exhausted: backtrack outer quantifier
+            mv.visitIincInsn(9, quantNode.greedy ? -1 : 1);
+            mv.visitJumpInsn(GOTO, backtrackLoop);
+
+            mv.visitLabel(subroutineSuccessLabel);
+            // All remaining children handled; break out of outer for-loop
+            break;
+          }
+
+          // Normal (non-retryable) child
           generateParserMethod(cw, className, child);
           String childMethod = getMethodNameForNode(child);
 
