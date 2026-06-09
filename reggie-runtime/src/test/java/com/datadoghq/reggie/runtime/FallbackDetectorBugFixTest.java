@@ -1,0 +1,83 @@
+/*
+ * Copyright 2026-Present Datadog, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.datadoghq.reggie.runtime;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import com.datadoghq.reggie.Reggie;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+/** Regression tests for FallbackPatternDetector conditions eliminated by routing fixes. */
+public class FallbackDetectorBugFixTest {
+
+  /**
+   * Patterns with a capturing group inside a quantified section. After the routing fix these are
+   * handled natively (PIKEVM_CAPTURE for plain patterns, OPTIMIZED_NFA_WITH_LOOKAROUND for
+   * assertion patterns) instead of falling back to JDK.
+   */
+  static Stream<Arguments> capturingGroupInQuantifiedSection() {
+    return Stream.of(
+        // Lookbehind + group inside quantifier → DFA_UNROLLED_WITH_ASSERTIONS → now
+        // OPTIMIZED_NFA_WITH_LOOKAROUND
+        Arguments.of("(?<=a)(x)+", "axx"),
+        Arguments.of("(?<=a)(x)+", "bxx"),
+        Arguments.of("(?<=a)(\\w)+", "ahello"),
+        // Non-assertion group inside quantifier → now PIKEVM_CAPTURE
+        Arguments.of("(a)+b", "aaab"),
+        Arguments.of("(a)+b", "b"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("capturingGroupInQuantifiedSection")
+  void capturingGroupInQuantifiedSection_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+
+    String ctx = "pat=" + pat + " in=" + in;
+
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+
+    // match() group spans
+    Matcher jm = jdk.matcher(in);
+    boolean jdkM = jm.matches();
+    MatchResult rm = reggie.match(in);
+    assertEquals(jdkM, rm != null, "match() null check " + ctx);
+    if (jdkM) {
+      for (int g = 0; g <= jm.groupCount(); g++) {
+        assertEquals(jm.start(g), rm.start(g), "match() g" + g + " start " + ctx);
+        assertEquals(jm.end(g), rm.end(g), "match() g" + g + " end " + ctx);
+      }
+    }
+
+    // findMatch() group spans
+    Matcher jmf = jdk.matcher(in);
+    boolean jdkF = jmf.find();
+    MatchResult rfm = reggie.findMatch(in);
+    assertEquals(jdkF, rfm != null, "findMatch() null check " + ctx);
+    if (jdkF) {
+      for (int g = 0; g <= jmf.groupCount(); g++) {
+        assertEquals(jmf.start(g), rfm.start(g), "findMatch() g" + g + " start " + ctx);
+        assertEquals(jmf.end(g), rfm.end(g), "findMatch() g" + g + " end " + ctx);
+      }
+    }
+  }
+}

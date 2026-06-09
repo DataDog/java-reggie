@@ -157,11 +157,13 @@ public final class FallbackPatternDetector {
     // boundaries during execution. When a capturing group appears inside a quantifier (min≠max or
     // max>1), the DFA cannot tell which loop iteration captured what, so the generated findMatch /
     // match methods return wrong group spans. Route to JDK for correct capture semantics.
-    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
-            || strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS)
-        && hasCapturingGroupInQuantifiedSection(ast)) {
-      return "DFA with capturing group inside quantifier: DFA cannot track per-iteration spans";
-    }
+    // REMOVED: now handled upstream in PatternAnalyzer by routing to PIKEVM_CAPTURE /
+    // OPTIMIZED_NFA_WITH_LOOKAROUND before these strategies are selected.
+    // if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
+    //         || strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS)
+    //     && hasCapturingGroupInQuantifiedSection(ast)) {
+    //   return "DFA with capturing group inside quantifier: DFA cannot track per-iteration spans";
+    // }
 
     // OPTIMIZED_NFA with overlapping literal alternatives: the NFA simulation takes the first
     // matching branch (leftmost-first) rather than the longest, diverging from JDK's semantics
@@ -590,7 +592,7 @@ public final class FallbackPatternDetector {
    * allows more than one repetition (min != max, or max > 1, or max == -1/MAX_VALUE meaning
    * unbounded). DFA generators cannot track per-iteration capture boundaries for such groups.
    */
-  private static boolean hasCapturingGroupInQuantifiedSection(RegexNode ast) {
+  static boolean hasCapturingGroupInQuantifiedSection(RegexNode ast) {
     return hasCapturingGroupInQuantifiedHelper(ast, false);
   }
 

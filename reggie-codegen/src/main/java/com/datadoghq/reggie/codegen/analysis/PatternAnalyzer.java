@@ -443,6 +443,18 @@ public class PatternAnalyzer {
               lookaheadGreedyInfo,
               hasGroupsInRepeatingQuantifiers(ast));
         }
+        if (FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+          // DFA cannot track per-iteration spans; OPTIMIZED_NFA_WITH_LOOKAROUND handles it
+          // correctly.
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              lookaheadGreedyInfo,
+              true);
+        }
         int stateCount = dfa.getStateCount();
         if (stateCount < 20) {
           return new MatchingStrategyResult(
@@ -939,6 +951,11 @@ public class PatternAnalyzer {
         return r;
       }
 
+      if (FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+        // DFA cannot track per-iteration spans; PIKEVM_CAPTURE handles capturing groups correctly.
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+      }
       // Choose DFA strategy based on state count
       int stateCount = dfa.getStateCount();
       if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
