@@ -68,3 +68,4 @@ SECURITY-SCAN-SUMMARY.md
 .jmh-baseline
 reggie-benchmark/com.datadoghq.reggie.benchmark*/
 .cachebro/
+.worktrees/
