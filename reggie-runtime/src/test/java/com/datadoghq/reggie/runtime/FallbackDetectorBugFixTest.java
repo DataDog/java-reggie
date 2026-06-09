@@ -107,6 +107,27 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
 
+  static Stream<Arguments> variableCaptureBackrefNullableGroup() {
+    return Stream.of(
+        Arguments.of("(a*)=\\1", "abc=abc"),
+        Arguments.of("(a*)=\\1", "="),
+        Arguments.of("(a*)=\\1", "a=a"),
+        Arguments.of("(-*):\\1", "---:---"),
+        Arguments.of("(b*)\\1", "bb"),
+        Arguments.of("(b*)\\1", ""));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("variableCaptureBackrefNullableGroup")
+  void variableCaptureBackrefNullableGroup_matchesAgreesWithJdk(String pat, String in)
+      throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
   static Stream<Arguments> variableCaptureBackrefPrefix() {
     return Stream.of(
         Arguments.of("c(.*)\\1", "cabc abc"),

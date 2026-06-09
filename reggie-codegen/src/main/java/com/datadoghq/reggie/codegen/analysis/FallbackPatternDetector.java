@@ -109,13 +109,8 @@ public final class FallbackPatternDetector {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
-    // VARIABLE_CAPTURE_BACKREF generator does not handle nullable groups correctly: when the
-    // group content can capture the empty string (e.g. (-?)), the backtracking logic produces
-    // spurious matches. Route to JDK for correct semantics.
-    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
-        && hasNullableBackrefGroup(ast)) {
-      return "variable-capture backref to nullable group: empty-capture path handled incorrectly";
-    }
+    // detectVariableCaptureBackref returns null for nullable groups (groupQuantifier.min == 0),
+    // routing them to OPTIMIZED_NFA_WITH_BACKREFS. This guard can no longer fire.
 
     // NESTED_QUANTIFIED_GROUPS bytecode generator falls through to an "accept any char" stub
     // when the innermost quantifier level contains an AlternationNode. Patterns like ((a|b)+)*

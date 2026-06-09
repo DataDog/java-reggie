@@ -2850,6 +2850,14 @@ public class PatternAnalyzer {
       }
     }
 
+    // Nullable groups cause spurious zero-length matches in find(). A group is nullable either
+    // because its outer quantifier allows zero repetitions (groupQuantifier.min == 0), or because
+    // its content itself is nullable (e.g. ([-]*) where the inner quantifier has min=0).
+    // Route to OPTIMIZED_NFA_WITH_BACKREFS which handles nullable groups correctly.
+    if (groupQuantifier.min == 0 || isGroupContentNullable(capturingGroup.child)) {
+      return null;
+    }
+
     return new VariableCaptureBackrefInfo(
         prefix,
         capturingGroup.groupNumber,
@@ -2873,6 +2881,34 @@ public class PatternAnalyzer {
   /** Check if a quantifier allows variable length (*, +, ?, {n,m} where n != m). */
   private boolean isVariableLengthQuantifier(QuantifierNode quant) {
     return quant.min != quant.max || quant.max < 0;
+  }
+
+  /**
+   * Returns true if the given node (the content of a capturing group) can match the empty string.
+   * Used to detect nullable groups that require routing away from VARIABLE_CAPTURE_BACKREF.
+   */
+  private boolean isGroupContentNullable(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      return ((QuantifierNode) node).min == 0
+          || isGroupContentNullable(((QuantifierNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (!isGroupContentNullable(c)) return false;
+      }
+      return true;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (isGroupContentNullable(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return isGroupContentNullable(((GroupNode) node).child);
+    }
+    // AnchorNode is zero-width; LiteralNode and CharClassNode consume characters.
+    return node instanceof AnchorNode;
   }
 
   private boolean containsBackrefToGroup(RegexNode node, int groupNumber) {
