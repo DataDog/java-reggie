@@ -419,7 +419,8 @@ public class PatternAnalyzer {
             null,
             false,
             requiredLiterals,
-            lookaheadGreedyInfo);
+            lookaheadGreedyInfo,
+            hasGroupsInRepeatingQuantifiers(ast));
       }
 
       try {
@@ -439,7 +440,8 @@ public class PatternAnalyzer {
               null,
               false,
               requiredLiterals,
-              lookaheadGreedyInfo);
+              lookaheadGreedyInfo,
+              hasGroupsInRepeatingQuantifiers(ast));
         }
         int stateCount = dfa.getStateCount();
         if (stateCount < 20) {
@@ -491,7 +493,8 @@ public class PatternAnalyzer {
               null,
               false,
               requiredLiterals,
-              lookaheadGreedyInfo);
+              lookaheadGreedyInfo,
+              hasGroupsInRepeatingQuantifiers(ast));
         }
       } catch (UnsupportedOperationException e) {
         // Complex assertion pattern (e.g., .*[A-Z]) - try hybrid DFA for lookaheads
@@ -535,7 +538,8 @@ public class PatternAnalyzer {
             null,
             false,
             requiredLiterals,
-            lookaheadGreedyInfo);
+            lookaheadGreedyInfo,
+            hasGroupsInRepeatingQuantifiers(ast));
       } catch (StateExplosionException e) {
         // DFA state explosion - try hybrid DFA for lookaheads
         HybridDFALookaheadInfo hybridInfo = detectDFACompatibleLookaheads();
@@ -578,7 +582,8 @@ public class PatternAnalyzer {
             null,
             false,
             requiredLiterals,
-            lookaheadGreedyInfo);
+            lookaheadGreedyInfo,
+            hasGroupsInRepeatingQuantifiers(ast));
       }
     }
 
