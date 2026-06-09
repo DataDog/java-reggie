@@ -143,11 +143,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, groupStartVar);
 
-    // int groupEnd = len - separatorMinLen;
-    mv.visitVarInsn(ILOAD, lenVar);
-    pushInt(mv, info.getSeparatorMinLength());
-    mv.visitInsn(ISUB);
-    mv.visitVarInsn(ISTORE, groupEndVar);
+    emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
     // int iterations = 0;
     mv.visitInsn(ICONST_0);
@@ -551,11 +547,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, lenVar);
     mv.visitJumpInsn(IF_ICMPGT, outerEnd);
 
-    // groupEnd = len - separatorMinLen
-    mv.visitVarInsn(ILOAD, lenVar);
-    pushInt(mv, info.getSeparatorMinLength());
-    mv.visitInsn(ISUB);
-    mv.visitVarInsn(ISTORE, groupEndVar);
+    emitGroupEndInit(mv, groupEndVar, lenVar, startVar);
 
     // iterations = 0
     mv.visitInsn(ICONST_0);
@@ -702,6 +694,22 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitEnd();
   }
 
+  private void emitGroupEndInit(MethodVisitor mv, int groupEndVar, int lenVar, int groupStartVar) {
+    mv.visitVarInsn(ILOAD, lenVar);
+    pushInt(mv, info.getSeparatorMinLength());
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, groupEndVar);
+
+    if (info.groupMaxCount >= 0) {
+      mv.visitVarInsn(ILOAD, groupEndVar);
+      mv.visitVarInsn(ILOAD, groupStartVar);
+      pushInt(mv, info.groupMaxCount);
+      mv.visitInsn(IADD);
+      mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "min", "(II)I", false);
+      mv.visitVarInsn(ISTORE, groupEndVar);
+    }
+  }
+
   /** Generate matches() method with longest-first backtracking. */
   public void generateMatchesMethod(ClassWriter cw) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
@@ -743,15 +751,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ISTORE, groupStartVar);
 
     // int groupEnd = len - separatorMinLen - groupMinLen;  (start with longest possible)
-    // For separator min=1 and backref of captured content, max group capture is:
-    // len - separatorMin - 0 (backref can be 0 if group captured empty, but we need at least
-    // groupMin)
-    mv.visitVarInsn(ILOAD, lenVar);
-    pushInt(mv, info.getSeparatorMinLength());
-    mv.visitInsn(ISUB);
-    // For backref, we need room for at least one copy of captured content
-    // But we don't know captured length yet, so start with max possible
-    mv.visitVarInsn(ISTORE, groupEndVar);
+    emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
     // int iterations = 0;
     mv.visitInsn(ICONST_0);
@@ -1207,11 +1207,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitJumpInsn(IF_ICMPGT, outerEnd);
 
     // Initialize for this starting position
-    // groupEnd = len - separatorMinLen (max possible capture from start)
-    mv.visitVarInsn(ILOAD, lenVar);
-    pushInt(mv, info.getSeparatorMinLength());
-    mv.visitInsn(ISUB);
-    mv.visitVarInsn(ISTORE, groupEndVar);
+    emitGroupEndInit(mv, groupEndVar, lenVar, startVar);
 
     // iterations = 0
     mv.visitInsn(ICONST_0);

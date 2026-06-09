@@ -135,14 +135,8 @@ public final class FallbackPatternDetector {
           + "NFA thread scheduler does not correctly isolate assertions per branch";
     }
 
-    // VARIABLE_CAPTURE_BACKREF uses a backtracking search over the captured group's possible
-    // lengths. When the group's content is itself a bounded quantifier (e.g. (-?), (\w{0,3})),
-    // the inner bound limits the actual match length in a way the outer loop cannot model.
-    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
-        && hasBoundedQuantifierInBackrefGroup(ast)) {
-      return "variable-capture backref with bounded inner quantifier: "
-          + "backtracking loop cannot model bounded-length group content";
-    }
+    // Generator now caps the initial groupEnd to info.groupMaxCount when the group has a bounded
+    // quantifier, so this fallback condition is no longer needed.
 
     // VARIABLE_CAPTURE_BACKREF bytecode generator has no prefix support: when the pattern has
     // non-anchor nodes before the capturing group (e.g. c(-*)\1), the generated code ignores them
@@ -503,47 +497,6 @@ public final class FallbackPatternDetector {
     }
     if (node instanceof QuantifierNode) {
       return hasLookaheadInAlternationHelper(((QuantifierNode) node).child, insideAlt);
-    }
-    return false;
-  }
-
-  /**
-   * Returns true if any capturing group referenced by a backref has a bounded-max QuantifierNode as
-   * its direct child. The VARIABLE_CAPTURE_BACKREF generator's backtracking loop over lengths only
-   * works for unbounded groups; a bounded inner quantifier caps the capture length in a way the
-   * loop cannot model correctly.
-   */
-  private static boolean hasBoundedQuantifierInBackrefGroup(RegexNode ast) {
-    Set<Integer> backrefNums = new HashSet<>();
-    collectBackrefsInSubtree(ast, backrefNums);
-    if (backrefNums.isEmpty()) return false;
-    return hasBoundedQuantifierInBackrefGroupHelper(ast, backrefNums);
-  }
-
-  private static boolean hasBoundedQuantifierInBackrefGroupHelper(
-      RegexNode node, Set<Integer> backrefNums) {
-    if (node instanceof GroupNode) {
-      GroupNode g = (GroupNode) node;
-      if (g.capturing && backrefNums.contains(g.groupNumber) && g.child instanceof QuantifierNode) {
-        QuantifierNode q = (QuantifierNode) g.child;
-        if (q.max != -1 && q.max != Integer.MAX_VALUE) return true;
-      }
-      return hasBoundedQuantifierInBackrefGroupHelper(g.child, backrefNums);
-    }
-    if (node instanceof ConcatNode) {
-      for (RegexNode c : ((ConcatNode) node).children) {
-        if (hasBoundedQuantifierInBackrefGroupHelper(c, backrefNums)) return true;
-      }
-      return false;
-    }
-    if (node instanceof AlternationNode) {
-      for (RegexNode a : ((AlternationNode) node).alternatives) {
-        if (hasBoundedQuantifierInBackrefGroupHelper(a, backrefNums)) return true;
-      }
-      return false;
-    }
-    if (node instanceof QuantifierNode) {
-      return hasBoundedQuantifierInBackrefGroupHelper(((QuantifierNode) node).child, backrefNums);
     }
     return false;
   }

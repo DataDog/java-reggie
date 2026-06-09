@@ -85,4 +85,25 @@ public class FallbackDetectorBugFixTest {
       }
     }
   }
+
+  static Stream<Arguments> variableCaptureBackrefBoundedGroup() {
+    return Stream.of(
+        Arguments.of("(-{0,3}):\\1", "---:---"),
+        Arguments.of("(-{0,3}):\\1", "----:----"),
+        Arguments.of("(\\w{1,4})=\\1", "abc=abc"),
+        Arguments.of("(\\w{1,4})=\\1", "abcde=abcde"),
+        Arguments.of("(\\w{1,4})=\\1", " abc=abc"),
+        Arguments.of("(\\w{1,4})=\\1", " abcde=abcde"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("variableCaptureBackrefBoundedGroup")
+  void variableCaptureBackrefBoundedGroup_matchesAgreesWithJdk(String pat, String in)
+      throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
 }
