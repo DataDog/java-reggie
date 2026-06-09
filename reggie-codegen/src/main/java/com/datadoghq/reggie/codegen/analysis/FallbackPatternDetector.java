@@ -109,15 +109,6 @@ public final class FallbackPatternDetector {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
-    // NESTED_QUANTIFIED_GROUPS bytecode generator falls through to an "accept any char" stub
-    // when the innermost quantifier level contains an AlternationNode. Patterns like ((a|b)+)*
-    // match characters they should not.
-    if (strategy == PatternAnalyzer.MatchingStrategy.NESTED_QUANTIFIED_GROUPS
-        && hasAlternationInNestedQuantifierContent(ast)) {
-      return "nested quantified groups with alternation in inner content: "
-          + "generator uses accept-any-char stub instead of alternation matching";
-    }
-
     // OPTIMIZED_NFA_WITH_LOOKAROUND NFA simulation produces wrong results when a lookahead
     // assertion appears inside an alternation branch. The NFA thread scheduler does not correctly
     // isolate assertion evaluation per branch.
@@ -414,44 +405,6 @@ public final class FallbackPatternDetector {
       for (RegexNode alt : ((AlternationNode) node).alternatives) {
         if (containsLookahead(alt)) return true;
       }
-    }
-    return false;
-  }
-
-  /**
-   * Returns true if the NESTED_QUANTIFIED_GROUPS pattern has an alternation as the content of any
-   * quantifier level. The bytecode generator falls through to an "accept any char" stub for {@link
-   * AlternationNode} content, producing wrong matches.
-   */
-  private static boolean hasAlternationInNestedQuantifierContent(RegexNode ast) {
-    return hasAlternationInQuantifierContentHelper(ast, false);
-  }
-
-  private static boolean hasAlternationInQuantifierContentHelper(
-      RegexNode node, boolean insideQuantifier) {
-    if (node instanceof QuantifierNode) {
-      QuantifierNode q = (QuantifierNode) node;
-      if (insideQuantifier && q.child instanceof GroupNode) {
-        RegexNode content = ((GroupNode) q.child).child;
-        if (content instanceof AlternationNode) return true;
-        return hasAlternationInQuantifierContentHelper(content, true);
-      }
-      return hasAlternationInQuantifierContentHelper(q.child, true);
-    }
-    if (node instanceof GroupNode) {
-      return hasAlternationInQuantifierContentHelper(((GroupNode) node).child, insideQuantifier);
-    }
-    if (node instanceof ConcatNode) {
-      for (RegexNode c : ((ConcatNode) node).children) {
-        if (hasAlternationInQuantifierContentHelper(c, insideQuantifier)) return true;
-      }
-      return false;
-    }
-    if (node instanceof AlternationNode) {
-      for (RegexNode a : ((AlternationNode) node).alternatives) {
-        if (hasAlternationInQuantifierContentHelper(a, insideQuantifier)) return true;
-      }
-      return false;
     }
     return false;
   }

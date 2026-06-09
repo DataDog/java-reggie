@@ -3388,6 +3388,14 @@ public class PatternAnalyzer {
       return null;
     }
 
+    // Route patterns with inner alternation to RECURSIVE_DESCENT.
+    // NestedQuantifiedGroupsBytecodeGenerator has no AlternationNode handler.
+    for (NestedQuantifiedGroupsInfo.QuantifierLevel level : levels) {
+      if (level.content instanceof AlternationNode) {
+        return null;
+      }
+    }
+
     // Collect prefix and suffix
     for (int i = 0; i < nestedGroupIdx; i++) {
       prefix.add(children.get(i));

@@ -131,6 +131,26 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
 
+  static Stream<Arguments> nestedQuantifiedGroupsWithAlt() {
+    return Stream.of(
+        Arguments.of("((a|b)+)*", "abab"),
+        Arguments.of("((a|b)+)*", "ccc"),
+        Arguments.of("((a|bc)+)*", "abcabc"),
+        Arguments.of("((a|bc)+)*x", "abcx"),
+        Arguments.of("((a|b)*)+", "aab"),
+        Arguments.of("((a|b)+)*", ""));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("nestedQuantifiedGroupsWithAlt")
+  void nestedQuantifiedGroupsWithAlt_matchesAgreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
   static Stream<Arguments> variableCaptureBackrefPrefix() {
     return Stream.of(
         Arguments.of("c(.*)\\1", "cabc abc"),
