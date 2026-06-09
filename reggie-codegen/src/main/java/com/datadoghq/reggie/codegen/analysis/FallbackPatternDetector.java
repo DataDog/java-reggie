@@ -109,9 +109,6 @@ public final class FallbackPatternDetector {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
-    // detectVariableCaptureBackref returns null for nullable groups (groupQuantifier.min == 0),
-    // routing them to OPTIMIZED_NFA_WITH_BACKREFS. This guard can no longer fire.
-
     // NESTED_QUANTIFIED_GROUPS bytecode generator falls through to an "accept any char" stub
     // when the innermost quantifier level contains an AlternationNode. Patterns like ((a|b)+)*
     // match characters they should not.

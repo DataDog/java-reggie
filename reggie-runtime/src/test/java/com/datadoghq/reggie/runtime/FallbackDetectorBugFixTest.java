@@ -114,7 +114,10 @@ public class FallbackDetectorBugFixTest {
         Arguments.of("(a*)=\\1", "a=a"),
         Arguments.of("(-*):\\1", "---:---"),
         Arguments.of("(b*)\\1", "bb"),
-        Arguments.of("(b*)\\1", ""));
+        Arguments.of("(b*)\\1", ""),
+        // outer + has min=1 but content a? is nullable → triggers isGroupContentNullable path
+        Arguments.of("(a?)+\\1", "aa"),
+        Arguments.of("(a?)+\\1", ""));
   }
 
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
