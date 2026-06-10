@@ -303,11 +303,18 @@ public class FallbackDetectorBugFixTest {
 
   static Stream<Arguments> capturingAlternationWithQuantifier() {
     return Stream.of(
+        // JDK-fallback patterns (quantified capturing group or nullable branch)
         Arguments.of("-?(-?.{3}).", "-bbb"),
         Arguments.of("-?(-?.{3}).", "bbb"),
         Arguments.of("([b]|.{3}){1,}", "cb"),
         Arguments.of("(a|bc)+", "abcbc"),
-        Arguments.of("(a|bc)+", "xyz"));
+        Arguments.of("(a|bc)+", "xyz"),
+        // PIKEVM_CAPTURE patterns (quantifiedAltWithGroupBug, no outer group quantifier, no anchor)
+        Arguments.of("(a|b)c+", "acc"),
+        Arguments.of("(a|b)c+", "bcc"),
+        Arguments.of("(a|b)c+", "xyz"),
+        Arguments.of("(foo|bar)x{2}", "fooxx"),
+        Arguments.of("(x|yz)w+", "xww"));
   }
 
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
