@@ -415,4 +415,34 @@ public class FallbackDetectorBugFixTest {
         m instanceof JavaRegexFallbackMatcher,
         "Expected native matcher for: " + pat + " got: " + m.getClass().getSimpleName());
   }
+
+  static Stream<Arguments> nonCapturingAltWithAnchor() {
+    return Stream.of(
+        Arguments.of("^a|b", "a"),
+        Arguments.of("^a|b", "b"),
+        Arguments.of("^a|b", "xb"),
+        Arguments.of("a|b$", "b"),
+        Arguments.of("a|b$", "a"),
+        Arguments.of("\\Aa|b", "b"),
+        Arguments.of("a|b\\Z", "a"),
+        Arguments.of("a|b\\Z", "b"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("nonCapturingAltWithAnchor")
+  void nonCapturingAltWithAnchor_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"^a|b", "a|b$", "\\Aa|b"})
+  void nonCapturingAltWithAnchor_usesNativePath(String pat) throws Exception {
+    assertFalse(
+        Reggie.compile(pat) instanceof JavaRegexFallbackMatcher,
+        "Expected native matcher for: " + pat);
+  }
 }
