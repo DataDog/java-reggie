@@ -135,6 +135,14 @@ public final class FallbackPatternDetector {
           + "generator only handles literal and char-class prefix nodes";
     }
 
+    // Outer quantifier wraps the entire capturing group: (X)+\N or (X){n,}\N. The
+    // backref engine cannot determine the correct last-iteration capture. Routes to JDK.
+    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
+        && hasOuterQuantifierOnBackrefGroup(ast)) {
+      return "quantified capturing group with backref: "
+          + "outer quantifier on group not supported by backref engine";
+    }
+
     // DFA generators track the boolean match result but do not track capturing-group span
     // boundaries during execution. When a capturing group appears inside a quantifier, the DFA
     // cannot tell which loop iteration captured what. PatternAnalyzer routes such patterns to
@@ -505,6 +513,42 @@ public final class FallbackPatternDetector {
         continue; // handled by emitPrefixMatch
       }
       return true; // unknown prefix node type
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing group referenced by a backref has the entire GroupNode wrapped by
+   * an outer quantifier at the concat level — i.e., the AST has {@code QuantifierNode(GroupNode(N,
+   * ...))} rather than {@code GroupNode(N, QuantifierNode(...))}. The backref engine cannot
+   * correctly determine the last-captured value when the group itself is quantified externally.
+   * Example: {@code (c)+\1} vs {@code (c+)\1}.
+   */
+  private static boolean hasOuterQuantifierOnBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    return hasQuantifiedGroupWithBackref(ast, backrefNums);
+  }
+
+  private static boolean hasQuantifiedGroupWithBackref(RegexNode node, Set<Integer> backrefNums) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.child instanceof GroupNode) {
+        GroupNode g = (GroupNode) q.child;
+        if (g.capturing && backrefNums.contains(g.groupNumber)) return true;
+      }
+      return hasQuantifiedGroupWithBackref(q.child, backrefNums);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children)
+        if (hasQuantifiedGroupWithBackref(c, backrefNums)) return true;
+    }
+    if (node instanceof GroupNode)
+      return hasQuantifiedGroupWithBackref(((GroupNode) node).child, backrefNums);
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        if (hasQuantifiedGroupWithBackref(a, backrefNums)) return true;
     }
     return false;
   }

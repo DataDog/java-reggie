@@ -204,6 +204,27 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
 
+  static Stream<Arguments> quantifiedGroupBackref() {
+    return Stream.of(
+        Arguments.of("(c)+\\1", "__"),
+        Arguments.of("(c)+\\1", "00"),
+        Arguments.of("(])+\\1", "cc"),
+        Arguments.of("(-{2})+\\1", "bb"),
+        Arguments.of("(-{2})+\\1", "__"),
+        Arguments.of("(-{2})+\\1", "cc"),
+        Arguments.of("(]){3,}\\1", "0"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("quantifiedGroupBackref")
+  void quantifiedGroupBackref_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
   static Stream<Arguments> variableCaptureBackrefPrefix() {
     return Stream.of(
         Arguments.of("c(.*)\\1", "cabc abc"),
