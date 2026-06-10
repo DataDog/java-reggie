@@ -243,10 +243,11 @@ public final class FallbackPatternDetector {
     // OPTIMIZED_NFA: when any alternation branch is nullable (can match the empty string),
     // OPTIMIZED_NFA's find() may pick a longer match from another branch rather than the
     // empty/shortest first-alternative match expected by JDK semantics.
-    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
+    if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
+            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
         && hasNullableAlternationBranchAnywhere(ast)) {
       return "nullable alternation branch: "
-          + "OPTIMIZED_NFA find() first-alternative semantics incorrect for empty/nullable branch";
+          + "find() first-alternative semantics incorrect for empty/nullable branch";
     }
 
     return null;

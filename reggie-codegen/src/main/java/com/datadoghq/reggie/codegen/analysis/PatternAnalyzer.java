@@ -991,22 +991,20 @@ public class PatternAnalyzer {
         return r;
       }
 
-      // Route to PIKEVM_CAPTURE (Thompson NFA with leftmost-first priority) for pure alternation
-      // patterns (no quantifiers, no anchors). The DFA uses longest-match semantics which diverges
-      // from JDK for alternation priority (e.g. fo|foo prefers "fo" over "foo"). PIKEVM_CAPTURE
-      // gives JDK-compatible first-alternative semantics for these simple cases.
-      // Patterns with quantifiers or anchors are excluded because PIKEVM semantics diverge from
-      // JDK for quantifier-alternation interactions and anchor-in-alternation edge cases.
+      // Non-anchor alternation + quantifiers (excluding nullable or optional-suffix branches):
+      // PIKEVM_CAPTURE gives correct leftmost-first semantics. Patterns with nullable branches
+      // (e.g. a{0,3}|b where the whole branch is nullable) or with {0,n} quantifiers anywhere
+      // in a branch (e.g. c.{0,3}|b where greedy max-repetition diverges in PIKEVM) are excluded.
       if (containsAlternation(ast)
-          && !containsAnyQuantifier(ast)
           && !hasAnchorInNfa(nfa)
+          && !hasNullableAlternationBranch(ast)
+          && !subtreeContainsOptional(ast)
           && dfaHasAcceptingStateWithTransitions(dfa)) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
-      // Patterns with alternation plus quantifiers or anchors where DFA has
-      // accepting-state-with-transitions: DFA longest-match semantics diverge from JDK
-      // first-alternative semantics. Fall back to JDK.
+      // Alternation + anchors: DFA anchor semantics still diverge. Fall back to JDK until
+      // PIKEVM anchor support is verified (Task 2).
       if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(

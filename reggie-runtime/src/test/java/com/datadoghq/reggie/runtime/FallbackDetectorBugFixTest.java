@@ -383,4 +383,27 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
+
+  static Stream<Arguments> nonCapturingAltWithQuantifier() {
+    return Stream.of(
+        Arguments.of("a?|b", "a"),
+        Arguments.of("a?|b", "b"),
+        Arguments.of("a?|b", ""),
+        Arguments.of("x+|y", "xx"),
+        Arguments.of("x+|y", "y"),
+        Arguments.of("ab?|a", "a"),
+        Arguments.of("ab?|a", "ab"),
+        Arguments.of("(a|b)?c", "c"),
+        Arguments.of("(a|b)?c", "ac"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("nonCapturingAltWithQuantifier")
+  void nonCapturingAltWithQuantifier_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
 }
