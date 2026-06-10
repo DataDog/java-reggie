@@ -115,6 +115,36 @@ public final class FallbackPatternDetector {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
+    // FIXED_REPETITION_BACKREF assumes groupLen > 0 when verifying repeated backrefs; when the
+    // referenced group captures the empty string, the loop never advances and produces a wrong
+    // result (false positive or false negative).
+    if (strategy == PatternAnalyzer.MatchingStrategy.FIXED_REPETITION_BACKREF
+        && hasNullableBackrefGroup(ast)) {
+      return "backref to nullable group: fixed-repetition backref loop does not handle empty capture";
+    }
+
+    // RECURSIVE_DESCENT backref matching fails when a backref to a nullable group appears inside
+    // another capturing group: the recursive parser propagates the zero-length capture into nested
+    // group boundaries incorrectly, mismatching the expected position. Simple top-level quantified
+    // backrefs like \1+ are handled correctly; only nested-inside-group uses are affected.
+    if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+        && hasNullableBackrefInsideCapturingGroup(ast)) {
+      return "backref to nullable group inside capturing group: "
+          + "recursive descent parser mishandles zero-length capture in nested group context";
+    }
+
+    // Tagged DFA (DFA_UNROLLED_WITH_GROUPS, DFA_SWITCH_WITH_GROUPS) group-span computation is
+    // unreliable when an optional element (quantifier with min=0) at the top-level concat precedes
+    // a capturing group. The TDFA priority-ordering cannot correctly resolve whether the group
+    // start position belongs to the skipped or matched optional prefix path, producing wrong
+    // group-start values (e.g. "-?(-?.{3})." gives g1=[1,3] instead of [0,3]).
+    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
+            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
+        && hasOptionalPrefixBeforeCapturingGroup(ast)) {
+      return "optional prefix before capturing group: "
+          + "tagged DFA group-span computation produces wrong group-start position";
+    }
+
     // OPTIMIZED_NFA_WITH_LOOKAROUND NFA simulation produces wrong results when a lookahead
     // assertion appears inside an alternation branch. The NFA thread scheduler does not correctly
     // isolate assertion evaluation per branch.
@@ -235,6 +265,52 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any capturing group in the AST contains a backref \N that references a group
+   * whose content is nullable (can match the empty string). The RECURSIVE_DESCENT engine's backref
+   * matching correctly handles simple top-level quantified backrefs like {@code \1+}, but fails
+   * when the zero-length capture propagates through a nested group boundary.
+   */
+  private static boolean hasNullableBackrefInsideCapturingGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    // Check if any capturing group body contains a backref to a nullable group.
+    return captGroupContainsNullableBackref(ast, backrefNums, ast);
+  }
+
+  private static boolean captGroupContainsNullableBackref(
+      RegexNode node, Set<Integer> backrefNums, RegexNode fullAst) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing) {
+        // If this group's body contains a backref to a nullable group, report.
+        Set<Integer> innerRefs = new HashSet<>();
+        collectBackrefsInSubtree(g.child, innerRefs);
+        for (int ref : innerRefs) {
+          if (backrefNums.contains(ref) && isGroupNullable(fullAst, ref)) return true;
+        }
+      }
+      return captGroupContainsNullableBackref(g.child, backrefNums, fullAst);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (captGroupContainsNullableBackref(c, backrefNums, fullAst)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (captGroupContainsNullableBackref(a, backrefNums, fullAst)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return captGroupContainsNullableBackref(((QuantifierNode) node).child, backrefNums, fullAst);
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any backref \N references a group whose content is nullable (can match the
    * empty string). In parallel NFA simulation, when such a group exists, the shared group-capture
    * arrays may be overwritten by the greedy (non-empty) path before the empty-capture path's
@@ -297,7 +373,12 @@ public final class FallbackPatternDetector {
     if (node instanceof GroupNode) {
       return subtreeIsNullable(((GroupNode) node).child);
     }
-    // AnchorNode is zero-width (nullable); LiteralNode and CharClassNode are not.
+    // Epsilon literal (ch==0) is the empty-string node produced by the parser for patterns like
+    // "(.|)" where the second alternative is empty. AnchorNode is zero-width (nullable).
+    // CharClassNode and non-epsilon LiteralNode consume at least one character.
+    if (node instanceof LiteralNode) {
+      return ((LiteralNode) node).ch == 0;
+    }
     return node instanceof AnchorNode;
   }
 
@@ -416,6 +497,67 @@ public final class FallbackPatternDetector {
     if (node instanceof CharClassNode) {
       CharClassNode cc = (CharClassNode) node;
       return cc.chars.isSingleChar() && cc.chars.getSingleChar() == '\n';
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any ConcatNode in the AST has an optional node (quantifier with min=0) that
+   * appears before a capturing group at the same concat level. The TDFA priority-ordering
+   * computation cannot resolve the group-start position correctly when an optional element may or
+   * may not be consumed before the group opens.
+   */
+  private static boolean hasOptionalPrefixBeforeCapturingGroup(RegexNode ast) {
+    if (ast instanceof ConcatNode) {
+      ConcatNode concat = (ConcatNode) ast;
+      boolean seenOptional = false;
+      for (RegexNode child : concat.children) {
+        if (child instanceof QuantifierNode && ((QuantifierNode) child).min == 0) {
+          seenOptional = true;
+        } else if (seenOptional && containsCapturingGroup(child)) {
+          return true;
+        }
+      }
+      // Recurse into children
+      for (RegexNode child : concat.children) {
+        if (hasOptionalPrefixBeforeCapturingGroup(child)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof GroupNode) {
+      return hasOptionalPrefixBeforeCapturingGroup(((GroupNode) ast).child);
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasOptionalPrefixBeforeCapturingGroup(((QuantifierNode) ast).child);
+    }
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives) {
+        if (hasOptionalPrefixBeforeCapturingGroup(a)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /** Returns true if the subtree contains at least one capturing GroupNode. */
+  private static boolean containsCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing) return true;
+      return containsCapturingGroup(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (containsCapturingGroup(c)) return true;
+      }
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (containsCapturingGroup(a)) return true;
+      }
+    }
+    if (node instanceof QuantifierNode) {
+      return containsCapturingGroup(((QuantifierNode) node).child);
     }
     return false;
   }

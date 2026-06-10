@@ -21,6 +21,7 @@ import com.datadoghq.reggie.Reggie;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -223,6 +224,49 @@ public class FallbackDetectorBugFixTest {
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
+  static Stream<Arguments> emptyGroupBackref() {
+    return Stream.of(
+        Arguments.of("()\\1{1}", ""),
+        Arguments.of("(.|)(\\1\\1)(\\2{3}[^a]){1}", "b"),
+        Arguments.of("()(\\1\\1)(\\2{3}[^a]){1}", "b"));
+  }
+
+  /**
+   * Patterns with an empty-capturing group whose backref must match the empty string. The engine
+   * strategies FIXED_REPETITION_BACKREF and RECURSIVE_DESCENT do not correctly handle nullable
+   * (empty-matching) group backreferences — they must fall back to JDK.
+   */
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("emptyGroupBackref")
+  void emptyGroupBackref_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
+  /**
+   * Pattern with an optional prefix before a capturing group: the TDFA group-span computation
+   * produces the wrong group-1 start position when the optional prefix can match or skip, shifting
+   * the capture boundary. Must fall back to JDK so group spans are correct.
+   */
+  @Test
+  void groupSpanWithOptionalPrefix_agreesWithJdk() throws Exception {
+    String pat = "-?(-?.{3}).";
+    String in = "-bbb";
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    Matcher jm = jdk.matcher(in);
+    boolean jdkM = jm.matches();
+    MatchResult rm = reggie.match(in);
+    assertEquals(jdkM, rm != null, "match() null check");
+    if (jdkM) {
+      assertEquals(jm.start(1), rm.start(1), "match() g1 start");
+      assertEquals(jm.end(1), rm.end(1), "match() g1 end");
+    }
   }
 
   static Stream<Arguments> variableCaptureBackrefPrefix() {
