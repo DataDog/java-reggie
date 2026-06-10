@@ -183,6 +183,27 @@ public class FallbackDetectorBugFixTest {
     }
   }
 
+  static Stream<Arguments> anchorInQuantifier() {
+    return Stream.of(
+        Arguments.of("\\A{0,3}a", "ca"),
+        Arguments.of("\\A{0,3}a", "_a"),
+        Arguments.of("(?:c*^{0,2})", "c"),
+        Arguments.of("(?:)(?:c*^{0,2}a)", "1a"),
+        Arguments.of("${3}0?[^a]*", ""),
+        Arguments.of("0{0}\\z{0,2}.{3}", "ba-"),
+        Arguments.of("0{0}\\z{0,2}.{3}", "1b1"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("anchorInQuantifier")
+  void anchorInQuantifier_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
   static Stream<Arguments> variableCaptureBackrefPrefix() {
     return Stream.of(
         Arguments.of("c(.*)\\1", "cabc abc"),

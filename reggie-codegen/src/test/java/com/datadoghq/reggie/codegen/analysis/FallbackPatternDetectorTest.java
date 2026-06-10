@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class FallbackPatternDetectorTest {
 
@@ -67,5 +69,23 @@ class FallbackPatternDetectorTest {
   @Test
   void lookbehindAndLookaheadCombinedNoFallback() throws Exception {
     assertNull(detect("(?<=\\d)[a-z]+(?=\\s)"));
+  }
+
+  // ── Anchor inside quantifier (non-capturing) must trigger fallback ────────────────────────
+
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "\\A{0,3}a",
+        "(?:c*^{0,2})",
+        "(?:)(?:c*^{0,2}a)",
+        "${3}0?[^a]*",
+        "0{0}\\z{0,2}.{3}",
+      })
+  void anchorInQuantifier_needsFallback(String pat) throws Exception {
+    RegexNode ast = new RegexParser().parse(pat);
+    assertNotNull(
+        FallbackPatternDetector.needsFallback(ast, PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA),
+        "expected fallback for: " + pat);
   }
 }

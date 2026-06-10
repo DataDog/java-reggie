@@ -66,6 +66,14 @@ public final class FallbackPatternDetector {
       return "anchor inside quantifier within capturing group: capture span tracking incorrect";
     }
 
+    // Anchor (start/end) inside a quantifier with range ≠ {1,1}: when the
+    // quantifier allows 0 repetitions the anchor becomes optional, and all
+    // DFA/NFA strategies produce wrong match positions. The capturing-group
+    // sub-case is already caught above; this guard covers the non-capturing case.
+    if (hasAnchorInQuantifier(ast)) {
+      return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
+    }
+
     // END/STRING_END anchor ($, \Z) immediately before a non-newline char consumer: while the
     // "$ then consume terminal \\n" path is handled correctly, other combinations (e.g. \\Z[^c])
     // are not modeled by the DFA and produce wrong boolean or span results.
@@ -317,6 +325,28 @@ public final class FallbackPatternDetector {
         if (hasAnchorInQuantifierInCapturingGroupHelper(a, inCapturing)) return true;
       }
       return false;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any AnchorNode appears as the direct or indirect child of a QuantifierNode
+   * whose range is not exactly {1,1}. Catches patterns like \A{0,3}, (?:c*^{0,2}), ${3} where a
+   * zero-width anchor is given a quantifier.
+   */
+  private static boolean hasAnchorInQuantifier(RegexNode ast) {
+    if (ast instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) ast;
+      if ((q.min != 1 || q.max != 1) && containsAnchor(q.child)) return true;
+      return hasAnchorInQuantifier(q.child);
+    }
+    if (ast instanceof GroupNode) return hasAnchorInQuantifier(((GroupNode) ast).child);
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) if (hasAnchorInQuantifier(c)) return true;
+    }
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives)
+        if (hasAnchorInQuantifier(a)) return true;
     }
     return false;
   }
