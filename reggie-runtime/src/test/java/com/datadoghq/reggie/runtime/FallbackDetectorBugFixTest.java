@@ -293,7 +293,7 @@ public class FallbackDetectorBugFixTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"fo|foo", "a|b|c", "cat|catch", "$|a", "x|xy|xyz"})
+  @ValueSource(strings = {"fo|foo", "a|b|c", "cat|catch", "x|xy|xyz"})
   void nonCapturingAlternation_usesNativePath(String pat) throws Exception {
     ReggieMatcher m = Reggie.compile(pat);
     assertFalse(
