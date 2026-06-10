@@ -301,6 +301,45 @@ public class FallbackDetectorBugFixTest {
         "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
   }
 
+  static Stream<Arguments> capturingAlternationWithQuantifier() {
+    return Stream.of(
+        Arguments.of("-?(-?.{3}).", "-bbb"),
+        Arguments.of("-?(-?.{3}).", "bbb"),
+        Arguments.of("([b]|.{3}){1,}", "cb"),
+        Arguments.of("(a|bc)+", "abcbc"),
+        Arguments.of("(a|bc)+", "xyz"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("capturingAlternationWithQuantifier")
+  void capturingAlternationWithQuantifier_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+    Matcher jm = jdk.matcher(in);
+    boolean jdkM = jm.matches();
+    MatchResult rm = reggie.match(in);
+    assertEquals(jdkM, rm != null, "match() null check " + ctx);
+    if (jdkM) {
+      for (int g = 0; g <= jm.groupCount(); g++)
+        assertEquals(
+            jm.start(g) + "," + jm.end(g),
+            rm.start(g) + "," + rm.end(g),
+            "match() g" + g + " span " + ctx);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"(a|b)c+", "(foo|bar)x{2}", "(x|yz)w+"})
+  void capturingAltNonAmbiguous_usesNativePath(String pat) throws Exception {
+    ReggieMatcher m = Reggie.compile(pat);
+    assertFalse(
+        m instanceof JavaRegexFallbackMatcher,
+        "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
+  }
+
   static Stream<Arguments> remainingDivergences() {
     return Stream.of(Arguments.of("()?\\1{1}", ""), Arguments.of("(){2}]{3}|a", "a"));
   }

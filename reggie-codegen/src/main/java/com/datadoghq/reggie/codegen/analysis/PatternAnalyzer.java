@@ -796,6 +796,25 @@ public class PatternAnalyzer {
                 && containsAnyQuantifier(ast)
                 && !hasNamedGroups(ast)
                 && !dfa.isCaptureAmbiguous();
+        // Safe sub-case: quantifiedAltWithGroupBug patterns without anchors, without quantified
+        // capturing groups, and without nullable alternation branches route to PIKEVM_CAPTURE
+        // (Pike VM, leftmost-first, correct group spans). Excludes: anchor-containing patterns,
+        // patterns where the capturing group itself is quantified (e.g. (a|b)+), and patterns
+        // with nullable alternation branches (empty alternatives, {0} quantifiers).
+        if (quantifiedAltWithGroupBug
+            && !hasAnchorInNfa(nfa)
+            && !hasQuantifiedCapturingGroup(ast)
+            && !hasNullableAlternationBranch(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // DFA-condition sub-case and remaining patterns: JDK fallback.
         if ((containsAlternation(ast) || containsOptionalQuantifier(ast))
             && (quantifiedAltWithGroupBug
                 || (containsAnyQuantifier(ast)
@@ -1218,6 +1237,54 @@ public class PatternAnalyzer {
     }
     if (node instanceof GroupNode) return containsAlternation(((GroupNode) node).child);
     if (node instanceof QuantifierNode) return containsAlternation(((QuantifierNode) node).child);
+    return false;
+  }
+
+  /**
+   * Returns true if the AST contains any alternation with at least one nullable (empty-matching)
+   * branch. PIKEVM_CAPTURE produces incorrect group spans for such patterns.
+   */
+  private boolean hasNullableAlternationBranch(RegexNode node) {
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (isNullable(alt) || hasNullableAlternationBranch(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (hasNullableAlternationBranch(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode g) return hasNullableAlternationBranch(g.child);
+    if (node instanceof QuantifierNode q) return hasNullableAlternationBranch(q.child);
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing group in the AST is directly wrapped by a quantifier (i.e. the
+   * group itself is quantified, like {@code (a|b)+}). PIKEVM_CAPTURE produces incorrect group spans
+   * for such patterns because repeated group captures overwrite earlier spans.
+   */
+  private boolean hasQuantifiedCapturingGroup(RegexNode node) {
+    if (node instanceof QuantifierNode q && q.child instanceof GroupNode g && g.capturing) {
+      return true;
+    }
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (hasQuantifiedCapturingGroup(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode g) return hasQuantifiedCapturingGroup(g.child);
+    if (node instanceof QuantifierNode q) return hasQuantifiedCapturingGroup(q.child);
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (hasQuantifiedCapturingGroup(alt)) return true;
+      }
+      return false;
+    }
     return false;
   }
 
