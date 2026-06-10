@@ -939,10 +939,22 @@ public class PatternAnalyzer {
         return r;
       }
 
-      // Alternation priority for non-capturing DFA: the priority-cut flag is unreliable for
-      // non-capturing patterns (the ordering computation has NFA-sharing artifacts for several
-      // pattern classes). Restore the original conservative decline for the non-capturing path;
-      // the capturing path (above) handles the target alternation-boundary class correctly.
+      // Route to PIKEVM_CAPTURE (Thompson NFA with leftmost-first priority) for pure alternation
+      // patterns (no quantifiers, no anchors). The DFA uses longest-match semantics which diverges
+      // from JDK for alternation priority (e.g. fo|foo prefers "fo" over "foo"). PIKEVM_CAPTURE
+      // gives JDK-compatible first-alternative semantics for these simple cases.
+      // Patterns with quantifiers or anchors are excluded because PIKEVM semantics diverge from
+      // JDK for quantifier-alternation interactions and anchor-in-alternation edge cases.
+      if (containsAlternation(ast)
+          && !containsAnyQuantifier(ast)
+          && !hasAnchorInNfa(nfa)
+          && dfaHasAcceptingStateWithTransitions(dfa)) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+      }
+      // Patterns with alternation plus quantifiers or anchors where DFA has
+      // accepting-state-with-transitions: DFA longest-match semantics diverge from JDK
+      // first-alternative semantics. Fall back to JDK.
       if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(

@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import com.datadoghq.reggie.Reggie;
 import java.util.regex.Matcher;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Regression tests for FallbackPatternDetector conditions eliminated by routing fixes. */
 public class FallbackDetectorBugFixTest {
@@ -288,6 +290,15 @@ public class FallbackDetectorBugFixTest {
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"fo|foo", "a|b|c", "cat|catch", "$|a", "x|xy|xyz"})
+  void nonCapturingAlternation_usesNativePath(String pat) throws Exception {
+    ReggieMatcher m = Reggie.compile(pat);
+    assertFalse(
+        m instanceof JavaRegexFallbackMatcher,
+        "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
   }
 
   static Stream<Arguments> remainingDivergences() {

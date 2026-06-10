@@ -1959,10 +1959,8 @@ public class NFABytecodeGenerator {
 
               // Add all epsilon-reachable states from this state
               for (Integer targetId : closure) {
-                // states.add(targetId) - StateSet.add() already checks contains()
-                iterMv.visitVarInsn(ALOAD, statesVar);
-                pushInt(iterMv, targetId);
-                generateStateSetAdd(iterMv);
+                // Use unified helper so single-long / dual-long / BitSet paths are all correct.
+                addStateToSet(iterMv, statesVar, targetId, allocator);
               }
 
               // Jump to default (end of switch, continue iteration)
@@ -3836,6 +3834,15 @@ public class NFABytecodeGenerator {
    * @return Longest literal string found, or null if no suitable literal exists
    */
   private String extractLongestRequiredLiteral(NFA nfa) {
+    // A multi-char literal is only valid for indexOf skipping when it must appear in EVERY
+    // possible match. For alternation patterns (start state has 2+ epsilon transitions),
+    // literals found inside one branch are not required for all matches, so skip the
+    // optimization entirely to avoid false negatives.
+    NFA.NFAState startState = nfa.getStartState();
+    if (startState != null && startState.getEpsilonTransitions().size() > 1) {
+      return null;
+    }
+
     String longestLiteral = null;
     int maxLength = 0;
 
