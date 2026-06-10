@@ -27,7 +27,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -117,7 +116,6 @@ public class AlgorithmicFuzzTest {
    * {@code -Dreggie.fuzz.enforceZero=true} (see {@link #zeroDivergenceGate_enforcedViaProperty()}).
    */
   @Test
-  @Disabled("enabled in Wave C once all divergences are fixed")
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
   public void zeroDivergenceGate() {
     runZeroDivergenceGate();
