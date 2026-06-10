@@ -111,9 +111,8 @@ public class AlgorithmicFuzzTest {
    * This is the production-readiness gate. It runs from the same fixed {@link #BASE_SEED} as the
    * smoke test, so the (pattern, input) stream and minimal repro set are fully reproducible.
    *
-   * <p>Default-disabled while known divergences are still being fixed (tracked in {@code
-   * doc/temp/prod-readiness/fuzz-inventory.md}). Enable by removing {@link Disabled} or by passing
-   * {@code -Dreggie.fuzz.enforceZero=true} (see {@link #zeroDivergenceGate_enforcedViaProperty()}).
+   * <p>Runs unconditionally. The companion {@link #zeroDivergenceGate_enforcedViaProperty()} can
+   * also be triggered via {@code -Dreggie.fuzz.enforceZero=true} without editing source.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
