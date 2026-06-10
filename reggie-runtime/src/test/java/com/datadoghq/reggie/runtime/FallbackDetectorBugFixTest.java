@@ -152,6 +152,37 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
 
+  static Stream<Arguments> prefixOverlapAlternation() {
+    return Stream.of(
+        Arguments.of("fo|foo", "foo"),
+        Arguments.of("fo|foo", "fo"),
+        Arguments.of("a|ab", "ab"),
+        Arguments.of("a|ab", "a"),
+        Arguments.of("cat|catch", "catch"),
+        Arguments.of("cat|catch", "cat"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("prefixOverlapAlternation")
+  void prefixOverlapAlternation_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+
+    // Verify the first-alternative (JDK-compatible) match span, not longest-match.
+    // fo|foo on "foo": JDK finds "fo" at [0,2], not "foo" at [0,3].
+    Matcher jmf = jdk.matcher(in);
+    boolean jdkF = jmf.find();
+    MatchResult rfm = reggie.findMatch(in);
+    assertEquals(jdkF, rfm != null, "findMatch() null check " + ctx);
+    if (jdkF) {
+      assertEquals(jmf.start(0), rfm.start(0), "findMatch() start " + ctx);
+      assertEquals(jmf.end(0), rfm.end(0), "findMatch() end " + ctx);
+    }
+  }
+
   static Stream<Arguments> variableCaptureBackrefPrefix() {
     return Stream.of(
         Arguments.of("c(.*)\\1", "cabc abc"),

@@ -29,7 +29,6 @@ import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -135,13 +134,12 @@ public final class FallbackPatternDetector {
     // PIKEVM_CAPTURE (non-assertion path) or OPTIMIZED_NFA_WITH_LOOKAROUND (assertion path)
     // before DFA strategies are selected, so this fallback condition is no longer needed.
 
-    // OPTIMIZED_NFA with overlapping literal alternatives: the NFA simulation takes the first
-    // matching branch (leftmost-first) rather than the longest, diverging from JDK's semantics
-    // when one alternative is a literal prefix of another (e.g. fo|foo on 'foo').
-    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
-        && hasAlternationWithPrefixOverlap(ast)) {
-      return "alternation with prefix-overlap: leftmost-first ordering diverges from JDK longest-match";
-    }
+    // OPTIMIZED_NFA prefix-overlap alternation (e.g. fo|foo): PatternAnalyzer sets
+    // alternationPriorityConflict=true for all patterns where the DFA has an accepting state
+    // with outgoing transitions, and RuntimeCompiler falls back to JDK before this method is
+    // called. This guard is unreachable in practice and has been removed. The actual fix
+    // (routing to OPTIMIZED_NFA instead of JDK when alternation priority is not a correctness
+    // concern) is deferred.
 
     return null;
   }
@@ -514,53 +512,6 @@ public final class FallbackPatternDetector {
       return false;
     }
     return false;
-  }
-
-  /**
-   * Returns true if any {@link AlternationNode} in {@code ast} has two literal-string alternatives
-   * where one is a strict prefix of the other (e.g., {@code fo|foo}). The OPTIMIZED_NFA engine
-   * takes the first matching branch (leftmost-first), but JDK uses a simulation that can prefer the
-   * longer branch, leading to different group-capture positions.
-   */
-  private static boolean hasAlternationWithPrefixOverlap(RegexNode ast) {
-    if (ast instanceof AlternationNode) {
-      List<String> lits = new ArrayList<>();
-      for (RegexNode alt : ((AlternationNode) ast).alternatives) {
-        String s = extractLiteralStringFpd(alt);
-        if (s != null) lits.add(s);
-      }
-      for (int i = 0; i < lits.size(); i++) {
-        for (int j = 0; j < lits.size(); j++) {
-          if (i != j && lits.get(j).startsWith(lits.get(i)) && !lits.get(j).equals(lits.get(i))) {
-            return true;
-          }
-        }
-      }
-    }
-    if (ast instanceof ConcatNode) {
-      for (RegexNode c : ((ConcatNode) ast).children) {
-        if (hasAlternationWithPrefixOverlap(c)) return true;
-      }
-    }
-    if (ast instanceof GroupNode) return hasAlternationWithPrefixOverlap(((GroupNode) ast).child);
-    if (ast instanceof QuantifierNode)
-      return hasAlternationWithPrefixOverlap(((QuantifierNode) ast).child);
-    return false;
-  }
-
-  /** Extracts a literal string from an AST node if it consists solely of literal characters. */
-  private static String extractLiteralStringFpd(RegexNode node) {
-    if (node instanceof LiteralNode) return String.valueOf(((LiteralNode) node).ch);
-    if (node instanceof ConcatNode) {
-      StringBuilder sb = new StringBuilder();
-      for (RegexNode c : ((ConcatNode) node).children) {
-        String s = extractLiteralStringFpd(c);
-        if (s == null) return null;
-        sb.append(s);
-      }
-      return sb.toString();
-    }
-    return null;
   }
 
   /**
