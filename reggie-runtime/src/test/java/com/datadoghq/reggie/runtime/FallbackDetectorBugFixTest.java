@@ -445,4 +445,25 @@ public class FallbackDetectorBugFixTest {
         Reggie.compile(pat) instanceof JavaRegexFallbackMatcher,
         "Expected native matcher for: " + pat);
   }
+
+  static Stream<Arguments> anchorDilutedResidual() {
+    return Stream.of(
+        // Patterns where dfa.isAnchorConditionDiluted() fires without AST predicates
+        Arguments.of("(?:a|b^)", "a"),
+        Arguments.of("(?:a|b^)", "b"),
+        Arguments.of("a\\Ab", "ab"),
+        Arguments.of("a\\Ab", "b"),
+        Arguments.of("(a|\\Ab)", "a"),
+        Arguments.of("(a|\\Ab)", "b"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("anchorDilutedResidual")
+  void anchorDilutedResidual_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
 }
