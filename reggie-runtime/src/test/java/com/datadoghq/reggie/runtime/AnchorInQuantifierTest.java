@@ -52,16 +52,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void dollarTwoHandledNatively() {
-    // ${2} is routed to JDK fallback via the hasAnchorInQuantifier guard
-    ReggieMatcher m = Reggie.compile("${2}");
-    assertTrue(
-        m instanceof JavaRegexFallbackMatcher,
-        "${2} must be routed to JDK fallback (anchor-in-quantifier guard active)");
-  }
-
-  @Test
-  void dollarTwoMatchesNativelyAfterFix() {
+  void dollarTwo_routedToFallback() {
     // ${2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("${2}");
     assertTrue(m instanceof JavaRegexFallbackMatcher, "${2} must be routed to JDK fallback");
@@ -70,7 +61,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void dollarZeroToTwo_nativeAfterFix() {
+  void dollarZeroToTwo_routedToFallback() {
     // ${0,2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("${0,2}");
     assertTrue(m instanceof JavaRegexFallbackMatcher, "${0,2} must be routed to JDK fallback");
@@ -80,7 +71,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void dollarPlus_nativeAfterFix() {
+  void dollarPlus_routedToFallback() {
     // $+ is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("$+");
     assertTrue(m instanceof JavaRegexFallbackMatcher, "$+ must be routed to JDK fallback");
@@ -89,7 +80,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void dollarStar_nativeAfterFix() {
+  void dollarStar_routedToFallback() {
     // $* is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("$*");
     assertTrue(m instanceof JavaRegexFallbackMatcher, "$* must be routed to JDK fallback");
@@ -98,7 +89,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void dollarQuestion_nativeAfterFix() {
+  void dollarQuestion_routedToFallback() {
     // $? is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("$?");
     assertTrue(m instanceof JavaRegexFallbackMatcher, "$? must be routed to JDK fallback");
@@ -107,7 +98,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void caretTwo_nativeAfterFix() {
+  void caretTwo_routedToFallback() {
     // ^{2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("^{2}");
     assertTrue(m instanceof JavaRegexFallbackMatcher, "^{2} must be routed to JDK fallback");
@@ -116,7 +107,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void stringEndTwo_nativeAfterFix() {
+  void stringEndTwo_routedToFallback() {
     // \z{2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("\\z{2}");
     assertTrue(m instanceof JavaRegexFallbackMatcher, "\\z{2} must be routed to JDK fallback");
@@ -125,7 +116,7 @@ class AnchorInQuantifierTest {
   }
 
   @Test
-  void anchorInQuantifierWithSurroundingContent_nativeAfterFix() {
+  void anchorInQuantifierWithSurroundingContent_routedToFallback() {
     // hello${2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("hello${2}");
     assertTrue(

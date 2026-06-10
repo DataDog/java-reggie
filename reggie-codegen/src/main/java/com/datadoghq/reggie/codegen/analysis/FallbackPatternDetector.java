@@ -66,10 +66,9 @@ public final class FallbackPatternDetector {
       return "anchor inside quantifier within capturing group: capture span tracking incorrect";
     }
 
-    // Anchor (start/end) inside a quantifier with range ≠ {1,1}: when the
-    // quantifier allows 0 repetitions the anchor becomes optional, and all
-    // DFA/NFA strategies produce wrong match positions. The capturing-group
-    // sub-case is already caught above; this guard covers the non-capturing case.
+    // Any anchor (start/end) inside a quantifier with range ≠ {1,1} produces wrong
+    // match positions in all DFA/NFA strategies. The capturing-group sub-case is caught
+    // by the guard above; this catches all remaining cases.
     if (hasAnchorInQuantifier(ast)) {
       return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
     }
@@ -364,6 +363,7 @@ public final class FallbackPatternDetector {
         if (containsAnchor(alt)) return true;
       }
     }
+    if (node instanceof QuantifierNode) return containsAnchor(((QuantifierNode) node).child);
     return false;
   }
 

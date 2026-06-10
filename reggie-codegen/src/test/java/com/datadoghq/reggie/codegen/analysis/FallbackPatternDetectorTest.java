@@ -83,9 +83,6 @@ class FallbackPatternDetectorTest {
         "0{0}\\z{0,2}.{3}",
       })
   void anchorInQuantifier_needsFallback(String pat) throws Exception {
-    RegexNode ast = new RegexParser().parse(pat);
-    assertNotNull(
-        FallbackPatternDetector.needsFallback(ast, PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA),
-        "expected fallback for: " + pat);
+    assertNotNull(detect(pat), "expected fallback for: " + pat);
   }
 }
