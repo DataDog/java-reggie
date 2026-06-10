@@ -991,10 +991,13 @@ public class PatternAnalyzer {
         return r;
       }
 
-      // Non-anchor alternation + quantifiers (excluding nullable or optional-suffix branches):
-      // PIKEVM_CAPTURE gives correct leftmost-first semantics. Patterns with nullable branches
-      // (e.g. a{0,3}|b where the whole branch is nullable) or with {0,n} quantifiers anywhere
-      // in a branch (e.g. c.{0,3}|b where greedy max-repetition diverges in PIKEVM) are excluded.
+      // Non-anchor alternation + quantifiers: PIKEVM_CAPTURE gives correct leftmost-first
+      // semantics. Two exclusions guard known PIKEVM divergences:
+      //  1. hasNullableAlternationBranch: entire branch can match empty (e.g. a{0,3}|b).
+      //  2. subtreeContainsOptional: any {0,n} quantifier anywhere in the pattern, including
+      //     inside a non-nullable branch (e.g. c.{0,3}|b — "c" makes the branch non-nullable
+      //     but the optional suffix still causes PIKEVM greedy divergence from JDK).
+      //  Both guards are needed; (1) alone misses the non-nullable optional-suffix case.
       if (containsAlternation(ast)
           && !hasAnchorInNfa(nfa)
           && !hasNullableAlternationBranch(ast)

@@ -406,4 +406,13 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"x+|y", "ab+|c", "cat|catch", "fo+|bar"})
+  void nonCapturingAltWithQuantifier_usesNativePath(String pat) throws Exception {
+    ReggieMatcher m = Reggie.compile(pat);
+    assertFalse(
+        m instanceof JavaRegexFallbackMatcher,
+        "Expected native matcher for: " + pat + " got: " + m.getClass().getSimpleName());
+  }
 }
