@@ -1247,7 +1247,11 @@ public class PatternAnalyzer {
   private boolean hasNullableAlternationBranch(RegexNode node) {
     if (node instanceof AlternationNode a) {
       for (RegexNode alt : a.alternatives) {
-        if (isNullable(alt) || hasNullableAlternationBranch(alt)) return true;
+        // LiteralNode(ch=0) is the parser's epsilon sentinel for syntactically empty branches
+        // (e.g. the trailing arm of "a|" or the body of "()"). isNullable does not handle it.
+        if ((alt instanceof LiteralNode l && l.ch == 0)
+            || isNullable(alt)
+            || hasNullableAlternationBranch(alt)) return true;
       }
       return false;
     }
@@ -1263,9 +1267,12 @@ public class PatternAnalyzer {
   }
 
   /**
-   * Returns true if any capturing group in the AST is directly wrapped by a quantifier (i.e. the
-   * group itself is quantified, like {@code (a|b)+}). PIKEVM_CAPTURE produces incorrect group spans
-   * for such patterns because repeated group captures overwrite earlier spans.
+   * Returns true if any capturing group in the AST is directly wrapped by a quantifier node (i.e.
+   * the group itself is quantified, like {@code (a|b)+}). PIKEVM_CAPTURE produces incorrect group
+   * spans for such patterns because repeated group captures overwrite earlier spans. Note: a
+   * quantified non-capturing group that wraps a capturing group (e.g. {@code (?:(a|b))+}) is not
+   * detected here; however, such patterns are capture-ambiguous and excluded earlier via {@code
+   * isCaptureAmbiguous}, so they never reach this check.
    */
   private boolean hasQuantifiedCapturingGroup(RegexNode node) {
     if (node instanceof QuantifierNode q && q.child instanceof GroupNode g && g.capturing) {

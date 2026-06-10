@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
 import java.util.regex.Matcher;
@@ -345,6 +346,9 @@ public class FallbackDetectorBugFixTest {
     assertFalse(
         m instanceof JavaRegexFallbackMatcher,
         "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
+    assertTrue(
+        m instanceof PikeVMMatcher,
+        "Expected PikeVMMatcher for: " + pat + " but got: " + m.getClass().getSimpleName());
   }
 
   static Stream<Arguments> remainingDivergences() {
