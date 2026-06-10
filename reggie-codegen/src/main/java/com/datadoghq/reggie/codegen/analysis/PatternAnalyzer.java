@@ -765,9 +765,31 @@ public class PatternAnalyzer {
         // Build DFA with tag computation enabled for Tagged DFA
         DFA dfa = constructor.buildDFA(nfa, true);
 
-        if (dfa.isAnchorConditionDiluted()
-            || hasMisplacedStartAnchorInAlternation(ast)
-            || hasStringEndAnchorInAlternation(ast)) {
+        if (hasMisplacedStartAnchorInAlternation(ast)
+            && !dfaHasAcceptingStateWithTransitions(dfa)) {
+          // Anchor condition diluted in DFA (misplaced anchor in alternation or
+          // string-end anchor in alternation). OPTIMIZED_NFA handles anchors as
+          // zero-width NFA assertions and gives correct JDK-compatible results.
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        if (hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        if (dfa.isAnchorConditionDiluted()) {
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
@@ -948,9 +970,20 @@ public class PatternAnalyzer {
       // A START-class anchor placed after a consumer inside an alternation branch makes that branch
       // unsatisfiable in find context, but the DFA mishandles it (treats \A/^ as match-start, not
       // input-start). Decline the DFA fast path so we route to a correct strategy / JDK fallback.
-      if (dfa.isAnchorConditionDiluted()
-          || hasMisplacedStartAnchorInAlternation(ast)
-          || hasStringEndAnchorInAlternation(ast)) {
+      // Only use OPTIMIZED_NFA when there's no accepting-state-with-transitions (no alternation
+      // priority conflict); otherwise fall through to the priority-conflict handling below.
+      if (hasMisplacedStartAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
+        // Anchor condition diluted in DFA (misplaced anchor in alternation or
+        // string-end anchor in alternation). OPTIMIZED_NFA handles anchors as
+        // zero-width NFA assertions and gives correct JDK-compatible results.
+        return new MatchingStrategyResult(
+            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+      }
+      if (hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+      }
+      if (dfa.isAnchorConditionDiluted()) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
                 MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
@@ -2468,16 +2501,6 @@ public class PatternAnalyzer {
         usePosixLastMatch; // Use POSIX last-match semantics for groups in quantifiers
 
     /**
-     * True when the DFA construction detected an anchor-condition dilution: alternation branches
-     * with differing positional-anchor requirements contributed to the same partition slice (or
-     * accept site), and the intersection logic collapsed those requirements to unconditional. The
-     * built DFA is structurally valid but semantically incorrect for such patterns; callers should
-     * route to a correct fallback engine (e.g. {@code JavaRegexFallbackMatcher}) rather than using
-     * the DFA.
-     */
-    public boolean anchorConditionDiluted;
-
-    /**
      * True when the pattern has alternation and the DFA has an unconditionally-accepting state with
      * further outgoing transitions. In this case the DFA uses longest-match semantics but Java NFA
      * semantics require first-alternative preference. Callers should route to a correct fallback
@@ -2493,6 +2516,14 @@ public class PatternAnalyzer {
      * route to a correct fallback engine (e.g. {@code JavaRegexFallbackMatcher}).
      */
     public boolean captureAmbiguous;
+
+    /**
+     * True when DFA construction detected an anchor-condition dilution that is not explained by an
+     * explicit misplaced-start or string-end anchor in an alternation. The DFA is structurally
+     * valid but semantically incorrect; callers should route to a correct fallback engine (e.g.
+     * {@code JavaRegexFallbackMatcher}) rather than using the generated NFA bytecode.
+     */
+    public boolean anchorConditionDiluted;
 
     public MatchingStrategyResult(MatchingStrategy strategy, DFA dfa) {
       this(strategy, dfa, null, false, java.util.Collections.emptySet(), null, false);

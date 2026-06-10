@@ -29,6 +29,7 @@ import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
+import com.datadoghq.reggie.codegen.automaton.CharSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -211,7 +212,211 @@ public final class FallbackPatternDetector {
           + "TDFA thread ordering silently skips alternation branches";
     }
 
+    // The TDFA does not correctly model POSIX last-match semantics when a capturing group is
+    // directly wrapped by an outer quantifier with min=0 (nullable). The last zero-width iteration
+    // should set group to the last non-empty capture, but the TDFA may report the wrong span.
+    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
+            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
+        && hasNullableOuterQuantifierOnCapturingGroup(ast)) {
+      return "capturing group with nullable outer quantifier: "
+          + "TDFA POSIX last-match span incorrect for zero-width last iteration";
+    }
+
+    // OPTIMIZED_NFA: \Z (STRING_END) in an alternation combined with capturing groups,
+    // nullable/empty branches, or zero-width prefixed branches causes incorrect find() span
+    // or group-span results. Patterns like (c{2}\Z)|[b] or |c\Z route to JDK.
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
+        && hasStringEndAnchorInAltWithProblematicContext(ast)) {
+      return "string-end anchor in alternation with capturing group or nullable/empty branch: "
+          + "OPTIMIZED_NFA find() span or group-span tracking incorrect";
+    }
+
+    // OPTIMIZED_NFA: a start-class anchor (\A or non-multiline ^) inside an alternation branch
+    // combined with capturing groups causes incorrect group-span tracking for unmatched branches.
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
+        && containsCapturingGroup(ast)
+        && hasStartClassAnchorInAlternationBranch(ast)) {
+      return "start anchor in alternation with capturing group: "
+          + "OPTIMIZED_NFA group span tracking for unmatched branches incorrect";
+    }
+
+    // OPTIMIZED_NFA: when any alternation branch is nullable (can match the empty string),
+    // OPTIMIZED_NFA's find() may pick a longer match from another branch rather than the
+    // empty/shortest first-alternative match expected by JDK semantics.
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA
+        && hasNullableAlternationBranchAnywhere(ast)) {
+      return "nullable alternation branch: "
+          + "OPTIMIZED_NFA find() first-alternative semantics incorrect for empty/nullable branch";
+    }
+
     return null;
+  }
+
+  /**
+   * Returns true if the AST has a STRING_END (\Z or $) anchor inside any alternation AND the
+   * alternation has at least one problematic context: a capturing group, an empty/nullable branch,
+   * or a branch whose first element is a zero-width quantifier (min=max=0).
+   */
+  private static boolean hasStringEndAnchorInAltWithProblematicContext(RegexNode ast) {
+    return hasStringEndAnchorInAltHelper(ast);
+  }
+
+  private static boolean hasStringEndAnchorInAltHelper(RegexNode node) {
+    if (node instanceof AlternationNode) {
+      AlternationNode alt = (AlternationNode) node;
+      boolean hasStringEndInAlt = false;
+      for (RegexNode branch : alt.alternatives) {
+        if (containsStringEndAnchor(branch)) {
+          hasStringEndInAlt = true;
+          break;
+        }
+      }
+      if (hasStringEndInAlt) {
+        if (containsCapturingGroup(node)) return true;
+        for (RegexNode branch : alt.alternatives) {
+          if (isNullableOrEmptyBranch(branch) || startsWithZeroWidthQuantifier(branch)) {
+            return true;
+          }
+          // Broad-charset branch (like '.') that also does NOT contain a start-class anchor
+          // (which would make it a dead/impossible branch) can cause span conflicts with \Z
+          // branches.
+          if (startsWithBroadCharClass(branch) && !containsAnchor(branch)) {
+            return true;
+          }
+        }
+      }
+      for (RegexNode branch : alt.alternatives) {
+        if (hasStringEndAnchorInAltHelper(branch)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) return hasStringEndAnchorInAltHelper(((GroupNode) node).child);
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (hasStringEndAnchorInAltHelper(c)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode)
+      return hasStringEndAnchorInAltHelper(((QuantifierNode) node).child);
+    return false;
+  }
+
+  /** Returns true if the subtree contains a STRING_END (\Z) or END ($) anchor. */
+  private static boolean containsStringEndAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) {
+      AnchorNode.Type t = ((AnchorNode) node).type;
+      return t == AnchorNode.Type.STRING_END || t == AnchorNode.Type.END;
+    }
+    if (node instanceof GroupNode) return containsStringEndAnchor(((GroupNode) node).child);
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (containsStringEndAnchor(c)) return true;
+      }
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (containsStringEndAnchor(a)) return true;
+      }
+    }
+    if (node instanceof QuantifierNode)
+      return containsStringEndAnchor(((QuantifierNode) node).child);
+    return false;
+  }
+
+  /** Returns true if the branch is an epsilon (empty) node or nullable (can match empty string). */
+  private static boolean isNullableOrEmptyBranch(RegexNode node) {
+    if (node instanceof LiteralNode) return ((LiteralNode) node).ch == 0;
+    return subtreeIsNullable(node);
+  }
+
+  /**
+   * Returns true if the branch starts (in a concat) with a QuantifierNode whose max == 0 (zero-
+   * width prefix). Example: a{0}[1-a] starts with a{0} which consumes nothing.
+   */
+  private static boolean startsWithZeroWidthQuantifier(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      return ((QuantifierNode) node).max == 0;
+    }
+    if (node instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) node).children;
+      if (!children.isEmpty()) {
+        RegexNode first = children.get(0);
+        if (first instanceof QuantifierNode) return ((QuantifierNode) first).max == 0;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the branch starts with a CharClassNode covering more than one character (e.g. a
+   * dot '.' or negated class). Such branches can compete with other branches for the first
+   * position, causing alternation-priority or span ambiguity with \Z branches.
+   */
+  private static boolean startsWithBroadCharClass(RegexNode node) {
+    CharClassNode cc = null;
+    if (node instanceof CharClassNode) {
+      cc = (CharClassNode) node;
+    } else if (node instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) node).children;
+      if (!children.isEmpty() && children.get(0) instanceof CharClassNode) {
+        cc = (CharClassNode) children.get(0);
+      }
+    }
+    if (cc == null) return false;
+    int size = 0;
+    for (CharSet.Range r : cc.chars.getRanges()) {
+      size += r.end - r.start + 1;
+      if (size > 1) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any {@link AlternationNode} in the AST contains a branch that has a start-
+   * class anchor ({@code \A} or non-multiline {@code ^}) anywhere within it.
+   */
+  private static boolean hasStartClassAnchorInAlternationBranch(RegexNode ast) {
+    if (ast instanceof AlternationNode) {
+      for (RegexNode branch : ((AlternationNode) ast).alternatives) {
+        if (containsStartClassAnchor(branch)) return true;
+        if (hasStartClassAnchorInAlternationBranch(branch)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof GroupNode)
+      return hasStartClassAnchorInAlternationBranch(((GroupNode) ast).child);
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasStartClassAnchorInAlternationBranch(c)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof QuantifierNode)
+      return hasStartClassAnchorInAlternationBranch(((QuantifierNode) ast).child);
+    return false;
+  }
+
+  private static boolean containsStartClassAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) {
+      AnchorNode.Type t = ((AnchorNode) node).type;
+      return t == AnchorNode.Type.STRING_START
+          || (t == AnchorNode.Type.START && !((AnchorNode) node).multiline);
+    }
+    if (node instanceof GroupNode) return containsStartClassAnchor(((GroupNode) node).child);
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (containsStartClassAnchor(c)) return true;
+      }
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (containsStartClassAnchor(a)) return true;
+      }
+    }
+    if (node instanceof QuantifierNode)
+      return containsStartClassAnchor(((QuantifierNode) node).child);
+    return false;
   }
 
   /**
@@ -420,7 +625,7 @@ public final class FallbackPatternDetector {
       RegexNode node, boolean inCapturing) {
     if (node instanceof QuantifierNode) {
       QuantifierNode q = (QuantifierNode) node;
-      if (inCapturing && (q.min != 1 || q.max != 1) && containsAnchor(q.child)) return true;
+      if (inCapturing && containsAnchor(q.child)) return true;
       return hasAnchorInQuantifierInCapturingGroupHelper(q.child, inCapturing);
     }
     if (node instanceof GroupNode) {
@@ -680,6 +885,60 @@ public final class FallbackPatternDetector {
         continue; // handled by emitPrefixMatch
       }
       return true; // unknown prefix node type
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any {@link AlternationNode} anywhere in the AST has at least one branch that is
+   * nullable (can match the empty string). OPTIMIZED_NFA may violate first-alternative semantics
+   * when a nullable branch competes with a longer match from another branch.
+   */
+  private static boolean hasNullableAlternationBranchAnywhere(RegexNode ast) {
+    if (ast instanceof AlternationNode) {
+      for (RegexNode branch : ((AlternationNode) ast).alternatives) {
+        if (subtreeIsNullable(branch)) return true;
+      }
+      for (RegexNode branch : ((AlternationNode) ast).alternatives) {
+        if (hasNullableAlternationBranchAnywhere(branch)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof GroupNode)
+      return hasNullableAlternationBranchAnywhere(((GroupNode) ast).child);
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasNullableAlternationBranchAnywhere(c)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof QuantifierNode)
+      return hasNullableAlternationBranchAnywhere(((QuantifierNode) ast).child);
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0.
+   * Example: {@code (0*-?){0,}} has the group quantified by {@code {0,}} (min=0).
+   */
+  private static boolean hasNullableOuterQuantifierOnCapturingGroup(RegexNode ast) {
+    if (ast instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) ast;
+      if (q.min == 0 && q.child instanceof GroupNode && ((GroupNode) q.child).capturing)
+        return true;
+      return hasNullableOuterQuantifierOnCapturingGroup(q.child);
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasNullableOuterQuantifierOnCapturingGroup(c)) return true;
+      }
+    }
+    if (ast instanceof GroupNode)
+      return hasNullableOuterQuantifierOnCapturingGroup(((GroupNode) ast).child);
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives) {
+        if (hasNullableOuterQuantifierOnCapturingGroup(a)) return true;
+      }
     }
     return false;
   }

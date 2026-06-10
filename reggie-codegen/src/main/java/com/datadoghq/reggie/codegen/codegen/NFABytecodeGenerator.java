@@ -2878,9 +2878,10 @@ public class NFABytecodeGenerator {
     mv.visitVarInsn(ILOAD, lenVar); // len
     mv.visitJumpInsn(IF_ICMPGT, outerLoopEnd);
 
-    // ANCHOR OPTIMIZATION: For patterns with ^ or \A, only try position 0
-    // if (tryPos != 0) return -1;
-    if (requiresStartAnchor || hasStringStartAnchor) {
+    // ANCHOR OPTIMIZATION: For patterns where ALL paths require ^ or \A, only try position 0.
+    // When \A appears only in some alternation branches, other branches can still match at any
+    // position, so we must not skip positions > 0 in that case.
+    if (requiresStartAnchor) {
       Label validPosition = new Label();
       mv.visitVarInsn(ILOAD, tryPosVar);
       mv.visitJumpInsn(IFEQ, validPosition); // if (tryPos == 0) goto validPosition

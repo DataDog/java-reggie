@@ -364,4 +364,23 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
+
+  static Stream<Arguments> anchorDiluted() {
+    return Stream.of(
+        Arguments.of("1[^c]$|.-\\A", "1-0"),
+        Arguments.of("[1][^-]?\\Z|_{2}", "1"),
+        Arguments.of("(?:a|b^)", "a"),
+        Arguments.of("(?:a|b^)", "b"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("anchorDiluted")
+  void anchorDiluted_usesNativePathAndAgreesWithJdk(String pat, String in) throws Exception {
+    ReggieMatcher reggie = Reggie.compile(pat);
+    assertFalse(reggie instanceof JavaRegexFallbackMatcher, "Expected native matcher for: " + pat);
+    Pattern jdk = Pattern.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
 }

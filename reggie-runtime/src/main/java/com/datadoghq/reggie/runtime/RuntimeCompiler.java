@@ -331,7 +331,9 @@ public class RuntimeCompiler {
       PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
 
-      // 3.5. Fall back to java.util.regex for patterns with known engine bugs
+      // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
+      // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
+      // results for these patterns (e.g. dot matching newline, group-span bugs).
       if (result.anchorConditionDiluted) {
         ReggieMatcher fallback =
             new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in DFA construction");
@@ -602,6 +604,11 @@ public class RuntimeCompiler {
     // 1. Get DFA strategy (ignore group count)
     PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
 
+    // If DFA construction failed due to anchor-condition dilution, the pure NFA fallback may
+    // produce incorrect results (e.g. dot matching newline). Route to JDK instead.
+    if (dfaResult.anchorConditionDiluted) {
+      return new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in hybrid DFA build");
+    }
     // If DFA construction failed or pattern needs NFA anyway, fall back to pure NFA
     if (dfaResult.dfa == null) {
       PatternAnalyzer.MatchingStrategyResult nfaResult =

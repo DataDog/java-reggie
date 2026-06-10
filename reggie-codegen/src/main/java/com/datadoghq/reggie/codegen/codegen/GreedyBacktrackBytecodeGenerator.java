@@ -644,6 +644,28 @@ public class GreedyBacktrackBytecodeGenerator {
       mv.visitJumpInsn(IF_ICMPLT, returnNull);
     }
 
+    // Validate that every char in the greedy range matches the greedy charset.
+    // Necessary for charsets like ANY_EXCEPT_NEWLINE ('.'): the greedy portion must not
+    // span characters outside the charset (e.g. '\n' for patterns like (.+)suffix).
+    if (info.greedyCharSet != null && !info.greedyCharSet.equals(CharSet.ANY)) {
+      int checkPosVar = greedyEndVar + 1;
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ISTORE, checkPosVar);
+      Label checkLoop = new Label();
+      Label checkDone = new Label();
+      mv.visitLabel(checkLoop);
+      mv.visitVarInsn(ILOAD, checkPosVar);
+      mv.visitVarInsn(ILOAD, greedyEndVar);
+      mv.visitJumpInsn(IF_ICMPGE, checkDone);
+      mv.visitVarInsn(ALOAD, inputVar);
+      mv.visitVarInsn(ILOAD, checkPosVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      generateCharSetCheckFail(mv, info.greedyCharSet, returnNull);
+      mv.visitIincInsn(checkPosVar, 1);
+      mv.visitJumpInsn(GOTO, checkLoop);
+      mv.visitLabel(checkDone);
+    }
+
     // Build MatchResult
     // Group 0: [0, len]
     // Group 1 (greedy): [pos, greedyEnd]
