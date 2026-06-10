@@ -173,6 +173,18 @@ public final class FallbackPatternDetector {
           + "outer quantifier on group not supported by backref engine";
     }
 
+    // OPTIONAL_GROUP_BACKREF cannot handle (1) a nullable (epsilon-matching) capturing group
+    // wrapped in an outer quantifier, or (2) a capturing group whose body contains alternation
+    // wrapped in an outer quantifier. Case 1: when the group body is nullable the backref must
+    // match the empty string but the generator assumes a non-empty captured span. Case 2: when
+    // the group body has alternation (e.g. (a|b)?\\1), the generator only handles single-char
+    // or simple-literal group bodies and produces wrong results for alternation bodies.
+    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF
+        && hasOuterQuantifierOnUnsupportedBackrefGroup(ast)) {
+      return "optional-group backref to unsupported capturing group: "
+          + "nullable or alternation-body group not handled by optional-group backref engine";
+    }
+
     // DFA generators track the boolean match result but do not track capturing-group span
     // boundaries during execution. When a capturing group appears inside a quantifier, the DFA
     // cannot tell which loop iteration captured what. PatternAnalyzer routes such patterns to
@@ -185,6 +197,19 @@ public final class FallbackPatternDetector {
     // called. This guard is unreachable in practice and has been removed. The actual fix
     // (routing to OPTIMIZED_NFA instead of JDK when alternation priority is not a correctness
     // concern) is deferred.
+
+    // The capture-ambiguous TDFA (DFA_UNROLLED_WITH_GROUPS / DFA_SWITCH_WITH_GROUPS) produces
+    // incorrect boolean results when the pattern has both alternation and a capturing group
+    // inside a quantifier. The TDFA priority thread for the quantified-group body can mark NFA
+    // states as visited before the alternation's other branches are explored, causing those
+    // branches to be silently skipped and producing a wrong false-negative result.
+    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
+            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
+        && containsAlternation(ast)
+        && hasCapturingGroupInQuantifiedSection(ast)) {
+      return "capturing group in quantifier with alternation: "
+          + "TDFA thread ordering silently skips alternation branches";
+    }
 
     return null;
   }
@@ -696,6 +721,45 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any capturing group referenced by a backref is wrapped in an outer quantifier
+   * AND has an unsupported body: either nullable (epsilon-matching) or containing alternation. The
+   * OPTIONAL_GROUP_BACKREF generator only handles simple single-char or literal group bodies;
+   * nullable bodies require matching the empty string (which the generator assumes non-empty), and
+   * alternation bodies are not modelled by the generator's single-path execution.
+   */
+  private static boolean hasOuterQuantifierOnUnsupportedBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    return hasQuantifiedUnsupportedGroupWithBackref(ast, backrefNums);
+  }
+
+  private static boolean hasQuantifiedUnsupportedGroupWithBackref(
+      RegexNode node, Set<Integer> backrefNums) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.child instanceof GroupNode) {
+        GroupNode g = (GroupNode) q.child;
+        if (g.capturing
+            && backrefNums.contains(g.groupNumber)
+            && (subtreeIsNullable(g.child) || containsAlternation(g.child))) return true;
+      }
+      return hasQuantifiedUnsupportedGroupWithBackref(q.child, backrefNums);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children)
+        if (hasQuantifiedUnsupportedGroupWithBackref(c, backrefNums)) return true;
+    }
+    if (node instanceof GroupNode)
+      return hasQuantifiedUnsupportedGroupWithBackref(((GroupNode) node).child, backrefNums);
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives)
+        if (hasQuantifiedUnsupportedGroupWithBackref(a, backrefNums)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any capturing group in {@code ast} is nested inside a quantifier whose range
    * allows more than one repetition (min != max, or max > 1, or max == -1/MAX_VALUE meaning
    * unbounded). DFA generators cannot track per-iteration capture boundaries for such groups.
@@ -762,6 +826,17 @@ public final class FallbackPatternDetector {
       return true; // zero-width
     }
     return false; // CharClassNode, BackreferenceNode, etc.
+  }
+
+  /** Returns true if the AST contains at least one {@link AlternationNode}. */
+  private static boolean containsAlternation(RegexNode node) {
+    if (node instanceof AlternationNode) return true;
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) if (containsAlternation(c)) return true;
+    }
+    if (node instanceof GroupNode) return containsAlternation(((GroupNode) node).child);
+    if (node instanceof QuantifierNode) return containsAlternation(((QuantifierNode) node).child);
+    return false;
   }
 
   private static boolean containsLazyQuantifier(RegexNode node) {

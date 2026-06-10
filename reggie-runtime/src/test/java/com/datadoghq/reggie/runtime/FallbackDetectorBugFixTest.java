@@ -289,4 +289,18 @@ public class FallbackDetectorBugFixTest {
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
+
+  static Stream<Arguments> remainingDivergences() {
+    return Stream.of(Arguments.of("()?\\1{1}", ""), Arguments.of("(){2}]{3}|a", "a"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("remainingDivergences")
+  void remainingDivergences_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
 }
