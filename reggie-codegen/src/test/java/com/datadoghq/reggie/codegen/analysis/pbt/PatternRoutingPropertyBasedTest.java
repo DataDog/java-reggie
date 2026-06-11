@@ -128,16 +128,11 @@ public class PatternRoutingPropertyBasedTest {
       @ForAll("largeStateSpace") String pattern) {
     PatternAnalyzer.MatchingStrategyResult result = analyze(pattern);
 
-    // Capturing alternation+quantifier patterns route to PIKEVM_CAPTURE (correct group spans).
-    // Non-capturing large-state patterns use DFA_SWITCH, SPECIALIZED_QUANTIFIED_GROUP, or
-    // OPTIMIZED_NFA.
+    // The largeStateSpace() generator produces (a|b|...){N} — capturing alternation under a
+    // fixed quantifier. These currently route to PIKEVM_CAPTURE (correct per-iteration group
+    // spans). The remaining strategies are retained as valid in case routing evolves.
     List<PatternAnalyzer.MatchingStrategy> validStrategies =
-        List.of(
-            PIKEVM_CAPTURE, // capturing alternation+quantifier: correct per-iteration group spans
-            DFA_SWITCH, // medium state count, non-capturing
-            SPECIALIZED_QUANTIFIED_GROUP, // specialized path
-            OPTIMIZED_NFA // large state-space fallback
-            );
+        List.of(PIKEVM_CAPTURE, DFA_SWITCH, SPECIALIZED_QUANTIFIED_GROUP, OPTIMIZED_NFA);
 
     assertTrue(
         validStrategies.contains(result.strategy),
