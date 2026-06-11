@@ -59,7 +59,12 @@ class NestedQuantifiedGroupsMatchResultTest {
 
   @Test
   void matchAlternationPattern() throws Exception {
-    assertStrategy("((a|bc)+)*");
+    // Patterns with alternation inside nested quantified groups route to OPTIMIZED_NFA because
+    // NestedQuantifiedGroupsBytecodeGenerator has no AlternationNode handler.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
+        StrategyCorrectnessMetaTest.routeOf("((a|bc)+)*"),
+        "pattern '((a|bc)+)*' must route to OPTIMIZED_NFA");
     MatchResult r = Reggie.compile("((a|bc)+)*").match("abcbc");
     assertNotNull(r, "match must succeed on 'abcbc'");
     assertEquals("abcbc", r.group(0));

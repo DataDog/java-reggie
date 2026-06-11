@@ -152,8 +152,8 @@ public class PatternRoutingPropertyTest {
         // Variable capture backrefs
         new PatternRoutingTestCase(
             "(.*)\\d+\\1",
-            SPECIALIZED_BACKREFERENCE,
-            "greedy-any backref: nullable (.*) excluded from VARIABLE_CAPTURE_BACKREF"),
+            VARIABLE_CAPTURE_BACKREF,
+            "greedy-any backref: nullable (.*) with CharClassNode content stays in VARIABLE_CAPTURE_BACKREF"),
 
         // Specialized backrefs
         new PatternRoutingTestCase(

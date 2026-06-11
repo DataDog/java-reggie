@@ -2984,11 +2984,15 @@ public class PatternAnalyzer {
       }
     }
 
-    // Nullable groups cause spurious zero-length matches in find(). A group is nullable either
-    // because its outer quantifier allows zero repetitions (groupQuantifier.min == 0), or because
-    // its content itself is nullable (e.g. ([-]*) where the inner quantifier has min=0).
-    // Route to OPTIMIZED_NFA_WITH_BACKREFS which handles nullable groups correctly.
-    if (groupQuantifier.min == 0 || isGroupContentNullable(capturingGroup.child)) {
+    // Groups whose content is a LiteralNode (e.g. (a*), (b+)) have their charset extracted as
+    // CharSet.ANY by the fallthrough in extractGroupCharSet, so the generator would accept any
+    // character instead of restricting to the literal. Nullable such groups (min=0 or nullable
+    // content) produce incorrect matches; route to OPTIMIZED_NFA_WITH_BACKREFS instead.
+    // Groups with CharClassNode content (any-char .* or bounded [a-z]*) use the correct charset
+    // and are handled correctly even when nullable.
+    RegexNode quantifierContent = groupQuantifier.child;
+    if (!(quantifierContent instanceof CharClassNode)
+        && (groupQuantifier.min == 0 || isGroupContentNullable(capturingGroup.child))) {
       return null;
     }
 
