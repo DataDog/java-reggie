@@ -128,14 +128,15 @@ public class PatternRoutingPropertyBasedTest {
       @ForAll("largeStateSpace") String pattern) {
     PatternAnalyzer.MatchingStrategyResult result = analyze(pattern);
 
-    // Patterns with many states should use switch-sized DFA, an NFA fallback, or a specialized
-    // strategy. Note: (a|b|c){50} = 151 states → DFA_SWITCH;
-    // (a|b|c|d|e|f){100} = 601 states → OPTIMIZED_NFA or SPECIALIZED_QUANTIFIED_GROUP.
+    // Capturing alternation+quantifier patterns route to PIKEVM_CAPTURE (correct group spans).
+    // Non-capturing large-state patterns use DFA_SWITCH, SPECIALIZED_QUANTIFIED_GROUP, or
+    // OPTIMIZED_NFA.
     List<PatternAnalyzer.MatchingStrategy> validStrategies =
         List.of(
-            DFA_SWITCH, // medium state count
-            SPECIALIZED_QUANTIFIED_GROUP, // Might have specialized strategy
-            OPTIMIZED_NFA // Large state-space fallback
+            PIKEVM_CAPTURE, // capturing alternation+quantifier: correct per-iteration group spans
+            DFA_SWITCH, // medium state count, non-capturing
+            SPECIALIZED_QUANTIFIED_GROUP, // specialized path
+            OPTIMIZED_NFA // large state-space fallback
             );
 
     assertTrue(
@@ -143,7 +144,7 @@ public class PatternRoutingPropertyBasedTest {
         () ->
             "Large state space pattern: '"
                 + pattern
-                + "' should use DFA_SWITCH/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA, got: "
+                + "' should use PIKEVM_CAPTURE/DFA_SWITCH/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA, got: "
                 + result.strategy);
   }
 
