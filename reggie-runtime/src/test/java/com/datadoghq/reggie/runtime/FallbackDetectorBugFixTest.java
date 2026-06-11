@@ -454,7 +454,12 @@ public class FallbackDetectorBugFixTest {
         Arguments.of("a\\Ab", "ab"),
         Arguments.of("a\\Ab", "b"),
         Arguments.of("(a|\\Ab)", "a"),
-        Arguments.of("(a|\\Ab)", "b"));
+        Arguments.of("(a|\\Ab)", "b"),
+        // Start-anchor-in-alternation patterns now routable to PIKEVM_CAPTURE (fuzz repros)
+        Arguments.of("^_|[_].", "_a"),
+        Arguments.of("-|\\A.{1,}", "-0"),
+        Arguments.of("^c|[^1][b]", "cb"),
+        Arguments.of("^-|.c", "-c"));
   }
 
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
@@ -465,5 +470,13 @@ public class FallbackDetectorBugFixTest {
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"^_|[_].", "-|\\A.{1,}", "^c|[^1][b]", "^-|.c"})
+  void anchorDilutedStartAnchor_usesNativePath(String pat) throws Exception {
+    assertFalse(
+        Reggie.compile(pat) instanceof JavaRegexFallbackMatcher,
+        "Expected native matcher for: " + pat);
   }
 }
