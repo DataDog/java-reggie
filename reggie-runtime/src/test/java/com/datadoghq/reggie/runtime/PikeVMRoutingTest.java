@@ -24,19 +24,22 @@ import org.junit.jupiter.api.Test;
 class PikeVMRoutingTest {
 
   @Test
-  void captureAmbiguousRoutes_toDfaWithGroups() throws Exception {
+  void captureAmbiguousRoutes_toPikevmCapture() throws Exception {
+    // (a)?b has a nullable outer quantifier on a capturing group (B16): PIKEVM_CAPTURE gives
+    // correct per-iteration spans; DFA_UNROLLED_WITH_GROUPS POSIX last-match span is wrong.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("(a)?b"),
-        "(a)?b must route to DFA_UNROLLED_WITH_GROUPS");
+        "(a)?b must route to PIKEVM_CAPTURE");
   }
 
   @Test
   void captureAmbiguousRoutes_dotOptionalB() throws Exception {
+    // (.)?b: nullable outer quantifier on capturing group — PIKEVM_CAPTURE.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("(.)?b"),
-        "(.)?b must route to DFA_UNROLLED_WITH_GROUPS");
+        "(.)?b must route to PIKEVM_CAPTURE");
   }
 
   @Test
