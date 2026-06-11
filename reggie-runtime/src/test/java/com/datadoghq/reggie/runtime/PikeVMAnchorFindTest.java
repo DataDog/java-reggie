@@ -116,4 +116,19 @@ class PikeVMAnchorFindTest {
     assertFindMatchesJdk("\\Aa{2,4}|b", "xaa");
     assertFindMatchesJdk("\\Aa{2,4}|b", "aaab");
   }
+
+  @Test
+  void matchesRespectsAnchorAtRegionStart() throws Exception {
+    // matches() is whole-region: \Aa|b on "a" must match (anchor satisfied at region start 0).
+    PikeVMMatcher m = build("\\Aa|b");
+    assertEquals(true, m.matches("a"), "\\Aa|b should match \"a\" under matches()");
+    assertEquals(true, m.matches("b"), "\\Aa|b should match \"b\" under matches()");
+  }
+
+  @Test
+  void boundedMatchRespectsAnchorAtRegionStart() throws Exception {
+    // matchesBounded over region [2,3] of "xxa": the substring "a" starts the region, \Aa matches.
+    PikeVMMatcher m = build("\\Aa|b");
+    assertEquals(true, m.matchesBounded("xxa", 2, 3), "region \"a\" should match \\Aa|b");
+  }
 }
