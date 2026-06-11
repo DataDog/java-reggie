@@ -194,14 +194,18 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int findStartFrom(String input, int fromPos) {
     int len = input.length();
     for (int start = fromPos; start <= len; start++) {
-      if (tryFindAt(input, start, len) >= 0) return start;
+      if (tryFindAt(input, start, fromPos, len) >= 0) return start;
     }
     return -1;
   }
 
-  /** Try matching starting at {@code tryPos}; returns match-end position or -1. */
-  private int tryFindAt(String input, int tryPos, int regionEnd) {
-    initClist(input, tryPos, tryPos, regionEnd);
+  /**
+   * Try matching starting at {@code tryPos}; returns match-end position or -1. {@code regionStart}
+   * is the fixed search-region origin used for start-anchor evaluation (^, \A); it does not move
+   * with {@code tryPos}.
+   */
+  private int tryFindAt(String input, int tryPos, int regionStart, int regionEnd) {
+    initClist(input, tryPos, regionStart, regionEnd);
 
     for (int pos = tryPos; pos <= regionEnd; pos++) {
       for (int t = 0; t < clistSize; t++) {
@@ -213,7 +217,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
       char ch = input.charAt(pos);
       resetNlist();
-      stepChar(ch, pos + 1, input, tryPos, regionEnd);
+      stepChar(ch, pos + 1, input, regionStart, regionEnd);
       swapLists();
     }
     return -1;
@@ -222,14 +226,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private MatchResult findMatchResultFrom(String input, int fromPos) {
     int len = input.length();
     for (int start = fromPos; start <= len; start++) {
-      MatchResult r = tryFindMatchAt(input, start, len);
+      MatchResult r = tryFindMatchAt(input, start, fromPos, len);
       if (r != null) return r;
     }
     return null;
   }
 
-  private MatchResult tryFindMatchAt(String input, int tryPos, int regionEnd) {
-    initClist(input, tryPos, tryPos, regionEnd);
+  private MatchResult tryFindMatchAt(String input, int tryPos, int regionStart, int regionEnd) {
+    initClist(input, tryPos, regionStart, regionEnd);
 
     // Greedy PikeVM rule: when a thread at index t accepts, threads at indices > t (lower priority)
     // cannot produce a better match. Truncate the clist to [0..t-1] so only higher-priority
@@ -253,7 +257,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
       char ch = input.charAt(pos);
       resetNlist();
-      stepChar(ch, pos + 1, input, tryPos, regionEnd);
+      stepChar(ch, pos + 1, input, regionStart, regionEnd);
       swapLists();
       if (clistSize == 0) break;
     }
