@@ -81,22 +81,4 @@ public final class StrategyJdkClassifier {
         return StrategyJdkClass.NATIVE;
     }
   }
-
-  /**
-   * Returns a human-readable reason string for {@link StrategyJdkClass#RICH_API_HYBRID} strategies,
-   * suitable for the loud "uses java.util.regex under the hood" warning, or {@code null} for
-   * non-hybrid strategies.
-   *
-   * @param strategy the matching strategy
-   * @return the hybrid reason, or null if the strategy is not RICH_API_HYBRID
-   */
-  public static String richApiHybridReason(MatchingStrategy strategy) {
-    if (classifyJdkDependency(strategy) != StrategyJdkClass.RICH_API_HYBRID) {
-      return null;
-    }
-    return "native boolean matching but group extraction (match/findMatch) delegates to"
-        + " java.util.regex (strategy "
-        + strategy
-        + ")";
-  }
 }

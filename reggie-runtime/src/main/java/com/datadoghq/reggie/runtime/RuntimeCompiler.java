@@ -87,11 +87,6 @@ public class RuntimeCompiler {
 
   private static final Logger LOG = Logger.getLogger(RuntimeCompiler.class.getName());
 
-  // Patterns for which a RICH_API_HYBRID warning has already been logged, so the loud
-  // "delegates to java.util.regex" warning fires at most once per pattern even though
-  // compileInternal may run more than once for the same pattern under cache races.
-  private static final Set<String> HYBRID_WARNED = ConcurrentHashMap.newKeySet();
-
   // Level 1: Pattern string → matcher instance (fast path for exact matches).
   // NFA-backed patterns are NOT stored here; they use NFA_CLASS_CACHE instead.
   private static final ConcurrentHashMap<String, ReggieMatcher> PATTERN_CACHE =
@@ -257,7 +252,6 @@ public class RuntimeCompiler {
     NFA_CLASS_CACHE.clear();
     PIKEVM_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
-    HYBRID_WARNED.clear();
   }
 
   /** Get current pattern cache size (level 1). */
@@ -383,44 +377,6 @@ public class RuntimeCompiler {
           fallback.setNameToIndex(nameMap);
         }
         return fallback;
-      }
-      // Fall back for lookahead strategies whose generated boolean engine is itself incorrect
-      // (find()/findFrom() never report a match, and matches() accepts embedded matches). These
-      // cannot keep a "fast boolean path" because that path is wrong; delegate the whole matcher to
-      // java.util.regex so booleans and group spans are both correct.
-      String lookaheadDefect = lookaheadBooleanEngineDefectReason(result.strategy);
-      if (lookaheadDefect != null) {
-        ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, lookaheadDefect);
-        if (!nameMap.isEmpty()) {
-          fallback.setNameToIndex(nameMap);
-        }
-        return fallback;
-      }
-      // Fall back for strategies whose MatchResult API (match, findMatch, bounded methods) is not
-      // yet fully implemented. Callers get correct behavior via JDK until implementation is
-      // complete.
-      String incompleteApiReason = incompleteMatchResultApiReason(result.strategy);
-      if (incompleteApiReason != null) {
-        ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, incompleteApiReason);
-        if (!nameMap.isEmpty()) {
-          fallback.setNameToIndex(nameMap);
-        }
-        return fallback;
-      }
-
-      // 3.6. Loud warning for RICH_API_HYBRID strategies: native boolean matching but the rich
-      // MatchResult API (match/findMatch/findMatchFrom/matchBounded) delegates to java.util.regex
-      // via the base-class defaults. FULL_FALLBACK already warned above (and returned); this never
-      // double-warns. Logged once per pattern.
-      String hybridReason = StrategyJdkClassifier.richApiHybridReason(result.strategy);
-      if (hybridReason != null && HYBRID_WARNED.add(pattern)) {
-        LOG.warning(
-            "Reggie compiled '"
-                + pattern
-                + "' to a HYBRID matcher: native boolean matching but group extraction"
-                + " (match/findMatch) delegates to java.util.regex (strategy "
-                + result.strategy
-                + ").");
       }
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
@@ -551,26 +507,6 @@ public class RuntimeCompiler {
           && first.literal().charAt(0) == next.literal().charAt(0);
     }
     return false;
-  }
-
-  /**
-   * /** Returns a non-null reason string when the selected strategy has an incomplete MatchResult
-   * API (match, findMatch, matchBounded, etc. not yet implemented). The caller falls back to JDK.
-   */
-  private static String incompleteMatchResultApiReason(PatternAnalyzer.MatchingStrategy strategy) {
-    return null;
-  }
-
-  /**
-   * Strategies whose generated boolean engine is itself incorrect (not merely the rich MatchResult
-   * API): {@code find()}/{@code findFrom()} never report a match and {@code matches()} accepts
-   * embedded matches. The whole matcher must delegate to {@code java.util.regex} until the
-   * generated lookahead engine is fixed; a "fast boolean path" cannot be kept because that path is
-   * wrong.
-   */
-  private static String lookaheadBooleanEngineDefectReason(
-      PatternAnalyzer.MatchingStrategy strategy) {
-    return null;
   }
 
   /**
