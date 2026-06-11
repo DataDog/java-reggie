@@ -991,23 +991,29 @@ public class PatternAnalyzer {
         return r;
       }
 
-      // Non-anchor alternation + quantifiers: PIKEVM_CAPTURE gives correct leftmost-first
-      // semantics. Two exclusions guard known PIKEVM divergences:
+      // Alternation + quantifiers/anchors: PIKEVM_CAPTURE gives correct leftmost-first
+      // semantics. Three exclusions guard known PIKEVM divergences:
       //  1. hasNullableAlternationBranch: entire branch can match empty (e.g. a{0,3}|b).
       //  2. subtreeContainsOptional: any {0,n} quantifier anywhere in the pattern, including
       //     inside a non-nullable branch (e.g. c.{0,3}|b — "c" makes the branch non-nullable
       //     but the optional suffix still causes PIKEVM greedy divergence from JDK).
-      //  Both guards are needed; (1) alone misses the non-nullable optional-suffix case.
+      //  3. hasEndAnchorLeadingInAlternationBranch: an end-anchor ($, \Z, \z) appears in
+      //     leading position of an alternation branch (e.g. a|$ or $x|y). PIKEVM's find()
+      //     evaluates such anchors during epsilon-closure and can diverge from JDK.
+      //  Guards (1) and (2) are both needed; (1) alone misses the non-nullable optional-suffix
+      // case.
+      //  Start-anchors (^, \A) in leading position are safe; the PikeVMMatcher fix ensures they
+      //  evaluate against the fixed search-region origin, not the per-attempt try-position.
       if (containsAlternation(ast)
-          && !hasAnchorInNfa(nfa)
           && !hasNullableAlternationBranch(ast)
           && !subtreeContainsOptional(ast)
+          && !hasEndAnchorLeadingInAlternationBranch(ast)
           && dfaHasAcceptingStateWithTransitions(dfa)) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
-      // Alternation + anchors: DFA anchor semantics still diverge. Fall back to JDK until
-      // PIKEVM anchor support is verified (Task 2).
+      // Alternation with nullable branches, optional suffixes, or leading end-anchors: PIKEVM
+      // greedy divergence from JDK is not yet resolved for these patterns.
       if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
@@ -1297,6 +1303,50 @@ public class PatternAnalyzer {
     }
     if (node instanceof GroupNode g) return hasNullableAlternationBranch(g.child);
     if (node instanceof QuantifierNode q) return hasNullableAlternationBranch(q.child);
+    return false;
+  }
+
+  /**
+   * Returns true if any alternation branch has an end-anchor ({@code $}, {@code \Z}, {@code \z}) in
+   * a leading position — i.e., reachable before consuming any character. PIKEVM's {@code find()}
+   * evaluates leading end-anchors during epsilon-closure, which can diverge from JDK (e.g. {@code
+   * a|$} or {@code $x|y}). Start-anchors ({@code ^}, {@code \A}) in leading position are safe after
+   * the PikeVMMatcher anchor-reference fix.
+   */
+  private static boolean hasEndAnchorLeadingInAlternationBranch(RegexNode node) {
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (branchLeadsWithEndAnchor(alt)) return true;
+        if (hasEndAnchorLeadingInAlternationBranch(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (hasEndAnchorLeadingInAlternationBranch(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode g) return hasEndAnchorLeadingInAlternationBranch(g.child);
+    if (node instanceof QuantifierNode q) return hasEndAnchorLeadingInAlternationBranch(q.child);
+    return false;
+  }
+
+  /**
+   * Returns true if the first reachable node in {@code branch} (skipping group wrappers) is an
+   * end-anchor ({@code $}, {@code \Z}, {@code \z}).
+   */
+  private static boolean branchLeadsWithEndAnchor(RegexNode branch) {
+    if (branch instanceof AnchorNode a) {
+      return a.type == AnchorNode.Type.END
+          || a.type == AnchorNode.Type.STRING_END
+          || a.type == AnchorNode.Type.STRING_END_ABSOLUTE;
+    }
+    if (branch instanceof GroupNode g) return branchLeadsWithEndAnchor(g.child);
+    if (branch instanceof QuantifierNode q) return branchLeadsWithEndAnchor(q.child);
+    if (branch instanceof ConcatNode c && !c.children.isEmpty()) {
+      return branchLeadsWithEndAnchor(c.children.get(0));
+    }
     return false;
   }
 
