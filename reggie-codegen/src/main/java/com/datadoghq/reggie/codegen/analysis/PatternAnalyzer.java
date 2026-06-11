@@ -789,7 +789,29 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
+        // Anchor-diluted alternation patterns: PIKEVM_CAPTURE gives correct leftmost-first
+        // semantics for start-anchor-in-alternation cases (e.g. ^x|x(y)) because PikeVM
+        // evaluates ^/\A against the fixed search-region origin since commit 0acfc66.
+        // The same three exclusions used for the non-capturing PIKEVM gate apply here:
+        //  1. hasNullableAlternationBranch: optional branch can match empty.
+        //  2. subtreeContainsOptional: any {0,n} quantifier causes greedy divergence from JDK.
+        //  3. hasEndAnchorLeadingInAlternationBranch: leading end-anchor diverges in find().
+        // Patterns failing these guards keep the anchorConditionDiluted → JDK path below.
         if (dfa.isAnchorConditionDiluted()) {
+          if (containsAlternation(ast)
+              && !hasNullableAlternationBranch(ast)
+              && !subtreeContainsOptional(ast)
+              && !hasEndAnchorLeadingInAlternationBranch(ast)
+              && dfaHasAcceptingStateWithTransitions(dfa)) {
+            return new MatchingStrategyResult(
+                MatchingStrategy.PIKEVM_CAPTURE,
+                null,
+                null,
+                false,
+                requiredLiterals,
+                null,
+                needsPosixSemantics);
+          }
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
