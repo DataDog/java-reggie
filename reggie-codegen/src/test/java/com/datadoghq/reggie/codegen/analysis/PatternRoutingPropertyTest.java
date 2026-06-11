@@ -151,7 +151,9 @@ public class PatternRoutingPropertyTest {
 
         // Variable capture backrefs
         new PatternRoutingTestCase(
-            "(.*)\\d+\\1", VARIABLE_CAPTURE_BACKREF, "greedy group with backref"),
+            "(.*)\\d+\\1",
+            SPECIALIZED_BACKREFERENCE,
+            "greedy-any backref: nullable (.*) excluded from VARIABLE_CAPTURE_BACKREF"),
 
         // Specialized backrefs
         new PatternRoutingTestCase(
@@ -215,12 +217,15 @@ public class PatternRoutingPropertyTest {
         new PatternRoutingTestCase(
             "(abc)", DFA_UNROLLED, "capturing group with literal (groups not tracked in DFA)"),
 
-        // DFA_SWITCH (20-300 states)
-        new PatternRoutingTestCase("(a|b|c){50}", DFA_SWITCH, "medium alternation (151 states)"),
-
-        // Large DFA state spaces fall back to NFA instead of generating oversized DFA bytecode.
+        // (a|b|c){50} and (a|b|c|d|e|f){100}: capturing group inside a repeating quantifier.
+        // PIKEVM_CAPTURE is chosen because DFA_SWITCH and OPTIMIZED_NFA cannot track
+        // per-iteration group spans for such patterns.
         new PatternRoutingTestCase(
-            "(a|b|c|d|e|f){100}", OPTIMIZED_NFA, "very high repetition alternation (601 states)"));
+            "(a|b|c){50}", PIKEVM_CAPTURE, "capturing alternation+quantifier (151 DFA states)"),
+        new PatternRoutingTestCase(
+            "(a|b|c|d|e|f){100}",
+            PIKEVM_CAPTURE,
+            "capturing alternation+quantifier (601 DFA states)"));
   }
 
   @Nested
