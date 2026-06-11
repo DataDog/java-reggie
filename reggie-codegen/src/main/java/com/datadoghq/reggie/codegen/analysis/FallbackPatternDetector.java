@@ -54,8 +54,13 @@ public final class FallbackPatternDetector {
     Visitor v = new Visitor();
     ast.accept(v);
 
-    // Lookahead inside a quantified group (issue #28): the NFA engine still produces wrong
-    // results for assertions evaluated across loop iterations.
+    // B1 — Lookahead inside a quantified group (issue #28).
+    // Root cause (NEEDS-RND): Thompson/Pike NFA has no per-thread quantifier-iteration counter.
+    // Multiple threads at the same NFA state after different iteration counts are merged in the
+    // shared state set; when their per-position assertion results diverge, the merge produces
+    // wrong find() results (e.g. (?:(?=\d)\d)+ on "1" returns false instead of true).
+    // Classification: NEEDS-RND — safe-backtracking R&D required for per-thread iteration state.
+    // Confirmed by LookaroundEngineNativeTest (spike: disabling guard causes wrong results).
     if (v.lookaheadInQuantifier) {
       return "lookahead inside quantified group";
     }
@@ -146,9 +151,19 @@ public final class FallbackPatternDetector {
           + "tagged DFA group-span computation produces wrong group-start position";
     }
 
-    // OPTIMIZED_NFA_WITH_LOOKAROUND NFA simulation produces wrong results when a lookahead
-    // assertion appears inside an alternation branch. The NFA thread scheduler does not correctly
-    // isolate assertion evaluation per branch.
+    // B11 — Lookahead inside alternation branch, NFA path only (OPTIMIZED_NFA_WITH_LOOKAROUND).
+    // Root cause (NEEDS-RND): The NFA epsilon-closure worklist is shared across all active
+    // threads. When a positive lookahead fires inside one alternative, its epsilon-targets are
+    // added to the global state set, contaminating sibling alternatives (a passing assertion in
+    // branch A enables states reachable from branch B, and vice versa for failures). This is a
+    // fundamental Thompson NFA limitation — no per-thread branch identity. Guard is intentionally
+    // scoped to OPTIMIZED_NFA_WITH_LOOKAROUND only: patterns handled by DFA-based strategies
+    // (HYBRID_DFA_LOOKAHEAD, DFA_UNROLLED_WITH_ASSERTIONS) evaluate assertions structurally at
+    // compile time and do not hit this runtime contamination. Note: a separate correctness bug
+    // was observed for (?=a)b|c on DFA path (input "c" returns false); that is a distinct issue.
+    // Classification: NEEDS-RND — per-thread assertion state required (safe-backtracking R&D).
+    // Confirmed by LookaroundEngineNativeTest (spike: disabling guard causes wrong results for
+    // ((?=\d+)x|y) and ((?!.*[A-Z])a|b) on the OPTIMIZED_NFA_WITH_LOOKAROUND path).
     if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
         && hasLookaheadInAlternation(ast)) {
       return "lookahead inside alternation branch: "
