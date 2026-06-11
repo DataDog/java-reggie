@@ -65,23 +65,31 @@ public final class FallbackPatternDetector {
       return "lookahead inside quantified group";
     }
 
-    // Anchor inside a quantifier that is itself inside a capturing group: the generators do not
-    // correctly track per-iteration capture boundaries when a zero-width anchor is repeated.
-    // Patterns like (${0,3}) produce wrong match spans or false matches.
+    // B2 — KEEP-PERMANENT: anchor inside a quantifier that is itself inside a capturing group.
+    // Spike (AnchorInQuantifierNativeTest) showed PikeVM mis-positions the zero-width match:
+    // (${0,3}) on "abc" lands at [3,3] instead of JDK's [0,0], and (^{0,2}ab) on "xab" returns
+    // false instead of true. Root cause: PikeVM uses leftmost-longest NFA traversal which
+    // collapses the zero-width anchor to the end-of-input position rather than the first viable
+    // zero-width position, and the optional anchor quantifier changes the anchoring semantics
+    // in a way the current engine cannot model. No tractable fix in scope.
     if (hasAnchorInQuantifierInCapturingGroup(ast)) {
       return "anchor inside quantifier within capturing group: capture span tracking incorrect";
     }
 
-    // Any anchor (start/end) inside a quantifier with range ≠ {1,1} produces wrong
-    // match positions in all DFA/NFA strategies. The capturing-group sub-case is caught
-    // by the guard above; this catches all remaining cases.
+    // B3 — KEEP-PERMANENT (conservative): any anchor inside a quantifier with range ≠ {1,1}.
+    // Spike showed that the tested patterns ((\b)+, (?:\Z)+) pass under PikeVM for the sample
+    // inputs tested. However, the predicate also covers exotic combinations (e.g. \A{2},
+    // (?:^){3}) that were not tested and may still misbehave. Retain the guard until a broader
+    // fuzz sweep with AnchorInQuantifierNativeTest confirms full correctness; at that point this
+    // predicate can be removed and these patterns routed to PIKEVM_CAPTURE.
     if (hasAnchorInQuantifier(ast)) {
       return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
     }
 
-    // END/STRING_END anchor ($, \Z) immediately before a non-newline char consumer: while the
-    // "$ then consume terminal \\n" path is handled correctly, other combinations (e.g. \\Z[^c])
-    // are not modeled by the DFA and produce wrong boolean or span results.
+    // B4 — KEEP-PERMANENT (conservative): END/STRING_END anchor ($, \Z) immediately before a
+    // non-newline char consumer. Spike showed that \Z[^c] and $[^\n] pass under PikeVM for the
+    // tested inputs (all unconditionally false in JDK). Retaining the guard until a fuzz sweep
+    // confirms no strategy can mis-model this path; removing it is safe but deferred.
     if (hasEndAnchorBeforeNonNewlineConsumer(ast)) {
       return "end-anchor before non-newline consumer: DFA does not model this path correctly";
     }
