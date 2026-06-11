@@ -818,15 +818,13 @@ public class PatternAnalyzer {
                 && containsAnyQuantifier(ast)
                 && !hasNamedGroups(ast)
                 && !dfa.isCaptureAmbiguous();
-        // Safe sub-case: quantifiedAltWithGroupBug patterns without anchors, without quantified
-        // capturing groups, and without nullable alternation branches route to PIKEVM_CAPTURE
-        // (Pike VM, leftmost-first, correct group spans). Excludes: anchor-containing patterns,
-        // patterns where the capturing group itself is quantified (e.g. (a|b)+), and patterns
-        // with nullable alternation branches (empty alternatives, {0} quantifiers).
+        // Safe sub-case: quantifiedAltWithGroupBug patterns without anchors and without quantified
+        // capturing groups route to PIKEVM_CAPTURE (Pike VM, leftmost-first, correct group spans).
+        // The nullable-branch exclusion was removed: ThompsonBuilder now wraps {0,n} fragments
+        // in a skip-entry state so the PikeVM correctly handles greedy quantifiers with zero-rep.
         if (quantifiedAltWithGroupBug
             && !hasAnchorInNfa(nfa)
-            && !hasQuantifiedCapturingGroup(ast)
-            && !hasNullableAlternationBranch(ast)) {
+            && !hasQuantifiedCapturingGroup(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -983,47 +981,28 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
-      // Alternation + quantifiers/anchors: PIKEVM_CAPTURE gives correct leftmost-first
-      // semantics. Three exclusions guard known PIKEVM divergences:
-      //  1. hasNullableAlternationBranch: entire branch can match empty (e.g. a{0,3}|b).
-      //  2. subtreeContainsOptional: any {0,n} quantifier anywhere in the pattern, including
-      //     inside a non-nullable branch (e.g. c.{0,3}|b — "c" makes the branch non-nullable
-      //     but the optional suffix still causes PIKEVM greedy divergence from JDK).
-      //  3. hasEndAnchorLeadingInAlternationBranch: an end-anchor ($, \Z, \z) appears in
-      //     leading position of an alternation branch (e.g. a|$ or $x|y). PIKEVM's find()
-      //     evaluates such anchors during epsilon-closure and can diverge from JDK.
-      //  Guards (1) and (2) are both needed; (1) alone misses the non-nullable optional-suffix
-      // case.
-      //  Start-anchors (^, \A) in leading position are safe; the PikeVMMatcher fix ensures they
-      //  evaluate against the fixed search-region origin, not the per-attempt try-position.
+      // Alternation with any accepting DFA state with transitions: PIKEVM_CAPTURE gives correct
+      // leftmost-first semantics for nullable/optional/end-anchor alternation branches. Previous
+      // exclusions for hasNullableAlternationBranch, subtreeContainsOptional, and
+      // hasEndAnchorLeadingInAlternationBranch are removed: ThompsonBuilder now wraps {0,n}
+      // fragments in a skip-entry state (preventing mixed char+epsilon states), and
+      // PikeVMMatcher.checkAnchor correctly handles the END ($) anchor before a trailing newline.
+      // Start-anchors (^, \A) in leading position are safe; the PikeVMMatcher fix ensures they
+      // evaluate against the fixed search-region origin, not the per-attempt try-position.
       // This block runs BEFORE the isAnchorConditionDiluted guard below: a diluted-anchor
-      // pattern that passes these exclusions (e.g. ^c|[^1][b]) is handled correctly by PIKEVM,
-      // whereas OPTIMIZED_NFA (the dilution fallback target) shares the old find() anchor bug.
-      if (containsAlternation(ast)
-          && !hasNullableAlternationBranch(ast)
-          && !subtreeContainsOptional(ast)
-          && !hasEndAnchorLeadingInAlternationBranch(ast)
-          && dfaHasAcceptingStateWithTransitions(dfa)) {
+      // pattern (e.g. ^c|[^1][b]) is handled correctly by PIKEVM, whereas OPTIMIZED_NFA
+      // (the dilution fallback target) shares the old find() anchor bug.
+      if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
-      // Anchor condition diluted in DFA construction and NOT claimed by PIKEVM above (optional or
-      // nullable subtree, or leading end-anchor). OPTIMIZED_NFA mishandles find() anchors for
-      // these, so fall back to java.util.regex via the anchorConditionDiluted guard.
+      // Anchor condition diluted in DFA construction and NOT claimed by PIKEVM above.
+      // OPTIMIZED_NFA mishandles find() anchors for these, so fall back to java.util.regex.
       if (dfa.isAnchorConditionDiluted()) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
                 MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
         r.anchorConditionDiluted = true;
-        return r;
-      }
-      // Alternation with nullable branches, optional suffixes, or leading end-anchors: PIKEVM
-      // greedy divergence from JDK is not yet resolved for these patterns.
-      if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
-        MatchingStrategyResult r =
-            new MatchingStrategyResult(
-                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
-        r.alternationPriorityConflict = true;
         return r;
       }
 
