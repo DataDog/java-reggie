@@ -876,9 +876,34 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if the given prefix node can be handled by {@code emitPrefixNode} in the bytecode
+   * generator. Handles AnchorNode (zero-width), LiteralNode, CharClassNode, non-capturing GroupNode
+   * (by recursing into its child), and ConcatNode (by checking all children).
+   */
+  private static boolean isPrefixNodeHandleable(RegexNode node) {
+    if (node instanceof AnchorNode
+        || node instanceof LiteralNode
+        || node instanceof CharClassNode) {
+      return true;
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      return !g.capturing && isPrefixNodeHandleable(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (!isPrefixNodeHandleable(child)) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Returns true if the VARIABLE_CAPTURE_BACKREF pattern has a prefix node type that the bytecode
-   * generator cannot handle (QuantifierNode, non-capturing GroupNode, or unknown node type).
-   * LiteralNode and CharClassNode prefix nodes are now handled by emitPrefixMatch.
+   * generator cannot handle (QuantifierNode, or unknown node type). LiteralNode, CharClassNode,
+   * AnchorNode, and non-capturing GroupNode prefixes with handleable content are supported by
+   * emitPrefixNode.
    */
   private static boolean hasNonAnchorPrefixBeforeBackrefGroup(RegexNode ast) {
     Set<Integer> backrefNums = new HashSet<>();
@@ -893,7 +918,8 @@ public final class FallbackPatternDetector {
       if (child instanceof GroupNode) {
         GroupNode g = (GroupNode) child;
         if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
-        return true; // non-capturing group in prefix: not handled
+        if (!g.capturing && isPrefixNodeHandleable(g.child)) continue; // handled by emitPrefixNode
+        return true;
       }
       if (child instanceof QuantifierNode) {
         QuantifierNode q = (QuantifierNode) child;
