@@ -352,6 +352,10 @@ public class RuntimeCompiler {
         }
         return fallback;
       }
+      // A6 [NEEDS-RND]: captureAmbiguous=true means the NFA has a bypass path around at least one
+      // capturing group (reachable accept state without entering that group's enterGroup marker).
+      // Native backref strategies cannot resolve which thread's binding wins in that case.
+      // Fix requires per-state group arrays (issue #38 Cat B). See BackrefEngineGapsTest.a6.
       if (result.captureAmbiguous) {
         ReggieMatcher fallback =
             new JavaRegexFallbackMatcher(
