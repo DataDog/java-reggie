@@ -7111,6 +7111,29 @@ public class NFABytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenLocal);
     mv.visitJumpInsn(IFLT, backrefFailed);
 
+    // Zero-length early-accept: empty backref vacuously succeeds; bypass bounds/regionMatches.
+    // This fixes the shared-array contamination for the zero-length case (B7): when a nullable
+    // group captures "" the greedy path may overwrite groupEnds[] before this check runs, but
+    // groupLen==0 is always safe to accept unconditionally.
+    Label notZeroLen = new Label();
+    mv.visitVarInsn(ILOAD, groupLenLocal);
+    mv.visitJumpInsn(IFNE, notZeroLen);
+    // groupLen == 0: emit the success path inline (epsilon targets, pos unchanged)
+    for (NFA.NFAState target : state.getEpsilonTransitions()) {
+      Label alreadyVisited = new Label();
+      checkStateInSetConst(mv, statesVar, target.id, allocator);
+      mv.visitJumpInsn(IFNE, alreadyVisited);
+      addStateToSet(mv, statesVar, target.id, allocator);
+      mv.visitVarInsn(ALOAD, worklistVar);
+      mv.visitVarInsn(ILOAD, worklistSizeVar);
+      pushInt(mv, target.id);
+      mv.visitInsn(IASTORE);
+      mv.visitIincInsn(worklistSizeVar, 1);
+      mv.visitLabel(alreadyVisited);
+    }
+    mv.visitJumpInsn(GOTO, backrefEnd);
+    mv.visitLabel(notZeroLen);
+
     // Get input length for bounds checking
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);

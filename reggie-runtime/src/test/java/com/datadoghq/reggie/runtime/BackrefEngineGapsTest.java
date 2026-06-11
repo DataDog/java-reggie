@@ -181,7 +181,6 @@ class BackrefEngineGapsTest {
    * OPTIMIZED_NFA_WITH_BACKREFS}. Classification: FIXABLE-NOW.
    */
   @Test
-  @Disabled("B7: nullable backref group in OPTIMIZED_NFA_WITH_BACKREFS — FIXABLE-NOW")
   void b7_nullableBackrefGroupInOptimizedNfa() {
     ReggieMatcher m = Reggie.compile("(a?)\\1");
     assertFalse(

@@ -126,13 +126,14 @@ public final class FallbackPatternDetector {
       return "cross-alternative backref: group captured in one branch, used in another";
     }
 
-    // B7 [FIXABLE-NOW]: Parallel NFA simulation uses shared group arrays across all active paths.
-    // When a backref \N references a group that can capture the empty string (nullable), the greedy
-    // path may record a non-zero groupLen while the empty-capture path needs groupLen=0. The shared
-    // array records the wrong value, causing the backref check to fail or spuriously succeed.
-    // Fix: add a zero-length early-accept in backrefCheck (if groupLen==0 accept unconditionally).
+    // B7 [PARTIALLY-FIXED]: The zero-length early-accept in generateBackreferenceCheck fixes the
+    // simplest class of nullable-group contamination: groups whose body can capture at most 1
+    // character (e.g. a?, [x]?). For these, contamination produces groupLen≤1 and the longest-match
+    // semantics plus the early-accept ensure correct results. Groups whose body can capture strings
+    // of length > 1 (e.g. [0]?-*, a{0,2}) can produce contaminated groupLen > 1, causing spurious
+    // bounds-check failures that the early-accept cannot prevent. Those cases still need fallback.
     if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
-        && hasNullableBackrefGroup(ast)) {
+        && hasAmbiguouslyNullableBackrefGroup(ast)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
@@ -593,6 +594,105 @@ public final class FallbackPatternDetector {
       if (isGroupNullable(ast, groupNum)) return true;
     }
     return false;
+  }
+
+  /**
+   * Returns true if any backref references a group that is nullable AND whose body can capture
+   * strings of length greater than 1. These are the cases where shared-array contamination can
+   * produce a corrupt {@code groupLen > 1}, causing spurious bounds-check failures in the backref
+   * check that the zero-length early-accept cannot prevent.
+   *
+   * <p>Groups whose body can capture at most 1 character (e.g. {@code a?}, {@code [x]?}) are safe
+   * without a fallback: contamination at most produces {@code groupLen=1}, and the longest-match
+   * semantics in {@code findMatch} ensure the non-empty path wins when it independently produces
+   * the correct result; the empty-input path ({@code matches("")}) has no competing threads. Groups
+   * whose body can capture ALWAYS-empty strings (like {@code ()}) are trivially safe.
+   */
+  private static boolean hasAmbiguouslyNullableBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    for (int groupNum : backrefNums) {
+      if (isGroupNullable(ast, groupNum) && isGroupBodyCapableOfLengthGtOne(ast, groupNum))
+        return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the capturing group with the given number can capture a string of length > 1.
+   */
+  private static boolean isGroupBodyCapableOfLengthGtOne(RegexNode node, int groupNum) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && g.groupNumber == groupNum) {
+        return subtreeMaxCaptureLength(g.child) > 1;
+      }
+      return isGroupBodyCapableOfLengthGtOne(g.child, groupNum);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (isGroupBodyCapableOfLengthGtOne(c, groupNum)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (isGroupBodyCapableOfLengthGtOne(a, groupNum)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return isGroupBodyCapableOfLengthGtOne(((QuantifierNode) node).child, groupNum);
+    }
+    return false;
+  }
+
+  /**
+   * Returns the maximum number of characters the subtree can match, or {@link Integer#MAX_VALUE}
+   * for unbounded. Returns 0 for always-empty subtrees (epsilon literals, anchors).
+   */
+  private static int subtreeMaxCaptureLength(RegexNode node) {
+    if (node instanceof LiteralNode) {
+      return ((LiteralNode) node).ch == 0 ? 0 : 1; // epsilon literal is always empty
+    }
+    if (node instanceof CharClassNode) {
+      return 1; // always matches exactly one character
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.max == 0) return 0;
+      int childMax = subtreeMaxCaptureLength(q.child);
+      if (childMax == 0) return 0;
+      // q.max == -1 means unbounded (*); Integer.MAX_VALUE is also treated as unbounded.
+      if (q.max == -1 || q.max == Integer.MAX_VALUE || childMax == Integer.MAX_VALUE)
+        return Integer.MAX_VALUE;
+      return q.max * childMax;
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode c : ((ConcatNode) node).children) {
+        int cm = subtreeMaxCaptureLength(c);
+        if (cm == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        total += cm;
+        if (total < 0) return Integer.MAX_VALUE; // overflow guard
+      }
+      return total;
+    }
+    if (node instanceof AlternationNode) {
+      int max = 0;
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        int am = subtreeMaxCaptureLength(a);
+        if (am == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        if (am > max) max = am;
+      }
+      return max;
+    }
+    if (node instanceof GroupNode) {
+      return subtreeMaxCaptureLength(((GroupNode) node).child);
+    }
+    // AnchorNode, AssertionNode — zero-width
+    return 0;
   }
 
   /** Walk the AST to find the capturing group with the given number and test nullability. */
