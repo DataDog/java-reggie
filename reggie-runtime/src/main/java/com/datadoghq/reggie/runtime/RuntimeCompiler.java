@@ -135,10 +135,35 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<String, NfaMatcherFactory> NFA_CLASS_CACHE =
       new ConcurrentHashMap<>();
 
-  // Level 1c: Pattern string → NFA for PIKEVM_CAPTURE patterns.
+  /**
+   * Cached entry for PIKEVM_CAPTURE patterns: holds the immutable NFA and the compile-time name map
+   * so that every compile() call can produce a correctly-enriched fresh PikeVMMatcher without
+   * re-parsing the pattern.
+   */
+  private static final class PikeVMEntry {
+    final NFA nfa;
+    final Map<String, Integer> nameMap;
+
+    PikeVMEntry(NFA nfa, Map<String, Integer> nameMap) {
+      this.nfa = nfa;
+      this.nameMap = nameMap;
+    }
+
+    ReggieMatcher newMatcher(String pattern) {
+      ReggieMatcher m = new PikeVMMatcher(nfa, pattern);
+      if (!nameMap.isEmpty()) {
+        m.setNameToIndex(nameMap);
+        m = new NameEnrichingMatcher(m);
+      }
+      return m;
+    }
+  }
+
+  // Level 1c: Pattern string → PikeVMEntry for PIKEVM_CAPTURE patterns.
   // PikeVMMatcher carries mutable per-call buffers and must be freshly instantiated on every
-  // compile() call; only the NFA (immutable after construction) is cached.
-  private static final ConcurrentHashMap<String, NFA> PIKEVM_NFA_CACHE = new ConcurrentHashMap<>();
+  // compile() call; only the NFA (immutable after construction) and the name map are cached.
+  private static final ConcurrentHashMap<String, PikeVMEntry> PIKEVM_NFA_CACHE =
+      new ConcurrentHashMap<>();
 
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
   // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
@@ -168,11 +193,11 @@ public class RuntimeCompiler {
             ? pattern
             : pattern + "\u0000capturePolicy=" + options.capturePolicy();
 
-    // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh PikeVMMatcher.
+    // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
-    NFA pikevmNfa = PIKEVM_NFA_CACHE.get(cacheKey);
-    if (pikevmNfa != null) {
-      return new PikeVMMatcher(pikevmNfa, pattern);
+    PikeVMEntry pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
+    if (pikevmEntry != null) {
+      return pikevmEntry.newMatcher(pattern);
     }
 
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
@@ -195,11 +220,11 @@ public class RuntimeCompiler {
                     : compileInternal(pattern, options, k));
 
     // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
-    // remove it from L1 and return a fresh PikeVMMatcher so callers never share mutable state.
-    pikevmNfa = PIKEVM_NFA_CACHE.get(cacheKey);
-    if (pikevmNfa != null) {
+    // remove it from L1 and return a fresh matcher so callers never share mutable state.
+    pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
+    if (pikevmEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return new PikeVMMatcher(pikevmNfa, pattern);
+      return pikevmEntry.newMatcher(pattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
@@ -363,17 +388,11 @@ public class RuntimeCompiler {
         return fallback;
       }
 
-      // 3.6. PIKEVM_CAPTURE: return a fresh PikeVMMatcher backed by the already-built NFA.
-      // PikeVMMatcher has mutable per-call buffers; cache only the NFA so each compile() call
-      // produces a fresh instance without rebuilding the NFA.
+      // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
+      // correctly-enriched PikeVMMatcher without re-parsing the pattern.
       if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
-        PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, nfa);
-        ReggieMatcher m = new PikeVMMatcher(PIKEVM_NFA_CACHE.get(cacheKey), pattern);
-        if (!nameMap.isEmpty()) {
-          m.setNameToIndex(nameMap);
-          m = new NameEnrichingMatcher(m);
-        }
-        return m;
+        PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
+        return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
