@@ -983,14 +983,6 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
-      if (dfa.isAnchorConditionDiluted()) {
-        MatchingStrategyResult r =
-            new MatchingStrategyResult(
-                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
-        r.anchorConditionDiluted = true;
-        return r;
-      }
-
       // Alternation + quantifiers/anchors: PIKEVM_CAPTURE gives correct leftmost-first
       // semantics. Three exclusions guard known PIKEVM divergences:
       //  1. hasNullableAlternationBranch: entire branch can match empty (e.g. a{0,3}|b).
@@ -1004,6 +996,9 @@ public class PatternAnalyzer {
       // case.
       //  Start-anchors (^, \A) in leading position are safe; the PikeVMMatcher fix ensures they
       //  evaluate against the fixed search-region origin, not the per-attempt try-position.
+      // This block runs BEFORE the isAnchorConditionDiluted guard below: a diluted-anchor
+      // pattern that passes these exclusions (e.g. ^c|[^1][b]) is handled correctly by PIKEVM,
+      // whereas OPTIMIZED_NFA (the dilution fallback target) shares the old find() anchor bug.
       if (containsAlternation(ast)
           && !hasNullableAlternationBranch(ast)
           && !subtreeContainsOptional(ast)
@@ -1011,6 +1006,16 @@ public class PatternAnalyzer {
           && dfaHasAcceptingStateWithTransitions(dfa)) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+      }
+      // Anchor condition diluted in DFA construction and NOT claimed by PIKEVM above (optional or
+      // nullable subtree, or leading end-anchor). OPTIMIZED_NFA mishandles find() anchors for
+      // these, so fall back to java.util.regex via the anchorConditionDiluted guard.
+      if (dfa.isAnchorConditionDiluted()) {
+        MatchingStrategyResult r =
+            new MatchingStrategyResult(
+                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+        r.anchorConditionDiluted = true;
+        return r;
       }
       // Alternation with nullable branches, optional suffixes, or leading end-anchors: PIKEVM
       // greedy divergence from JDK is not yet resolved for these patterns.
