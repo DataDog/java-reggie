@@ -158,17 +158,8 @@ public final class FallbackPatternDetector {
           + "recursive descent parser mishandles zero-length capture in nested group context";
     }
 
-    // Tagged DFA (DFA_UNROLLED_WITH_GROUPS, DFA_SWITCH_WITH_GROUPS) group-span computation is
-    // unreliable when an optional element (quantifier with min=0) at the top-level concat precedes
-    // a capturing group. The TDFA priority-ordering cannot correctly resolve whether the group
-    // start position belongs to the skipped or matched optional prefix path, producing wrong
-    // group-start values (e.g. "-?(-?.{3})." gives g1=[1,3] instead of [0,3]).
-    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
-        && hasOptionalPrefixBeforeCapturingGroup(ast)) {
-      return "optional prefix before capturing group: "
-          + "tagged DFA group-span computation produces wrong group-start position";
-    }
+    // B10 [ELIMINATED]: DFA_*_WITH_GROUPS optional-prefix-before-capturing-group.
+    // PatternAnalyzer now routes these to PIKEVM_CAPTURE before the DFA ladder.
 
     // B11 — Lookahead inside alternation branch, NFA path only (OPTIMIZED_NFA_WITH_LOOKAROUND).
     // Root cause (NEEDS-RND): The NFA epsilon-closure worklist is shared across all active
@@ -238,27 +229,19 @@ public final class FallbackPatternDetector {
     // (routing to OPTIMIZED_NFA instead of JDK when alternation priority is not a correctness
     // concern) is deferred.
 
-    // The capture-ambiguous TDFA (DFA_UNROLLED_WITH_GROUPS / DFA_SWITCH_WITH_GROUPS) produces
-    // incorrect boolean results when the pattern has both alternation and a capturing group
-    // inside a quantifier. The TDFA priority thread for the quantified-group body can mark NFA
-    // states as visited before the alternation's other branches are explored, causing those
-    // branches to be silently skipped and producing a wrong false-negative result.
-    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
-        && containsAlternation(ast)
-        && hasCapturingGroupInQuantifiedSection(ast)) {
-      return "capturing group in quantifier with alternation: "
-          + "TDFA thread ordering silently skips alternation branches";
-    }
+    // B15 [ELIMINATED]: DFA_*_WITH_GROUPS capturing-group-in-quantified-alternation.
+    // PatternAnalyzer now routes these to PIKEVM_CAPTURE before the DFA ladder.
 
-    // The TDFA does not correctly model POSIX last-match semantics when a capturing group is
-    // directly wrapped by an outer quantifier with min=0 (nullable). The last zero-width iteration
-    // should set group to the last non-empty capture, but the TDFA may report the wrong span.
+    // B16 [PARTIAL]: nullable outer quantifier on capturing group with nullable content.
+    // When the group content is itself nullable (e.g. (0*-?){0,}), PIKEVM_CAPTURE also diverges
+    // (wrong last-iteration spans), so these still fall back to JDK. The non-nullable-content
+    // sub-case (e.g. (a)?) is handled by PatternAnalyzer routing to PIKEVM_CAPTURE.
     if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
-        && hasNullableOuterQuantifierOnCapturingGroup(ast)) {
-      return "capturing group with nullable outer quantifier: "
-          + "TDFA POSIX last-match span incorrect for zero-width last iteration";
+            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS
+            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+        && hasNullableGroupContentWithNullableQuantifier(ast)) {
+      return "capturing group with nullable content and nullable outer quantifier: "
+          + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect";
     }
 
     // OPTIMIZED_NFA: \Z (STRING_END) in an alternation combined with capturing groups,
@@ -623,7 +606,7 @@ public final class FallbackPatternDetector {
   }
 
   /** Returns true if the subtree can match the empty string (zero characters). */
-  private static boolean subtreeIsNullable(RegexNode node) {
+  static boolean subtreeIsNullable(RegexNode node) {
     if (node instanceof QuantifierNode) {
       return ((QuantifierNode) node).min == 0 || subtreeIsNullable(((QuantifierNode) node).child);
     }
@@ -776,7 +759,7 @@ public final class FallbackPatternDetector {
    * computation cannot resolve the group-start position correctly when an optional element may or
    * may not be consumed before the group opens.
    */
-  private static boolean hasOptionalPrefixBeforeCapturingGroup(RegexNode ast) {
+  static boolean hasOptionalPrefixBeforeCapturingGroup(RegexNode ast) {
     if (ast instanceof ConcatNode) {
       ConcatNode concat = (ConcatNode) ast;
       boolean seenOptional = false;
@@ -957,10 +940,41 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
+   * the group's content is itself nullable (can match the empty string). Example: {@code
+   * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is
+   * nullable. PIKEVM diverges for this sub-case; only non-nullable-content B16 patterns are safe to
+   * route to PIKEVM_CAPTURE.
+   */
+  static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
+    if (ast instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) ast;
+      if (q.min == 0 && q.child instanceof GroupNode) {
+        GroupNode g = (GroupNode) q.child;
+        if (g.capturing && subtreeIsNullable(g.child)) return true;
+      }
+      return hasNullableGroupContentWithNullableQuantifier(q.child);
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasNullableGroupContentWithNullableQuantifier(c)) return true;
+      }
+    }
+    if (ast instanceof GroupNode)
+      return hasNullableGroupContentWithNullableQuantifier(((GroupNode) ast).child);
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives) {
+        if (hasNullableGroupContentWithNullableQuantifier(a)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0.
    * Example: {@code (0*-?){0,}} has the group quantified by {@code {0,}} (min=0).
    */
-  private static boolean hasNullableOuterQuantifierOnCapturingGroup(RegexNode ast) {
+  static boolean hasNullableOuterQuantifierOnCapturingGroup(RegexNode ast) {
     if (ast instanceof QuantifierNode) {
       QuantifierNode q = (QuantifierNode) ast;
       if (q.min == 0 && q.child instanceof GroupNode && ((GroupNode) q.child).capturing)
@@ -1127,7 +1141,7 @@ public final class FallbackPatternDetector {
   }
 
   /** Returns true if the AST contains at least one {@link AlternationNode}. */
-  private static boolean containsAlternation(RegexNode node) {
+  static boolean containsAlternation(RegexNode node) {
     if (node instanceof AlternationNode) return true;
     if (node instanceof ConcatNode) {
       for (RegexNode c : ((ConcatNode) node).children) if (containsAlternation(c)) return true;

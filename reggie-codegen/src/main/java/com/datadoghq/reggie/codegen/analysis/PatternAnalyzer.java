@@ -883,6 +883,45 @@ public class PatternAnalyzer {
           // handles all anchor types natively (since commit 0acfc66), and RuntimeCompiler wraps
           // the result in NameEnrichingMatcher when named groups are present.
           if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
+            // B16: nullable outer quantifier on non-nullable capturing group — TDFA POSIX
+            // last-match span wrong. PIKEVM gives correct spans when the group content itself is
+            // non-nullable; nullable-content groups (e.g. (0*-?){0,}) are left on the TDFA path
+            // and caught by needsFallback.
+            if (FallbackPatternDetector.hasNullableOuterQuantifierOnCapturingGroup(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // B10: optional prefix before capturing group — TDFA group-start computation wrong.
+            if (FallbackPatternDetector.hasOptionalPrefixBeforeCapturingGroup(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // B15: capturing group inside quantified alternation — TDFA thread ordering wrong.
+            if (FallbackPatternDetector.containsAlternation(ast)
+                && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
             if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
               return new MatchingStrategyResult(
@@ -915,7 +954,42 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
 
-        // DFA with groups: choose strategy based on state count
+        // DFA with groups: choose strategy based on state count.
+        // Gates for B16/B10/B15: TDFA cannot correctly compute group spans for these; PIKEVM can.
+        // B16: only when group content is non-nullable; nullable-content case left for
+        // needsFallback.
+        if (FallbackPatternDetector.hasNullableOuterQuantifierOnCapturingGroup(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        if (FallbackPatternDetector.hasOptionalPrefixBeforeCapturingGroup(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        if (FallbackPatternDetector.containsAlternation(ast)
+            && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
         int stateCount = dfa.getStateCount();
         if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
           return new MatchingStrategyResult(
