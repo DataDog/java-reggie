@@ -23,7 +23,10 @@ import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
@@ -85,6 +88,18 @@ import org.objectweb.asm.MethodVisitor;
  */
 public class DFASwitchBytecodeGenerator {
 
+  /**
+   * Maximum number of DFA states to inline into a single switch method body. When the state count
+   * exceeds this threshold, {@link #generateStateSwitch} and the group-tracking variants split the
+   * per-state case logic into private helper methods ({@code $ng_step_N} / {@code $gt_step_N}) to
+   * stay well under the JVM 64 KB per-method bytecode limit.
+   *
+   * <p>With 100 states per bucket and roughly 300 bytes of bytecode per state (multi-range charset
+   * checks + group actions), each helper stays around 30 KB — half the JVM limit, leaving headroom
+   * for the method preamble and loop overhead.
+   */
+  private static final int STATE_SPLIT_THRESHOLD = 100;
+
   private final DFA dfa;
   private final int groupCount;
   private final NFA nfa; // Needed for anchor information
@@ -96,6 +111,23 @@ public class DFASwitchBytecodeGenerator {
   private final boolean hasStringStartAnchor;
   private final boolean hasStringEndAnchor;
   private final boolean hasStringEndAbsoluteAnchor;
+
+  /**
+   * Set before any code-generation method that may need to emit bucket-helper methods. Bucket
+   * helpers are written directly to {@code activeCw} when the state count exceeds {@link
+   * #STATE_SPLIT_THRESHOLD}.
+   */
+  private ClassWriter activeCw;
+
+  /** Internal class name (slash-separated) corresponding to {@link #activeCw}. */
+  private String activeInternalClassName;
+
+  /**
+   * Tracks which bucket-helper method names have already been emitted into {@link #activeCw}.
+   * Guards against duplicate-method errors when multiple public generate* methods trigger the same
+   * bucket split (e.g. generateMatchesMethod and generateMatchMethod both overflow).
+   */
+  private final Set<String> emittedBucketHelpers = new HashSet<>();
 
   public DFASwitchBytecodeGenerator(DFA dfa) {
     this(dfa, 0, null);
@@ -126,6 +158,8 @@ public class DFASwitchBytecodeGenerator {
    * acceptStates.contains(state);
    */
   public void generateMatchesMethod(ClassWriter cw, String className) {
+    activeCw = cw;
+    activeInternalClassName = className.replace('.', '/');
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
     mv.visitCode();
 
@@ -224,8 +258,9 @@ public class DFASwitchBytecodeGenerator {
   }
 
   /**
-   * Generate switch statement that handles all state transitions. OPTIMIZATION: Use tableswitch
-   * instead of lookupswitch for O(1) lookup.
+   * Generate switch statement that handles all state transitions. Uses tableswitch for O(1)
+   * dispatch. When the DFA state count exceeds {@link #STATE_SPLIT_THRESHOLD}, splits the per-state
+   * case logic into private bucket-helper methods to stay under the JVM 64 KB per-method limit.
    */
   private void generateStateSwitch(
       MethodVisitor mv,
@@ -234,22 +269,82 @@ public class DFASwitchBytecodeGenerator {
       int posVar,
       Label loopStart,
       LocalVarAllocator allocator) {
-    Label defaultLabel = new Label();
-    Label[] caseLabels = new Label[dfa.getAllStates().size()];
-    int[] caseKeys = new int[dfa.getAllStates().size()];
 
-    // Create labels for each state
-    for (int i = 0; i < dfa.getAllStates().size(); i++) {
+    int stateCount = dfa.getAllStates().size();
+
+    if (stateCount > STATE_SPLIT_THRESHOLD && activeCw != null) {
+      // Split mode: emit one $ng_step_J helper per bucket of STATE_SPLIT_THRESHOLD states.
+      // The routing switch calls the appropriate helper, stores the returned nextState into
+      // stateVar, and jumps to loopStart. On -1 (no-match sentinel) it returns false.
+      int numBuckets = (stateCount + STATE_SPLIT_THRESHOLD - 1) / STATE_SPLIT_THRESHOLD;
+      for (int b = 0; b < numBuckets; b++) {
+        int lo = b * STATE_SPLIT_THRESHOLD;
+        int hi = Math.min(lo + STATE_SPLIT_THRESHOLD - 1, stateCount - 1);
+        emitNonGroupBucketHelperFull(b, lo, hi);
+      }
+
+      // Emit the routing switch: one case per bucket, calls $ng_step_B(state, ch, pos)
+      Label defaultLabel = new Label();
+      Label[] bucketLabels = new Label[numBuckets];
+      for (int b = 0; b < numBuckets; b++) {
+        bucketLabels[b] = new Label();
+      }
+
+      // Routing key: which bucket does this state belong to?
+      // bucket = state / STATE_SPLIT_THRESHOLD  → emit tableswitch over bucket indices
+      // But we need to dispatch on bucket, not state. Push state / threshold.
+      // Simpler: emit a tableswitch over [0, numBuckets-1] with bucket = state >> log2(threshold)?
+      // Easiest: emit a full tableswitch over [0, stateCount-1] mapping each state to its bucket.
+      Label[] stateToBucketLabels = new Label[stateCount];
+      for (int id = 0; id < stateCount; id++) {
+        int bucket = id / STATE_SPLIT_THRESHOLD;
+        stateToBucketLabels[id] = bucketLabels[bucket];
+      }
+
+      mv.visitVarInsn(ILOAD, stateVar);
+      mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, stateToBucketLabels);
+
+      // Emit one label per bucket; each calls the helper and handles the return value
+      for (int b = 0; b < numBuckets; b++) {
+        mv.visitLabel(bucketLabels[b]);
+        String helperName = "$ng_step_" + b;
+        mv.visitVarInsn(ALOAD, 0); // this
+        mv.visitVarInsn(ALOAD, 1); // input (String) — must be slot 1 in the calling method
+        mv.visitVarInsn(ILOAD, stateVar);
+        mv.visitVarInsn(ILOAD, chVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, activeInternalClassName, helperName, "(Ljava/lang/String;III)I", false);
+        // nextState is now on the stack; store it and check for -1
+        mv.visitVarInsn(ISTORE, stateVar);
+        Label notReject = new Label();
+        mv.visitVarInsn(ILOAD, stateVar);
+        mv.visitInsn(ICONST_M1);
+        mv.visitJumpInsn(IF_ICMPNE, notReject);
+        // helper returned -1: no transition matched -> return false
+        mv.visitInsn(ICONST_0);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(notReject);
+        mv.visitJumpInsn(GOTO, loopStart);
+      }
+
+      mv.visitLabel(defaultLabel);
+      mv.visitInsn(ICONST_0);
+      mv.visitInsn(IRETURN);
+      return;
+    }
+
+    // Inline mode (stateCount <= STATE_SPLIT_THRESHOLD or no activeCw): emit all cases inline.
+    Label defaultLabel = new Label();
+    Label[] caseLabels = new Label[stateCount];
+
+    for (int i = 0; i < stateCount; i++) {
       caseLabels[i] = new Label();
-      caseKeys[i] = i;
     }
 
     // switch (state)
     mv.visitVarInsn(ILOAD, stateVar);
-
-    // OPTIMIZATION: Use tableswitch for dense, sequential keys (O(1) vs O(log n))
-    // State IDs are always sequential starting from 0, making them perfect for tableswitch
-    mv.visitTableSwitchInsn(0, dfa.getAllStates().size() - 1, defaultLabel, caseLabels);
+    mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, caseLabels);
 
     // Generate case for each state
     for (DFA.DFAState state : dfa.getAllStates()) {
@@ -266,6 +361,13 @@ public class DFASwitchBytecodeGenerator {
   /**
    * Generate code for a single state case in the switch. Checks assertions first, then character
    * transitions.
+   *
+   * <p>Normal mode ({@code helperMode = false}): on transition hit, stores the next-state ID into
+   * {@code stateVar} and jumps to {@code loopStart}; on no-match, jumps to {@code rejectLabel}.
+   *
+   * <p>Helper mode ({@code helperMode = true}): on transition hit, pushes the next-state ID and
+   * {@code IRETURN}s it; on no-match, pushes {@code -1} and {@code IRETURN}s it. Used when emitting
+   * per-bucket helper methods to stay under the JVM 64 KB per-method limit.
    */
   private void generateStateCaseCode(
       MethodVisitor mv,
@@ -275,7 +377,8 @@ public class DFASwitchBytecodeGenerator {
       int posVar,
       Label loopStart,
       Label rejectLabel,
-      LocalVarAllocator allocator) {
+      LocalVarAllocator allocator,
+      boolean helperMode) {
     // Check assertions BEFORE character transitions (critical for correctness)
     // Note: posVar is AFTER pos++ (incremented in main loop before switch)
     // generateAssertionCheck handles the position adjustment internally
@@ -292,7 +395,12 @@ public class DFASwitchBytecodeGenerator {
 
       // Assertion failed - reject
       mv.visitLabel(assertionFailed);
-      mv.visitJumpInsn(GOTO, rejectLabel);
+      if (helperMode) {
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IRETURN);
+      } else {
+        mv.visitJumpInsn(GOTO, rejectLabel);
+      }
 
       mv.visitLabel(assertionsPassed);
     }
@@ -305,17 +413,211 @@ public class DFASwitchBytecodeGenerator {
       Label nextCheck = new Label();
       generateCharSetCheck(mv, chars, chVar, nextCheck);
 
-      // Match found - update state and continue loop
-      pushInt(mv, target.id);
-      mv.visitVarInsn(ISTORE, stateVar);
-      mv.visitJumpInsn(GOTO, loopStart);
+      // Match found: update state and continue loop (normal mode) or return next state (helper
+      // mode)
+      if (helperMode) {
+        pushInt(mv, target.id);
+        mv.visitInsn(IRETURN);
+      } else {
+        pushInt(mv, target.id);
+        mv.visitVarInsn(ISTORE, stateVar);
+        mv.visitJumpInsn(GOTO, loopStart);
+      }
 
       // No match - try next transition
       mv.visitLabel(nextCheck);
     }
 
     // No transition matched - reject
-    mv.visitJumpInsn(GOTO, rejectLabel);
+    if (helperMode) {
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+    } else {
+      mv.visitJumpInsn(GOTO, rejectLabel);
+    }
+  }
+
+  /**
+   * Backward-compatible overload: delegates to the full method with {@code helperMode = false}.
+   * Preserves call sites that do not need helper-mode splitting.
+   */
+  private void generateStateCaseCode(
+      MethodVisitor mv,
+      DFA.DFAState state,
+      int stateVar,
+      int chVar,
+      int posVar,
+      Label loopStart,
+      Label rejectLabel,
+      LocalVarAllocator allocator) {
+    generateStateCaseCode(
+        mv, state, stateVar, chVar, posVar, loopStart, rejectLabel, allocator, false);
+  }
+
+  // ============================================================================================
+  // Bucket-helper emission: when the DFA state count exceeds STATE_SPLIT_THRESHOLD, the main
+  // switch is replaced by a two-level dispatch. A routing switch (one case per bucket) calls
+  // a private helper method that handles the states in that bucket. Each helper returns the
+  // next-state ID on a charset hit, or -1 on no-match (sentinel). The caller stores the result
+  // into stateVar and jumps to loopStart, or returns false/null on -1.
+  //
+  // Non-group helper descriptor: (Ljava/lang/String;III)I
+  //   — (String input, int state, int ch, int pos) -> int nextState
+  // String input is placed at slot 1 so that all assertion-check code that emits ALOAD_1 for
+  // the input String continues to work correctly inside the helper.
+  //
+  // Group-tracking helper descriptor: (Ljava/lang/String;III[I[I)I
+  //   — (String input, int state, int ch, int pos, int[] gs, int[] ge) -> int
+  // ============================================================================================
+
+  /**
+   * Emit one bucket helper for the <em>non-group</em> state switch.
+   *
+   * <p>Helper signature: {@code private int $ng_step_J(String input, int state, int ch, int pos)}
+   * Returns the next-state ID on a charset hit, or {@code -1} for no-match. {@code String input}
+   * occupies slot 1 so that assertion-check bytecode that unconditionally emits {@code ALOAD_1} for
+   * the input reference continues to resolve correctly.
+   *
+   * @param bucketIndex index used to form the unique method name
+   * @param lo first state ID handled by this bucket
+   * @param hi last state ID handled by this bucket (inclusive)
+   */
+  private void emitNonGroupBucketHelperFull(int bucketIndex, int lo, int hi) {
+    String helperName = "$ng_step_" + bucketIndex;
+    if (!emittedBucketHelpers.add(helperName)) {
+      return; // already emitted for this ClassWriter instance
+    }
+    // (String input, int state, int ch, int pos) -> int
+    MethodVisitor hv =
+        activeCw.visitMethod(ACC_PRIVATE, helperName, "(Ljava/lang/String;III)I", null, null);
+    hv.visitCode();
+
+    // Slot layout: 0=this, 1=input (String), 2=state, 3=ch, 4=pos; allocator starts at 5 for temps
+    int stateSlot = 2;
+    int chSlot = 3;
+    int posSlot = 4;
+    LocalVarAllocator helperAlloc = new LocalVarAllocator(5);
+
+    int bucketSize = hi - lo + 1;
+    Label defaultLabel = new Label();
+    Label[] caseLabels = new Label[bucketSize];
+    for (int i = 0; i < bucketSize; i++) {
+      caseLabels[i] = new Label();
+    }
+
+    hv.visitVarInsn(ILOAD, stateSlot);
+    hv.visitTableSwitchInsn(lo, hi, defaultLabel, caseLabels);
+
+    List<DFA.DFAState> allStates = dfa.getAllStates();
+    for (int id = lo; id <= hi; id++) {
+      DFA.DFAState state = allStates.get(id);
+      hv.visitLabel(caseLabels[id - lo]);
+      // helperMode=true: on hit returns target.id; on miss returns -1
+      generateStateCaseCode(
+          hv,
+          state,
+          stateSlot,
+          chSlot,
+          posSlot,
+          /* loopStart= */ null,
+          /* rejectLabel= */ null,
+          helperAlloc,
+          true);
+    }
+
+    hv.visitLabel(defaultLabel);
+    hv.visitInsn(ICONST_M1);
+    hv.visitInsn(IRETURN);
+
+    hv.visitMaxs(0, 0);
+    hv.visitEnd();
+  }
+
+  /**
+   * Emit one bucket helper for the <em>group-tracking</em> state switch.
+   *
+   * <p>Helper signature: {@code private int $gt_step_J(int state, int ch, int pos, int[]
+   * groupStarts, int[] groupEnds)}. Returns the next-state ID on a charset hit, or {@code -1} for
+   * no-match. Group-array mutations are visible to the caller because arrays are passed by
+   * reference.
+   *
+   * @param bucketIndex index used to form the unique method name
+   * @param lo first state ID handled by this bucket
+   * @param hi last state ID handled by this bucket (inclusive)
+   */
+  private void emitGroupTrackingBucketHelper(int bucketIndex, int lo, int hi) {
+    String helperName = "$gt_step_" + bucketIndex;
+    if (!emittedBucketHelpers.add(helperName)) {
+      return; // already emitted for this ClassWriter instance
+    }
+    // (int state, int ch, int pos, int[] groupStarts, int[] groupEnds) -> int
+    MethodVisitor hv = activeCw.visitMethod(ACC_PRIVATE, helperName, "(III[I[I)I", null, null);
+    hv.visitCode();
+
+    // Slot layout: 0=this, 1=state, 2=ch, 3=pos, 4=groupStarts, 5=groupEnds
+    int stateSlot = 1;
+    int chSlot = 2;
+    int posSlot = 3;
+    int groupStartsSlot = 4;
+    int groupEndsSlot = 5;
+    // No allocator temps needed: generateStateCaseCodeWithGroupTrackingHelper accesses these slots
+    // directly.
+
+    int bucketSize = hi - lo + 1;
+    Label defaultLabel = new Label();
+    Label[] caseLabels = new Label[bucketSize];
+    for (int i = 0; i < bucketSize; i++) {
+      caseLabels[i] = new Label();
+    }
+
+    hv.visitVarInsn(ILOAD, stateSlot);
+    hv.visitTableSwitchInsn(lo, hi, defaultLabel, caseLabels);
+
+    List<DFA.DFAState> allStates = dfa.getAllStates();
+    for (int id = lo; id <= hi; id++) {
+      DFA.DFAState state = allStates.get(id);
+      hv.visitLabel(caseLabels[id - lo]);
+      generateStateCaseCodeWithGroupTrackingHelper(
+          hv, state, chSlot, posSlot, groupStartsSlot, groupEndsSlot);
+    }
+
+    hv.visitLabel(defaultLabel);
+    hv.visitInsn(ICONST_M1);
+    hv.visitInsn(IRETURN);
+
+    hv.visitMaxs(0, 0);
+    hv.visitEnd();
+  }
+
+  /**
+   * Generate case code for a single state in a group-tracking bucket helper. Unlike {@link
+   * #generateStateCaseCodeWithGroupTracking}, on transition hit this method pushes the next-state
+   * ID and returns it ({@code IRETURN}); on no-match it pushes {@code -1} and returns.
+   */
+  private void generateStateCaseCodeWithGroupTrackingHelper(
+      MethodVisitor mv,
+      DFA.DFAState state,
+      int chSlot,
+      int posSlot,
+      int groupStartsSlot,
+      int groupEndsSlot) {
+    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
+      CharSet chars = entry.getKey();
+      DFA.DFAState target = entry.getValue().target;
+
+      Label nextCheck = new Label();
+      generateCharSetCheck(mv, chars, chSlot, nextCheck);
+
+      // Apply group actions, then return the next-state ID
+      generateGroupActionsForState(mv, target, posSlot, groupStartsSlot, groupEndsSlot);
+      pushInt(mv, target.id);
+      mv.visitInsn(IRETURN);
+
+      mv.visitLabel(nextCheck);
+    }
+    // No transition matched
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IRETURN);
   }
 
   /**
@@ -981,6 +1283,7 @@ public class DFASwitchBytecodeGenerator {
    * accept state is reached.
    */
   public void generateMatchesAtStartMethod(ClassWriter cw) {
+    if (activeCw == null) activeCw = cw;
     MethodVisitor mv =
         cw.visitMethod(ACC_PRIVATE, "matchesAtStart", "(Ljava/lang/String;I)Z", null, null);
     mv.visitCode();
@@ -1116,6 +1419,8 @@ public class DFASwitchBytecodeGenerator {
    * }</pre>
    */
   public void generateMatchMethod(ClassWriter cw, String className) {
+    activeCw = cw;
+    activeInternalClassName = className.replace('.', '/');
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -1198,6 +1503,8 @@ public class DFASwitchBytecodeGenerator {
    * match(String): it writes group 0 and capture group boundaries into caller-provided arrays.
    */
   public void generateMatchIntoMethod(ClassWriter cw, String className) {
+    activeCw = cw;
+    activeInternalClassName = className.replace('.', '/');
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
     mv.visitCode();
@@ -2367,6 +2674,12 @@ public class DFASwitchBytecodeGenerator {
   }
 
   /** Generate switch statement with group tracking. */
+  /**
+   * Emit the routing + per-state logic for group-tracking state transitions. When the state count
+   * exceeds {@link #STATE_SPLIT_THRESHOLD}, splits into bucket helpers to avoid the 64 KB
+   * per-method limit. On no-match, executes {@code ACONST_NULL; ARETURN} (returns null for {@code
+   * match()} / {@code findMatch()} callers).
+   */
   private void generateStateSwitchWithGroupTracking(
       MethodVisitor mv,
       int stateVar,
@@ -2375,18 +2688,32 @@ public class DFASwitchBytecodeGenerator {
       int groupStartsVar,
       int groupEndsVar,
       Label loopStart) {
-    Label defaultLabel = new Label();
-    Label[] caseLabels = new Label[dfa.getAllStates().size()];
-    int[] caseKeys = new int[dfa.getAllStates().size()];
 
-    for (int i = 0; i < dfa.getAllStates().size(); i++) {
+    int stateCount = dfa.getAllStates().size();
+
+    if (stateCount > STATE_SPLIT_THRESHOLD && activeCw != null) {
+      emitGroupTrackingSplitSwitch(
+          mv,
+          stateVar,
+          chVar,
+          posVar,
+          groupStartsVar,
+          groupEndsVar,
+          loopStart,
+          /* returnFalseOnMiss= */ false);
+      return;
+    }
+
+    // Inline mode
+    Label defaultLabel = new Label();
+    Label[] caseLabels = new Label[stateCount];
+
+    for (int i = 0; i < stateCount; i++) {
       caseLabels[i] = new Label();
-      caseKeys[i] = i;
     }
 
     mv.visitVarInsn(ILOAD, stateVar);
-    // OPTIMIZATION: Use tableswitch for O(1) state lookup
-    mv.visitTableSwitchInsn(0, dfa.getAllStates().size() - 1, defaultLabel, caseLabels);
+    mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, caseLabels);
 
     for (DFA.DFAState state : dfa.getAllStates()) {
       mv.visitLabel(caseLabels[state.id]);
@@ -2402,13 +2729,17 @@ public class DFASwitchBytecodeGenerator {
           defaultLabel);
     }
 
-    // Default: no match
+    // Default: no match — null return for MatchResult callers
     mv.visitLabel(defaultLabel);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
   }
 
-  /** Generate switch statement with group tracking for boolean matchInto(). */
+  /**
+   * Emit the routing + per-state logic for group-tracking state transitions (boolean return). When
+   * the state count exceeds {@link #STATE_SPLIT_THRESHOLD}, splits into bucket helpers. On
+   * no-match, executes {@code ICONST_0; IRETURN} (returns false for {@code matchInto()} callers).
+   */
   private void generateStateSwitchWithGroupTrackingReturningFalse(
       MethodVisitor mv,
       int stateVar,
@@ -2417,15 +2748,32 @@ public class DFASwitchBytecodeGenerator {
       int groupStartsVar,
       int groupEndsVar,
       Label loopStart) {
-    Label defaultLabel = new Label();
-    Label[] caseLabels = new Label[dfa.getAllStates().size()];
 
-    for (int i = 0; i < dfa.getAllStates().size(); i++) {
+    int stateCount = dfa.getAllStates().size();
+
+    if (stateCount > STATE_SPLIT_THRESHOLD && activeCw != null) {
+      emitGroupTrackingSplitSwitch(
+          mv,
+          stateVar,
+          chVar,
+          posVar,
+          groupStartsVar,
+          groupEndsVar,
+          loopStart,
+          /* returnFalseOnMiss= */ true);
+      return;
+    }
+
+    // Inline mode
+    Label defaultLabel = new Label();
+    Label[] caseLabels = new Label[stateCount];
+
+    for (int i = 0; i < stateCount; i++) {
       caseLabels[i] = new Label();
     }
 
     mv.visitVarInsn(ILOAD, stateVar);
-    mv.visitTableSwitchInsn(0, dfa.getAllStates().size() - 1, defaultLabel, caseLabels);
+    mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, caseLabels);
 
     for (DFA.DFAState state : dfa.getAllStates()) {
       mv.visitLabel(caseLabels[state.id]);
@@ -2444,6 +2792,89 @@ public class DFASwitchBytecodeGenerator {
     mv.visitLabel(defaultLabel);
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Shared implementation for split-mode group-tracking dispatch. Emits one {@code $gt_step_J}
+   * bucket helper per bucket of states, then emits a routing tableswitch that calls the appropriate
+   * helper.
+   *
+   * <p>On a successful transition the helper returns the next-state ID; the routing code stores it
+   * into {@code stateVar} and jumps to {@code loopStart}. On a -1 return (no-match), either {@code
+   * ACONST_NULL; ARETURN} (for {@code match()} callers) or {@code ICONST_0; IRETURN} (for {@code
+   * matchInto()} callers) is emitted depending on {@code returnFalseOnMiss}.
+   */
+  private void emitGroupTrackingSplitSwitch(
+      MethodVisitor mv,
+      int stateVar,
+      int chVar,
+      int posVar,
+      int groupStartsVar,
+      int groupEndsVar,
+      Label loopStart,
+      boolean returnFalseOnMiss) {
+
+    int stateCount = dfa.getAllStates().size();
+    int numBuckets = (stateCount + STATE_SPLIT_THRESHOLD - 1) / STATE_SPLIT_THRESHOLD;
+
+    // Emit one helper per bucket (idempotent if already emitted for this generator instance)
+    for (int b = 0; b < numBuckets; b++) {
+      int lo = b * STATE_SPLIT_THRESHOLD;
+      int hi = Math.min(lo + STATE_SPLIT_THRESHOLD - 1, stateCount - 1);
+      emitGroupTrackingBucketHelper(b, lo, hi);
+    }
+
+    // Routing tableswitch: maps each state to its bucket's entry label
+    Label defaultLabel = new Label();
+    Label[] bucketLabels = new Label[numBuckets];
+    for (int b = 0; b < numBuckets; b++) {
+      bucketLabels[b] = new Label();
+    }
+
+    Label[] stateToBucketLabels = new Label[stateCount];
+    for (int id = 0; id < stateCount; id++) {
+      stateToBucketLabels[id] = bucketLabels[id / STATE_SPLIT_THRESHOLD];
+    }
+
+    mv.visitVarInsn(ILOAD, stateVar);
+    mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, stateToBucketLabels);
+
+    for (int b = 0; b < numBuckets; b++) {
+      mv.visitLabel(bucketLabels[b]);
+      String helperName = "$gt_step_" + b;
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ILOAD, stateVar);
+      mv.visitVarInsn(ILOAD, chVar);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      mv.visitMethodInsn(INVOKESPECIAL, activeInternalClassName, helperName, "(III[I[I)I", false);
+      // Store returned nextState and check for -1
+      mv.visitVarInsn(ISTORE, stateVar);
+      Label notReject = new Label();
+      mv.visitVarInsn(ILOAD, stateVar);
+      mv.visitInsn(ICONST_M1);
+      mv.visitJumpInsn(IF_ICMPNE, notReject);
+      // No transition matched
+      if (returnFalseOnMiss) {
+        mv.visitInsn(ICONST_0);
+        mv.visitInsn(IRETURN);
+      } else {
+        mv.visitInsn(ACONST_NULL);
+        mv.visitInsn(ARETURN);
+      }
+      mv.visitLabel(notReject);
+      mv.visitJumpInsn(GOTO, loopStart);
+    }
+
+    mv.visitLabel(defaultLabel);
+    if (returnFalseOnMiss) {
+      mv.visitInsn(ICONST_0);
+      mv.visitInsn(IRETURN);
+    } else {
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+    }
   }
 
   /** Generate case code for a state with group tracking. */
