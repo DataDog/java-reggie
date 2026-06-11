@@ -484,10 +484,13 @@ public class RuntimeCompiler {
       return matcher;
 
     } catch (org.objectweb.asm.MethodTooLargeException e) {
-      // Very large grok-style alternations can exceed JVM method-size limits. Preserve drop-in
-      // behavior by falling back to java.util.regex instead of failing compilation, but include the
-      // generated method and bytecode size in the warning so routing/generator fixes can be guided
-      // by real-world patterns.
+      // Very large patterns can exceed the JVM 64 KB per-method limit. DFASwitchBytecodeGenerator
+      // mitigates this via STATE_SPLIT_THRESHOLD bucket-helper splitting; hitting this path for a
+      // DFA_SWITCH* strategy indicates a STATE_SPLIT_THRESHOLD bug in DFASwitchBytecodeGenerator.
+      // Other generators (e.g. NFABytecodeGenerator) do not yet implement splitting and may still
+      // reach this path for extremely large alternations. Preserve drop-in behavior by falling back
+      // to java.util.regex, and include the generated method and bytecode size in the warning so
+      // the responsible generator can be identified and fixed.
       ReggieMatcher fallback =
           new JavaRegexFallbackMatcher(
               pattern,
