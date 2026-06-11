@@ -86,53 +86,64 @@ public final class FallbackPatternDetector {
       return "end-anchor before non-newline consumer: DFA does not model this path correctly";
     }
 
-    // RECURSIVE_DESCENT uses a greedy-first descent parser with limited backtracking (quantifiers
-    // followed by fixed suffixes). It does NOT implement general alternation backtracking: when an
-    // alternation's first branch partially matches but the following context fails, the parser
-    // cannot retry a different branch. Lazy quantifiers expose this because they interact heavily
-    // with alternation (e.g. a|ab matches "ab" requires the engine to try both branches). Until
-    // the generator is extended with full continuation-passing backtracking, lazy patterns route
-    // to java.util.regex which handles them correctly.
+    // B5 [NEEDS-RND]: RECURSIVE_DESCENT uses a greedy-first descent parser with limited
+    // backtracking (quantifiers followed by fixed suffixes). It does NOT implement general
+    // alternation backtracking: when an alternation's first branch partially matches but the
+    // following context fails, the parser cannot retry a different branch. Lazy quantifiers
+    // expose this because they interact heavily with alternation (e.g. a|ab matches "ab" requires
+    // the engine to try both branches). Until the generator is extended with full
+    // continuation-passing backtracking, lazy patterns route to java.util.regex which handles
+    // them correctly.
     //
     // OPTIMIZED_NFA_WITH_BACKREFS findMatchFromMethod always returns the LONGEST match (it tries
     // all end positions and keeps the maximum). Lazy quantifiers require the SHORTEST match.
     // Without proper lazy-aware result selection, these patterns produce wrong spans.
+    //
+    // NOTE: This guard does NOT cover VARIABLE_CAPTURE_BACKREF — lazy patterns that route there
+    // (e.g. (a+?)\1) go native with greedy semantics, producing wrong spans. See
+    // BackrefEngineGapsTest.
     if ((strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS)
         && v.hasLazyQuantifier) {
       return "lazy quantifier: requires shortest-match semantics not supported by this strategy";
     }
 
-    // Thompson NFA group-state contamination (OPTIMIZED_NFA_WITH_BACKREFS) and RECURSIVE_DESCENT
-    // backtracking limitations: both fail when a backref \N appears in one alternative of an
-    // alternation but group N is defined in a DIFFERENT alternative of the same alternation.
+    // B6 [NEEDS-RND]: Thompson NFA group-state contamination (OPTIMIZED_NFA_WITH_BACKREFS) and
+    // RECURSIVE_DESCENT backtracking limitations: both fail when a backref \N appears in one
+    // alternative of an alternation but group N is defined in a DIFFERENT alternative of the same
+    // alternation. Fix requires per-state group arrays (issue #38 Cat B).
     if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT)
         && hasCrossAlternativeBackref(ast)) {
       return "cross-alternative backref: group captured in one branch, used in another";
     }
 
-    // Parallel NFA simulation uses shared group arrays across all active paths. When a backref
-    // \N references a group that can capture the empty string (nullable), the greedy path may
-    // record a non-zero groupLen while the empty-capture path needs groupLen=0. The shared
+    // B7 [FIXABLE-NOW]: Parallel NFA simulation uses shared group arrays across all active paths.
+    // When a backref \N references a group that can capture the empty string (nullable), the greedy
+    // path may record a non-zero groupLen while the empty-capture path needs groupLen=0. The shared
     // array records the wrong value, causing the backref check to fail or spuriously succeed.
+    // Fix: add a zero-length early-accept in backrefCheck (if groupLen==0 accept unconditionally).
     if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
         && hasNullableBackrefGroup(ast)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
-    // FIXED_REPETITION_BACKREF assumes groupLen > 0 when verifying repeated backrefs; when the
-    // referenced group captures the empty string, the loop never advances and produces a wrong
-    // result (false positive or false negative).
+    // B8 [KEEP-PERMANENT — dead code]: FIXED_REPETITION_BACKREF assumes groupLen > 0 when
+    // verifying repeated backrefs; when the referenced group captures the empty string, the loop
+    // never advances. However, detectFixedRepetitionBackref requires isSimpleGroupContent (only
+    // LiteralNode or CharClassNode), neither of which is nullable. Nullable groups fail that check
+    // and route to RECURSIVE_DESCENT instead. This guard is therefore unreachable in practice and
+    // can be removed without any behavioral change. See BackrefEngineGapsTest.b8 for verification.
     if (strategy == PatternAnalyzer.MatchingStrategy.FIXED_REPETITION_BACKREF
         && hasNullableBackrefGroup(ast)) {
       return "backref to nullable group: fixed-repetition backref loop does not handle empty capture";
     }
 
-    // RECURSIVE_DESCENT backref matching fails when a backref to a nullable group appears inside
-    // another capturing group: the recursive parser propagates the zero-length capture into nested
-    // group boundaries incorrectly, mismatching the expected position. Simple top-level quantified
-    // backrefs like \1+ are handled correctly; only nested-inside-group uses are affected.
+    // B9 [NEEDS-RND]: RECURSIVE_DESCENT backref matching fails when a backref to a nullable group
+    // appears inside another capturing group: the recursive parser propagates the zero-length
+    // capture into nested group boundaries incorrectly, mismatching the expected position. Simple
+    // top-level quantified backrefs like \1+ are handled correctly; only nested-inside-group uses
+    // are affected. Fix requires per-frame capture state in the descent parser.
     if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
         && hasNullableBackrefInsideCapturingGroup(ast)) {
       return "backref to nullable group inside capturing group: "
@@ -173,28 +184,33 @@ public final class FallbackPatternDetector {
     // Generator now caps the initial groupEnd to info.groupMaxCount when the group has a bounded
     // quantifier, so this fallback condition is no longer needed.
 
-    // Generator handles LiteralNode and CharClassNode prefix nodes via emitPrefixMatch.
-    // Still fall back for patterns with complex prefix nodes the generator cannot handle.
+    // B12 [FIXABLE-NOW]: Generator handles LiteralNode and CharClassNode prefix nodes via
+    // emitPrefixMatch. Still fall back for patterns with complex prefix nodes the generator cannot
+    // handle (non-capturing GroupNode, QuantifierNode, etc). Fix: extend emitPrefixMatch to inline
+    // non-capturing group content — bounded, allocation-free change.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
       return "variable-capture backref with unsupported prefix node type: "
           + "generator only handles literal and char-class prefix nodes";
     }
 
-    // Outer quantifier wraps the entire capturing group: (X)+\N or (X){n,}\N. The
-    // backref engine cannot determine the correct last-iteration capture. Routes to JDK.
+    // B13 [NEEDS-RND]: Outer quantifier wraps the entire capturing group: (X)+\N or (X){n,}\N.
+    // The backref engine cannot determine the correct last-iteration capture without
+    // iteration-state
+    // tracking. Routes to JDK until safe-backtracking R&D provides last-iteration tracking.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasOuterQuantifierOnBackrefGroup(ast)) {
       return "quantified capturing group with backref: "
           + "outer quantifier on group not supported by backref engine";
     }
 
-    // OPTIONAL_GROUP_BACKREF cannot handle (1) a nullable (epsilon-matching) capturing group
-    // wrapped in an outer quantifier, or (2) a capturing group whose body contains alternation
-    // wrapped in an outer quantifier. Case 1: when the group body is nullable the backref must
-    // match the empty string but the generator assumes a non-empty captured span. Case 2: when
-    // the group body has alternation (e.g. (a|b)?\\1), the generator only handles single-char
-    // or simple-literal group bodies and produces wrong results for alternation bodies.
+    // B14 [NEEDS-RND]: OPTIONAL_GROUP_BACKREF cannot handle (1) a nullable (epsilon-matching)
+    // capturing group wrapped in an outer quantifier, or (2) a capturing group whose body contains
+    // alternation wrapped in an outer quantifier. Case 1: when the group body is nullable the
+    // backref must match the empty string but the generator assumes a non-empty captured span.
+    // Case 2: when the group body has alternation (e.g. (a|b)?\\1), the generator only handles
+    // single-char or simple-literal group bodies and produces wrong results for alternation bodies.
+    // Both sub-problems require safe-backtracking R&D for a correct fix.
     if (strategy == PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF
         && hasOuterQuantifierOnUnsupportedBackrefGroup(ast)) {
       return "optional-group backref to unsupported capturing group: "
