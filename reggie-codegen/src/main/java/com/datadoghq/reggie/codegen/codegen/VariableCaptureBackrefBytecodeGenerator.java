@@ -21,6 +21,8 @@ import static org.objectweb.asm.Opcodes.*;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.AnchorNode;
 import com.datadoghq.reggie.codegen.ast.CharClassNode;
+import com.datadoghq.reggie.codegen.ast.ConcatNode;
+import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
@@ -757,34 +759,55 @@ public class VariableCaptureBackrefBytecodeGenerator {
     }
   }
 
+  private void emitPrefixNode(
+      MethodVisitor mv,
+      RegexNode node,
+      int groupStartVar,
+      int lenVar,
+      Label failLabel,
+      LocalVarAllocator alloc) {
+    if (node instanceof AnchorNode) {
+      // zero-width, nothing to consume
+    } else if (node instanceof LiteralNode) {
+      char ch = ((LiteralNode) node).ch;
+      mv.visitVarInsn(ILOAD, groupStartVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPGE, failLabel);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, groupStartVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, ch);
+      mv.visitJumpInsn(IF_ICMPNE, failLabel);
+      mv.visitIincInsn(groupStartVar, 1);
+    } else if (node instanceof CharClassNode) {
+      CharClassNode ccn = (CharClassNode) node;
+      int charVar = alloc.allocate();
+      mv.visitVarInsn(ILOAD, groupStartVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPGE, failLabel);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, groupStartVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      mv.visitVarInsn(ISTORE, charVar);
+      emitCharSetCheck(mv, charVar, ccn.chars, ccn.negated, failLabel);
+      mv.visitIincInsn(groupStartVar, 1);
+    } else if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (!g.capturing) {
+        emitPrefixNode(mv, g.child, groupStartVar, lenVar, failLabel, alloc);
+      }
+      // capturing groups in prefix are not reachable here (they are the backref group, not prefix)
+    } else if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        emitPrefixNode(mv, child, groupStartVar, lenVar, failLabel, alloc);
+      }
+    }
+  }
+
   private void emitPrefixMatch(
       MethodVisitor mv, int groupStartVar, int lenVar, Label failLabel, LocalVarAllocator alloc) {
     for (RegexNode node : info.prefix) {
-      if (node instanceof AnchorNode) continue;
-      if (node instanceof LiteralNode) {
-        char ch = ((LiteralNode) node).ch;
-        mv.visitVarInsn(ILOAD, groupStartVar);
-        mv.visitVarInsn(ILOAD, lenVar);
-        mv.visitJumpInsn(IF_ICMPGE, failLabel);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, groupStartVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        pushInt(mv, ch);
-        mv.visitJumpInsn(IF_ICMPNE, failLabel);
-        mv.visitIincInsn(groupStartVar, 1);
-      } else if (node instanceof CharClassNode) {
-        CharClassNode ccn = (CharClassNode) node;
-        int charVar = alloc.allocate();
-        mv.visitVarInsn(ILOAD, groupStartVar);
-        mv.visitVarInsn(ILOAD, lenVar);
-        mv.visitJumpInsn(IF_ICMPGE, failLabel);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, groupStartVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        mv.visitVarInsn(ISTORE, charVar);
-        emitCharSetCheck(mv, charVar, ccn.chars, ccn.negated, failLabel);
-        mv.visitIincInsn(groupStartVar, 1);
-      }
+      emitPrefixNode(mv, node, groupStartVar, lenVar, failLabel, alloc);
     }
   }
 

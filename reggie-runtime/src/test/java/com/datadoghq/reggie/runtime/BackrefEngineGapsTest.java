@@ -270,7 +270,6 @@ class BackrefEngineGapsTest {
    * content is a bounded, allocation-free fix. Classification: FIXABLE-NOW.
    */
   @Test
-  @Disabled("B12: non-capturing group prefix in VARIABLE_CAPTURE_BACKREF — FIXABLE-NOW")
   void b12_nonAnchorPrefixBeforeBackrefGroup() {
     ReggieMatcher m = Reggie.compile("(?:x)(a)\\1");
     assertFalse(
