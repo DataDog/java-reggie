@@ -855,8 +855,12 @@ public class PatternAnalyzer {
         }
 
         if (dfa.isCaptureAmbiguous()) {
+          // For pure-regular, anchor-free patterns the C2 priority-ordered TDFA gives correct
+          // spans and can use an inline DFA strategy when the state count is small enough.
+          // Patterns with anchors or named groups are also safe for PIKEVM_CAPTURE: PikeVM
+          // handles all anchor types natively (since commit 0acfc66), and RuntimeCompiler wraps
+          // the result in NameEnrichingMatcher when named groups are present.
           if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
-            // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
             if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
               return new MatchingStrategyResult(
@@ -877,28 +881,16 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
-            // Too many states for inline DFA: PikeVM gives correct O(n·m) spans.
-            return new MatchingStrategyResult(
-                MatchingStrategy.PIKEVM_CAPTURE,
-                null,
-                null,
-                false,
-                requiredLiterals,
-                null,
-                needsPosixSemantics);
           }
-          // Fallback: named groups or anchors — PikeVMMatcher doesn't handle these yet.
-          MatchingStrategyResult r =
-              new MatchingStrategyResult(
-                  MatchingStrategy.OPTIMIZED_NFA,
-                  null,
-                  null,
-                  false,
-                  requiredLiterals,
-                  null,
-                  needsPosixSemantics);
-          r.captureAmbiguous = true;
-          return r;
+          // Named groups, anchors, or too many DFA states: PikeVM gives correct O(n·m) spans.
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
         }
 
         // DFA with groups: choose strategy based on state count
@@ -935,21 +927,11 @@ public class PatternAnalyzer {
         }
       } catch (StateExplosionException e) {
         // Tagged-DFA determinization failed (>10k states). isCaptureAmbiguous() is unavailable
-        // (DFA not built), so pure-regular anchor-free patterns — ambiguous or not — fall to
-        // PikeVM, which gives correct O(n·m) spans for all of them. Named-group/anchor
-        // patterns fall back to JDK.
-        if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
-          return new MatchingStrategyResult(
-              MatchingStrategy.PIKEVM_CAPTURE,
-              null,
-              null,
-              false,
-              requiredLiterals,
-              null,
-              needsPosixSemantics);
-        }
+        // (DFA not built), so all patterns — including those with named groups or anchors — fall
+        // to PikeVM, which gives correct O(n·m) spans and handles anchors natively.
+        // RuntimeCompiler wraps the result in NameEnrichingMatcher when named groups are present.
         return new MatchingStrategyResult(
-            MatchingStrategy.OPTIMIZED_NFA,
+            MatchingStrategy.PIKEVM_CAPTURE,
             null,
             null,
             false,

@@ -178,11 +178,11 @@ public class StrategyCorrectnessMetaTest {
         PatternAnalyzer.MatchingStrategy.BITPARALLEL_GLUSHKOV,
         new Spec(
             ".*a.{9}", List.of("a123456789", "zza123456789zz", "nomatchhere", "", "xa12345678é")));
-    // Named capture group + capture-ambiguous (optional bypass) → captureAmbiguous=true and
-    // hasNamedGroups=true, so the DFA_WITH_GROUPS path is blocked → OPTIMIZED_NFA (JDK fallback).
+    // alternationPriorityConflict: quantified capturing group with alternation causes DFA
+    // priority-ordering to be unreliable → OPTIMIZED_NFA (JDK fallback).
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-        new Spec("(?<x>a)?b", List.of("ab", "xaby", "xyz", "", "abé")));
+        new Spec("(a|b)+c", List.of("abc", "xabcy", "xyz", "", "abcé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.LAZY_DFA,
         new Spec(
@@ -206,9 +206,11 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT,
         new Spec("a([bc]*)(c+d)", List.of("abcd", "x abccd y", "axd", "", "abcdé")));
-    // PIKEVM_CAPTURE: now an explosion-only fallback (C4); no compact pattern routes here at
-    // normal state counts. (a)?b is the canonical capture-ambiguous form — kept for behavioral
-    // correctness coverage; routing is skipped via captureAmbiguousIntercepted below.
+    // PIKEVM_CAPTURE: used for isCaptureAmbiguous patterns with named groups or anchors (A7 fix),
+    // and as the overflow path when the tagged DFA has too many states. Routing confirmation is
+    // skipped (see captureAmbiguousIntercepted); behavioral coverage is via
+    // allStrategiesAgreeWithJdkAcrossPublicApi. The representative (a)?b matches and extracts
+    // group spans correctly via PikeVM.
     m.put(
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
@@ -311,18 +313,22 @@ public class StrategyCorrectnessMetaTest {
         missing.isEmpty(),
         "Every MatchingStrategy must have a representative pattern; missing: " + missing);
 
-    // Strategies that are explosion-only fallbacks or otherwise not directly routable in tests.
+    // Strategies whose routing is skipped in this test because compact routing-confirmable
+    // representatives are not available. PIKEVM_CAPTURE patterns come from either:
+    //  (a) DFA state-explosion (>DFA_SWITCH_STATE_LIMIT states) — no compact pattern,
+    //  (b) hasCapturingGroupInQuantifiedSection — intercepted by SPECIALIZED_QUANTIFIED_GROUP
+    // first,
+    //  (c) isCaptureAmbiguous + (hasNamedGroups or hasAnchorInNfa) — A7 fix; tagged DFA resolves
+    //      most capture-ambiguous cases so compact patterns often route to DFA_*_WITH_GROUPS.
+    // Behavioral coverage is provided by allStrategiesAgreeWithJdkAcrossPublicApi() below.
     Set<PatternAnalyzer.MatchingStrategy> captureAmbiguousIntercepted =
-        java.util.EnumSet.of(
-            // PIKEVM_CAPTURE is an explosion-only fallback after C4; no compact pattern routes
-            // here at normal state counts, so routing confirmation is skipped.
-            PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+        java.util.EnumSet.of(PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
 
     // Confirm routing of each representative pattern.
     List<String> misrouted = new ArrayList<>();
     for (Map.Entry<PatternAnalyzer.MatchingStrategy, Spec> e : map.entrySet()) {
       PatternAnalyzer.MatchingStrategy expected = e.getKey();
-      if (captureAmbiguousIntercepted.contains(expected)) continue; // now routes via JDK
+      if (captureAmbiguousIntercepted.contains(expected)) continue;
       String pattern = e.getValue().pattern();
       PatternAnalyzer.MatchingStrategy actual = routeOf(pattern);
       if (actual != expected) {
