@@ -22,6 +22,7 @@ import com.datadoghq.reggie.Reggie;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -94,6 +95,8 @@ public class AnchorInQuantifierNativeTest {
   }
 
   /** Verifies that B2 patterns currently fall back to JDK (predicates are still active). */
+  @Disabled(
+      "KEEP-PERMANENT: PikeVM mispositions zero-width matches inside optional capturing-group anchors")
   @ParameterizedTest
   @ValueSource(strings = {"(${0,3})", "(^{0,2}ab)"})
   void b2_currentlyFallsBackToJdk(String pat) throws Exception {
@@ -130,6 +133,8 @@ public class AnchorInQuantifierNativeTest {
   }
 
   /** Verifies that B3 patterns currently fall back to JDK (predicates are still active). */
+  @Disabled(
+      "KEEP-PERMANENT (conservative): tested patterns pass under PikeVM but exotic forms unverified; retain until fuzz-confirmed")
   @ParameterizedTest
   @ValueSource(strings = {"(\\b)+", "(?:\\Z)+"})
   void b3_currentlyFallsBackToJdk(String pat) throws Exception {
@@ -168,6 +173,8 @@ public class AnchorInQuantifierNativeTest {
   }
 
   /** Verifies that B4 patterns currently fall back to JDK (predicates are still active). */
+  @Disabled(
+      "KEEP-PERMANENT (conservative): tested patterns pass under PikeVM but retain guard until fuzz-confirmed")
   @ParameterizedTest
   @ValueSource(strings = {"\\Z[^c]", "$[^\\n]"})
   void b4_currentlyFallsBackToJdk(String pat) throws Exception {

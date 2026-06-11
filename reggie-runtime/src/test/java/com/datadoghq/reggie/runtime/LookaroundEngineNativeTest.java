@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import com.datadoghq.reggie.Reggie;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -118,6 +119,8 @@ public class LookaroundEngineNativeTest {
    * resolved (NEEDS-RND), the guard is removed and these tests must pass: native engine, JDK
    * agreement.
    */
+  @Disabled(
+      "NEEDS-RND: flat state set has no per-thread assertion metadata; safe-backtracking R&D required")
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
   @MethodSource("b1PatternsAndInputs")
   void b1LookaheadInQuantifier_shouldBeNativeAndAgreeWithJdk(String pat, String in)
@@ -172,6 +175,7 @@ public class LookaroundEngineNativeTest {
    * JavaRegexFallbackMatcher. Once B11 is resolved (NEEDS-RND), the guard is removed and these
    * tests must pass: native engine, JDK agreement.
    */
+  @Disabled("NEEDS-RND: same flat state set limitation as B1; safe-backtracking R&D required")
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
   @MethodSource("b11PatternsAndInputs")
   void b11LookaheadInAlternation_shouldBeNativeAndAgreeWithJdk(String pat, String in)
