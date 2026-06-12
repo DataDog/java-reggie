@@ -1002,6 +1002,14 @@ public final class FallbackPatternDetector {
       }
       return true;
     }
+    if (node instanceof QuantifierNode q) {
+      // Handle unbounded (max == -1: *, +, {n,}) and exact ({n}) quantifiers.
+      // Bounded ranges {n,m} with m > n are not yet implemented in emitPrefixNode.
+      if (q.max == -1 || q.min == q.max) {
+        return isPrefixNodeHandleable(q.child);
+      }
+      return false;
+    }
     return false;
   }
 
@@ -1033,7 +1041,8 @@ public final class FallbackPatternDetector {
           GroupNode g = (GroupNode) q.child;
           if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
         }
-        return true; // quantified node in prefix: not handled
+        if (isPrefixNodeHandleable(child)) continue; // handled by emitPrefixNode
+        return true; // bounded-range quantified prefix: not handled
       }
       if (child instanceof LiteralNode || child instanceof CharClassNode) {
         continue; // handled by emitPrefixMatch
