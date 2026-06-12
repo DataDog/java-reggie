@@ -353,7 +353,14 @@ public class RuntimeCompiler {
       // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
       // results for these patterns (e.g. dot matching newline, group-span bugs).
+      // Exception: patterns with capturing groups are routed to PIKEVM_CAPTURE instead, which
+      // handles anchors correctly via per-thread NFA simulation.
       if (result.anchorConditionDiluted) {
+        if (groupCount > 0) {
+          // Route to PIKEVM_CAPTURE: handles anchor semantics correctly with per-thread tracking.
+          PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
+          return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+        }
         ReggieMatcher fallback =
             new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in DFA construction");
         if (!nameMap.isEmpty()) {
@@ -362,6 +369,13 @@ public class RuntimeCompiler {
         return fallback;
       }
       if (result.alternationPriorityConflict) {
+        if (groupCount > 0 && nfaHasAnyAnchor(nfa)) {
+          // Anchor-in-alternation with groups: PikeVM gives correct leftmost-first NFA semantics
+          // and handles all anchor types natively. The DFA priority conflict is irrelevant here
+          // because PikeVM does not use DFA ordering.
+          PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
+          return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+        }
         ReggieMatcher fallback =
             new JavaRegexFallbackMatcher(
                 pattern,
@@ -404,9 +418,14 @@ public class RuntimeCompiler {
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
-        ReggieMatcher hybrid = compileHybrid(pattern, ast, nfa, analyzer, result, caseInsensitive);
-        hybrid.setNameToIndex(nameMap);
-        return hybrid;
+        PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+        if (!dfaResult.anchorConditionDiluted) {
+          ReggieMatcher hybrid =
+              compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive);
+          hybrid.setNameToIndex(nameMap);
+          return hybrid;
+        }
+        // Hybrid DFA anchor-diluted: skip hybrid, fall through to NFA-only routing below.
       }
 
       // 5. Compute structural hash for level 2 cache lookup (64-bit key)
@@ -535,6 +554,18 @@ public class RuntimeCompiler {
     return false;
   }
 
+  /** Returns true if any NFA state carries an anchor assertion (^, $, \A, \Z, \z, etc.). */
+  private static boolean nfaHasAnyAnchor(NFA nfa) {
+    if (nfa == null) return false;
+    return nfa.hasStartAnchor()
+        || nfa.hasEndAnchor()
+        || nfa.hasMultilineStartAnchor()
+        || nfa.hasMultilineEndAnchor()
+        || nfa.hasStringStartAnchor()
+        || nfa.hasStringEndAnchor()
+        || nfa.hasStringEndAbsoluteAnchor();
+  }
+
   /**
    * Check if the strategy would benefit from hybrid mode. Hybrid mode uses DFA for fast matching
    * and NFA for group extraction.
@@ -559,18 +590,11 @@ public class RuntimeCompiler {
       String pattern,
       RegexNode ast,
       NFA nfa,
-      PatternAnalyzer analyzer,
+      PatternAnalyzer.MatchingStrategyResult dfaResult,
       PatternAnalyzer.MatchingStrategyResult originalResult,
       boolean caseInsensitive)
       throws Exception {
-    // 1. Get DFA strategy (ignore group count)
-    PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
-
-    // If DFA construction failed due to anchor-condition dilution, the pure NFA fallback may
-    // produce incorrect results (e.g. dot matching newline). Route to JDK instead.
-    if (dfaResult.anchorConditionDiluted) {
-      return new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in hybrid DFA build");
-    }
+    // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
     // If DFA construction failed or pattern needs NFA anyway, fall back to pure NFA
     if (dfaResult.dfa == null) {
       PatternAnalyzer.MatchingStrategyResult nfaResult =
