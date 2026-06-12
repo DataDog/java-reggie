@@ -73,10 +73,66 @@ public class ReggieMatcherBytecodeGenerator {
 
   /**
    * Returns the {@link PatternAnalyzer.MatchingStrategy} selected during the most recent {@link
-   * #generate()} call, or {@code null} if {@code generate()} has not completed yet.
+   * #generate()} or {@link #resolveRealization} call, or {@code null} if neither has completed yet.
    */
   public PatternAnalyzer.MatchingStrategy resolvedStrategy() {
     return resolvedStrategy;
+  }
+
+  /** How a {@code @RegexPattern} method should be realized. */
+  public enum Realization {
+    NATIVE,
+    DELEGATE_PIKEVM,
+    DELEGATE_FALLBACK
+  }
+
+  /**
+   * Resolves how to realize this pattern. Throws {@link UnsupportedOperationException} when the
+   * pattern requires JDK fallback and {@code allowJdkFallback} is false (build error). Populates
+   * {@link #resolvedStrategy()} as a side effect.
+   */
+  public Realization resolveRealization(boolean allowJdkFallback) throws Exception {
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pattern);
+    int groupCount = countGroups(pattern);
+    NFA nfa = new ThompsonBuilder().build(ast, groupCount);
+    PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
+    PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
+    this.resolvedStrategy = result.strategy;
+
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+      return Realization.DELEGATE_PIKEVM;
+    }
+    boolean needsJdk =
+        result.anchorConditionDiluted
+            || result.alternationPriorityConflict
+            || result.captureAmbiguous
+            || FallbackPatternDetector.needsFallback(ast, result.strategy) != null
+            || StrategyJdkClassifier.classifyJdkDependency(result.strategy)
+                == StrategyJdkClassifier.StrategyJdkClass.FULL_FALLBACK;
+    if (needsJdk) {
+      if (allowJdkFallback) {
+        return Realization.DELEGATE_FALLBACK;
+      }
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' requires java.util.regex fallback (strategy "
+              + result.strategy
+              + "). Add options = ReggieOption.ALLOW_JDK_FALLBACK to @RegexPattern to permit a"
+              + " delegating stub, or use Reggie.compile() at runtime.");
+    }
+    return Realization.NATIVE;
+  }
+
+  /**
+   * Returns the group-name map for the resolved pattern. Re-parses the pattern to extract named
+   * groups.
+   */
+  public Map<String, Integer> resolvedNameMap() throws Exception {
+    RegexParser parser = new RegexParser();
+    parser.parse(pattern);
+    return parser.getGroupNameMap();
   }
 
   /**

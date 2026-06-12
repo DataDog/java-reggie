@@ -25,8 +25,10 @@ import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.Test;
 
 class FallbackPolicyTest {
-  // capture-ambiguous: group in * quantifier, forces JavaRegexFallbackMatcher
-  private static final String FALLBACK_PATTERN = "(a|b|c|d|e|f|g|h|i|j)*(x|y|z)";
+  // captureAmbiguous: the "b" alternative bypasses group 1, so the NFA has a thread that reaches
+  // accept without entering group 1. Per-state group arrays are required for correct spans
+  // (issue A6); until then RuntimeCompiler routes this pattern to JavaRegexFallbackMatcher.
+  private static final String FALLBACK_PATTERN = "(a)\\1|b";
 
   @Test
   void throwsByDefault() {

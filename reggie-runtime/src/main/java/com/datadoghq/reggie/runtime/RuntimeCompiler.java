@@ -225,6 +225,68 @@ public class RuntimeCompiler {
     return compiled;
   }
 
+  private static final char NAME_SEP = ''; // US (unit separator)
+  private static final char PAIR_SEP = ''; // RS (record separator)
+
+  /** Encodes a group-name-to-index map into a compact string for baking into a delegating stub. */
+  public static String encodeNameMap(Map<String, Integer> nameMap) {
+    if (nameMap == null || nameMap.isEmpty()) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+    for (Map.Entry<String, Integer> e : nameMap.entrySet()) {
+      if (sb.length() > 0) {
+        sb.append(PAIR_SEP);
+      }
+      sb.append(e.getKey()).append(NAME_SEP).append(e.getValue());
+    }
+    return sb.toString();
+  }
+
+  /** Inverse of {@link #encodeNameMap}. Returns an empty map for an empty string. */
+  public static Map<String, Integer> decodeNameMap(String encoded) {
+    if (encoded == null || encoded.isEmpty()) {
+      return java.util.Collections.emptyMap();
+    }
+    Map<String, Integer> m = new java.util.LinkedHashMap<>();
+    int i = 0;
+    while (i < encoded.length()) {
+      int pairEnd = encoded.indexOf(PAIR_SEP, i);
+      if (pairEnd < 0) {
+        pairEnd = encoded.length();
+      }
+      int sep = encoded.indexOf(NAME_SEP, i);
+      String name = encoded.substring(i, sep);
+      int idx = Integer.parseInt(encoded.substring(sep + 1, pairEnd));
+      m.put(name, idx);
+      i = pairEnd + 1;
+    }
+    return m;
+  }
+
+  /**
+   * Compile a pattern that the annotation processor resolved to {@code PIKEVM_CAPTURE}, skipping
+   * strategy re-analysis. The NFA is still built by the canonical runtime builder; only the routing
+   * decision and name map are carried from compile time. Used by generated delegating stubs.
+   */
+  public static ReggieMatcher compilePikeVm(String pattern, String encodedNames) {
+    PikeVMEntry entry = PIKEVM_NFA_CACHE.get(pattern);
+    if (entry != null) {
+      return entry.newMatcher(pattern);
+    }
+    try {
+      RegexParser parser = new RegexParser();
+      RegexNode ast = parser.parse(pattern);
+      Map<String, Integer> nameMap = decodeNameMap(encodedNames);
+      int groupCount = countGroups(pattern);
+      NFA nfa = new ThompsonBuilder().build(ast, groupCount);
+      PIKEVM_NFA_CACHE.putIfAbsent(pattern, new PikeVMEntry(nfa, nameMap));
+      return PIKEVM_NFA_CACHE.get(pattern).newMatcher(pattern);
+    } catch (RegexParser.ParseException e) {
+      throw new java.util.regex.PatternSyntaxException(e.getMessage(), pattern, -1);
+    }
+  }
+
   /**
    * Compile with explicit cache key (for user-controlled caching).
    *
