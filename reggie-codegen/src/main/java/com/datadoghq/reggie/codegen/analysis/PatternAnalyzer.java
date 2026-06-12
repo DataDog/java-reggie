@@ -780,6 +780,18 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         if (hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
+          // \Z or $ in alternation without capturing groups: OPTIMIZED_NFA mishandles find()
+          // anchor semantics; route to PIKEVM_CAPTURE which handles \Z/$ correctly.
+          if (nfa.getGroupCount() == 0) {
+            return new MatchingStrategyResult(
+                MatchingStrategy.PIKEVM_CAPTURE,
+                null,
+                null,
+                false,
+                requiredLiterals,
+                null,
+                needsPosixSemantics);
+          }
           return new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA,
               null,
@@ -1051,8 +1063,10 @@ public class PatternAnalyzer {
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
       if (hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
+        // \Z or $ in alternation: OPTIMIZED_NFA mishandles find() anchor semantics;
+        // route to PIKEVM_CAPTURE which handles \Z/$ correctly.
         return new MatchingStrategyResult(
-            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+            MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
       // Alternation with any accepting DFA state with transitions: PIKEVM_CAPTURE gives correct
       // leftmost-first semantics for nullable/optional/end-anchor alternation branches. Previous
