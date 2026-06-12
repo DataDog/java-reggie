@@ -94,7 +94,7 @@ public final class FallbackPatternDetector {
       return "end-anchor before non-newline consumer: DFA does not model this path correctly";
     }
 
-    // B5 [NEEDS-RND]: RECURSIVE_DESCENT uses a greedy-first descent parser with limited
+    // B5 [PARTIALLY-FIXED]: RECURSIVE_DESCENT uses a greedy-first descent parser with limited
     // backtracking (quantifiers followed by fixed suffixes). It does NOT implement general
     // alternation backtracking: when an alternation's first branch partially matches but the
     // following context fails, the parser cannot retry a different branch. Lazy quantifiers
@@ -107,11 +107,14 @@ public final class FallbackPatternDetector {
     // all end positions and keeps the maximum). Lazy quantifiers require the SHORTEST match.
     // Without proper lazy-aware result selection, these patterns produce wrong spans.
     //
-    // NOTE: This guard does NOT cover VARIABLE_CAPTURE_BACKREF — lazy patterns that route there
-    // (e.g. (a+?)\1) go native with greedy semantics, producing wrong spans. See
-    // BackrefEngineGapsTest.
+    // VARIABLE_CAPTURE_BACKREF runs the backref engine with greedy semantics and does not
+    // implement lazy-match result selection either. Lazy backref patterns (e.g. (a+?)\1) would
+    // silently produce wrong spans without this guard. The guard makes them throw instead, which
+    // routes to JDK fallback when allowJdkFallback() is set. Lazy semantics in the backref engine
+    // still require R&D.
     if ((strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
-            || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS)
+            || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
+            || strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF)
         && v.hasLazyQuantifier) {
       return "lazy quantifier: requires shortest-match semantics not supported by this strategy";
     }
