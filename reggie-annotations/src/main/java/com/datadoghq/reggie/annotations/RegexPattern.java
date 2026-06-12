@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.annotations;
 
+import com.datadoghq.reggie.ReggieOption;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -47,4 +48,11 @@ import java.lang.annotation.Target;
 public @interface RegexPattern {
   /** The regular expression pattern. */
   String value();
+
+  /**
+   * Compilation flags. {@code ALLOW_JDK_FALLBACK} permits a delegating stub that routes to {@code
+   * java.util.regex} at runtime for patterns Reggie cannot compile natively; without it such
+   * patterns are a build error. Has no effect on natively-compilable patterns.
+   */
+  ReggieOption[] options() default {};
 }
