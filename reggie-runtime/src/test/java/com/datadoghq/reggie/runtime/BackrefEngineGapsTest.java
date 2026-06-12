@@ -18,6 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
@@ -144,6 +146,18 @@ class BackrefEngineGapsTest {
     assertEquals(
         2, r.end(), "B5: lazy match must end at 2 (group 'a' + backref 'a'); reggie returns 4");
     assertEquals("a", r.group(1), "B5: group 1 must be 'a' (lazy shortest); reggie returns 'aa'");
+  }
+
+  /** B5 guard active: lazy backref now throws instead of silently giving wrong spans. */
+  @Test
+  void b5_lazyBackref_guardActive() {
+    assertThrows(
+        UnsupportedPatternException.class,
+        () -> Reggie.compile("(a+?)\\1"),
+        "B5: lazy backref must throw, not silently produce wrong spans");
+    ReggieMatcher m =
+        Reggie.compile("(a+?)\\1", ReggieOptions.builder().allowJdkFallback().build());
+    assertTrue(m instanceof JavaRegexFallbackMatcher, "B5: with fallback enabled, must use JDK");
   }
 
   // ── B6: cross-alternative backref ──────────────────────────────────────────────────────────────
