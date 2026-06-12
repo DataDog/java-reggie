@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,6 +27,9 @@ import org.junit.jupiter.api.Test;
  * work correctly, along with named backreferences \k<name> and \k'name'.
  */
 public class NamedGroupCorrectnessTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -109,7 +113,7 @@ public class NamedGroupCorrectnessTest {
   public void testHTMLTagMatching() {
     // Pattern: <(?<tag>\w+)>.*?</\k<tag>>
     // Match opening and closing HTML tags
-    ReggieMatcher m = RuntimeCompiler.compile("<(?<tag>\\w+)>.*?</\\k<tag>>");
+    ReggieMatcher m = RuntimeCompiler.compile("<(?<tag>\\w+)>.*?</\\k<tag>>", WITH_FALLBACK);
 
     assertTrue(m.matches("<div>content</div>"), "Should match '<div>content</div>'");
     assertTrue(m.matches("<span>text</span>"), "Should match '<span>text</span>'");

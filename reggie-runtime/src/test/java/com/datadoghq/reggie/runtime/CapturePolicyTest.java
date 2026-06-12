@@ -17,7 +17,6 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.datadoghq.reggie.CapturePolicy;
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
@@ -28,8 +27,7 @@ class CapturePolicyTest {
   void namedOnlyPreservesNamedGroupIndexesAndDropsInternalCaptures() {
     ReggieMatcher matcher =
         Reggie.compile(
-            "(?<first>(a|b)+)-(?<second>(c))",
-            ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build());
+            "(?<first>(a|b)+)-(?<second>(c))", ReggieOptions.builder().namedOnly().build());
 
     MatchResult result = matcher.match("abba-c");
     assertNotNull(result);
@@ -44,8 +42,7 @@ class CapturePolicyTest {
   void namedOnlyMatchIntoUsesOriginalNamedGroupIndexes() {
     ReggieMatcher matcher =
         Reggie.compile(
-            "(?<first>(a|b)+)-(?<second>(c))",
-            ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build());
+            "(?<first>(a|b)+)-(?<second>(c))", ReggieOptions.builder().namedOnly().build());
 
     int[] starts = new int[5];
     int[] ends = new int[5];

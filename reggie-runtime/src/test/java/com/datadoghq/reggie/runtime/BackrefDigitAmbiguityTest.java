@@ -18,11 +18,16 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 public class BackrefDigitAmbiguityTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @Test
   void backrefFollowedByGroupThenDigit() {
     // (cat(a(ract|tonic)|erpillar)) \1()2(3) on "cataract cataract23"
@@ -30,7 +35,7 @@ public class BackrefDigitAmbiguityTest {
     String input = "cataract cataract23";
     Matcher jdk = Pattern.compile(pat).matcher(input);
     assertTrue(jdk.matches(), "JDK should match");
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     MatchResult r = reg.match(input);
     assertNotNull(r, "Reggie should match");
     // Check each group

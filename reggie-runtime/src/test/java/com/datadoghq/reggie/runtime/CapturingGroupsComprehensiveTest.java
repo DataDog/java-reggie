@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,9 @@ import org.junit.jupiter.api.Test;
  * during Phase 1-4.
  */
 public class CapturingGroupsComprehensiveTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -138,7 +142,7 @@ public class CapturingGroupsComprehensiveTest {
 
   @Test
   public void testOptionalGroup() {
-    ReggieMatcher matcher = RuntimeCompiler.compile("a(b)?c");
+    ReggieMatcher matcher = RuntimeCompiler.compile("a(b)?c", WITH_FALLBACK);
 
     // With optional group present
     MatchResult result1 = matcher.match("abc");

@@ -15,14 +15,16 @@
  */
 package com.datadoghq.reggie;
 
-/** Controls which capturing groups Reggie should track and expose. */
-public enum CapturePolicy {
-  /** Track all capturing groups, matching java.util.regex group numbering semantics. */
-  ALL,
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-  /**
-   * Track named groups and groups required by regex semantics (for example backreference targets).
-   * Unnamed groups that are only used for precedence are compiled as non-capturing groups.
-   */
-  NAMED_ONLY
+import java.util.EnumSet;
+import org.junit.jupiter.api.Test;
+
+class ReggieOptionTest {
+  @Test
+  void enumHasCaptureAndFallbackFlags() {
+    EnumSet<ReggieOption> all = EnumSet.allOf(ReggieOption.class);
+    assertEquals(true, all.contains(ReggieOption.CAPTURE_NAMED_ONLY));
+    assertEquals(true, all.contains(ReggieOption.ALLOW_JDK_FALLBACK));
+  }
 }

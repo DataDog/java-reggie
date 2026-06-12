@@ -20,7 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.datadoghq.reggie.CapturePolicy;
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
@@ -35,8 +34,7 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class LinearTokenSequenceAccessLogTest {
-  private static final ReggieOptions NAMED_ONLY =
-      ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build();
+  private static final ReggieOptions NAMED_ONLY = ReggieOptions.builder().namedOnly().build();
 
   private static final String COMBINED_ACCESS_LOG_PATTERN =
       "(?s)(?<grok0>[0-9A-Fa-f:.]+) (?<grok1>\\S+) (?<grok2>\\S+) "

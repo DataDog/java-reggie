@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +29,9 @@ import org.junit.jupiter.api.Test;
  * null.
  */
 public class EmptyGroupCaptureTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -85,7 +89,7 @@ public class EmptyGroupCaptureTest {
     // Pattern: a(b)?
     // Input: "a"
     // Group 1 should not be captured (truly optional)
-    ReggieMatcher m = Reggie.compile("a(b)?");
+    ReggieMatcher m = Reggie.compile("a(b)?", WITH_FALLBACK);
     MatchResult result = m.match("a");
 
     assertNotNull(result, "Should match");

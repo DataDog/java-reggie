@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +32,9 @@ import org.junit.jupiter.api.Test;
  * match()/matches() (full match): may need to backtrack if minimum doesn't work
  */
 public class DebugNonGreedyTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -52,7 +56,7 @@ public class DebugNonGreedyTest {
     System.out.println("Input: " + input);
     System.out.println("Input breakdown: a[0] c[1] d[2] b[3] c[4] d[5] b[6] e[7]");
 
-    ReggieMatcher m = Reggie.compile(pattern);
+    ReggieMatcher m = Reggie.compile(pattern, WITH_FALLBACK);
     MatchResult r = m.findMatch(input); // Use findMatch for partial match
 
     assertNotNull(r, "Should find match");
@@ -79,7 +83,7 @@ public class DebugNonGreedyTest {
     System.out.println("Pattern: " + pattern);
     System.out.println("Input: " + input);
 
-    ReggieMatcher m = Reggie.compile(pattern);
+    ReggieMatcher m = Reggie.compile(pattern, WITH_FALLBACK);
     MatchResult r = m.match(input); // Full match
 
     System.out.println("Match result: " + (r != null));
@@ -122,7 +126,7 @@ public class DebugNonGreedyTest {
     System.out.println("Pattern: " + pattern);
     System.out.println("Input: " + input);
 
-    ReggieMatcher m = Reggie.compile(pattern);
+    ReggieMatcher m = Reggie.compile(pattern, WITH_FALLBACK);
     MatchResult r = m.findMatch(input);
 
     assertNotNull(r, "Should find match");
@@ -137,7 +141,7 @@ public class DebugNonGreedyTest {
     String input = "acdbcdbe";
 
     // Non-greedy: a(?:b|c|d){5,6}?(.)
-    ReggieMatcher nonGreedy = Reggie.compile("a(?:b|c|d){5,6}?(.)");
+    ReggieMatcher nonGreedy = Reggie.compile("a(?:b|c|d){5,6}?(.)", WITH_FALLBACK);
     MatchResult nonGreedyResult = nonGreedy.findMatch(input);
 
     assertNotNull(nonGreedyResult, "Non-greedy should find match");
