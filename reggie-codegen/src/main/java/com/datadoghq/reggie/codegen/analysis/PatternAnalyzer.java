@@ -870,6 +870,20 @@ public class PatternAnalyzer {
                     ? dfaHasAcceptingStateWithTransitions(dfa)
                     : (dfa.getStartState().accepting
                         || hasUnresolvedAcceptingTransitionState(dfa))))) {
+          // Anchor + alternation with simple (non-quantified) capturing groups: PikeVM handles
+          // leftmost-first NFA semantics and anchor evaluation correctly without the DFA priority
+          // ordering. Outer quantifiers on capturing groups containing anchor branches are excluded
+          // — those can diverge (fuzz finding: ([^a]{0,}\z|.){1,}).
+          if (hasAnchorInNfa(nfa) && !hasQuantifiedCapturingGroup(ast)) {
+            return new MatchingStrategyResult(
+                MatchingStrategy.PIKEVM_CAPTURE,
+                null,
+                null,
+                false,
+                requiredLiterals,
+                null,
+                needsPosixSemantics);
+          }
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
