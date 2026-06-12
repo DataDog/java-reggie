@@ -61,7 +61,12 @@ class QuantifiedGroupAltPriorityTest {
         Arguments.of("([^a]{0,}\\z|.){1,}", "c"),
         Arguments.of("([^a]{0,}\\z|.){1,}", "-"),
         Arguments.of("(a+|b)+x", "ax"),
-        Arguments.of("(a+|b)+x", "abx"));
+        Arguments.of("(a+|b)+x", "abx"),
+        Arguments.of("(a+|b)+x", "aabx"),
+        Arguments.of("(a+|b)+x", "x"),
+        Arguments.of("(a+|ab)+c", "ac"),
+        Arguments.of("(a+|ab)+c", "abc"),
+        Arguments.of("(a+|ab)+c", "aabc"));
   }
 
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
