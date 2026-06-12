@@ -22,7 +22,6 @@ import com.datadoghq.reggie.Reggie;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -114,9 +113,6 @@ class AnchorAlternationPikeVMTest {
     }
   }
 
-  @Disabled(
-      "guard3 \\Z still needed: FallbackPatternDetector.hasStringEndAnchorInAltWithProblematicContext"
-          + " routes OPTIMIZED_NFA(\\Z-in-alternation) to JDK; separate from isAnchorConditionDiluted")
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
   @MethodSource("guard3ZPatterns")
   void guard3Z_routesToPikeVm(String pat, String in) {
@@ -198,10 +194,6 @@ class AnchorAlternationPikeVMTest {
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
   }
 
-  @Disabled(
-      "guard1 still needed: patterns like ^|(a) are blocked by alternationPriorityConflict"
-          + " (DFA start-state accepting due to nullable anchor branch),"
-          + " not by isAnchorConditionDiluted; separate fix required")
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
   @MethodSource("guard1Patterns")
   void guard1_routesToPikeVm(String pat, String in) {

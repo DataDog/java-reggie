@@ -296,6 +296,10 @@ public final class FallbackPatternDetector {
       if (hasStringEndInAlt) {
         if (containsCapturingGroup(node)) return true;
         for (RegexNode branch : alt.alternatives) {
+          // Pure-anchor branches (\Z, $, ^) are always zero-width; their nullability is
+          // definitional, not a structural problem — PikeVM handles them correctly.
+          // Only non-anchor nullable branches cause OPTIMIZED_NFA span tracking to fail.
+          if (branch instanceof AnchorNode) continue;
           if (isNullableOrEmptyBranch(branch) || startsWithZeroWidthQuantifier(branch)) {
             return true;
           }
