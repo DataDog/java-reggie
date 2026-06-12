@@ -187,9 +187,9 @@ public final class FallbackPatternDetector {
     // Generator now caps the initial groupEnd to info.groupMaxCount when the group has a bounded
     // quantifier, so this fallback condition is no longer needed.
 
-    // B12 [PARTIALLY-FIXED]: emitPrefixMatch handles Literal, CharClass, Anchor, and non-capturing
-    // GroupNode (via isPrefixNodeHandleable recursion). Prefix patterns whose top-level node is a
-    // QuantifierNode or another unsupported type still fall back.
+    // B12 [PARTIALLY-FIXED]: emitPrefixMatch handles Literal, CharClass, Anchor, non-capturing
+    // GroupNode (via isPrefixNodeHandleable recursion), and unbounded/exact QuantifierNodes (e.g.
+    // a*, a+, [0-9]*, x{3}). Bounded-range quantifiers {n,m} still fall back.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
       return "variable-capture backref with unsupported prefix node type: "
@@ -1002,6 +1002,14 @@ public final class FallbackPatternDetector {
       }
       return true;
     }
+    if (node instanceof QuantifierNode q) {
+      // Handle unbounded (max == -1: *, +, {n,}) and exact ({n}) quantifiers.
+      // Bounded ranges {n,m} with m > n are not yet implemented in emitPrefixNode.
+      if (q.max == -1 || q.min == q.max) {
+        return isPrefixNodeHandleable(q.child);
+      }
+      return false;
+    }
     return false;
   }
 
@@ -1033,7 +1041,8 @@ public final class FallbackPatternDetector {
           GroupNode g = (GroupNode) q.child;
           if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
         }
-        return true; // quantified node in prefix: not handled
+        if (isPrefixNodeHandleable(child)) continue; // handled by emitPrefixNode
+        return true; // bounded-range quantified prefix: not handled
       }
       if (child instanceof LiteralNode || child instanceof CharClassNode) {
         continue; // handled by emitPrefixMatch
