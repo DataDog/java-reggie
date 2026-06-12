@@ -184,10 +184,9 @@ public final class FallbackPatternDetector {
     // Generator now caps the initial groupEnd to info.groupMaxCount when the group has a bounded
     // quantifier, so this fallback condition is no longer needed.
 
-    // B12 [FIXABLE-NOW]: Generator handles LiteralNode and CharClassNode prefix nodes via
-    // emitPrefixMatch. Still fall back for patterns with complex prefix nodes the generator cannot
-    // handle (non-capturing GroupNode, QuantifierNode, etc). Fix: extend emitPrefixMatch to inline
-    // non-capturing group content — bounded, allocation-free change.
+    // B12 [PARTIALLY-FIXED]: emitPrefixMatch handles Literal, CharClass, Anchor, and non-capturing
+    // GroupNode (via isPrefixNodeHandleable recursion). Prefix patterns whose top-level node is a
+    // QuantifierNode or another unsupported type still fall back.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
       return "variable-capture backref with unsupported prefix node type: "
