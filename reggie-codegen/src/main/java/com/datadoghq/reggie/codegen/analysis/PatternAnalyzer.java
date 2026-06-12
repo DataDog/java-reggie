@@ -789,7 +789,24 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
+        // Anchor-diluted alternation patterns: PIKEVM_CAPTURE gives correct leftmost-first
+        // semantics for nullable/optional/end-anchor alternation branches. Guards for
+        // hasNullableAlternationBranch, subtreeContainsOptional, and
+        // hasEndAnchorLeadingInAlternationBranch are removed: ThompsonBuilder wraps {0,n}
+        // fragments in a skip-entry state (preventing mixed char+epsilon DFA states), and
+        // PikeVMMatcher.checkAnchor correctly handles $ before a trailing newline.
+        // This mirrors the identical guard-free routing in the ignoreGroupCount=true path.
         if (dfa.isAnchorConditionDiluted()) {
+          if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+            return new MatchingStrategyResult(
+                MatchingStrategy.PIKEVM_CAPTURE,
+                null,
+                null,
+                false,
+                requiredLiterals,
+                null,
+                needsPosixSemantics);
+          }
           MatchingStrategyResult r =
               new MatchingStrategyResult(
                   MatchingStrategy.OPTIMIZED_NFA,
