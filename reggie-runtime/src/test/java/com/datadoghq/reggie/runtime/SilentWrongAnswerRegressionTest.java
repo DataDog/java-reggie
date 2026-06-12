@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -35,6 +36,9 @@ import org.junit.jupiter.api.Test;
  * strategy must continue to route to that strategy and still agree with the JDK.
  */
 public class SilentWrongAnswerRegressionTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   // ---- A1: alternation inside a quantified group (SPECIALIZED_QUANTIFIED_GROUP) ----
 
@@ -144,7 +148,7 @@ public class SilentWrongAnswerRegressionTest {
   /** Assert Reggie's find(), matches(), and leftmost-match span all agree with the JDK. */
   private static void assertAgrees(String pattern, String input) {
     Pattern jdk = Pattern.compile(pattern);
-    ReggieMatcher reggie = Reggie.compile(pattern);
+    ReggieMatcher reggie = Reggie.compile(pattern, WITH_FALLBACK);
 
     boolean jdkMatches = jdk.matcher(input).matches();
     assertEquals(

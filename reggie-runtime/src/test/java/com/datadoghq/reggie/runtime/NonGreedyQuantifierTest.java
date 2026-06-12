@@ -18,12 +18,16 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /** Tests for non-greedy (reluctant) quantifiers: *?, +?, ??, {n,m}? */
 public class NonGreedyQuantifierTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -33,7 +37,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyStarBasic() {
     // a*?b - match minimum 'a's before 'b'
-    ReggieMatcher m = Reggie.compile("a*?b");
+    ReggieMatcher m = Reggie.compile("a*?b", WITH_FALLBACK);
 
     assertTrue(m.matches("b"), "Should match 'b' (zero a's)");
     assertTrue(m.matches("ab"), "Should match 'ab'");
@@ -45,7 +49,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyPlusBasic() {
     // a+?b - match minimum 'a's (at least one) before 'b'
-    ReggieMatcher m = Reggie.compile("a+?b");
+    ReggieMatcher m = Reggie.compile("a+?b", WITH_FALLBACK);
 
     assertFalse(m.matches("b"), "Should not match 'b' (+ requires at least one a)");
     assertTrue(m.matches("ab"), "Should match 'ab'");
@@ -56,7 +60,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyQuestionBasic() {
     // a??b - prefer not matching 'a'
-    ReggieMatcher m = Reggie.compile("a??b");
+    ReggieMatcher m = Reggie.compile("a??b", WITH_FALLBACK);
 
     assertTrue(m.matches("b"), "Should match 'b'");
     assertTrue(m.matches("ab"), "Should match 'ab'");
@@ -66,7 +70,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyBounded() {
     // a{2,4}?b - match minimum (2) 'a's before 'b'
-    ReggieMatcher m = Reggie.compile("a{2,4}?b");
+    ReggieMatcher m = Reggie.compile("a{2,4}?b", WITH_FALLBACK);
 
     assertFalse(m.matches("ab"), "Should not match 'ab' (min is 2)");
     assertTrue(m.matches("aab"), "Should match 'aab'");
@@ -78,7 +82,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyWithCapturingGroup() {
     // (a*?)b - non-greedy with capturing group
-    ReggieMatcher m = Reggie.compile("(a*?)b");
+    ReggieMatcher m = Reggie.compile("(a*?)b", WITH_FALLBACK);
 
     // For full matches, group captures what's before 'b'
     MatchResult r1 = m.match("b");
@@ -97,7 +101,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyFind() {
     // x(a+?)y - find with non-greedy
-    ReggieMatcher m = Reggie.compile("x(a+?)y");
+    ReggieMatcher m = Reggie.compile("x(a+?)y", WITH_FALLBACK);
 
     // In "xaay", the non-greedy quantifier tries to match minimum 'a's first
     // Since we need the pattern to fully match, it will match "xaay" with group="aa"
@@ -116,7 +120,7 @@ public class NonGreedyQuantifierTest {
     for (String patternStr : patterns) {
       RuntimeCompiler.clearCache(); // Clear cache for each pattern
       Pattern jdkPattern = Pattern.compile(patternStr);
-      ReggieMatcher reggie = Reggie.compile(patternStr);
+      ReggieMatcher reggie = Reggie.compile(patternStr, WITH_FALLBACK);
 
       for (String input : inputs) {
         boolean jdkMatches = jdkPattern.matcher(input).matches();
@@ -130,7 +134,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyWithSuffix() {
     // a+?bc - non-greedy followed by literal suffix
-    ReggieMatcher m = Reggie.compile("a+?bc");
+    ReggieMatcher m = Reggie.compile("a+?bc", WITH_FALLBACK);
 
     assertTrue(m.matches("abc"), "Should match 'abc'");
     assertTrue(m.matches("aabc"), "Should match 'aabc'");
@@ -141,7 +145,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyCharClass() {
     // [ab]+?c - non-greedy char class
-    ReggieMatcher m = Reggie.compile("[ab]+?c");
+    ReggieMatcher m = Reggie.compile("[ab]+?c", WITH_FALLBACK);
 
     assertTrue(m.matches("ac"), "Should match 'ac'");
     assertTrue(m.matches("bc"), "Should match 'bc'");
@@ -153,7 +157,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testNonGreedyDot() {
     // .+?x - non-greedy dot
-    ReggieMatcher m = Reggie.compile(".+?x");
+    ReggieMatcher m = Reggie.compile(".+?x", WITH_FALLBACK);
 
     assertTrue(m.matches("ax"), "Should match 'ax'");
     assertTrue(m.matches("abx"), "Should match 'abx'");
@@ -164,7 +168,7 @@ public class NonGreedyQuantifierTest {
   @Test
   void testMixedGreedyNonGreedy() {
     // a+b+? - greedy followed by non-greedy
-    ReggieMatcher m = Reggie.compile("a+b+?");
+    ReggieMatcher m = Reggie.compile("a+b+?", WITH_FALLBACK);
 
     assertTrue(m.matches("ab"), "Should match 'ab'");
     assertTrue(m.matches("aab"), "Should match 'aab'");

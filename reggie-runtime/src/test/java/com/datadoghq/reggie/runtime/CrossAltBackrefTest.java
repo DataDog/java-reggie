@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -37,6 +38,9 @@ import org.junit.jupiter.api.Test;
  */
 class CrossAltBackrefTest {
 
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @BeforeEach
   void clearCache() {
     RuntimeCompiler.clearCache();
@@ -49,7 +53,7 @@ class CrossAltBackrefTest {
   @Test
   void crossAltBackref_isFallback() {
     assertTrue(
-        Reggie.compile("(a)|\\1") instanceof JavaRegexFallbackMatcher,
+        Reggie.compile("(a)|\\1", WITH_FALLBACK) instanceof JavaRegexFallbackMatcher,
         "(a)|\\1 must fall back to JavaRegexFallbackMatcher until per-state group arrays are added");
   }
 
@@ -59,14 +63,14 @@ class CrossAltBackrefTest {
    */
   @Test
   void crossAltBackref_noSpuriousMatch_onBranchZeroFailure() {
-    MatchResult r = Reggie.compile("(a)|\\1").findMatch("b");
+    MatchResult r = Reggie.compile("(a)|\\1", WITH_FALLBACK).findMatch("b");
     assertNull(r, "(a)|\\1 must return null on 'b' — no spurious zero-length match");
   }
 
   /** {@code (a)|\1} on input "a": branch-0 matches, group 1 captures "a". */
   @Test
   void crossAltBackref_correctMatchOnBranchZeroSuccess() {
-    MatchResult r = Reggie.compile("(a)|\\1").findMatch("a");
+    MatchResult r = Reggie.compile("(a)|\\1", WITH_FALLBACK).findMatch("a");
     assertNotNull(r, "(a)|\\1 must match 'a' via branch-0");
     assertEquals("a", r.group(1), "group 1 must capture 'a'");
   }
@@ -77,7 +81,7 @@ class CrossAltBackrefTest {
    */
   @Test
   void crossAltBackref_noSpuriousMatchBeforeActual() {
-    MatchResult r = Reggie.compile("(a)|\\1").findMatch("ba");
+    MatchResult r = Reggie.compile("(a)|\\1", WITH_FALLBACK).findMatch("ba");
     assertNotNull(r, "(a)|\\1 must find a match in 'ba'");
     assertEquals(1, r.start(), "match must start at position 1, not 0");
     assertEquals("a", r.group(1), "group 1 must capture 'a'");
@@ -90,7 +94,7 @@ class CrossAltBackrefTest {
    */
   @Test
   void crossAltBackref_multipleAltsWithLiteralBeforeBackref() {
-    MatchResult r = Reggie.compile("(a)|(b)\\1").findMatch("ba");
+    MatchResult r = Reggie.compile("(a)|(b)\\1", WITH_FALLBACK).findMatch("ba");
     assertNotNull(r, "(a)|(b)\\1 must find 'a' at position 1 in 'ba'");
     assertEquals(1, r.start(), "match must start at position 1 (branch-0 on 'a'), not 0");
     assertEquals("a", r.group(1), "group 1 must capture 'a'");

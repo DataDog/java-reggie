@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -29,6 +30,9 @@ import org.junit.jupiter.api.Test;
  * This enables patterns like {@code (a\1?){4}} and {@code ^(a\1?)(a\1?)(a\2?)(a\3?)$} to match.
  */
 class SelfReferencingBackrefTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -155,7 +159,7 @@ class SelfReferencingBackrefTest {
 
   @Test
   void regression_quantifiedGroupWithAlternation() {
-    ReggieMatcher m = Reggie.compile("^(a|b){4}$");
+    ReggieMatcher m = Reggie.compile("^(a|b){4}$", WITH_FALLBACK);
     assertNotNull(m.match("aaaa"));
     assertNotNull(m.match("abba"));
     assertNotNull(m.match("bbbb"));

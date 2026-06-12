@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +27,9 @@ import org.junit.jupiter.api.Test;
  * multi-assertion analysis path in PatternAnalyzer and NFABytecodeGenerator.
  */
 class MultiAssertionTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -94,7 +98,7 @@ class MultiAssertionTest {
 
   @Test
   void lookaheadInsideGroup() {
-    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\w)+");
+    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\w)+", WITH_FALLBACK);
     assertTrue(m.find("123")); // falls back to java.util.regex — correct behavior
     assertFalse(m.find("abc"));
   }
@@ -159,7 +163,7 @@ class MultiAssertionTest {
 
   @Test
   void lookaheadInsideQuantifiedGroup() {
-    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+");
+    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+", WITH_FALLBACK);
     assertFalse(m.matches("12a")); // trailing non-digit always fails
   }
 

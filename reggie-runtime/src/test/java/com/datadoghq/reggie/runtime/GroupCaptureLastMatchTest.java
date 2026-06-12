@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -31,6 +32,9 @@ import org.junit.jupiter.api.Test;
  * first iteration).
  */
 public class GroupCaptureLastMatchTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -114,7 +118,7 @@ public class GroupCaptureLastMatchTest {
     // First iteration: matches "aa"
     // Second iteration: matches "" (empty)
     // Expected: group 1 = "" (last iteration)
-    ReggieMatcher m = Reggie.compile("(a*)+");
+    ReggieMatcher m = Reggie.compile("(a*)+", WITH_FALLBACK);
     MatchResult result = m.match("aa");
 
     assertNotNull(result, "Pattern should match");
@@ -128,7 +132,7 @@ public class GroupCaptureLastMatchTest {
     // Quantifier '?' allows 0 or 1 matches
     // Group doesn't participate in match
     // Expected: group 1 = null (didn't match)
-    ReggieMatcher m = Reggie.compile("(a+)?b");
+    ReggieMatcher m = Reggie.compile("(a+)?b", WITH_FALLBACK);
     MatchResult result = m.match("b");
 
     assertNotNull(result, "Pattern should match");

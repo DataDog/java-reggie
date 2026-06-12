@@ -18,12 +18,17 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /** Regression coverage for fuzz $ anchor findings. */
 class AnchorDiagTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @Test
   void diagNoClearCacheEver() {
     // Verify that $ patterns work correctly even when compiled AFTER many other patterns,
@@ -70,10 +75,15 @@ class AnchorDiagTest {
   }
 
   static void check(String pat, String inp) {
-    assertFindEquivalent(pat, inp, true);
+    assertFindEquivalent(pat, inp, true, WITH_FALLBACK);
   }
 
   private static void assertFindEquivalent(String pat, String inp, boolean clearCache) {
+    assertFindEquivalent(pat, inp, clearCache, ReggieOptions.DEFAULT);
+  }
+
+  private static void assertFindEquivalent(
+      String pat, String inp, boolean clearCache, ReggieOptions options) {
     if (clearCache) {
       RuntimeCompiler.clearCache();
     }
@@ -81,7 +91,7 @@ class AnchorDiagTest {
     Matcher jm = jdk.matcher(inp);
     boolean jdkFound = jm.find();
 
-    ReggieMatcher rm = Reggie.compile(pat);
+    ReggieMatcher rm = Reggie.compile(pat, options);
     MatchResult r = rm.findMatch(inp);
     boolean reggieFound = r != null;
 

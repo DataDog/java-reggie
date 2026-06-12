@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,6 +32,9 @@ import org.junit.jupiter.api.Test;
  */
 class LazyQuantifierNativeTest {
 
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @BeforeEach
   void clearCache() {
     RuntimeCompiler.clearCache();
@@ -42,7 +46,7 @@ class LazyQuantifierNativeTest {
   void boundedLazyOuter_lazyInner_correctGroup() {
     // ^[ab]{1,3}?(ab*?|b) on "aabbbbb" — lazy outer prefers 1 char, inner is lazy too
     String pat = "^[ab]{1,3}?(ab*?|b)";
-    ReggieMatcher m = Reggie.compile(pat);
+    ReggieMatcher m = Reggie.compile(pat, WITH_FALLBACK);
     Matcher jdk = Pattern.compile(pat).matcher("aabbbbb");
     assertTrue(jdk.find(), "JDK should find match");
     MatchResult r = m.findMatch("aabbbbb");
@@ -54,7 +58,7 @@ class LazyQuantifierNativeTest {
   void boundedLazyOuter_greedyInner_correctGroup() {
     // ^[ab]{1,3}?(ab*|b) on "aabbbbb" — lazy outer, greedy inner
     String pat = "^[ab]{1,3}?(ab*|b)";
-    ReggieMatcher m = Reggie.compile(pat);
+    ReggieMatcher m = Reggie.compile(pat, WITH_FALLBACK);
     Matcher jdk = Pattern.compile(pat).matcher("aabbbbb");
     assertTrue(jdk.find(), "JDK should find match");
     MatchResult r = m.findMatch("aabbbbb");
@@ -66,7 +70,7 @@ class LazyQuantifierNativeTest {
   void lazyOptional_noGroupParticipation() {
     // (?i)(a+|b){0,1}? on "AB" — lazy optional prefers 0 iterations
     String pat = "(?i)(a+|b){0,1}?";
-    ReggieMatcher m = Reggie.compile(pat);
+    ReggieMatcher m = Reggie.compile(pat, WITH_FALLBACK);
     Matcher jdk = Pattern.compile(pat).matcher("AB");
     assertTrue(jdk.find(), "JDK should find match");
     MatchResult r = m.findMatch("AB");
@@ -78,7 +82,7 @@ class LazyQuantifierNativeTest {
   void fixedRepetitionWithInnerLazy() {
     // (([a-c])b*?\2){3} on "ababbbcbc" — fixed outer {3}, lazy inner b*?\2
     String pat = "(([a-c])b*?\\2){3}";
-    ReggieMatcher m = Reggie.compile(pat);
+    ReggieMatcher m = Reggie.compile(pat, WITH_FALLBACK);
     Matcher jdk = Pattern.compile(pat).matcher("ababbbcbc");
     boolean jdkFound = jdk.find();
     MatchResult r = m.findMatch("ababbbcbc");
@@ -93,7 +97,7 @@ class LazyQuantifierNativeTest {
   void nullableChildLazyQuantifier_matchesJdk() {
     // (|ab)*?d on "abd" — nullable child lazy, must match JDK (currently via fallback)
     String pat = "(|ab)*?d";
-    ReggieMatcher m = Reggie.compile(pat);
+    ReggieMatcher m = Reggie.compile(pat, WITH_FALLBACK);
     Matcher jdk = Pattern.compile(pat).matcher("abd");
     boolean jdkFound = jdk.find();
     MatchResult r = m.findMatch("abd");

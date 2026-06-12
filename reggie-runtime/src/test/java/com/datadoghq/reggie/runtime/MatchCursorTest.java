@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -27,6 +28,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 public class MatchCursorTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -138,7 +142,7 @@ public class MatchCursorTest {
   // 9. Non-participating group → empty string
   @Test
   void testNonParticipatingGroupEmitsEmpty() {
-    ReggieMatcher m = RuntimeCompiler.compile("(a)?(b)");
+    ReggieMatcher m = RuntimeCompiler.compile("(a)?(b)", WITH_FALLBACK);
     MatchCursor cursor = m.cursor("b");
     assertNotNull(cursor.findNext());
     StringBuilder sb = new StringBuilder();

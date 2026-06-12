@@ -18,9 +18,13 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
 
 public class LookaroundQuickTest {
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @Test
   void lookbehindPlusLookahead_issue31() {
     var m = Reggie.compile("(?<=\\[)[^\\]]+(?=\\])");
@@ -30,7 +34,7 @@ public class LookaroundQuickTest {
 
   @Test
   void lookaheadInQuantifiedGroup_issue28() {
-    var m = Reggie.compile("(?:(?=\\d)\\d)+");
+    var m = Reggie.compile("(?:(?=\\d)\\d)+", WITH_FALLBACK);
     assertTrue(m.find("123"), "#28 should find digits");
     assertFalse(m.find("abc"), "#28 should not find letters");
   }

@@ -18,11 +18,15 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /** Debug tests for PCRE parity issues. */
 public class PCREParityDebugTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -35,7 +39,7 @@ public class PCREParityDebugTest {
     // Should match with group 1 = "b"
     String pattern = "^(b+|a){1,2}c";
 
-    ReggieMatcher m = Reggie.compile(pattern);
+    ReggieMatcher m = Reggie.compile(pattern, WITH_FALLBACK);
     System.out.println("Pattern: " + pattern);
     System.out.println("Matcher class: " + m.getClass().getName());
 
@@ -124,7 +128,7 @@ public class PCREParityDebugTest {
   void testOptionalQuantifiedGroup() {
     // Pattern (a+|b){0,1} — finds first match in "ab"
     // find() should match "a" via the a+ branch (first alternative, one occurrence)
-    ReggieMatcher m = Reggie.compile("(a+|b){0,1}");
+    ReggieMatcher m = Reggie.compile("(a+|b){0,1}", WITH_FALLBACK);
     MatchResult r = m.findMatch("ab");
 
     // Greedy {0,1} tries 1 occurrence first; a+ matches "a"

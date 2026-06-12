@@ -18,11 +18,16 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 public class EscapedQuoteGroupTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @Test
   void escapedQuoteLastCapture_issue33() {
     // DFA_UNROLLED_WITH_GROUPS: alternation+plus inside star loses final capture
@@ -31,7 +36,7 @@ public class EscapedQuoteGroupTest {
     Matcher jdk = Pattern.compile(pat).matcher(input);
     assertTrue(jdk.find(), "JDK should find");
     System.out.println("JDK group 1: " + jdk.group(1));
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     MatchResult r = reg.findMatch(input);
     assertNotNull(r, "Reggie should find");
     System.out.println("Reggie group 1: " + r.group(1));

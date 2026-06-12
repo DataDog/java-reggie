@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -32,6 +33,9 @@ import org.junit.jupiter.api.Test;
  */
 class LookaheadInQuantifierTest {
 
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @BeforeEach
   void clearCache() {
     RuntimeCompiler.clearCache();
@@ -44,7 +48,7 @@ class LookaheadInQuantifierTest {
     // (?:(?=\d)\d)+ — group with lookahead repeated one or more times
     String pat = "(?:(?=\\d)\\d)+";
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pat);
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertEquals(jdk.matcher("123").find(), reg.find("123"), pat + " on '123'");
     assertEquals(jdk.matcher("abc").find(), reg.find("abc"), pat + " on 'abc'");
     assertEquals(jdk.matcher("1").find(), reg.find("1"), pat + " on '1'");
@@ -55,7 +59,7 @@ class LookaheadInQuantifierTest {
     // (a(?=b)){2} — capturing group with lookahead repeated exactly 2 times
     String pat = "(a(?=b)){2}";
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pat);
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertEquals(jdk.matcher("abab").find(), reg.find("abab"), pat + " find on 'abab'");
     assertEquals(jdk.matcher("ab").find(), reg.find("ab"), pat + " find on 'ab'");
     assertEquals(jdk.matcher("aa").find(), reg.find("aa"), pat + " find on 'aa'");
@@ -66,7 +70,7 @@ class LookaheadInQuantifierTest {
     // (?:a(?=b)){2}b — non-capturing group with trailing lookahead, repeated 2 times
     String pat = "(?:a(?=b)){2}b";
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pat);
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertEquals(jdk.matcher("abab").find(), reg.find("abab"), pat + " on 'abab'");
     assertEquals(jdk.matcher("ab").find(), reg.find("ab"), pat + " on 'ab'");
   }
@@ -76,7 +80,7 @@ class LookaheadInQuantifierTest {
     // (?=a){3} — bare lookahead repeated 3 times (zero-width, should match at 'a')
     String pat = "(?=a){3}";
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pat);
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertEquals(jdk.matcher("a").find(), reg.find("a"), pat + " on 'a'");
     assertEquals(jdk.matcher("b").find(), reg.find("b"), pat + " on 'b'");
   }
@@ -86,7 +90,7 @@ class LookaheadInQuantifierTest {
     // (?:(?=a)a)? — optional group containing a lookahead
     String pat = "(?:(?=a)a)?";
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pat);
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertEquals(jdk.matcher("a").find(), reg.find("a"), pat + " on 'a'");
     assertEquals(jdk.matcher("b").find(), reg.find("b"), pat + " on 'b'");
   }
@@ -96,7 +100,7 @@ class LookaheadInQuantifierTest {
     // (?:(?!\d)\w)+ — non-digit word characters (negative lookahead in quantified group)
     String pat = "(?:(?!\\d)\\w)+";
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pat);
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertEquals(jdk.matcher("abc").find(), reg.find("abc"), pat + " on 'abc'");
     assertEquals(jdk.matcher("123").find(), reg.find("123"), pat + " on '123'");
     assertEquals(jdk.matcher("abc123").find(), reg.find("abc123"), pat + " on 'abc123'");
@@ -105,7 +109,7 @@ class LookaheadInQuantifierTest {
   @Test
   void lookaheadInQuantifierUsesFallback() {
     // Issue #28: NFA engine still mis-handles assertions across loop iterations.
-    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+");
+    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+", WITH_FALLBACK);
     assertTrue(m instanceof JavaRegexFallbackMatcher, "(?:(?=\\d)\\d)+ must use JDK fallback");
   }
 }

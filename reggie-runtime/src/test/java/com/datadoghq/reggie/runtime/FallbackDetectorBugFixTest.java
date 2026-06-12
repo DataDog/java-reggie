@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -31,6 +32,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /** Regression tests for FallbackPatternDetector conditions eliminated by routing fixes. */
 public class FallbackDetectorBugFixTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   /**
    * Patterns with a capturing group inside a quantified section. After the routing fix these are
@@ -58,7 +62,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("capturingGroupInQuantifiedSection")
   void capturingGroupInQuantifiedSection_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
 
     String ctx = "pat=" + pat + " in=" + in;
 
@@ -105,7 +109,7 @@ public class FallbackDetectorBugFixTest {
   void variableCaptureBackrefBoundedGroup_matchesAgreesWithJdk(String pat, String in)
       throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -129,7 +133,7 @@ public class FallbackDetectorBugFixTest {
   void variableCaptureBackrefNullableGroup_matchesAgreesWithJdk(String pat, String in)
       throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -150,7 +154,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("nestedQuantifiedGroupsWithAlt")
   void nestedQuantifiedGroupsWithAlt_matchesAgreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -170,7 +174,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("prefixOverlapAlternation")
   void prefixOverlapAlternation_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -202,7 +206,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("anchorInQuantifier")
   void anchorInQuantifier_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -223,7 +227,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("quantifiedGroupBackref")
   void quantifiedGroupBackref_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -245,7 +249,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("emptyGroupBackref")
   void emptyGroupBackref_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -261,7 +265,7 @@ public class FallbackDetectorBugFixTest {
     String pat = "-?(-?.{3}).";
     String in = "-bbb";
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     Matcher jm = jdk.matcher(in);
     boolean jdkM = jm.matches();
     MatchResult rm = reggie.match(in);
@@ -287,7 +291,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("variableCaptureBackrefPrefix")
   void variableCaptureBackrefPrefix_matchesAgreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -322,7 +326,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("capturingAlternationWithQuantifier")
   void capturingAlternationWithQuantifier_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -359,7 +363,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("remainingDivergences")
   void remainingDivergences_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -376,7 +380,7 @@ public class FallbackDetectorBugFixTest {
   @ParameterizedTest(name = "[{index}] pat={0} in={1}")
   @MethodSource("anchorDiluted")
   void anchorDiluted_usesNativePathAndAgreesWithJdk(String pat, String in) throws Exception {
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     assertFalse(reggie instanceof JavaRegexFallbackMatcher, "Expected native matcher for: " + pat);
     Pattern jdk = Pattern.compile(pat);
     String ctx = "pat=" + pat + " in=" + in;
@@ -401,7 +405,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("nonCapturingAltWithQuantifier")
   void nonCapturingAltWithQuantifier_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -432,7 +436,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("nonCapturingAltWithAnchor")
   void nonCapturingAltWithAnchor_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -466,7 +470,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("anchorDilutedResidual")
   void anchorDilutedResidual_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);

@@ -18,15 +18,19 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
 
 /** Simplified tests for recursive patterns to isolate issues. */
 public class TestRecursiveSimple {
 
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @Test
   void testOptionalGroupQuantified() {
     RuntimeCompiler.clearCache();
-    ReggieMatcher m = Reggie.compile("(a|)*b");
+    ReggieMatcher m = Reggie.compile("(a|)*b", WITH_FALLBACK);
 
     System.out.println("[DEBUG] Pattern: (a|)*b");
     assertTrue(m.matches("b"), "Should match 'b'");

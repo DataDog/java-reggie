@@ -18,10 +18,14 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import org.junit.jupiter.api.Test;
 
 class PikeVMRoutingTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @Test
   void captureAmbiguousRoutes_toDfaWithGroups() throws Exception {
@@ -41,7 +45,7 @@ class PikeVMRoutingTest {
 
   @Test
   void captureAmbiguousMatcher_matchesCorrectly() {
-    ReggieMatcher m = Reggie.compile("(a)?b");
+    ReggieMatcher m = Reggie.compile("(a)?b", WITH_FALLBACK);
     assertTrue(m.matches("ab"), "should match 'ab'");
     assertTrue(m.matches("b"), "should match 'b'");
     assertFalse(m.matches("a"), "should not match 'a'");

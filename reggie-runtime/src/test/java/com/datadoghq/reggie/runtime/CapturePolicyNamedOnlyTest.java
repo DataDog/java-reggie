@@ -18,7 +18,6 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
-import com.datadoghq.reggie.CapturePolicy;
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
@@ -29,8 +28,7 @@ import org.junit.jupiter.api.Test;
  */
 public class CapturePolicyNamedOnlyTest {
 
-  private static final ReggieOptions NAMED_ONLY =
-      ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build();
+  private static final ReggieOptions NAMED_ONLY = ReggieOptions.builder().namedOnly().build();
 
   @Test
   public void namedGroupRetainsJdkIndex() {
