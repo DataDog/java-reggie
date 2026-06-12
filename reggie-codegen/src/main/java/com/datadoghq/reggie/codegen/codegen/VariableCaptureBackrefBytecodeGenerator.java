@@ -24,6 +24,7 @@ import com.datadoghq.reggie.codegen.ast.CharClassNode;
 import com.datadoghq.reggie.codegen.ast.ConcatNode;
 import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
+import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import org.objectweb.asm.ClassWriter;
@@ -712,9 +713,31 @@ public class VariableCaptureBackrefBytecodeGenerator {
   private int getPrefixLength() {
     int n = 0;
     for (RegexNode node : info.prefix) {
-      if (!(node instanceof AnchorNode)) n++;
+      n += prefixNodeMinLength(node);
     }
     return n;
+  }
+
+  /** Returns the minimum number of characters consumed by a single prefix node. */
+  private static int prefixNodeMinLength(RegexNode node) {
+    if (node instanceof AnchorNode) return 0;
+    if (node instanceof LiteralNode || node instanceof CharClassNode) return 1;
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      return q.min * prefixNodeMinLength(q.child);
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      return g.capturing ? 0 : prefixNodeMinLength(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode child : ((ConcatNode) node).children) {
+        total += prefixNodeMinLength(child);
+      }
+      return total;
+    }
+    return 0;
   }
 
   private void emitCharSetCheck(
@@ -801,6 +824,23 @@ public class VariableCaptureBackrefBytecodeGenerator {
       for (RegexNode child : ((ConcatNode) node).children) {
         emitPrefixNode(mv, child, groupStartVar, lenVar, failLabel, alloc);
       }
+    } else if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      // Emit min mandatory repetitions — if too few chars, jump to failLabel (match fails).
+      for (int i = 0; i < q.min; i++) {
+        emitPrefixNode(mv, q.child, groupStartVar, lenVar, failLabel, alloc);
+      }
+      // For unbounded quantifiers (max == -1): greedy loop for optional repetitions.
+      // Use loopEnd as the child's failLabel so the loop exits without failing the match.
+      if (q.max == -1) {
+        Label loopStart = new Label();
+        Label loopEnd = new Label();
+        mv.visitLabel(loopStart);
+        emitPrefixNode(mv, q.child, groupStartVar, lenVar, loopEnd, alloc);
+        mv.visitJumpInsn(GOTO, loopStart);
+        mv.visitLabel(loopEnd);
+      }
+      // For exact quantifiers (q.min == q.max): mandatory repetitions already emitted above.
     }
   }
 
