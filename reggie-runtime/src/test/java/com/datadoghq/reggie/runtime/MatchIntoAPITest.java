@@ -74,7 +74,8 @@ class MatchIntoAPITest {
 
   @Test
   void dfaSwitchMatcherOverridesMatchInto() throws Exception {
-    ReggieMatcher matcher = Reggie.compile("([a-z]|[0-9]|[A-Z]|_){10}x", WITH_FALLBACK);
+    // Complex body (nested quantifier) keeps this on the DFA-switch path rather than PIKEVM.
+    ReggieMatcher matcher = Reggie.compile("([a-z]+|[0-9]|[A-Z]|_){10}x", WITH_FALLBACK);
     int[] starts = new int[2];
     int[] ends = new int[2];
 

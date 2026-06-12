@@ -870,11 +870,11 @@ public class PatternAnalyzer {
                     ? dfaHasAcceptingStateWithTransitions(dfa)
                     : (dfa.getStartState().accepting
                         || hasUnresolvedAcceptingTransitionState(dfa))))) {
-          // Alternation priority conflict without quantified capturing groups: PikeVM gives
-          // correct first-alternative NFA semantics regardless of whether an anchor is present.
-          // Outer quantifiers on capturing groups are excluded — those can diverge in PikeVM
-          // (fuzz finding: ([^a]{0,}\z|.){1,}).
-          if (!hasQuantifiedCapturingGroup(ast)) {
+          // Alternation priority conflict: PikeVM gives correct first-alternative NFA semantics.
+          // Exclude quantified capturing groups with complex bodies (nested quantifier or anchor
+          // inside the group body) — those can diverge in PikeVM.
+          // Simple bodies like (a|b)+ are safe: no inner quantifier, no inner anchor.
+          if (!hasComplexQuantifiedCapturingGroup(ast)) {
             return new MatchingStrategyResult(
                 MatchingStrategy.PIKEVM_CAPTURE,
                 null,
@@ -1458,6 +1458,53 @@ public class PatternAnalyzer {
     if (node instanceof AlternationNode a) {
       for (RegexNode alt : a.alternatives) {
         if (hasQuantifiedCapturingGroup(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any quantified capturing group in the subtree has a body that contains a nested
+   * quantifier or anchor. Such groups can diverge in PikeVM for alternation-priority-conflict
+   * patterns (fuzz finding: ([^a]{0,}\z|.){1,}). Simple groups like (a|b) return false.
+   */
+  private boolean hasComplexQuantifiedCapturingGroup(RegexNode node) {
+    if (node instanceof QuantifierNode q && q.child instanceof GroupNode g && g.capturing) {
+      if (containsAnyQuantifier(g.child) || containsAnchorInSubtree(g.child)) {
+        return true;
+      }
+    }
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (hasComplexQuantifiedCapturingGroup(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode g) return hasComplexQuantifiedCapturingGroup(g.child);
+    if (node instanceof QuantifierNode q) return hasComplexQuantifiedCapturingGroup(q.child);
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (hasComplexQuantifiedCapturingGroup(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  private static boolean containsAnchorInSubtree(RegexNode node) {
+    if (node instanceof AnchorNode) return true;
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (containsAnchorInSubtree(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode g) return containsAnchorInSubtree(g.child);
+    if (node instanceof QuantifierNode q) return containsAnchorInSubtree(q.child);
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (containsAnchorInSubtree(alt)) return true;
       }
       return false;
     }
