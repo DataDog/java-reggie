@@ -60,12 +60,11 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   @RegexPattern("(\\d{3})-(\\d+)-(\\d{4})")
   public abstract ReggieMatcher phoneWithVariableLength();
 
-  // Original: (<\w+>).*?(</\w+>) — lazy .*? falls back to java.util.regex because
-  // RECURSIVE_DESCENT lacks general alternation backtracking (see FallbackPatternDetector).
-  // Using greedy .* here; .* overlaps with '<', so the concat triggers backtracking via
-  // requiresBacktrackingForGroups and still routes through RECURSIVE_DESCENT.
-  @RegexPattern("(<\\w+>).*(</\\w+>)")
-  public abstract ReggieMatcher xmlTags();
+  // Uses runtime compilation: routes to PIKEVM_CAPTURE (capture-ambiguous with greedy wildcard)
+  // which requires a PikeVMMatcher instance and cannot be generated at annotation-processing time.
+  public ReggieMatcher xmlTags() {
+    return XML_TAGS;
+  }
 
   // ====================
   // COMPLEX ASSERTIONS (forces NFA)
@@ -136,6 +135,7 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   // Runtime-compiled matchers for FULL_FALLBACK patterns (see methods above). These cannot be
   // generated at annotation-processing time, so they go through Reggie.compile()'s runtime path,
   // which delegates to java.util.regex — preserving each benchmark's intended pattern.
+  private static final ReggieMatcher XML_TAGS = Reggie.compile("(<\\w+>).*(</\\w+>)");
   private static final ReggieMatcher DUPLICATE_WORD = Reggie.compile("(\\w+)\\s+\\1");
   private static final ReggieMatcher REPEATED_SEQUENCE = Reggie.compile("(a+)\\1");
   private static final ReggieMatcher LOOKAHEAD_WITH_QUANTIFIER = Reggie.compile("(?=.*\\d{3})\\w+");

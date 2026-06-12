@@ -353,14 +353,7 @@ public class RuntimeCompiler {
       // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
       // results for these patterns (e.g. dot matching newline, group-span bugs).
-      // Exception: patterns with capturing groups are routed to PIKEVM_CAPTURE instead, which
-      // handles anchors correctly via per-thread NFA simulation.
       if (result.anchorConditionDiluted) {
-        if (groupCount > 0) {
-          // Route to PIKEVM_CAPTURE: handles anchor semantics correctly with per-thread tracking.
-          PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
-          return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
-        }
         ReggieMatcher fallback =
             new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in DFA construction");
         if (!nameMap.isEmpty()) {
@@ -369,13 +362,6 @@ public class RuntimeCompiler {
         return fallback;
       }
       if (result.alternationPriorityConflict) {
-        if (groupCount > 0 && nfaHasAnyAnchor(nfa)) {
-          // Anchor-in-alternation with groups: PikeVM gives correct leftmost-first NFA semantics
-          // and handles all anchor types natively. The DFA priority conflict is irrelevant here
-          // because PikeVM does not use DFA ordering.
-          PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
-          return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
-        }
         ReggieMatcher fallback =
             new JavaRegexFallbackMatcher(
                 pattern,
@@ -552,18 +538,6 @@ public class RuntimeCompiler {
           && first.literal().charAt(0) == next.literal().charAt(0);
     }
     return false;
-  }
-
-  /** Returns true if any NFA state carries an anchor assertion (^, $, \A, \Z, \z, etc.). */
-  private static boolean nfaHasAnyAnchor(NFA nfa) {
-    if (nfa == null) return false;
-    return nfa.hasStartAnchor()
-        || nfa.hasEndAnchor()
-        || nfa.hasMultilineStartAnchor()
-        || nfa.hasMultilineEndAnchor()
-        || nfa.hasStringStartAnchor()
-        || nfa.hasStringEndAnchor()
-        || nfa.hasStringEndAbsoluteAnchor();
   }
 
   /**
