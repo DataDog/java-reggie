@@ -775,9 +775,18 @@ pattern. `Reggie.compile()` logs a one-time WARNING; `@RegexPattern` emits a `MA
 
 **RICH_API_HYBRID strategies** (2): `SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`.
 
-The fallback applies only to `Reggie.compile()` (runtime path). Patterns compiled via the
-`@RegexPattern` annotation processor that trigger a FULL_FALLBACK condition will fail at build time
-with an `UnsupportedOperationException` — use `Reggie.compile()` instead for those patterns.
+**`@RegexPattern` delegating-stub policy:**
+
+- **PIKEVM_CAPTURE patterns** (capture-ambiguous without backrefs): the processor emits a delegating
+  stub that calls `RuntimeCompiler.compilePikeVm()` at runtime — no `ALLOW_JDK_FALLBACK` flag needed.
+  Example: `(<\w+>).*(</\w+>)`.
+
+- **FULL_FALLBACK patterns** (patterns that require `java.util.regex` for correctness — e.g.
+  `captureAmbiguous` backref bypass, anchor-in-quantifier, lazy-backref): if the method carries
+  `options = ReggieOption.ALLOW_JDK_FALLBACK`, the processor emits a delegating stub that calls
+  `Reggie.compileAllowingFallback()` at runtime and emits a `MANDATORY_WARNING`. Without
+  `ALLOW_JDK_FALLBACK` such patterns are a **build error** — use `Reggie.compile()` at runtime
+  instead.
 
 The fallback is transparent to callers of `Reggie.compile()` — correctness is guaranteed at the
 cost of reggie's allocation-free performance. All other patterns continue to use the fast reggie
