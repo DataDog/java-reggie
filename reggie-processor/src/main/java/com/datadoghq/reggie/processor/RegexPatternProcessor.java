@@ -152,19 +152,18 @@ public class RegexPatternProcessor extends AbstractProcessor {
         Diagnostic.Kind.NOTE,
         "Processing class " + simpleClassName + " with " + methods.size() + " annotated methods");
 
-    // Generate matcher classes for each method; track which methods are NATIVE (have a .class)
-    List<ExecutableElement> nativeMethods = new ArrayList<>();
+    // Generate matcher classes for each method; collect MethodInfo per realization kind
+    List<ImplClassBytecodeGenerator.MethodInfo> methodInfos = new ArrayList<>();
     for (ExecutableElement method : methods) {
-      ReggieMatcherBytecodeGenerator.Realization realization =
+      ImplClassBytecodeGenerator.MethodInfo info =
           generateMatcherClass(packageName, simpleClassName, method);
-      if (realization == ReggieMatcherBytecodeGenerator.Realization.NATIVE) {
-        nativeMethods.add(method);
+      if (info != null) {
+        methodInfos.add(info);
       }
-      // TODO(Task 4): collect DELEGATE_PIKEVM and DELEGATE_FALLBACK methods for stub emission
     }
 
-    // Generate implementation class — only NATIVE methods have matcher .class files to wire up
-    generateImplementationClass(packageName, simpleClassName, nativeMethods);
+    // Generate implementation class for all realized methods
+    generateImplementationClass(packageName, simpleClassName, methodInfos);
   }
 
   private String generateMatcherClassName(String providerClassName, String methodName) {
@@ -177,7 +176,12 @@ public class RegexPatternProcessor extends AbstractProcessor {
         + "Matcher";
   }
 
-  private ReggieMatcherBytecodeGenerator.Realization generateMatcherClass(
+  /**
+   * Generates the matcher class file (for NATIVE) and returns a {@link
+   * ImplClassBytecodeGenerator.MethodInfo} describing how the impl class should wire this method.
+   * Returns {@code null} on error (error already reported to messager).
+   */
+  private ImplClassBytecodeGenerator.MethodInfo generateMatcherClass(
       String packageName, String providerClassName, ExecutableElement method) throws Exception {
     RegexPattern annotation = method.getAnnotation(RegexPattern.class);
     String pattern = annotation.value();
@@ -204,9 +208,8 @@ public class RegexPatternProcessor extends AbstractProcessor {
       realization = generator.resolveRealization(allowJdkFallback);
     } catch (UnsupportedOperationException e) {
       messager.printMessage(Diagnostic.Kind.ERROR, e.getMessage(), method);
-      // Return NATIVE as a sentinel — processClass won't emit a MethodInfo for errored methods
-      // since the build will already fail. Using NATIVE here avoids NPE in the caller.
-      return ReggieMatcherBytecodeGenerator.Realization.NATIVE;
+      // Return null — processClass skips errored methods; build already fails via ERROR message.
+      return null;
     }
 
     if (realization == ReggieMatcherBytecodeGenerator.Realization.NATIVE) {
@@ -241,6 +244,7 @@ public class RegexPatternProcessor extends AbstractProcessor {
       try (OutputStream os = classFile.openOutputStream()) {
         os.write(bytecode);
       }
+      return ImplClassBytecodeGenerator.MethodInfo.native_(methodName, matcherClassName);
     } else if (realization == ReggieMatcherBytecodeGenerator.Realization.DELEGATE_PIKEVM) {
       messager.printMessage(
           Diagnostic.Kind.NOTE,
@@ -248,7 +252,8 @@ public class RegexPatternProcessor extends AbstractProcessor {
               + pattern
               + "' delegates to runtime PikeVM (native, not bakeable at compile time).",
           method);
-      // TODO(Task 4): emit PikeVM delegating stub
+      String encodedNames = encodeNameMap(generator.resolvedNameMap());
+      return ImplClassBytecodeGenerator.MethodInfo.pikevm(methodName, pattern, encodedNames);
     } else {
       // DELEGATE_FALLBACK
       messager.printMessage(
@@ -258,25 +263,40 @@ public class RegexPatternProcessor extends AbstractProcessor {
               + "' compiles to a JDK-delegating stub (java.util.regex at runtime) because"
               + " ALLOW_JDK_FALLBACK is set.",
           method);
-      // TODO(Task 4): emit JDK fallback delegating stub
+      return ImplClassBytecodeGenerator.MethodInfo.fallback(methodName, pattern);
     }
-    return realization;
+  }
+
+  /**
+   * Encodes a group-name-to-index map into a compact string for baking into delegating stubs.
+   * Mirrors {@code RuntimeCompiler.encodeNameMap} — kept here to avoid a compile-time dependency on
+   * reggie-runtime from the annotation processor. Uses US (0x1F) as name/index separator and RS
+   * (0x1E) as pair separator, identical to {@code RuntimeCompiler}.
+   */
+  private static String encodeNameMap(Map<String, Integer> nameMap) {
+    if (nameMap == null || nameMap.isEmpty()) {
+      return "";
+    }
+    // US (unit separator) between name and index; RS (record separator) between pairs
+    char nameSep = '';
+    char pairSep = '';
+    StringBuilder sb = new StringBuilder();
+    for (Map.Entry<String, Integer> e : nameMap.entrySet()) {
+      if (sb.length() > 0) {
+        sb.append(pairSep);
+      }
+      sb.append(e.getKey()).append(nameSep).append(e.getValue());
+    }
+    return sb.toString();
   }
 
   private void generateImplementationClass(
-      String packageName, String className, List<ExecutableElement> methods) throws IOException {
+      String packageName, String className, List<ImplClassBytecodeGenerator.MethodInfo> methodInfos)
+      throws IOException {
     String implClassName = className + "$Impl";
 
     messager.printMessage(
         Diagnostic.Kind.NOTE, "Generating bytecode for implementation class " + implClassName);
-
-    // Prepare method info for bytecode generator
-    java.util.List<ImplClassBytecodeGenerator.MethodInfo> methodInfos = new java.util.ArrayList<>();
-    for (ExecutableElement method : methods) {
-      String methodName = method.getSimpleName().toString();
-      String matcherClassName = generateMatcherClassName(className, methodName);
-      methodInfos.add(new ImplClassBytecodeGenerator.MethodInfo(methodName, matcherClassName));
-    }
 
     // Use ASM to generate bytecode
     ImplClassBytecodeGenerator generator =

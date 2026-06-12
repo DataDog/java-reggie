@@ -32,12 +32,41 @@ public class ImplClassBytecodeGenerator {
   private final List<MethodInfo> methods;
 
   public static class MethodInfo {
-    public final String methodName;
-    public final String matcherClassName;
+    public enum Kind {
+      NATIVE,
+      PIKEVM,
+      FALLBACK
+    }
 
-    public MethodInfo(String methodName, String matcherClassName) {
+    public final String methodName;
+    public final Kind kind;
+    public final String matcherClassName; // NATIVE only
+    public final String pattern; // PIKEVM and FALLBACK
+    public final String encodedNames; // PIKEVM only
+
+    private MethodInfo(
+        String methodName,
+        Kind kind,
+        String matcherClassName,
+        String pattern,
+        String encodedNames) {
       this.methodName = methodName;
+      this.kind = kind;
       this.matcherClassName = matcherClassName;
+      this.pattern = pattern;
+      this.encodedNames = encodedNames;
+    }
+
+    public static MethodInfo native_(String methodName, String matcherClassName) {
+      return new MethodInfo(methodName, Kind.NATIVE, matcherClassName, null, null);
+    }
+
+    public static MethodInfo pikevm(String methodName, String pattern, String encodedNames) {
+      return new MethodInfo(methodName, Kind.PIKEVM, null, pattern, encodedNames);
+    }
+
+    public static MethodInfo fallback(String methodName, String pattern) {
+      return new MethodInfo(methodName, Kind.FALLBACK, null, pattern, null);
     }
   }
 
@@ -64,7 +93,10 @@ public class ImplClassBytecodeGenerator {
 
     // Generate fields for each matcher (volatile)
     for (MethodInfo method : methods) {
-      String fieldDescriptor = "L" + packageName + "/" + method.matcherClassName + ";";
+      String fieldDescriptor =
+          method.kind == MethodInfo.Kind.NATIVE
+              ? "L" + packageName + "/" + method.matcherClassName + ";"
+              : "Lcom/datadoghq/reggie/runtime/ReggieMatcher;";
       cw.visitField(ACC_PRIVATE | ACC_VOLATILE, method.methodName, fieldDescriptor, null, null)
           .visitEnd();
     }
@@ -103,8 +135,12 @@ public class ImplClassBytecodeGenerator {
    * field = new MatcherClass(); } } } return field; }
    */
   private void generateLazyInitMethod(ClassWriter cw, MethodInfo method) {
-    String matcherClassFullName = packageName + "/" + method.matcherClassName;
-    String fieldDescriptor = "L" + matcherClassFullName + ";";
+    String matcherClassFullName =
+        method.kind == MethodInfo.Kind.NATIVE ? packageName + "/" + method.matcherClassName : null;
+    String fieldDescriptor =
+        method.kind == MethodInfo.Kind.NATIVE
+            ? "L" + matcherClassFullName + ";"
+            : "Lcom/datadoghq/reggie/runtime/ReggieMatcher;";
 
     MethodVisitor mv =
         cw.visitMethod(
@@ -138,11 +174,34 @@ public class ImplClassBytecodeGenerator {
     mv.visitFieldInsn(GETFIELD, implClassName, method.methodName, fieldDescriptor);
     mv.visitJumpInsn(IFNONNULL, syncEnd);
 
-    // Initialize: field = new MatcherClass();
+    // Initialize: field = <realization>;
     mv.visitVarInsn(ALOAD, 0); // Load 'this'
-    mv.visitTypeInsn(NEW, matcherClassFullName);
-    mv.visitInsn(DUP);
-    mv.visitMethodInsn(INVOKESPECIAL, matcherClassFullName, "<init>", "()V", false);
+    switch (method.kind) {
+      case NATIVE:
+        mv.visitTypeInsn(NEW, matcherClassFullName);
+        mv.visitInsn(DUP);
+        mv.visitMethodInsn(INVOKESPECIAL, matcherClassFullName, "<init>", "()V", false);
+        break;
+      case PIKEVM:
+        mv.visitLdcInsn(method.pattern);
+        mv.visitLdcInsn(method.encodedNames != null ? method.encodedNames : "");
+        mv.visitMethodInsn(
+            INVOKESTATIC,
+            "com/datadoghq/reggie/runtime/RuntimeCompiler",
+            "compilePikeVm",
+            "(Ljava/lang/String;Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/ReggieMatcher;",
+            false);
+        break;
+      case FALLBACK:
+        mv.visitLdcInsn(method.pattern);
+        mv.visitMethodInsn(
+            INVOKESTATIC,
+            "com/datadoghq/reggie/Reggie",
+            "compileAllowingFallback",
+            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/ReggieMatcher;",
+            false);
+        break;
+    }
     mv.visitFieldInsn(PUTFIELD, implClassName, method.methodName, fieldDescriptor);
 
     mv.visitLabel(syncEnd);
