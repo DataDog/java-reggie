@@ -181,11 +181,12 @@ public class StrategyCorrectnessMetaTest {
         PatternAnalyzer.MatchingStrategy.BITPARALLEL_GLUSHKOV,
         new Spec(
             ".*a.{9}", List.of("a123456789", "zza123456789zz", "nomatchhere", "", "xa12345678é")));
-    // alternationPriorityConflict: quantified capturing group with alternation causes DFA
-    // priority-ordering to be unreliable → OPTIMIZED_NFA (JDK fallback).
+    // alternationPriorityConflict: quantified capturing group with a nested quantifier in its body
+    // causes DFA priority-ordering to be unreliable → OPTIMIZED_NFA (JDK fallback).
+    // Simple bodies like (a|b) are now routed to PIKEVM_CAPTURE instead.
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-        new Spec("(a|b)+c", List.of("abc", "xabcy", "xyz", "", "abcé")));
+        new Spec("(a+|b)+c", List.of("abc", "xabcy", "xyz", "", "abcé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.LAZY_DFA,
         new Spec(
