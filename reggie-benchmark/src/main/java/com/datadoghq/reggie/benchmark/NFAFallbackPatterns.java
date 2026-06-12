@@ -133,6 +133,7 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   // Runtime-compiled matchers for FULL_FALLBACK patterns (see methods above). These cannot be
   // generated at annotation-processing time, so they go through Reggie.compile()'s runtime path,
   // which delegates to java.util.regex — preserving each benchmark's intended pattern.
+  private static final ReggieMatcher XML_TAGS = Reggie.compile("(<\\w+>).*(</\\w+>)");
   private static final ReggieMatcher DUPLICATE_WORD = Reggie.compile("(\\w+)\\s+\\1");
   private static final ReggieMatcher REPEATED_SEQUENCE = Reggie.compile("(a+)\\1");
   private static final ReggieMatcher LOOKAHEAD_WITH_QUANTIFIER = Reggie.compile("(?=.*\\d{3})\\w+");

@@ -470,10 +470,14 @@ public class RuntimeCompiler {
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
-        ReggieMatcher hybrid =
-            compileHybrid(pattern, ast, nfa, analyzer, result, caseInsensitive, options);
-        hybrid.setNameToIndex(nameMap);
-        return hybrid;
+        PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+        if (!dfaResult.anchorConditionDiluted) {
+          ReggieMatcher hybrid =
+              compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);
+          hybrid.setNameToIndex(nameMap);
+          return hybrid;
+        }
+        // Hybrid DFA anchor-diluted: skip hybrid, fall through to NFA-only routing below.
       }
 
       // 5. Compute structural hash for level 2 cache lookup (64-bit key)
@@ -628,20 +632,12 @@ public class RuntimeCompiler {
       String pattern,
       RegexNode ast,
       NFA nfa,
-      PatternAnalyzer analyzer,
+      PatternAnalyzer.MatchingStrategyResult dfaResult,
       PatternAnalyzer.MatchingStrategyResult originalResult,
       boolean caseInsensitive,
       ReggieOptions options)
       throws Exception {
-    // 1. Get DFA strategy (ignore group count)
-    PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
-
-    // If DFA construction failed due to anchor-condition dilution, the pure NFA fallback may
-    // produce incorrect results (e.g. dot matching newline). Route to JDK instead.
-    if (dfaResult.anchorConditionDiluted) {
-      return fallbackOrThrow(
-          pattern, "anchor condition diluted in hybrid DFA build", null, options);
-    }
+    // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
     // If DFA construction failed or pattern needs NFA anyway, fall back to pure NFA
     if (dfaResult.dfa == null) {
       PatternAnalyzer.MatchingStrategyResult nfaResult =
