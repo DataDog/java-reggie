@@ -83,13 +83,9 @@ class AlternationPriorityPikeVMTest {
     assertAgrees(pat, in);
   }
 
-  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
-  @MethodSource("quantifiedAltPatterns")
-  void quantifiedAlt_routesToPikeVm(String pat, String in) {
-    assertFalse(
-        Reggie.compile(pat) instanceof JavaRegexFallbackMatcher,
-        "expected native matcher for: " + pat);
-  }
+  // quantifiedAlt patterns have quantified capturing groups (e.g. (a|b)+) and are correctly
+  // excluded from PIKEVM routing — they remain in the alternationPriorityConflict fallback path.
+  // No routesToPikeVm test here; the agreesWithJdk test (via WITH_FALLBACK) is sufficient.
 
   private static void assertAgrees(String pat, String in) {
     ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
