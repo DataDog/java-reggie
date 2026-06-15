@@ -317,6 +317,32 @@ public class NFABytecodeGenerator {
     this.useBitSet = stateCount <= BITSET_THRESHOLD && !useSingleLong && !useDualLong;
   }
 
+  /** True when any NFA state performs a backreference check (selects the per-config skeleton). */
+  private boolean nfaHasBackref() {
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.backrefCheck != null) return true;
+    }
+    return false;
+  }
+
+  private enum PerConfigMode {
+    MATCHES,
+    FIND,
+    FIND_FROM,
+    MATCH,
+    MATCH_INTO,
+    MATCH_BOUNDED,
+    FIND_MATCH,
+    FIND_MATCH_FROM,
+    FIND_BOUNDS_FROM,
+    FIND_LONGEST_END
+  }
+
+  private void generatePerConfigBody(
+      MethodVisitor mv, LocalVariableAllocator allocator, PerConfigMode mode, String className) {
+    throw new UnsupportedOperationException("per-config not wired");
+  }
+
   // ========== Dual-Long Slot Encoding Utilities ==========
   //
   // To simplify dual-long handling, we encode whether a slot is dual-long in the slot number
@@ -1463,6 +1489,13 @@ public class NFABytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
     mv.visitLabel(inputNotNull);
+
+    if (nfaHasBackref() && Boolean.getBoolean("reggie.perconfig")) {
+      generatePerConfigBody(mv, allocator, PerConfigMode.MATCHES, className);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
 
     // OPTIMIZATION: Literal lookahead checks using indexOf() - must pass BEFORE running NFA
     if (literalLookaheadInfo != null) {
