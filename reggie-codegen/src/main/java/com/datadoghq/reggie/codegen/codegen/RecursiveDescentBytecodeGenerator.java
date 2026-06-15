@@ -712,25 +712,81 @@ public class RecursiveDescentBytecodeGenerator {
     mv.visitJumpInsn(GOTO, initLoopStart);
     mv.visitLabel(initLoopEnd);
 
-    // Call root parser: int result = parse_X_0(input, 0, input.length(), groups, depth)
-    String rootParserMethod = getMethodNameForNode(ast);
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitInsn(ICONST_0); // pos = 0
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitVarInsn(ALOAD, groupsVar); // groups
-    mv.visitInsn(ICONST_0); // depth = 0
-    mv.visitMethodInsn(
-        INVOKESPECIAL, className, rootParserMethod, "(Ljava/lang/String;II[II)I", false);
-    mv.visitVarInsn(ISTORE, resultVar); // result
-
-    // Check if result == input.length() (full match)
-    mv.visitVarInsn(ILOAD, resultVar);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    // When the root AST is an alternation, try each branch separately and require that the
+    // chosen branch consumes the entire input.  A branch that matches only a prefix of the
+    // input (result != length) is treated as a failure and the next branch is tried.  This
+    // mirrors JDK semantics: Pattern.matches() requires the pattern to span the whole string,
+    // so an alternation branch that stops early must be discarded in favour of a later branch
+    // that reaches the end.
     Label matchSuccess = new Label();
-    mv.visitJumpInsn(IF_ICMPEQ, matchSuccess);
+    if (ast instanceof AlternationNode) {
+      AlternationNode altNode = (AlternationNode) ast;
+      for (int altIdx = 0; altIdx < altNode.alternatives.size(); altIdx++) {
+        RegexNode alt = altNode.alternatives.get(altIdx);
+        generateParserMethod(cw, className, alt);
+        String altMethod = getMethodNameForNode(alt);
+
+        // Reset groups to -1 before each alternative (groups may have been dirtied by a
+        // previous alternative that partially matched).
+        if (altIdx > 0) {
+          Label resetLoopStart = new Label();
+          Label resetLoopEnd = new Label();
+          mv.visitInsn(ICONST_0);
+          mv.visitVarInsn(ISTORE, iVar);
+          mv.visitLabel(resetLoopStart);
+          mv.visitVarInsn(ILOAD, iVar);
+          mv.visitVarInsn(ALOAD, groupsVar);
+          mv.visitInsn(ARRAYLENGTH);
+          mv.visitJumpInsn(IF_ICMPGE, resetLoopEnd);
+          mv.visitVarInsn(ALOAD, groupsVar);
+          mv.visitVarInsn(ILOAD, iVar);
+          mv.visitInsn(ICONST_M1);
+          mv.visitInsn(IASTORE);
+          mv.visitIincInsn(iVar, 1);
+          mv.visitJumpInsn(GOTO, resetLoopStart);
+          mv.visitLabel(resetLoopEnd);
+        }
+
+        // Call this alternative's parser
+        mv.visitVarInsn(ALOAD, 0); // this
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitInsn(ICONST_0); // pos = 0
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitVarInsn(ALOAD, groupsVar); // groups
+        mv.visitInsn(ICONST_0); // depth = 0
+        mv.visitMethodInsn(
+            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
+        mv.visitVarInsn(ISTORE, resultVar);
+
+        // If this alternative consumed the whole input, we have a full match
+        mv.visitVarInsn(ILOAD, resultVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitJumpInsn(IF_ICMPEQ, matchSuccess);
+        // Otherwise continue to the next alternative
+      }
+    } else {
+      // Non-alternation root: call the single root parser and check for full match
+      String rootParserMethod = getMethodNameForNode(ast);
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitInsn(ICONST_0); // pos = 0
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitVarInsn(ALOAD, groupsVar); // groups
+      mv.visitInsn(ICONST_0); // depth = 0
+      mv.visitMethodInsn(
+          INVOKESPECIAL, className, rootParserMethod, "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, resultVar); // result
+
+      // Check if result == input.length() (full match)
+      mv.visitVarInsn(ILOAD, resultVar);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPEQ, matchSuccess);
+    }
+
     mv.visitInsn(ICONST_0); // false
     mv.visitInsn(IRETURN);
 
@@ -1081,24 +1137,72 @@ public class RecursiveDescentBytecodeGenerator {
 
     mv.visitLabel(initLoopEnd);
 
-    // Call parseRoot: int result = parseRoot(input, 0, input.length(), groups)
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitInsn(ICONST_0); // start = 0
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/lang/String", "length", "()I", false); // end = input.length()
-    mv.visitVarInsn(ALOAD, groupsVar);
-    mv.visitInsn(ICONST_0); // depth = 0
-    mv.visitMethodInsn(INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
-    mv.visitVarInsn(ISTORE, resultVar);
-
-    // Check if we matched the entire bounded region
-    mv.visitVarInsn(ILOAD, resultVar);
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    // Call the root parser, trying each alternation branch separately when the root is an
+    // alternation (same logic as generateMatchesMethod — see comment there).
     Label matchFailed = new Label();
-    mv.visitJumpInsn(IF_ICMPNE, matchFailed); // if result != input.length(), match failed
+    if (ast instanceof AlternationNode) {
+      AlternationNode altNode = (AlternationNode) ast;
+      Label matchOk = new Label();
+      for (int altIdx = 0; altIdx < altNode.alternatives.size(); altIdx++) {
+        RegexNode alt = altNode.alternatives.get(altIdx);
+        generateParserMethod(cw, className, alt);
+        String altMethod = getMethodNameForNode(alt);
+
+        if (altIdx > 0) {
+          Label resetLoopStart = new Label();
+          Label resetLoopEnd = new Label();
+          mv.visitInsn(ICONST_0);
+          mv.visitVarInsn(ISTORE, iVar);
+          mv.visitLabel(resetLoopStart);
+          mv.visitVarInsn(ILOAD, iVar);
+          mv.visitVarInsn(ALOAD, groupsVar);
+          mv.visitInsn(ARRAYLENGTH);
+          mv.visitJumpInsn(IF_ICMPGE, resetLoopEnd);
+          mv.visitVarInsn(ALOAD, groupsVar);
+          mv.visitVarInsn(ILOAD, iVar);
+          mv.visitInsn(ICONST_M1);
+          mv.visitInsn(IASTORE);
+          mv.visitIincInsn(iVar, 1);
+          mv.visitJumpInsn(GOTO, resetLoopStart);
+          mv.visitLabel(resetLoopEnd);
+        }
+
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitVarInsn(ALOAD, groupsVar);
+        mv.visitInsn(ICONST_0);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
+        mv.visitVarInsn(ISTORE, resultVar);
+
+        mv.visitVarInsn(ILOAD, resultVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitJumpInsn(IF_ICMPEQ, matchOk);
+      }
+      mv.visitJumpInsn(GOTO, matchFailed);
+      mv.visitLabel(matchOk);
+    } else {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitInsn(ICONST_0); // start = 0
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "length", "()I", false); // end = input.length()
+      mv.visitVarInsn(ALOAD, groupsVar);
+      mv.visitInsn(ICONST_0); // depth = 0
+      mv.visitMethodInsn(
+          INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, resultVar);
+
+      mv.visitVarInsn(ILOAD, resultVar);
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPNE, matchFailed); // if result != input.length(), match failed
+    }
 
     // Set group 0 (entire match): groups[0] = 0, groups[1] = result
     mv.visitVarInsn(ALOAD, groupsVar);
@@ -1169,23 +1273,81 @@ public class RecursiveDescentBytecodeGenerator {
     mv.visitJumpInsn(GOTO, initLoopStart);
     mv.visitLabel(initLoopEnd);
 
-    // Call parseRoot
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitInsn(ICONST_0); // start = 0
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitVarInsn(ALOAD, groupsVar);
-    mv.visitInsn(ICONST_0); // depth = 0
-    mv.visitMethodInsn(INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
-    mv.visitVarInsn(ISTORE, resultVar);
-
-    // Check if matched entire input
-    mv.visitVarInsn(ILOAD, resultVar);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    // Call the root parser, trying each alternation branch separately when the root is an
+    // alternation (same logic as generateMatchesMethod — see comment there).
     Label matchFailed = new Label();
-    mv.visitJumpInsn(IF_ICMPNE, matchFailed);
+    if (ast instanceof AlternationNode) {
+      AlternationNode altNode = (AlternationNode) ast;
+      Label matchOk = new Label();
+      for (int altIdx = 0; altIdx < altNode.alternatives.size(); altIdx++) {
+        RegexNode alt = altNode.alternatives.get(altIdx);
+        generateParserMethod(cw, className, alt);
+        String altMethod = getMethodNameForNode(alt);
+
+        if (altIdx > 0) {
+          Label resetLoopStart = new Label();
+          Label resetLoopEnd = new Label();
+          mv.visitInsn(ICONST_0);
+          mv.visitVarInsn(ISTORE, iVar);
+          mv.visitLabel(resetLoopStart);
+          mv.visitVarInsn(ILOAD, iVar);
+          mv.visitVarInsn(ALOAD, groupsVar);
+          mv.visitInsn(ARRAYLENGTH);
+          mv.visitJumpInsn(IF_ICMPGE, resetLoopEnd);
+          mv.visitVarInsn(ALOAD, groupsVar);
+          mv.visitVarInsn(ILOAD, iVar);
+          mv.visitInsn(ICONST_M1);
+          mv.visitInsn(IASTORE);
+          mv.visitIincInsn(iVar, 1);
+          mv.visitJumpInsn(GOTO, resetLoopStart);
+          mv.visitLabel(resetLoopEnd);
+        }
+
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitVarInsn(ALOAD, groupsVar);
+        mv.visitInsn(ICONST_0);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
+        mv.visitVarInsn(ISTORE, resultVar);
+
+        mv.visitVarInsn(ILOAD, resultVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitJumpInsn(IF_ICMPEQ, matchOk);
+      }
+      mv.visitJumpInsn(GOTO, matchFailed);
+      mv.visitLabel(matchOk);
+      // parseRoot normally sets groups[0]=0 and groups[1]=result.  Since we called the
+      // alt parser directly (bypassing parseRoot), we must set group 0 manually here.
+      mv.visitVarInsn(ALOAD, groupsVar);
+      mv.visitInsn(ICONST_0); // index = 0
+      mv.visitInsn(ICONST_0); // value = 0 (match start)
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, groupsVar);
+      mv.visitInsn(ICONST_1); // index = 1
+      mv.visitVarInsn(ILOAD, resultVar); // value = result (match end = input.length())
+      mv.visitInsn(IASTORE);
+    } else {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitInsn(ICONST_0); // start = 0
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitVarInsn(ALOAD, groupsVar);
+      mv.visitInsn(ICONST_0); // depth = 0
+      mv.visitMethodInsn(
+          INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, resultVar);
+
+      mv.visitVarInsn(ILOAD, resultVar);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPNE, matchFailed);
+    }
 
     // Create MatchResult: starts and ends arrays
     com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt(mv, groupCount + 1);
@@ -2238,10 +2400,10 @@ public class RecursiveDescentBytecodeGenerator {
         if (!q.greedy && q.min != q.max) {
           return true;
         }
-        // Greedy quantifiers need backtracking if they can match multiple times
-        // ? (min=0, max=1) greedy doesn't need backtracking because it matches max first
-        // + (min=1, max=-1) and * (min=0, max=-1) do need backtracking
-        return q.min != q.max && (q.max == -1 || q.max > 1);
+        // Greedy quantifiers need backtracking if they can match multiple lengths.
+        // This includes ?, +, *, {n,m} with n<m — any variable-length quantifier followed by
+        // more concat children may need to give back characters on failure.
+        return q.min != q.max;
       }
       if (node instanceof GroupNode) {
         GroupNode g = (GroupNode) node;
@@ -2741,6 +2903,10 @@ public class RecursiveDescentBytecodeGenerator {
         }
       }
 
+      // Label used in the simple-case suffix-failure path: either shrink the last quantifier
+      // iteration and retry the suffix, or fall back to the standard outer backtracking.
+      Label doBacktrackOrShrink = new Label();
+
       if (nestedBacktrackIndex == -1) {
         // Simple case: no nested backtracking needed
         for (int i = backtrackChildIndex + 1; i < node.children.size(); i++) {
@@ -2904,18 +3070,116 @@ public class RecursiveDescentBytecodeGenerator {
               INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
           mv.visitVarInsn(ISTORE, 5);
 
-          // If this child failed, backtrack
+          // If this child failed, attempt inner-iteration shrink or outer backtrack
           mv.visitVarInsn(ILOAD, 5);
           mv.visitInsn(ICONST_M1);
           Label childSucceeded = new Label();
           mv.visitJumpInsn(IF_ICMPNE, childSucceeded);
 
-          // Failed: adjust tryMatchCount and try again
-          mv.visitIincInsn(9, quantNode.greedy ? -1 : 1);
-          mv.visitJumpInsn(GOTO, backtrackLoop);
+          mv.visitJumpInsn(GOTO, doBacktrackOrShrink);
 
           mv.visitLabel(childSucceeded);
         }
+
+        // All suffix children succeeded: jump past the doBacktrackOrShrink block so we don't
+        // accidentally enter it on the fall-through path from the last child-succeeded label.
+        Label skipBacktrackOrShrink = new Label();
+        mv.visitJumpInsn(GOTO, skipBacktrackOrShrink);
+
+        // Inner last-iteration retry: when the suffix fails and tryMatchCount==1 and the last
+        // quantifier iteration made forward progress, try calling quantChildMethod again with a
+        // smaller end bound.  This lets patterns like (c+){0,}\1+ find the solution where the
+        // group captures a shorter prefix (e.g. "c") rather than the greedy-maximum ("cc").
+        //
+        // We reuse slot 13 (lastIterationEnd) as the current shrink-end limit.  It already holds
+        // the position where the last iteration ended; decrementing it narrows the bound for the
+        // next retry.  When the retry produces a new (shorter) result we store it back into
+        // slot 13, so the decrement loop always starts from the most recent result.
+        //
+        // Only applies to greedy quantifiers for now; non-greedy already iterates upward so
+        // the outer tryMatchCount++ covers the equivalent exploration.
+        mv.visitLabel(doBacktrackOrShrink);
+        {
+          Label doOuterBacktrack = new Label();
+
+          // Only attempt inner shrink for greedy quantifiers with tryMatchCount == 1
+          if (quantNode.greedy) {
+            // Check tryMatchCount == 1
+            mv.visitVarInsn(ILOAD, 9); // tryMatchCount
+            mv.visitInsn(ICONST_1);
+            mv.visitJumpInsn(IF_ICMPNE, doOuterBacktrack);
+
+            // Check lastIterationEnd (slot 13) > lastIterationStart (slot 12): progress was made
+            mv.visitVarInsn(ILOAD, 13); // lastIterationEnd (= current shrinkEnd)
+            mv.visitVarInsn(ILOAD, 12); // lastIterationStart
+            mv.visitJumpInsn(IF_ICMPLE, doOuterBacktrack);
+
+            // Check slot-13 - 1 > lastIterationStart: room to shrink one more step
+            mv.visitVarInsn(ILOAD, 13); // current shrinkEnd
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB); // shrinkEnd - 1
+            mv.visitVarInsn(ILOAD, 12); // lastIterationStart
+            mv.visitJumpInsn(IF_ICMPLE, doOuterBacktrack);
+
+            // Decrement the shrink-end limit (slot 13)
+            mv.visitIincInsn(13, -1);
+
+            // Restore groups from savedGroups (same as the start of backtrackLoop)
+            generateGroupArrayRestore(6, 4);
+
+            // Reset currentPos to lastIterationStart
+            mv.visitVarInsn(ILOAD, 12); // lastIterationStart
+            mv.visitVarInsn(ISTORE, 5); // currentPos
+
+            // Retry the single iteration with the new shrinkEnd (slot 13) as the end bound
+            mv.visitVarInsn(ALOAD, 0);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, 5); // pos = lastIterationStart
+            mv.visitVarInsn(ILOAD, 13); // shrinkEnd (decremented)
+            mv.visitVarInsn(ALOAD, 4);
+            mv.visitVarInsn(ILOAD, depthSlot);
+            mv.visitMethodInsn(
+                INVOKESPECIAL, className, quantChildMethod, "(Ljava/lang/String;II[II)I", false);
+            mv.visitVarInsn(ISTORE, 11); // result
+
+            // If the child can't match even at the shorter end, fall through to outer backtrack
+            mv.visitVarInsn(ILOAD, 11);
+            mv.visitInsn(ICONST_M1);
+            mv.visitJumpInsn(IF_ICMPEQ, doOuterBacktrack);
+
+            // Update currentPos; store the new result back into slot 13 so the next potential
+            // shrink step starts from the correct (shorter) position.
+            mv.visitVarInsn(ILOAD, 11);
+            mv.visitVarInsn(ISTORE, 5); // currentPos = result
+            mv.visitVarInsn(ILOAD, 11);
+            mv.visitVarInsn(ISTORE, 13); // lastIterationEnd = result (new shrinkEnd baseline)
+
+            // Re-set captureGroupNumber boundaries if this quantifier sits directly inside a
+            // capturing group (captureGroupNumber tracks that case).
+            if (captureGroupNumber > 0) {
+              mv.visitVarInsn(ALOAD, 4);
+              BytecodeUtil.pushInt(mv, captureGroupNumber * 2);
+              mv.visitVarInsn(ILOAD, 12); // lastIterationStart
+              mv.visitInsn(IASTORE);
+              mv.visitVarInsn(ALOAD, 4);
+              BytecodeUtil.pushInt(mv, captureGroupNumber * 2 + 1);
+              mv.visitVarInsn(ILOAD, 5); // currentPos after shrunk iteration
+              mv.visitInsn(IASTORE);
+            }
+
+            // Jump back to retry the suffix children with the shorter last-iteration result
+            mv.visitJumpInsn(GOTO, tryRemainingChildren);
+          }
+
+          // Standard outer backtrack: adjust tryMatchCount and restart
+          mv.visitLabel(doOuterBacktrack);
+          mv.visitIincInsn(9, quantNode.greedy ? -1 : 1);
+          mv.visitJumpInsn(GOTO, backtrackLoop);
+        }
+
+        // Land here when all suffix children succeeded (the GOTO above skips the
+        // doBacktrackOrShrink block on the success path).
+        mv.visitLabel(skipBacktrackOrShrink);
       } else {
         // Complex case: nested backtracking needed
         // Process children before the nested backtrack point
