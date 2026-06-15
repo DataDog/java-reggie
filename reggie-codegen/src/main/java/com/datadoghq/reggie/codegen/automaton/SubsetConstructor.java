@@ -199,7 +199,8 @@ public class SubsetConstructor {
                   targets,
                   chars,
                   flattenClosure(anchoredClosures),
-                  nfa.getAcceptStates());
+                  nfa.getAcceptStates(),
+                  target.acceptanceAnchorConditions);
           current.addTransition(chars, target, tagOps, transitionGuard);
         } else {
           current.addTransition(chars, target, Collections.emptyList(), transitionGuard);
@@ -922,6 +923,22 @@ public class SubsetConstructor {
       CharSet charSet,
       Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures,
       Set<NFA.NFAState> nfaAcceptStates) {
+    return computeTagOperations(
+        sourceNFAStates,
+        targetNFAStates,
+        charSet,
+        epsilonClosures,
+        nfaAcceptStates,
+        EnumSet.noneOf(NFA.AnchorType.class));
+  }
+
+  private List<DFA.TagOperation> computeTagOperations(
+      Set<NFA.NFAState> sourceNFAStates,
+      Set<NFA.NFAState> targetNFAStates,
+      CharSet charSet,
+      Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures,
+      Set<NFA.NFAState> nfaAcceptStates,
+      EnumSet<NFA.AnchorType> targetAcceptConditions) {
 
     List<NFA.NFAState> sourceOrdered =
         (dfaStateOrdering != null)
@@ -964,11 +981,58 @@ public class SubsetConstructor {
     Map<Integer, DFA.TagOperation> tagOps = new HashMap<>();
     Map<Integer, Integer> tagOpRanks = new HashMap<>(); // tagId → best source rank so far
 
-    // FIRST: Check for group ENTER markers in source states
+    // FIRST: Check for group ENTER markers in source states.
+    // Build a set of source states that are on the accepting path (rank == minAcceptingSourceRank),
+    // so that we can detect when a high-priority group-enter marker is in the same NFA thread as
+    // the accepting source and must NOT be suppressed by C2.4.
+    Set<NFA.NFAState> acceptingSourceStates = new HashSet<>();
+    if (applyC24Filter) {
+      for (NFA.NFAState source : sourceNFAStates) {
+        if (sourceRankMap.getOrDefault(source, Integer.MAX_VALUE) == minAcceptingSourceRank) {
+          acceptingSourceStates.add(source);
+        }
+      }
+    }
     for (NFA.NFAState sourceState : sourceNFAStates) {
       if (sourceState.enterGroup == null) continue;
       int srcRank = sourceRankMap.getOrDefault(sourceState, Integer.MAX_VALUE);
-      if (applyC24Filter && srcRank < minAcceptingSourceRank) continue; // C2.4
+      if (applyC24Filter && srcRank < minAcceptingSourceRank) {
+        // C2.4: this source has higher priority than the accepting source. Normally skip it.
+        // Exception: if ANY accepting-source state is reachable from this enter-marker via epsilon,
+        // the enter marker IS on the accepting path and must not be suppressed (e.g. (b)|b where
+        // group1_enter precedes b_alt1 in the same thread, and b_alt1 is the accepting source).
+        Set<NFA.NFAState> enterClosure = epsilonClosures.get(sourceState);
+        boolean onAcceptingPath = false;
+        if (enterClosure != null) {
+          for (NFA.NFAState acc : acceptingSourceStates) {
+            if (enterClosure.contains(acc)) {
+              onAcceptingPath = true;
+              break;
+            }
+          }
+        }
+        if (!onAcceptingPath) continue; // C2.4: suppress — not on the accepting path
+      }
+      if (applyC24Filter && srcRank > minAcceptingSourceRank) {
+        // C2.4B: this source has LOWER priority than the accepting source. If the accepting
+        // source bypasses this group (i.e., the group-enter state does NOT lead to the accepting
+        // source via epsilon), suppress the START tag — the winning thread does not bind this
+        // group (e.g. b|(b) where the bare-b alt1 wins and the group alt2 should be unmatched).
+        // A group-enter IS on the accepting path when the accepting-source state is reachable from
+        // it via epsilon (meaning they are in the same NFA thread, e.g. (b)|b's group enters
+        // before the consuming 'b' state that is the accepting source).
+        Set<NFA.NFAState> enterClosure = epsilonClosures.get(sourceState);
+        boolean acceptingSourceDownstream = false;
+        if (enterClosure != null) {
+          for (NFA.NFAState acc : acceptingSourceStates) {
+            if (enterClosure.contains(acc)) {
+              acceptingSourceDownstream = true;
+              break;
+            }
+          }
+        }
+        if (!acceptingSourceDownstream) continue; // C2.4B: accepting source bypasses the group
+      }
       boolean actuallyEntering =
           isGroupActuallyEntered(
               sourceState,
@@ -1035,6 +1099,20 @@ public class SubsetConstructor {
       }
     }
 
+    // C2.4C: when the target DFA state is unconditionally accepting and multiple threads compete,
+    // suppress any tag that was recorded exclusively by lower-priority threads (rank >
+    // minAcceptingSourceRank). The highest-priority accepting thread wins; if it doesn't record a
+    // tag, the tag must not be set by a losing thread (e.g. b|(b) where the bare-b thread wins but
+    // the group-thread records group-end — that end must be suppressed so group is unmatched).
+    // This is NOT applied when acceptance is anchor-conditional (e.g. $-anchored patterns) because
+    // a conditionally-accepting higher-priority thread may not actually win for longer inputs, and
+    // suppressing the lower-priority group-tracking thread's tags would produce wrong spans.
+    if (applyC24Filter && targetAcceptConditions.isEmpty()) {
+      final int minAccRank = minAcceptingSourceRank;
+      tagOps
+          .entrySet()
+          .removeIf(e -> tagOpRanks.getOrDefault(e.getKey(), Integer.MAX_VALUE) > minAccRank);
+    }
     List<DFA.TagOperation> result = new ArrayList<>(tagOps.values());
     result.sort(
         Comparator.comparingInt(op -> tagOpRanks.getOrDefault(op.tagId, Integer.MAX_VALUE)));
