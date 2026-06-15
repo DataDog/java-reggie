@@ -471,6 +471,10 @@ public class RuntimeCompiler {
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
         PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+        // Skip hybrid when the anchor-free DFA is anchor-diluted: the DFA incorrectly models
+        // anchor conditions so it cannot serve as the fast-matching pass. compileHybrid handles
+        // dfaResult.dfa==null by generating a pure NFA matcher, so non-diluted PIKEVM results
+        // (e.g. from hasCapturingGroupInQuantifiedSection) still reach the NFA fallback inside.
         if (!dfaResult.anchorConditionDiluted) {
           ReggieMatcher hybrid =
               compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);

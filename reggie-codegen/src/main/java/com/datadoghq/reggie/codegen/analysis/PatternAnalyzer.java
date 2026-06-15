@@ -801,13 +801,12 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
-        // Anchor-diluted alternation patterns: PIKEVM_CAPTURE gives correct leftmost-first
-        // semantics for nullable/optional/end-anchor alternation branches. Guards for
-        // hasNullableAlternationBranch, subtreeContainsOptional, and
-        // hasEndAnchorLeadingInAlternationBranch are removed: ThompsonBuilder wraps {0,n}
-        // fragments in a skip-entry state (preventing mixed char+epsilon DFA states), and
-        // PikeVMMatcher.checkAnchor correctly handles $ before a trailing newline.
-        // This mirrors the identical guard-free routing in the ignoreGroupCount=true path.
+        // Anchor-diluted patterns: PIKEVM_CAPTURE gives correct leftmost-first semantics for
+        // all anchor types. Dilution occurs when the DFA subset construction merges NFA states
+        // with disjoint anchor conditions (e.g. ^x and x(y) sharing the same DFA state), causing
+        // the DFA to lose the anchor guard. PikeVMMatcher.checkAnchor evaluates all anchor types
+        // correctly against the actual search position, so PIKEVM is safe for all diluted shapes —
+        // not just alternation patterns. The alternation+accepting-transitions guard is removed.
         if (dfa.isAnchorConditionDiluted()) {
           // Anchor condition diluted in DFA: capture-ambiguous patterns are safe for PikeVM
           // because PikeVM evaluates anchors natively per position (via checkAnchor) and tracks
@@ -1100,12 +1099,14 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
-      // Anchor condition diluted in DFA construction and NOT claimed by PIKEVM above.
-      // OPTIMIZED_NFA mishandles find() anchors for these, so fall back to java.util.regex.
+      // Anchor-diluted: same as the capturing-group path — PIKEVM_CAPTURE evaluates anchors
+      // correctly at each search position, whereas OPTIMIZED_NFA mishandles diluted conditions.
+      // anchorConditionDiluted=true on the result signals RuntimeCompiler's hybrid pre-check to
+      // skip the hybrid DFA path (a diluted DFA is not safe for the fast-matching pass).
       if (dfa.isAnchorConditionDiluted()) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
-                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+                MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
         r.anchorConditionDiluted = true;
         return r;
       }

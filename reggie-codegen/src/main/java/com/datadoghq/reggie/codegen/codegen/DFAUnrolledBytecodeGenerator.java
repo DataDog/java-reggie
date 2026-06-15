@@ -1435,8 +1435,8 @@ public class DFAUnrolledBytecodeGenerator {
     // which MatchResultImpl reports as start(g)=matchStart but group(g)=null — diverging from JDK
     // which reports start(g)=-1 for an unmatched group.
     DFA.DFAState startState = dfa.getStartState();
-    java.util.Set<Integer> completedGroups = new java.util.HashSet<>();
-    java.util.Set<Integer> enteredGroups = new java.util.HashSet<>();
+    Set<Integer> completedGroups = new HashSet<>();
+    Set<Integer> enteredGroups = new HashSet<>();
     for (DFA.GroupAction action : startState.groupActions) {
       if (action.type == DFA.GroupAction.ActionType.ENTER) enteredGroups.add(action.groupId);
       else completedGroups.add(action.groupId);
@@ -1686,14 +1686,14 @@ public class DFAUnrolledBytecodeGenerator {
   private void emitAcceptStateGroupActions(
       MethodVisitor mv, DFA.DFAState state, int posVar, int tagsVar) {
     if (state.groupActions.isEmpty()) return;
-    java.util.Set<Integer> enteredGroups = new java.util.HashSet<>();
-    java.util.Set<Integer> exitedGroups = new java.util.HashSet<>();
+    Set<Integer> enteredGroups = new HashSet<>();
+    Set<Integer> exitedGroups = new HashSet<>();
     for (DFA.GroupAction action : state.groupActions) {
       if (action.type == DFA.GroupAction.ActionType.ENTER) enteredGroups.add(action.groupId);
       else exitedGroups.add(action.groupId);
     }
     // Only fix up groups that complete their full enter+exit cycle here.
-    java.util.Set<Integer> zeroWidthGroups = new java.util.HashSet<>(enteredGroups);
+    Set<Integer> zeroWidthGroups = new HashSet<>(enteredGroups);
     zeroWidthGroups.retainAll(exitedGroups);
     for (int g : zeroWidthGroups) {
       // tags[2*g] = posVar  (START)
