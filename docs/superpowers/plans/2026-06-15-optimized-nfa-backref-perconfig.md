@@ -19,10 +19,12 @@
 - **Theory constraint (AGENTS.md O(n) guarantee):** general REWB membership is NP-complete; per-config simulation is only kept tractable by the dedup key + AVD bound. All 3 failing patterns have **AVD = 1** (single referenced group `\1`), so they stay near-linear.
 - NFA model (reggie-codegen `automaton/NFA.java`): `NFAState.id` (int), `.enterGroup`/`.exitGroup`/`.backrefCheck` (Integer, nullable), `.anchor`, `.assertionType`, `.getEpsilonTransitions()`, `.getTransitions()`; `NFA.getStartState()`, `.getAcceptStates()`, `.getGroupCount()`, `.getStates()`. `NFA.contentHashCode()` already hashes `backrefCheck` (line 318).
 - The 12 generated methods for this strategy: `generateMatchesMethod` (1450), `generateFindMethod` (2443), `generateFindFromMethod` (2535), `generateMatchMethod` (5999), `generateMatchIntoMethod` (6332), `generateMatchBoundedMethod` (6723), `generateMatchesBoundedMethod` (7617), `generateMatchBoundedCharSequenceMethod` (7648), `generateFindMatchMethod` (7686), `generateFindMatchFromMethod` (7748), `generateFindBoundsFromMethod` (7889), `generateFindLongestMatchEndMethod` (8022).
-- The 3 target patterns:
-  - P1 `(c{0}|1)(\1_{3}|.{1}[0-c])`
-  - P2 `(0{1,}|b{2}){2}(?:[a]|-{1})*(\1|c)`
-  - P3 `(0{1}|b{2}){2,}(?:[c]|-{1})(\1.|.c)`
+- The 3 target patterns + their **exact** minimal repro inputs (from `doc/temp/prod-readiness/fuzz-inventory.md` §B — do NOT guess inputs; the divergence only manifests on these):
+  - P1 `(c{0}|1)(\1_{3}|.{1}[0-c])` on `1_` — **group-span** divergence (matches()/find() agree; g1 `[0,0)`→`[0,1)`, g2 `[0,2)`→`[1,2)`). The test MUST compare group spans, not just match spans.
+  - P2 `(0{1,}|b{2}){2}(?:[a]|-{1})*(\1|c)` on `000a` — over-match (JDK no-match, Reggie `[0,4)`).
+  - P3 `(0{1}|b{2}){2,}(?:[c]|-{1})(\1.|.c)` on `00cb` — over-match (JDK no-match, Reggie `[0,4)`).
+- The fuzz oracle (`RegexFuzzOracle.java:97`) compiles with `ReggieOptions.builder().allowJdkFallback().build()`; for these natively-routed patterns fallback does NOT engage, so this option still exercises the buggy native path. The pin test uses the same option.
+- **Done (Task 0, commit a48de00):** `PerConfigBackrefRegressionTest` written; `targetsAgreeWithJdk_acrossInputs` fails on the P1 group-span assertion (correct), `regressionPatternsStayCorrect` green.
 
 ## Convention for bytecode-generation steps
 
