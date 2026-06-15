@@ -1581,6 +1581,11 @@ public class DFAUnrolledBytecodeGenerator {
         if (state.acceptanceAnchorConditions.isEmpty()) {
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitVarInsn(ISTORE, longestPosVar);
+          // Apply zero-width group actions before cloning: groups that both ENTER and EXIT as
+          // epsilon at this accept state must have their START and END tags fixed up to posVar
+          // (the accept position), overriding any earlier char-transition tag that recorded the
+          // wrong position.
+          emitAcceptStateGroupActions(mv, state, posVar, tagsVar);
           mv.visitVarInsn(ALOAD, tagsVar);
           mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
           mv.visitTypeInsn(CHECKCAST, "[I");
@@ -1593,6 +1598,8 @@ public class DFAUnrolledBytecodeGenerator {
           emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipSave);
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitVarInsn(ISTORE, longestPosVar);
+          // Apply zero-width group actions before cloning (same as unconditional branch above).
+          emitAcceptStateGroupActions(mv, state, posVar, tagsVar);
           mv.visitVarInsn(ALOAD, tagsVar);
           mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
           mv.visitTypeInsn(CHECKCAST, "[I");
@@ -1663,6 +1670,43 @@ public class DFAUnrolledBytecodeGenerator {
     }
 
     mv.visitLabel(exitLabel);
+  }
+
+  /**
+   * Emits tag-fixup code for zero-width capturing groups at an accepting DFA state. A group that
+   * both ENTERs and EXITs via epsilon transitions at the accept state is zero-width: its span must
+   * be {@code [acceptPos, acceptPos)}. Earlier char-transition tag-ops may have written a stale
+   * start position into {@code tagsVar}; this method overrides both the START and END tags with
+   * {@code posVar} (the current accept position) so that {@code tagsVar.clone()} captures the
+   * correct zero-width span.
+   *
+   * <p>Only groups that have a complete ENTER+EXIT pair in {@code state.groupActions} are fixed up;
+   * unpaired actions (e.g. a lone ENTER for an optional group) are left untouched.
+   */
+  private void emitAcceptStateGroupActions(
+      MethodVisitor mv, DFA.DFAState state, int posVar, int tagsVar) {
+    if (state.groupActions.isEmpty()) return;
+    java.util.Set<Integer> enteredGroups = new java.util.HashSet<>();
+    java.util.Set<Integer> exitedGroups = new java.util.HashSet<>();
+    for (DFA.GroupAction action : state.groupActions) {
+      if (action.type == DFA.GroupAction.ActionType.ENTER) enteredGroups.add(action.groupId);
+      else exitedGroups.add(action.groupId);
+    }
+    // Only fix up groups that complete their full enter+exit cycle here.
+    java.util.Set<Integer> zeroWidthGroups = new java.util.HashSet<>(enteredGroups);
+    zeroWidthGroups.retainAll(exitedGroups);
+    for (int g : zeroWidthGroups) {
+      // tags[2*g] = posVar  (START)
+      mv.visitVarInsn(ALOAD, tagsVar);
+      pushInt(mv, 2 * g);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(IASTORE);
+      // tags[2*g+1] = posVar  (END)
+      mv.visitVarInsn(ALOAD, tagsVar);
+      pushInt(mv, 2 * g + 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(IASTORE);
+    }
   }
 
   /**
