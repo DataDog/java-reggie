@@ -840,7 +840,7 @@ public class DFAUnrolledBytecodeGenerator {
     Label noMatchHere = new Label();
     mv.visitJumpInsn(IFEQ, noMatchHere);
 
-    // Match found - return tryPos
+    // Match found at tryPos
     mv.visitVarInsn(ILOAD, 4);
     mv.visitInsn(IRETURN);
 

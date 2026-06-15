@@ -638,8 +638,26 @@ public class RuntimeCompiler {
       ReggieOptions options)
       throws Exception {
     // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
-    // If DFA construction failed or pattern needs NFA anyway, fall back to pure NFA
+    // When dfaResult.dfa==null but originalResult.dfa!=null, use original DFA for booleans + NFA.
     if (dfaResult.dfa == null) {
+      if (originalResult.dfa != null) {
+        // Use the original DFA for boolean matching, NFA for group extraction.
+        byte[] dfaBytecode = generateBytecode(pattern, originalResult, nfa, ast, caseInsensitive);
+        ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
+        PatternAnalyzer.MatchingStrategyResult nfaResult =
+            new PatternAnalyzer.MatchingStrategyResult(
+                PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
+                null,
+                null,
+                false,
+                originalResult.requiredLiterals,
+                originalResult.lookaheadGreedyInfo,
+                originalResult.usePosixLastMatch);
+        byte[] nfaBytecode = generateBytecode(pattern, nfaResult, nfa, ast, caseInsensitive);
+        ReggieMatcher nfaMatcher = instantiateMatcher(nfaBytecode, pattern);
+        return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
+      }
+      // No DFA available: fall back to pure NFA
       PatternAnalyzer.MatchingStrategyResult nfaResult =
           new PatternAnalyzer.MatchingStrategyResult(
               PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,

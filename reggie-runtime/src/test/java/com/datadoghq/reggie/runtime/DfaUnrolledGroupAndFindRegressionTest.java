@@ -190,4 +190,9 @@ public class DfaUnrolledGroupAndFindRegressionTest {
   void c_emptyGroupPlusRange() throws Exception {
     assertAgrees("[0-c]()+", "b");
   }
+
+  @Test
+  void c_control_leftmostUnaffected() {
+    assertAgrees("(ab)+", "xababy");
+  }
 }
