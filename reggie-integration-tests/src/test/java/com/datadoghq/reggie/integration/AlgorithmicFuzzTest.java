@@ -53,7 +53,7 @@ public class AlgorithmicFuzzTest {
    * new/fixed finding in {@code doc/temp/prod-readiness/fuzz-inventory.md}. Override via {@code
    * -Dreggie.fuzz.maxFindings=N} for stricter local runs.
    */
-  private static final int KNOWN_FINDINGS_BUDGET = 50;
+  private static final int KNOWN_FINDINGS_BUDGET = 18;
 
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)
