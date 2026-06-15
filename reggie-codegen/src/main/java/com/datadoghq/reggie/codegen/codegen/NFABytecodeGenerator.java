@@ -325,6 +325,23 @@ public class NFABytecodeGenerator {
     return false;
   }
 
+  /**
+   * Phase-1 scope limit: the per-config skeleton does not yet wire lookaround assertions. Patterns
+   * whose NFA carries an {@code assertionType} state stay on the legacy lockstep path. The three
+   * Phase-1 target patterns are assertion-free, so this is acceptable for now.
+   */
+  private boolean nfaHasAssertion() {
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.assertionType != null) return true;
+    }
+    return false;
+  }
+
+  /** True when the per-config skeleton may handle this NFA (backref present, no assertions). */
+  private boolean perConfigEligible() {
+    return nfaHasBackref() && !nfaHasAssertion();
+  }
+
   private enum PerConfigMode {
     MATCHES,
     FIND,
@@ -338,9 +355,684 @@ public class NFABytecodeGenerator {
     FIND_LONGEST_END
   }
 
+  /**
+   * Phase-1 fixed capacity for the per-config outer worklist.
+   *
+   * <p>WARNING: on overflow {@link #emitPushConfig} silently DROPS the configuration, which can
+   * make {@code matches()} return a false negative (miss a valid match) — a silent wrong answer,
+   * which the project Correctness Guarantee forbids. This is only safe today because the per-config
+   * path is gated behind {@code -Dreggie.perconfig}. Before the path is ungated, Task 9 MUST
+   * replace the drop with a delegation to {@code java.util.regex} (the {@code className} delegate
+   * field).
+   */
+  private static final int PER_CONFIG_CAP = 256;
+
+  /**
+   * Emit a guarded push of a single (stateId, pos) configuration onto the SoA outer worklist.
+   *
+   * <p>Template (CAP = {@link #PER_CONFIG_CAP}):
+   *
+   * <pre>{@code
+   * if (wlSize < CAP) {
+   *   wlState[wlSize] = <stateId>;
+   *   wlPos[wlSize]   = <pos>;
+   *   wlSize++;
+   * }
+   * }</pre>
+   *
+   * Overflow drops the configuration — see the false-negative WARNING on {@link #PER_CONFIG_CAP};
+   * Task 9 turns this into a {@code java.util.regex} delegation. The {@code pushStateId}/{@code
+   * pushPos} runnables must each leave exactly one int on the stack.
+   */
+  private void emitPushConfig(
+      MethodVisitor mv,
+      int wlStateVar,
+      int wlPosVar,
+      int wlSizeVar,
+      Runnable pushStateId,
+      Runnable pushPos) {
+    Label full = new Label();
+    // if (wlSize >= CAP) skip
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    pushInt(mv, PER_CONFIG_CAP);
+    mv.visitJumpInsn(IF_ICMPGE, full);
+
+    // wlState[wlSize] = stateId;
+    mv.visitVarInsn(ALOAD, wlStateVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    pushStateId.run();
+    mv.visitInsn(IASTORE);
+
+    // wlPos[wlSize] = pos;
+    mv.visitVarInsn(ALOAD, wlPosVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    pushPos.run();
+    mv.visitInsn(IASTORE);
+
+    // wlSize++;
+    mv.visitIincInsn(wlSizeVar, 1);
+
+    mv.visitLabel(full);
+  }
+
+  /**
+   * Per-configuration worklist NFA simulation for backreference patterns (Defect B fix).
+   *
+   * <p>Design: two-level worklist. The OUTER SoA worklist {@code (wlState[], wlPos[])} holds
+   * position-advancing configurations {@code (stateId, pos)}. For each popped config we run an
+   * INNER epsilon-closure over the states reachable at that FIXED position (mirroring {@code
+   * generateEpsilonClosureWithGroups}), using a {@code seen[]} processed-set keyed by stateId that
+   * is cleared per popped config. The inner closure handles enterGroup/exitGroup (writing the
+   * GLOBAL group arrays, last-write-wins), anchors, and backreferences. Position-advancing
+   * transitions (char consume, non-empty backref) push NEW configs at a DIFFERENT position onto the
+   * outer worklist; that is what fixes the legacy shared-cursor bug — each config carries its own
+   * pos.
+   *
+   * <p>Termination: the inner closure dedups per fixed pos via {@code seen[]} (epsilon expansion is
+   * finite once deduped); the outer worklist only ever pushes configs at a strictly greater pos
+   * (char consume advances by 1; non-empty backref advances by L &ge; 1; zero-length backref is an
+   * in-closure epsilon, not an outer push).
+   *
+   * <p>Scope (Phase 1): captures still use the GLOBAL group arrays (per-config columns are a later
+   * task). Assertion-bearing NFAs are NOT handled here — the dispatch guard must exclude them (the
+   * three target patterns have no assertions). Only {@link PerConfigMode#MATCHES} is implemented.
+   *
+   * <p>On entry the caller has already emitted the {@code input == null} guard; {@code input} is in
+   * slot 1. {@code className} is currently unused; it is reserved for the Task 9
+   * overflow-delegation field ({@code java.util.regex} fallback).
+   */
   private void generatePerConfigBody(
       MethodVisitor mv, LocalVariableAllocator allocator, PerConfigMode mode, String className) {
-    throw new UnsupportedOperationException("per-config not wired");
+    if (mode != PerConfigMode.MATCHES) {
+      throw new UnsupportedOperationException("per-config: only MATCHES implemented in this phase");
+    }
+
+    final int groupCount = nfa.getGroupCount();
+    final int startStateId = nfa.getStartState().id;
+
+    // Dense bound for the per-pos seen[] set (state ids are not guaranteed contiguous).
+    int maxStateId = 0;
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.id > maxStateId) maxStateId = s.id;
+    }
+    final int seenSize = maxStateId + 1;
+
+    // Accept-state membership as a compile-time set for fast emit.
+    Set<Integer> acceptIds = new HashSet<>();
+    for (NFA.NFAState a : nfa.getAcceptStates()) {
+      acceptIds.add(a.id);
+    }
+
+    // States the inner closure must dispatch on (anything with zero-width behavior or eps edges).
+    List<NFA.NFAState> closureStates = new ArrayList<>();
+    for (NFA.NFAState state : nfa.getStates()) {
+      if (state.enterGroup != null
+          || state.exitGroup != null
+          || state.backrefCheck != null
+          || state.anchor != null
+          || !state.getEpsilonTransitions().isEmpty()
+          || acceptIds.contains(state.id)) {
+        closureStates.add(state);
+      }
+    }
+
+    // States with character transitions (for the consume step).
+    List<NFA.NFAState> consumeStates = new ArrayList<>();
+    for (NFA.NFAState state : nfa.getStates()) {
+      if (!state.getTransitions().isEmpty()) {
+        consumeStates.add(state);
+      }
+    }
+
+    // ---- Slots (allocated once, before any loop) ----
+    int lenVar = allocator.allocateInt();
+    int groupStartsVar = allocator.allocateRef();
+    int groupEndsVar = allocator.allocateRef();
+    int wlStateVar = allocator.allocateRef();
+    int wlPosVar = allocator.allocateRef();
+    int wlSizeVar = allocator.allocateInt();
+    int seenVar = allocator.allocateRef();
+    int curStateVar = allocator.allocateInt();
+    int curPosVar = allocator.allocateInt();
+    int inWlVar = allocator.allocateRef(); // inner closure worklist (state ids at curPos)
+    int inSizeVar = allocator.allocateInt();
+    int inStateVar = allocator.allocateInt();
+    int chVar = allocator.allocateInt();
+
+    // ---- Init ----
+    // len = input.length();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    // int[] groupStarts/groupEnds = new int[groupCount + 1]; fill -1; groupStarts[0] = 0;
+    pushInt(mv, groupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, groupStartsVar);
+    pushInt(mv, groupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, groupEndsVar);
+    for (int i = 0; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+
+    // Outer worklist arrays + inner closure arrays (allocated once).
+    pushInt(mv, PER_CONFIG_CAP);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlStateVar);
+    pushInt(mv, PER_CONFIG_CAP);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlPosVar);
+    pushInt(mv, seenSize);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, seenVar);
+    pushInt(mv, seenSize);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, inWlVar);
+
+    // seed: wlState[0] = startState.id; wlPos[0] = 0; wlSize = 1;
+    mv.visitVarInsn(ALOAD, wlStateVar);
+    mv.visitInsn(ICONST_0);
+    pushInt(mv, startStateId);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, wlPosVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, wlSizeVar);
+
+    // ---- Outer loop: while (wlSize > 0) ----
+    Label outerLoop = new Label();
+    Label outerEnd = new Label();
+    mv.visitLabel(outerLoop);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitJumpInsn(IFLE, outerEnd);
+
+    // wlSize--; curState = wlState[wlSize]; curPos = wlPos[wlSize];
+    mv.visitIincInsn(wlSizeVar, -1);
+    mv.visitVarInsn(ALOAD, wlStateVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, curStateVar);
+    mv.visitVarInsn(ALOAD, wlPosVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, curPosVar);
+
+    // Clear seen[] for this fixed-pos inner closure: java.util.Arrays.fill(seen, 0);
+    mv.visitVarInsn(ALOAD, seenVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([II)V", false);
+
+    // Seed inner worklist with curState: inWl[0] = curState; inSize = 1; seen[curState] = 1;
+    mv.visitVarInsn(ALOAD, inWlVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, curStateVar);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, inSizeVar);
+    mv.visitVarInsn(ALOAD, seenVar);
+    mv.visitVarInsn(ILOAD, curStateVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IASTORE);
+
+    // ---- Inner closure loop over states at curPos ----
+    Label innerLoop = new Label();
+    Label innerEnd = new Label();
+    mv.visitLabel(innerLoop);
+    mv.visitVarInsn(ILOAD, inSizeVar);
+    mv.visitJumpInsn(IFLE, innerEnd);
+    // inSize--; inState = inWl[inSize];
+    mv.visitIincInsn(inSizeVar, -1);
+    mv.visitVarInsn(ALOAD, inWlVar);
+    mv.visitVarInsn(ILOAD, inSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, inStateVar);
+
+    // Char consume for THIS frontier state (inState) at curPos: every state reached by the inner
+    // epsilon closure must be able to consume one character and push its targets at curPos+1 onto
+    // the OUTER worklist. (curState alone is insufficient — the closure expands many states.)
+    // if (curPos < len) { ch = input.charAt(curPos); switch(inState){...push target@curPos+1...} }
+    Label noConsume = new Label();
+    mv.visitVarInsn(ILOAD, curPosVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGE, noConsume);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, curPosVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    emitPerConfigConsume(
+        mv, consumeStates, inStateVar, chVar, curPosVar, wlStateVar, wlPosVar, wlSizeVar);
+    mv.visitLabel(noConsume);
+
+    // Zero-width expansion of inState at curPos (accept / group / anchor / backref / plain eps).
+    emitPerConfigInnerSwitch(
+        mv,
+        allocator,
+        closureStates,
+        acceptIds,
+        groupStartsVar,
+        groupEndsVar,
+        seenVar,
+        inWlVar,
+        inSizeVar,
+        inStateVar,
+        curPosVar,
+        lenVar,
+        wlStateVar,
+        wlPosVar,
+        wlSizeVar,
+        innerLoop);
+
+    mv.visitJumpInsn(GOTO, innerLoop);
+    mv.visitLabel(innerEnd);
+
+    mv.visitJumpInsn(GOTO, outerLoop);
+    mv.visitLabel(outerEnd);
+
+    // No accepting configuration found.
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Emit the inner-closure dispatch for one popped (curState=inState) at a fixed curPos. Handles
+   * accept, enterGroup/exitGroup, anchors, backref, and plain epsilon edges. Targets staying at
+   * curPos are pushed onto the inner worklist (with {@code seen[]} dedup); non-empty backref
+   * targets are pushed onto the OUTER worklist at the advanced position. {@code worklistContinue}
+   * is the inner loop head (used to skip dead branches).
+   */
+  private void emitPerConfigInnerSwitch(
+      MethodVisitor mv,
+      LocalVariableAllocator allocator,
+      List<NFA.NFAState> closureStates,
+      Set<Integer> acceptIds,
+      int groupStartsVar,
+      int groupEndsVar,
+      int seenVar,
+      int inWlVar,
+      int inSizeVar,
+      int inStateVar,
+      int curPosVar,
+      int lenVar,
+      int wlStateVar,
+      int wlPosVar,
+      int wlSizeVar,
+      Label worklistContinue) {
+    // Accept check: if (curState in accept && curPos == len) { groupEnds[0]=len; return true; }
+    // Done first so it fires regardless of whether the state also has eps/group behavior.
+    if (!acceptIds.isEmpty()) {
+      Label notAccept = new Label();
+      // switch over accept ids: build a lookupswitch that jumps to a shared accept-attempt label
+      Label acceptAttempt = new Label();
+      int[] keys = acceptIds.stream().mapToInt(Integer::intValue).sorted().toArray();
+      Label[] labels = new Label[keys.length];
+      for (int i = 0; i < keys.length; i++) labels[i] = acceptAttempt;
+      mv.visitVarInsn(ILOAD, inStateVar);
+      mv.visitLookupSwitchInsn(notAccept, keys, labels);
+      mv.visitLabel(acceptAttempt);
+      // if (curPos == len) accept
+      mv.visitVarInsn(ILOAD, curPosVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPNE, notAccept);
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitInsn(IASTORE);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(notAccept);
+    }
+
+    if (closureStates.isEmpty()) {
+      return;
+    }
+
+    // Dispatch on inState for zero-width behavior.
+    int[] keys = new int[closureStates.size()];
+    Label[] labels = new Label[closureStates.size()];
+    for (int i = 0; i < closureStates.size(); i++) {
+      keys[i] = closureStates.get(i).id;
+      labels[i] = new Label();
+    }
+    // keys must be sorted for lookupswitch.
+    Integer[] order = new Integer[closureStates.size()];
+    for (int i = 0; i < order.length; i++) order[i] = i;
+    Arrays.sort(order, (a, b) -> Integer.compare(keys[a], keys[b]));
+    int[] sortedKeys = new int[keys.length];
+    Label[] sortedLabels = new Label[labels.length];
+    for (int i = 0; i < order.length; i++) {
+      sortedKeys[i] = keys[order[i]];
+      sortedLabels[i] = labels[order[i]];
+    }
+    Label dispatchDefault = new Label();
+    mv.visitVarInsn(ILOAD, inStateVar);
+    mv.visitLookupSwitchInsn(dispatchDefault, sortedKeys, sortedLabels);
+
+    for (int i = 0; i < closureStates.size(); i++) {
+      NFA.NFAState state = closureStates.get(i);
+      mv.visitLabel(labels[i]);
+
+      // enterGroup / exitGroup: write GLOBAL arrays (last-write-wins) at curPos.
+      if (state.enterGroup != null) {
+        mv.visitVarInsn(ALOAD, groupStartsVar);
+        pushInt(mv, state.enterGroup);
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitInsn(IASTORE);
+      }
+      if (state.exitGroup != null) {
+        mv.visitVarInsn(ALOAD, groupEndsVar);
+        pushInt(mv, state.exitGroup);
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitInsn(IASTORE);
+      }
+
+      if (state.backrefCheck != null) {
+        emitPerConfigBackref(
+            mv,
+            allocator,
+            state,
+            groupStartsVar,
+            groupEndsVar,
+            seenVar,
+            inWlVar,
+            inSizeVar,
+            curPosVar,
+            lenVar,
+            wlStateVar,
+            wlPosVar,
+            wlSizeVar,
+            worklistContinue);
+      } else if (state.anchor != null) {
+        emitPerConfigAnchorAndEps(
+            mv, state, seenVar, inWlVar, inSizeVar, curPosVar, lenVar, worklistContinue);
+      } else {
+        // plain epsilon edges -> push targets at curPos onto inner worklist
+        for (NFA.NFAState target : state.getEpsilonTransitions()) {
+          emitPerConfigInnerPush(mv, seenVar, inWlVar, inSizeVar, target.id);
+        }
+      }
+      mv.visitJumpInsn(GOTO, worklistContinue);
+    }
+    mv.visitLabel(dispatchDefault);
+  }
+
+  /**
+   * Push a target state id onto the inner closure worklist at the current pos, deduped via {@code
+   * seen[]}: {@code if (seen[t] == 0) { seen[t] = 1; inWl[inSize++] = t; }}.
+   */
+  private void emitPerConfigInnerPush(
+      MethodVisitor mv, int seenVar, int inWlVar, int inSizeVar, int targetId) {
+    Label already = new Label();
+    mv.visitVarInsn(ALOAD, seenVar);
+    pushInt(mv, targetId);
+    mv.visitInsn(IALOAD);
+    mv.visitJumpInsn(IFNE, already);
+    mv.visitVarInsn(ALOAD, seenVar);
+    pushInt(mv, targetId);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, inWlVar);
+    mv.visitVarInsn(ILOAD, inSizeVar);
+    pushInt(mv, targetId);
+    mv.visitInsn(IASTORE);
+    mv.visitIincInsn(inSizeVar, 1);
+    mv.visitLabel(already);
+  }
+
+  /**
+   * Anchor predicate guard (mirrors legacy closure), then push eps targets at curPos if it holds.
+   */
+  private void emitPerConfigAnchorAndEps(
+      MethodVisitor mv,
+      NFA.NFAState state,
+      int seenVar,
+      int inWlVar,
+      int inSizeVar,
+      int curPosVar,
+      int lenVar,
+      Label worklistContinue) {
+    // If the anchor fails, jump to worklistContinue (skip this state's eps targets).
+    Label passed = new Label();
+    switch (state.anchor) {
+      case START:
+      case STRING_START:
+        // curPos == 0
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitJumpInsn(IFNE, worklistContinue);
+        break;
+      case START_MULTILINE:
+        // curPos == 0 || input.charAt(curPos-1) == '\n'
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitJumpInsn(IFEQ, passed);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        break;
+      case STRING_END_ABSOLUTE:
+        // curPos == len
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        break;
+      case END:
+      case STRING_END:
+        // curPos == len || (curPos == len-1 && input.charAt(curPos) == '\n')
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        mv.visitJumpInsn(IF_ICMPEQ, passed);
+        mv.visitVarInsn(ILOAD, lenVar);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        break;
+      case END_MULTILINE:
+        // curPos == len || input.charAt(curPos) == '\n'
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        mv.visitJumpInsn(IF_ICMPEQ, passed);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        break;
+      default:
+        // WORD_BOUNDARY and others: treat as pass (mirrors legacy).
+        // TODO(perconfig): \b/\B are not evaluated here — if the legacy
+        // generateEpsilonClosureWithGroups ever starts evaluating them in-closure, this silently
+        // diverges. Backref patterns reaching this path with \b would need explicit handling.
+        break;
+    }
+    mv.visitLabel(passed);
+    for (NFA.NFAState target : state.getEpsilonTransitions()) {
+      emitPerConfigInnerPush(mv, seenVar, inWlVar, inSizeVar, target.id);
+    }
+  }
+
+  /**
+   * Per-config backreference: reads GLOBAL group arrays, and on success advances THIS config's own
+   * position (Defect B fix) by pushing eps targets at {@code curPos + L} onto the OUTER worklist.
+   * Dead branches jump to {@code worklistContinue}. Zero-length backref is an in-pos epsilon (push
+   * targets at curPos onto inner worklist).
+   */
+  private void emitPerConfigBackref(
+      MethodVisitor mv,
+      LocalVariableAllocator allocator,
+      NFA.NFAState state,
+      int groupStartsVar,
+      int groupEndsVar,
+      int seenVar,
+      int inWlVar,
+      int inSizeVar,
+      int curPosVar,
+      int lenVar,
+      int wlStateVar,
+      int wlPosVar,
+      int wlSizeVar,
+      Label worklistContinue) {
+    final int groupNum = state.backrefCheck;
+    int gsLocal = allocator.allocateInt();
+    int geLocal = allocator.allocateInt();
+    int lenLocal = allocator.allocateInt();
+
+    // gs = groupStarts[groupNum]; ge = groupEnds[groupNum];
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    pushInt(mv, groupNum);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, gsLocal);
+    mv.visitVarInsn(ALOAD, groupEndsVar);
+    pushInt(mv, groupNum);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, geLocal);
+
+    // if (gs < 0) dead
+    mv.visitVarInsn(ILOAD, gsLocal);
+    mv.visitJumpInsn(IFLT, worklistContinue);
+
+    // L = ge - gs; if (L < 0) dead
+    mv.visitVarInsn(ILOAD, geLocal);
+    mv.visitVarInsn(ILOAD, gsLocal);
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, lenLocal);
+    mv.visitVarInsn(ILOAD, lenLocal);
+    mv.visitJumpInsn(IFLT, worklistContinue);
+
+    // if (L == 0) { push eps targets at curPos (inner); done }
+    Label notZero = new Label();
+    mv.visitVarInsn(ILOAD, lenLocal);
+    mv.visitJumpInsn(IFNE, notZero);
+    for (NFA.NFAState target : state.getEpsilonTransitions()) {
+      emitPerConfigInnerPush(mv, seenVar, inWlVar, inSizeVar, target.id);
+    }
+    mv.visitJumpInsn(GOTO, worklistContinue);
+    mv.visitLabel(notZero);
+
+    // if (curPos + L > len) dead
+    mv.visitVarInsn(ILOAD, curPosVar);
+    mv.visitVarInsn(ILOAD, lenLocal);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, worklistContinue);
+
+    // if (!input.regionMatches([ic,] curPos, input, gs, L)) dead
+    mv.visitVarInsn(ALOAD, 1);
+    if (caseInsensitive) {
+      mv.visitInsn(ICONST_1);
+      mv.visitVarInsn(ILOAD, curPosVar);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, gsLocal);
+      mv.visitVarInsn(ILOAD, lenLocal);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ZILjava/lang/String;II)Z", false);
+    } else {
+      mv.visitVarInsn(ILOAD, curPosVar);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, gsLocal);
+      mv.visitVarInsn(ILOAD, lenLocal);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
+    }
+    mv.visitJumpInsn(IFEQ, worklistContinue);
+
+    // success: push each eps target at (curPos + L) onto the OUTER worklist (own pos advanced).
+    for (NFA.NFAState target : state.getEpsilonTransitions()) {
+      emitPushConfig(
+          mv,
+          wlStateVar,
+          wlPosVar,
+          wlSizeVar,
+          () -> pushInt(mv, target.id),
+          () -> {
+            mv.visitVarInsn(ILOAD, curPosVar);
+            mv.visitVarInsn(ILOAD, lenLocal);
+            mv.visitInsn(IADD);
+          });
+    }
+  }
+
+  /**
+   * Char-consume step for an epsilon-closure frontier state: for each state with char transitions,
+   * if it is the given frontier state and the transition matches {@code ch}, push the transition
+   * target at {@code curPos + 1} onto the OUTER worklist. Called once per frontier state reached by
+   * the inner closure (not just the popped seed), so {@code frontierStateVar} is the inner-closure
+   * state being expanded.
+   */
+  private void emitPerConfigConsume(
+      MethodVisitor mv,
+      List<NFA.NFAState> consumeStates,
+      int frontierStateVar,
+      int chVar,
+      int curPosVar,
+      int wlStateVar,
+      int wlPosVar,
+      int wlSizeVar) {
+    if (consumeStates.isEmpty()) {
+      return;
+    }
+    int[] keys = new int[consumeStates.size()];
+    Label[] labels = new Label[consumeStates.size()];
+    Integer[] order = new Integer[consumeStates.size()];
+    for (int i = 0; i < consumeStates.size(); i++) {
+      keys[i] = consumeStates.get(i).id;
+      order[i] = i;
+    }
+    Arrays.sort(order, (a, b) -> Integer.compare(keys[a], keys[b]));
+    int[] sortedKeys = new int[keys.length];
+    NFA.NFAState[] sortedStates = new NFA.NFAState[keys.length];
+    for (int i = 0; i < order.length; i++) {
+      sortedKeys[i] = keys[order[i]];
+      labels[i] = new Label();
+      sortedStates[i] = consumeStates.get(order[i]);
+    }
+    Label consumeDefault = new Label();
+    mv.visitVarInsn(ILOAD, frontierStateVar);
+    mv.visitLookupSwitchInsn(consumeDefault, sortedKeys, labels);
+    for (int i = 0; i < sortedStates.length; i++) {
+      mv.visitLabel(labels[i]);
+      NFA.NFAState state = sortedStates[i];
+      for (NFA.Transition trans : state.getTransitions()) {
+        Label noMatch = new Label();
+        generateCharSetCheck(mv, trans.chars, chVar);
+        mv.visitJumpInsn(IFEQ, noMatch);
+        emitPushConfig(
+            mv,
+            wlStateVar,
+            wlPosVar,
+            wlSizeVar,
+            () -> pushInt(mv, trans.target.id),
+            () -> {
+              mv.visitVarInsn(ILOAD, curPosVar);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(IADD);
+            });
+        mv.visitLabel(noMatch);
+      }
+      mv.visitJumpInsn(GOTO, consumeDefault);
+    }
+    mv.visitLabel(consumeDefault);
   }
 
   // ========== Dual-Long Slot Encoding Utilities ==========
@@ -1490,7 +2182,7 @@ public class NFABytecodeGenerator {
     mv.visitInsn(IRETURN);
     mv.visitLabel(inputNotNull);
 
-    if (nfaHasBackref() && Boolean.getBoolean("reggie.perconfig")) {
+    if (perConfigEligible() && Boolean.getBoolean("reggie.perconfig")) {
       generatePerConfigBody(mv, allocator, PerConfigMode.MATCHES, className);
       mv.visitMaxs(0, 0);
       mv.visitEnd();
