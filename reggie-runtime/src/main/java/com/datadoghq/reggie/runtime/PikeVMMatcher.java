@@ -61,11 +61,24 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // One per DFS depth level; bounded by stateCount.
   private final int[][] scratchCaptures;
 
+  // Per-clist-slot marker: true when the slot was added via a path that passed through TWO OR
+  // MORE distinct anchor states at pos=regionStart. This identifies unrolled-quantifier consuming
+  // threads (e.g. `a copy3` in `(^a?){3}` reached via copy1-^, copy2-^, copy3-^) while
+  // leaving single-anchor consuming threads (e.g. `b` in `\A(?:b|1)?` or `(^b)*`) untouched.
+  // The count is tracked as an `int anchorCount` parameter in addThread.
+  private final boolean[] clistViaMultipleAnchors;
+
   // NFA states indexed by id for O(1) lookup.
   private final NFA.NFAState[] statesById;
 
   // Accept-state mask for O(1) accept check.
   private final boolean[] isAccept;
+
+  // For each GroupExit state (indexed by state id): true when the group body can produce an
+  // empty match (i.e. there is an epsilon-only path from the corresponding GroupEntry to this
+  // GroupExit). Used by the trailing-empty-iteration rebind to avoid propagating captures when
+  // the loop body requires character consumption (e.g. `(.)+` vs `(.*[_]*)+`).
+  private final boolean[] groupBodyNullable;
 
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
@@ -83,11 +96,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
     inNlist = new boolean[stateCount];
     winCaptures = new int[slotCount];
     scratchCaptures = new int[stateCount + 1][slotCount];
+    clistViaMultipleAnchors = new boolean[stateCount];
 
     statesById = new NFA.NFAState[stateCount];
     for (NFA.NFAState s : nfa.getStates()) {
       statesById[s.id] = s;
     }
+
+    // Precompute groupBodyNullable: for each GroupExit state, determine whether there is
+    // an epsilon-only path from its matching GroupEntry to that GroupExit.
+    groupBodyNullable = computeGroupBodyNullable(nfa);
     isAccept = new boolean[stateCount];
     for (NFA.NFAState s : nfa.getAcceptStates()) {
       isAccept[s.id] = true;
@@ -152,8 +170,17 @@ public final class PikeVMMatcher extends ReggieMatcher {
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       // Look for an accept thread in the current list.
       for (int t = 0; t < clistSize; t++) {
-        if (isAccept[clistIds[t]] && pos == regionEnd) {
-          return true;
+        if (isAccept[clistIds[t]]) {
+          if (pos == regionEnd) return true;
+          // Zero-length accept at region start: JDK prevents consuming threads that traversed
+          // two or more distinct anchor states (e.g. copy2-^ and copy3-^ in (^a?){3}) from
+          // extending a zero-length match into a full-input match. Threads that passed through
+          // only one anchor (e.g. \A then 1 in \A(?:b|1)?) are retained as legitimate paths.
+          if (pos == regionStart) {
+            // keepLowerPriority=true: lower-priority threads may still produce a full-input match.
+            pruneAnchorDerivedAtStart(t, true);
+            break;
+          }
         }
       }
       if (pos == regionEnd) break;
@@ -171,10 +198,17 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       for (int t = 0; t < clistSize; t++) {
-        if (isAccept[clistIds[t]] && pos == regionEnd) {
-          int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
-          caps[1] = pos;
-          return buildResult(input, caps);
+        if (isAccept[clistIds[t]]) {
+          if (pos == regionEnd) {
+            int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
+            caps[1] = pos;
+            return buildResult(input, caps);
+          }
+          // Same zero-length-accept pruning as runMatches(), keeping lower-priority threads.
+          if (pos == regionStart) {
+            pruneAnchorDerivedAtStart(t, true);
+            break;
+          }
         }
       }
       if (pos == regionEnd) break;
@@ -241,6 +275,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // (but will at a later position) override the current accept — giving greedy longest-match from
     // the highest-priority thread (e.g. (_)? prefers consuming _ over the empty match, while
     // (fo|foo) prefers "fo" over "foo" since "fo" is the higher-priority first alternative).
+    //
+    // Exception — zero-length match at tryPos: JDK semantics prevent anchor-derived consuming
+    // threads from overriding a zero-length accept. When the first accept fires at tryPos,
+    // retain only non-anchor-derived higher-priority threads so that legitimate greedy consuming
+    // paths (e.g. `a` in `(a)*`) can still extend the match while anchor-driven empty-iteration
+    // consuming paths (e.g. `a` copy3 in `(^a?){3}`) cannot.
     MatchResult best = null;
 
     for (int pos = tryPos; pos <= regionEnd; pos++) {
@@ -249,7 +289,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
           int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
           caps[1] = pos;
           best = buildResult(input, caps);
-          clistSize = t; // discard lower-priority threads (indices > t); keep higher (0..t-1)
+          if (pos == tryPos) {
+            // Zero-length match at start: prune anchor-derived high-priority threads; discard
+            // lower-priority threads (keepLowerPriority=false) per Perl priority rules.
+            pruneAnchorDerivedAtStart(t, false);
+          } else {
+            clistSize = t;
+          }
           break;
         }
       }
@@ -274,7 +320,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     int[] init = scratchCaptures[0];
     Arrays.fill(init, -1);
     init[0] = pos; // tentative whole-match start
-    addThread(nfa.getStartState(), init, pos, 0, input, regionStart, regionEnd);
+    addThread(nfa.getStartState(), init, pos, 0, 0, false, input, regionStart, regionEnd);
   }
 
   /** Advance each thread in clist by character {@code ch}, populating nlist. */
@@ -300,12 +346,23 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * Add a thread rooted at {@code state} to clist. Performs a DFS through epsilon transitions in
    * insertion order (= Perl priority). Capture slots are updated inline for enterGroup/exitGroup
    * states.
+   *
+   * <p>{@code anchorCount} counts the distinct anchor states that fired at pos=regionStart on the
+   * DFS path from the clist root to {@code state}. {@code anchorFollowedBySkip} is set when a
+   * non-first epsilon (i.e. a quantifier-skip path) of a non-anchor, non-group state was traversed
+   * while {@code anchorCount > 0}. Leaf states are marked in {@link #clistViaMultipleAnchors} when
+   * both {@code anchorFollowedBySkip} is true and {@code anchorCount >= 2}: this identifies
+   * unrolled-quantifier consuming threads (e.g. {@code a copy3} in {@code (^a?){3}}) that arrived
+   * via anchor firings interleaved with quantifier skips, distinguishing them from direct-sequence
+   * anchored paths (e.g. {@code \A{3}a} where anchorFollowedBySkip remains false).
    */
   private void addThread(
       NFA.NFAState state,
       int[] captures,
       int pos,
       int depth,
+      int anchorCount,
+      boolean anchorFollowedBySkip,
       String input,
       int regionStart,
       int regionEnd) {
@@ -314,8 +371,18 @@ public final class PikeVMMatcher extends ReggieMatcher {
     if (state.anchor != null) {
       if (!checkAnchor(state.anchor, input, pos, regionStart, regionEnd)) return;
       inClist[state.id] = true;
+      // Increment the anchor count; anchorFollowedBySkip is not reset by anchor firing.
       for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThread(next, captures, pos, depth, input, regionStart, regionEnd);
+        addThread(
+            next,
+            captures,
+            pos,
+            depth,
+            anchorCount + 1,
+            anchorFollowedBySkip,
+            input,
+            regionStart,
+            regionEnd);
       }
       return;
     }
@@ -325,8 +392,48 @@ public final class PikeVMMatcher extends ReggieMatcher {
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
       inClist[state.id] = true;
-      for (NFA.NFAState next : epsilons) {
-        addThread(next, ownCaptures, pos, depth + 1, input, regionStart, regionEnd);
+      int[] passedCaptures = ownCaptures;
+      // Determine the "skip-after-anchor" flag for each epsilon child: set to true when
+      // taking a non-first epsilon of a non-anchor, non-group state while anchors have fired.
+      // This identifies quantifier-skip paths (e.g. a? skip to next copy) as distinct from
+      // anchor-chaining epsilons (e.g. \A{3}a where consecutive \A anchors fire in sequence).
+      boolean isQuantifierSkipContext =
+          anchorCount > 0
+              && state.anchor == null
+              && state.enterGroup == null
+              && state.exitGroup == null;
+      for (int i = 0; i < epsilons.size(); i++) {
+        NFA.NFAState next = epsilons.get(i);
+        boolean childAnchorFollowedBySkip =
+            anchorFollowedBySkip || (i > 0 && isQuantifierSkipContext);
+        // Trailing-empty-iteration rebind: when the loop-back epsilon of a '+' quantifier
+        // enters a capturing group (enterGroup) and that group was not already in clist, the
+        // addThread call below will run updateCaptures(GroupEntry, ...) writing updated
+        // group-start into scratchCaptures[depth+2]. Record this BEFORE the call so we can
+        // propagate those captures to subsequent sibling epsilons (e.g. the exit/accept path).
+        // Scoped to loop-back: only propagate when the current state is a group EXIT (exitGroup
+        // not null), which identifies the "GroupExit → GroupEntry loop-back" pattern of '+' and
+        // '*'. For '?' entry states (exitGroup==null), the siblings are independent optional/skip
+        // paths and must not receive updated captures from the try-match sibling.
+        boolean willUpdateGroupEntry =
+            state.exitGroup != null
+                && groupBodyNullable[state.id]
+                && next.enterGroup != null
+                && !inClist[next.id];
+        addThread(
+            next,
+            passedCaptures,
+            pos,
+            depth + 1,
+            anchorCount,
+            childAnchorFollowedBySkip,
+            input,
+            regionStart,
+            regionEnd);
+        if (willUpdateGroupEntry) {
+          int scratchIdx = Math.min(depth + 2, scratchCaptures.length - 1);
+          passedCaptures = scratchCaptures[scratchIdx];
+        }
       }
       return;
     }
@@ -335,6 +442,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
     inClist[state.id] = true;
     clistIds[clistSize] = state.id;
     System.arraycopy(ownCaptures, 0, clistCaptures[clistSize], 0, ownCaptures.length);
+    // Mark as "via skip-after-anchor with 2+ anchor fires": signals unrolled-quantifier
+    // consuming threads that must not override a zero-length match (e.g. `a copy3` in
+    // `(^a?){3}` but NOT `a` in `\A{3}a` where anchorFollowedBySkip remains false).
+    clistViaMultipleAnchors[clistSize] = anchorFollowedBySkip && anchorCount >= 2;
     clistSize++;
   }
 
@@ -363,8 +474,23 @@ public final class PikeVMMatcher extends ReggieMatcher {
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
       inNlist[state.id] = true;
+      int[] passedCaptures = ownCaptures;
       for (NFA.NFAState next : epsilons) {
-        addThreadToNlist(next, ownCaptures, pos, depth + 1, input, regionStart, regionEnd);
+        // Trailing-empty-iteration rebind: mirror the scoped logic from addThread above.
+        // Only propagate when the current state is a group EXIT (loop-back context) AND
+        // the group body is nullable (can produce an empty match). The nullable check prevents
+        // spurious rebind when the loop body requires character consumption (e.g. `(.)+`
+        // cannot empty-iterate, so the capture must not be rebound to [pos,pos)).
+        boolean willUpdateGroupEntry =
+            state.exitGroup != null
+                && groupBodyNullable[state.id]
+                && next.enterGroup != null
+                && !inNlist[next.id];
+        addThreadToNlist(next, passedCaptures, pos, depth + 1, input, regionStart, regionEnd);
+        if (willUpdateGroupEntry) {
+          int scratchIdx = Math.min(depth + 2, scratchCaptures.length - 1);
+          passedCaptures = scratchCaptures[scratchIdx];
+        }
       }
       return;
     }
@@ -438,7 +564,51 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // Full clear: selective clearing misses non-leaf epsilon states whose inClist flag was set
     // inside addThread but whose id was never appended to clistIds.
     Arrays.fill(inClist, false);
+    Arrays.fill(clistViaMultipleAnchors, false);
     clistSize = 0;
+  }
+
+  /**
+   * Prune clist when a zero-length accept is detected at the start position.
+   *
+   * <p>For {@code matches()}/{@code match()} (called with {@code keepLowerPriority=true}): removes
+   * multi-anchor-derived threads at indices 0..{@code acceptIdx-1} (higher priority), then appends
+   * the lower-priority threads at indices {@code acceptIdx+1..clistSize-1}. This preserves
+   * legitimate consuming threads like {@code b} in {@code a?|b} (lower priority than the empty
+   * accept) that are still needed to satisfy a full-input match.
+   *
+   * <p>For {@code findMatch()} (called with {@code keepLowerPriority=false}): same high-priority
+   * pruning, but lower-priority threads (t &gt; acceptIdx) are discarded per Perl priority rules (a
+   * lower-priority thread cannot produce a better match than the current best).
+   *
+   * <p>The inClist flags for removed multi-anchor-derived threads remain {@code true} so they
+   * cannot re-enter clist through subsequent character steps.
+   */
+  private void pruneAnchorDerivedAtStart(int acceptIdx, boolean keepLowerPriority) {
+    int write = 0;
+    for (int t = 0; t < acceptIdx; t++) {
+      if (!clistViaMultipleAnchors[t]) {
+        if (write != t) {
+          clistIds[write] = clistIds[t];
+          System.arraycopy(clistCaptures[t], 0, clistCaptures[write], 0, clistCaptures[t].length);
+          clistViaMultipleAnchors[write] = false;
+        }
+        write++;
+      }
+      // multi-anchor-derived: leave inClist[id]=true so the thread cannot re-enter
+    }
+    if (keepLowerPriority) {
+      // Append lower-priority threads (t > acceptIdx) — needed for full-input match checks.
+      for (int t = acceptIdx + 1; t < clistSize; t++) {
+        if (write != t) {
+          clistIds[write] = clistIds[t];
+          System.arraycopy(clistCaptures[t], 0, clistCaptures[write], 0, clistCaptures[t].length);
+          clistViaMultipleAnchors[write] = clistViaMultipleAnchors[t];
+        }
+        write++;
+      }
+    }
+    clistSize = write;
   }
 
   private void resetNlist() {
@@ -478,6 +648,60 @@ public final class PikeVMMatcher extends ReggieMatcher {
       ends[g] = caps[2 * g + 1];
     }
     return new MatchResultImpl(input, starts, ends, groupCount, Collections.emptyMap());
+  }
+
+  /**
+   * Precompute, for each GroupExit state, whether the group body is nullable (can produce an empty
+   * match). This is true when there exists an epsilon-only path from the corresponding GroupEntry
+   * to the GroupExit. Used to guard the trailing-empty-iteration rebind: propagation happens only
+   * when the group body is nullable, matching JDK semantics that prevent rebind when the loop body
+   * requires character consumption (e.g. {@code (.)+} has a non-nullable body; propagation must not
+   * fire there even though the GroupExit → GroupEntry loop-back epsilon exists).
+   */
+  private static boolean[] computeGroupBodyNullable(NFA nfa) {
+    List<NFA.NFAState> states = nfa.getStates();
+    int n = states.size();
+    boolean[] nullable = new boolean[n];
+    // For each state, determine if it can reach itself (or a GroupExit peer) via epsilon-only
+    // paths.
+    // We compute per-state epsilon-closure reachability (boolean[] of reachable state IDs).
+    // Since groups match GroupEntry → body → GroupExit, we check:
+    // for each GroupEntry state E, can GroupExit state X (E's pair) be reached via epsilon only?
+    //
+    // Approach: compute epsilon closure of each GroupEntry, mark GroupExit states reachable.
+    // The epsilon closure is computed as a simple BFS/DFS over epsilon transitions.
+    NFA.NFAState[] byId = new NFA.NFAState[n];
+    for (NFA.NFAState s : states) {
+      byId[s.id] = s;
+    }
+    // For each GroupExit state, check if it's reachable from the corresponding GroupEntry.
+    // We identify GroupEntry states (those with enterGroup != null) and track which GroupExit
+    // states (with exitGroup == enterGroup) are reachable via epsilon.
+    boolean[] visited = new boolean[n];
+    int[] stack = new int[n];
+    for (NFA.NFAState entryState : states) {
+      if (entryState.enterGroup == null) continue;
+      Integer groupId = entryState.enterGroup;
+      // BFS/DFS epsilon-only reachability from entryState
+      Arrays.fill(visited, false);
+      int top = 0;
+      stack[top++] = entryState.id;
+      visited[entryState.id] = true;
+      while (top > 0) {
+        NFA.NFAState cur = byId[stack[--top]];
+        if (cur.exitGroup != null && cur.exitGroup.equals(groupId)) {
+          // Found the matching GroupExit reachable via epsilon from this GroupEntry.
+          nullable[cur.id] = true;
+        }
+        for (NFA.NFAState next : cur.getEpsilonTransitions()) {
+          if (!visited[next.id]) {
+            visited[next.id] = true;
+            stack[top++] = next.id;
+          }
+        }
+      }
+    }
+    return nullable;
   }
 
   private static MatchResult shiftResult(MatchResult r, int delta, String originalInput) {

@@ -809,7 +809,10 @@ public class PatternAnalyzer {
         // PikeVMMatcher.checkAnchor correctly handles $ before a trailing newline.
         // This mirrors the identical guard-free routing in the ignoreGroupCount=true path.
         if (dfa.isAnchorConditionDiluted()) {
-          if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+          // Anchor condition diluted in DFA: capture-ambiguous patterns are safe for PikeVM
+          // because PikeVM evaluates anchors natively per position (via checkAnchor) and tracks
+          // captures per thread. Non-capture-ambiguous patterns fall back to OPTIMIZED_NFA.
+          if (dfa.isCaptureAmbiguous()) {
             return new MatchingStrategyResult(
                 MatchingStrategy.PIKEVM_CAPTURE,
                 null,
