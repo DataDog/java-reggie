@@ -482,7 +482,20 @@ re-deriving:
    The generator takes one generation-time boolean and emits delegate-or-throw — no runtime field,
    no path-specific branching.
 
-### Task 8: Backref-capable PikeVM (interpreted, principled priority) — ⚠️ NEXT
+### Task 8: principled backref engine
+
+> **OUTCOME (2026-06-16): shape B built, FAILED the benchmark gate → escalating to 8-full.** The
+> interpreted `BackrefBacktrackMatcher` (memoized priority-DFS) is **correct** (12,817 differential
+> checks vs JDK; one documented self-ref deviation) but **30-100× slower than `java.util.regex`** on
+> common backref patterns — memoization is pure overhead on patterns JDK doesn't blow up on, and
+> allocation tuning can't close a 50× gap. Per the pre-stated criterion (<1× → escalate), routing was
+> reverted (commit `ff58f19`); the interpreted matcher + differential tests are **kept as the
+> correctness oracle**. **Now building "8-full": the same memoized-priority-DFS algorithm generated in
+> bytecode**, validated against the oracle. ⚠️ Open risk: the memo overhead is algorithmic, so even
+> compiled it may not beat JDK on simple AVD=1 patterns — calibrate against the existing Task-7 native
+> engine. See "Escalation alternatives → 8-full" below.
+
+#### (historical) Shape B — interpreted PikeVM-style backref matcher
 
 > **Decided 2026-06-16 (design pass → adversarial review → fork resolution).** Two earlier framings
 > were rejected: "small open-addressing hash" (under-scoped — dedup without priority regresses P1's
