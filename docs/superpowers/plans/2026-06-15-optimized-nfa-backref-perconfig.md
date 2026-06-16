@@ -379,36 +379,54 @@ Expected: builds; no `VerifyError`.
 
 Goal: give each configuration its own capture spans so `\1` resolves against the spans on *its own* path, and add a dedup key so the worklist cannot blow up on revisited configurations.
 
-### Task 7: Per-config capture columns
+### Task 7: Per-config capture columns — ✅ DONE (Alt A: outer columns only)
+
+**Decision (2026-06-16):** Adversarial review + a spike showed the 3 target over-matches are caused
+entirely by **Defect A1** (cross-config clobbering of the *shared global* capture arrays), not by
+the same-pos within-closure merge (**Defect A2**). Outer capture columns alone — without the inner
+closure becoming capture-aware ("Alt B") — flip all 3 targets green AND leave P1's spans intact.
+Alt B's inner-closure rewrite was therefore **not built**; A2 is recorded as a deferred gap below.
 
 **Files:**
 - Modify: `reggie-codegen/.../codegen/NFABytecodeGenerator.java`
 
-- [ ] **Step 1: Extend config layout with capture columns**
+- [x] **Step 1: Outer per-config capture columns**
 
-Replace global capture reads/writes (Phase 1) with per-config columns. For `groupCount` groups, store starts/ends per worklist slot:
+Each outer worklist slot gets its own capture row:
 
 ```text
 int[] wlGS = new int[CAP * (groupCount+1)];   // wlGS[i*(gc+1)+g] = config i's start of group g
 int[] wlGE = new int[CAP * (groupCount+1)];
 ```
 
-`pushConfig` now copies the parent config's capture row into the child's row (System.arraycopy semantics, emitted inline) and then applies the child's enter/exit update at `pos`. This is the only correctness-critical allocation; arrays are preallocated once at method entry → hot loop stays allocation-free.
+The global `groupStarts/groupEnds` become a **scratch working row**: loaded from the popped
+config's row on each outer pop (`System.arraycopy(wlGS, wlSize*width, groupStarts, 0, width)`),
+mutated in-place by the inner closure's enterGroup/exitGroup, read by the backref, and **snapshotted
+into the child slot** by `emitPushConfig` on every outer push (char consume, non-empty backref).
+New helper `emitRowCopy`. Arrays preallocated once at method entry → hot loop allocation-free.
+The inner `seen[]` closure is unchanged (still state-only dedup — that is the A2 gap).
 
-- [ ] **Step 2: Backref reads config-local spans**
+- [x] **Step 2: Backref reads config-local spans**
 
-In Task 4's `onBackref`, read `gs = wlGS[curIdx*(gc+1)+g]`, `ge = wlGE[...]` instead of the global arrays.
+No code change needed beyond Step 1: the backref already reads `groupStarts/groupEnds`, which now
+hold the popped config's own row (loaded on pop), so `\1` resolves against the spans on *its own*
+config's path.
 
-- [ ] **Step 3: Run targets**
+- [x] **Step 3: Run targets** — `targetsAgreeWithJdk_acrossInputs` PASS (boolean + span);
+  `regressionPatternsStayCorrect` PASS; `StrategyCorrectnessMetaTest` + `*Backref*` + full
+  `:reggie-runtime:test` PASS; `:reggie-benchmark:build` clean (no VerifyError).
 
-Run: `./gradlew :reggie-runtime:test --tests PerConfigBackrefRegressionTest`
-Expected: `targetsAgreeWithJdk_acrossInputs` now PASS (boolean + span). `regressionPatternsStayCorrect` still PASS.
+- [x] **Step 4: Commit** — `fix: per-config capture columns for backref resolution (Alt A, fixes 3 targets)`
 
-- [ ] **Step 4: Commit**
+#### Deferred gap — Defect A2 (same-pos within-closure capture merge)
 
-```bash
-./gradlew spotlessApply && git add -A && git commit -m "fix: per-config capture spans for backref resolution (Alt 1, fixes 3 targets)"
-```
+The inner epsilon-closure still dedups by `stateId` only (`emitPerConfigInnerPush`), so two eps
+paths reaching the same state at the same pos with *different* group spans are merged
+(last-write-wins on the working row). This cannot affect the 3 targets or the current regression
+corpus (verified: the backref states are reached after their referenced group is closed, so no
+same-pos re-entry occurs). **Close A2 only if the Task 12 fuzz gate surfaces a pattern that needs
+it** — at which point implement "Alt B" (capture-aware inner closure: per-entry rows + dedup keyed
+on `(state, row)`). Do not build it speculatively.
 
 ### Task 8: Configuration dedup key + leftmost-priority ordering
 
@@ -442,7 +460,14 @@ Expected: all green.
 
 Goal: guarantee O(n) **by construction**. Primary mechanism = compile-time active-variable-degree routing: patterns whose AVD exceeds a threshold route to fallback so every *natively compiled* backref pattern is near-linear. Runtime cap = defensive backstop.
 
-### Task 9: Runtime configuration cap (defensive)
+### Task 9: Runtime configuration cap (defensive) — ⚠️ URGENT (re-ranked 2026-06-16)
+
+**Priority bump:** Task 6 already removed the `-Dreggie.perconfig` gate, so the per-config path is
+live for all backref NFAs, and `PER_CONFIG_CAP=256` currently **silently drops** configs on
+overflow — a false negative that violates the project Correctness Guarantee. Task 7 (Alt A) added
+per-config capture rows, which modestly increases config count. Until this task lands, an
+AVD>1 / high-fan-out backref pattern can overflow and return a wrong answer with no signal. This
+should be done **before** Tasks 10–11.
 
 **Files:**
 - Modify: `reggie-codegen/.../codegen/NFABytecodeGenerator.java`

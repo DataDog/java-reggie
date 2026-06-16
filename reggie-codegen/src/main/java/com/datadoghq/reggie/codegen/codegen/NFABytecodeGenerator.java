@@ -355,6 +355,22 @@ public class NFABytecodeGenerator {
     FIND_LONGEST_END
   }
 
+  @FunctionalInterface
+  private interface PerConfigAcceptCond {
+    /** Emit a conditional jump to {@code skipAccept} when the accept condition is NOT met. */
+    void emit(Label skipAccept);
+  }
+
+  @FunctionalInterface
+  private interface PerConfigAcceptAct {
+    /**
+     * Emit the accept action. Either terminates with a return instruction, or falls through to the
+     * label immediately following (used when the closure dispatch should still run after noting the
+     * accept, e.g. {@link PerConfigMode#FIND_LONGEST_END}).
+     */
+    void emit();
+  }
+
   /**
    * Phase-1 fixed capacity for the per-config outer worklist.
    *
@@ -389,6 +405,11 @@ public class NFABytecodeGenerator {
       int wlStateVar,
       int wlPosVar,
       int wlSizeVar,
+      int wlGSVar,
+      int wlGEVar,
+      int groupStartsVar,
+      int groupEndsVar,
+      int width,
       Runnable pushStateId,
       Runnable pushPos) {
     Label full = new Label();
@@ -409,10 +430,40 @@ public class NFABytecodeGenerator {
     pushPos.run();
     mv.visitInsn(IASTORE);
 
+    // Snapshot the working capture row into the child config's row (Alt A: per-config captures).
+    // System.arraycopy(groupStarts, 0, wlGS, wlSize*width, width); likewise groupEnds -> wlGE.
+    Runnable destPos =
+        () -> {
+          mv.visitVarInsn(ILOAD, wlSizeVar);
+          pushInt(mv, width);
+          mv.visitInsn(IMUL);
+        };
+    emitRowCopy(mv, groupStartsVar, () -> mv.visitInsn(ICONST_0), wlGSVar, destPos, width);
+    emitRowCopy(mv, groupEndsVar, () -> mv.visitInsn(ICONST_0), wlGEVar, destPos, width);
+
     // wlSize++;
     mv.visitIincInsn(wlSizeVar, 1);
 
     mv.visitLabel(full);
+  }
+
+  /**
+   * Emit {@code System.arraycopy(src, <srcPos>, dst, <dstPos>, width)} for one capture row. {@code
+   * srcPos}/{@code dstPos} each push exactly one int onto the operand stack.
+   */
+  private void emitRowCopy(
+      MethodVisitor mv, int srcVar, Runnable srcPos, int dstVar, Runnable dstPos, int width) {
+    mv.visitVarInsn(ALOAD, srcVar);
+    srcPos.run();
+    mv.visitVarInsn(ALOAD, dstVar);
+    dstPos.run();
+    pushInt(mv, width);
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "java/lang/System",
+        "arraycopy",
+        "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+        false);
   }
 
   /**
@@ -443,8 +494,13 @@ public class NFABytecodeGenerator {
    */
   private void generatePerConfigBody(
       MethodVisitor mv, LocalVariableAllocator allocator, PerConfigMode mode, String className) {
-    if (mode != PerConfigMode.MATCHES) {
-      throw new UnsupportedOperationException("per-config: only MATCHES implemented in this phase");
+    if (mode == PerConfigMode.FIND_FROM) {
+      emitPerConfigFindFromBody(mv, allocator, className);
+      return;
+    }
+    if (mode == PerConfigMode.FIND_LONGEST_END) {
+      emitPerConfigFindLongestEndBody(mv, allocator, className);
+      return;
     }
 
     final int groupCount = nfa.getGroupCount();
@@ -485,11 +541,14 @@ public class NFABytecodeGenerator {
     }
 
     // ---- Slots (allocated once, before any loop) ----
+    final int width = groupCount + 1; // capture-row width (Alt A: per-config capture columns)
     int lenVar = allocator.allocateInt();
     int groupStartsVar = allocator.allocateRef();
     int groupEndsVar = allocator.allocateRef();
     int wlStateVar = allocator.allocateRef();
     int wlPosVar = allocator.allocateRef();
+    int wlGSVar = allocator.allocateRef(); // per-config group starts (CAP rows of width)
+    int wlGEVar = allocator.allocateRef(); // per-config group ends
     int wlSizeVar = allocator.allocateInt();
     int seenVar = allocator.allocateRef();
     int curStateVar = allocator.allocateInt();
@@ -500,12 +559,17 @@ public class NFABytecodeGenerator {
     int chVar = allocator.allocateInt();
 
     // ---- Init ----
-    // len = input.length();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitVarInsn(ISTORE, lenVar);
+    // len = input.length()  OR  end (slot 3) for MATCH_BOUNDED
+    if (mode == PerConfigMode.MATCH_BOUNDED) {
+      mv.visitVarInsn(ILOAD, 3);
+      mv.visitVarInsn(ISTORE, lenVar);
+    } else {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitVarInsn(ISTORE, lenVar);
+    }
 
-    // int[] groupStarts/groupEnds = new int[groupCount + 1]; fill -1; groupStarts[0] = 0;
+    // int[] groupStarts/groupEnds = new int[groupCount + 1]; fill -1; groupStarts[0] = start;
     pushInt(mv, groupCount + 1);
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitVarInsn(ASTORE, groupStartsVar);
@@ -524,7 +588,11 @@ public class NFABytecodeGenerator {
     }
     mv.visitVarInsn(ALOAD, groupStartsVar);
     mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0);
+    if (mode == PerConfigMode.MATCH_BOUNDED) {
+      mv.visitVarInsn(ILOAD, 2); // start (slot 2)
+    } else {
+      mv.visitInsn(ICONST_0);
+    }
     mv.visitInsn(IASTORE);
 
     // Outer worklist arrays + inner closure arrays (allocated once).
@@ -540,18 +608,126 @@ public class NFABytecodeGenerator {
     pushInt(mv, seenSize);
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitVarInsn(ASTORE, inWlVar);
+    // Per-config capture rows: wlGS/wlGE = new int[CAP * width].
+    pushInt(mv, PER_CONFIG_CAP * width);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlGSVar);
+    pushInt(mv, PER_CONFIG_CAP * width);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlGEVar);
 
-    // seed: wlState[0] = startState.id; wlPos[0] = 0; wlSize = 1;
+    // seed: wlState[0] = startStateId; wlPos[0] = start (MATCH_BOUNDED: slot 2) or 0; wlSize = 1;
     mv.visitVarInsn(ALOAD, wlStateVar);
     mv.visitInsn(ICONST_0);
     pushInt(mv, startStateId);
     mv.visitInsn(IASTORE);
     mv.visitVarInsn(ALOAD, wlPosVar);
     mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0);
+    if (mode == PerConfigMode.MATCH_BOUNDED) {
+      mv.visitVarInsn(ILOAD, 2); // start (slot 2)
+    } else {
+      mv.visitInsn(ICONST_0);
+    }
     mv.visitInsn(IASTORE);
     mv.visitInsn(ICONST_1);
     mv.visitVarInsn(ISTORE, wlSizeVar);
+    // seed config's capture row (row 0) = the initial working row.
+    emitRowCopy(
+        mv,
+        groupStartsVar,
+        () -> mv.visitInsn(ICONST_0),
+        wlGSVar,
+        () -> mv.visitInsn(ICONST_0),
+        width);
+    emitRowCopy(
+        mv,
+        groupEndsVar,
+        () -> mv.visitInsn(ICONST_0),
+        wlGEVar,
+        () -> mv.visitInsn(ICONST_0),
+        width);
+
+    // ---- Accept lambdas (mode-specific) ----
+    PerConfigAcceptCond acceptCond =
+        (skip) -> {
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitVarInsn(ILOAD, lenVar);
+          mv.visitJumpInsn(IF_ICMPNE, skip);
+        };
+    final PerConfigAcceptAct acceptAct;
+    switch (mode) {
+      case MATCHES:
+        acceptAct =
+            () -> {
+              mv.visitVarInsn(ALOAD, groupEndsVar);
+              mv.visitInsn(ICONST_0);
+              mv.visitVarInsn(ILOAD, lenVar);
+              mv.visitInsn(IASTORE);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(IRETURN);
+            };
+        break;
+      case MATCH:
+      case MATCH_BOUNDED:
+        acceptAct =
+            () -> {
+              // groupEnds[0] = lenVar (whole-match end: curPos == lenVar at accept).
+              mv.visitVarInsn(ALOAD, groupEndsVar);
+              mv.visitInsn(ICONST_0);
+              mv.visitVarInsn(ILOAD, lenVar);
+              mv.visitInsn(IASTORE);
+              mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
+              mv.visitInsn(DUP);
+              mv.visitVarInsn(ALOAD, 1);
+              mv.visitVarInsn(ALOAD, groupStartsVar);
+              mv.visitVarInsn(ALOAD, groupEndsVar);
+              pushInt(mv, groupCount);
+              mv.visitMethodInsn(
+                  INVOKESPECIAL,
+                  "com/datadoghq/reggie/runtime/MatchResultImpl",
+                  "<init>",
+                  "(Ljava/lang/String;[I[II)V",
+                  false);
+              mv.visitInsn(ARETURN);
+            };
+        break;
+      case MATCH_INTO:
+        acceptAct =
+            () -> {
+              // groupEnds[0] = lenVar (whole-match end).
+              mv.visitVarInsn(ALOAD, groupEndsVar);
+              mv.visitInsn(ICONST_0);
+              mv.visitVarInsn(ILOAD, lenVar);
+              mv.visitInsn(IASTORE);
+              mv.visitVarInsn(ALOAD, groupStartsVar);
+              mv.visitInsn(ICONST_0);
+              mv.visitVarInsn(ALOAD, 2); // outStarts (slot 2)
+              mv.visitInsn(ICONST_0);
+              pushInt(mv, groupCount + 1);
+              mv.visitMethodInsn(
+                  INVOKESTATIC,
+                  "java/lang/System",
+                  "arraycopy",
+                  "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+                  false);
+              mv.visitVarInsn(ALOAD, groupEndsVar);
+              mv.visitInsn(ICONST_0);
+              mv.visitVarInsn(ALOAD, 3); // outEnds (slot 3)
+              mv.visitInsn(ICONST_0);
+              pushInt(mv, groupCount + 1);
+              mv.visitMethodInsn(
+                  INVOKESTATIC,
+                  "java/lang/System",
+                  "arraycopy",
+                  "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+                  false);
+              mv.visitInsn(ICONST_1);
+              mv.visitInsn(IRETURN);
+            };
+        break;
+      default:
+        throw new UnsupportedOperationException("per-config: unsupported mode " + mode);
+    }
 
     // ---- Outer loop: while (wlSize > 0) ----
     Label outerLoop = new Label();
@@ -570,6 +746,17 @@ public class NFABytecodeGenerator {
     mv.visitVarInsn(ILOAD, wlSizeVar);
     mv.visitInsn(IALOAD);
     mv.visitVarInsn(ISTORE, curPosVar);
+
+    // Load this config's capture row into the working arrays (Alt A: per-config captures).
+    // System.arraycopy(wlGS, wlSize*width, groupStarts, 0, width); likewise wlGE -> groupEnds.
+    Runnable popSrcPos =
+        () -> {
+          mv.visitVarInsn(ILOAD, wlSizeVar);
+          pushInt(mv, width);
+          mv.visitInsn(IMUL);
+        };
+    emitRowCopy(mv, wlGSVar, popSrcPos, groupStartsVar, () -> mv.visitInsn(ICONST_0), width);
+    emitRowCopy(mv, wlGEVar, popSrcPos, groupEndsVar, () -> mv.visitInsn(ICONST_0), width);
 
     // Clear seen[] for this fixed-pos inner closure: java.util.Arrays.fill(seen, 0);
     mv.visitVarInsn(ALOAD, seenVar);
@@ -614,7 +801,19 @@ public class NFABytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
     emitPerConfigConsume(
-        mv, consumeStates, inStateVar, chVar, curPosVar, wlStateVar, wlPosVar, wlSizeVar);
+        mv,
+        consumeStates,
+        inStateVar,
+        chVar,
+        curPosVar,
+        wlStateVar,
+        wlPosVar,
+        wlSizeVar,
+        wlGSVar,
+        wlGEVar,
+        groupStartsVar,
+        groupEndsVar,
+        width);
     mv.visitLabel(noConsume);
 
     // Zero-width expansion of inState at curPos (accept / group / anchor / backref / plain eps).
@@ -634,7 +833,12 @@ public class NFABytecodeGenerator {
         wlStateVar,
         wlPosVar,
         wlSizeVar,
-        innerLoop);
+        wlGSVar,
+        wlGEVar,
+        width,
+        innerLoop,
+        acceptCond,
+        acceptAct);
 
     mv.visitJumpInsn(GOTO, innerLoop);
     mv.visitLabel(innerEnd);
@@ -642,8 +846,527 @@ public class NFABytecodeGenerator {
     mv.visitJumpInsn(GOTO, outerLoop);
     mv.visitLabel(outerEnd);
 
-    // No accepting configuration found.
+    // No accepting configuration found — mode-specific return value.
+    if (mode == PerConfigMode.MATCHES || mode == PerConfigMode.MATCH_INTO) {
+      mv.visitInsn(ICONST_0);
+      mv.visitInsn(IRETURN);
+    } else {
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+    }
+  }
+
+  /**
+   * Per-config body for {@link PerConfigMode#FIND_FROM}: iterates start positions from {@code
+   * start} (slot 2) to {@code len} and returns the first position where the NFA reaches an accept
+   * state. Returns -1 if no such position exists. Phase-1 only — span correctness deferred to Task
+   * 8.
+   */
+  private void emitPerConfigFindFromBody(
+      MethodVisitor mv, LocalVariableAllocator allocator, String className) {
+    final int startStateId = nfa.getStartState().id;
+    int maxStateId = 0;
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.id > maxStateId) maxStateId = s.id;
+    }
+    final int seenSize = maxStateId + 1;
+    final int groupCount = nfa.getGroupCount();
+
+    Set<Integer> acceptIds = new HashSet<>();
+    for (NFA.NFAState a : nfa.getAcceptStates()) acceptIds.add(a.id);
+
+    List<NFA.NFAState> closureStates = new ArrayList<>();
+    for (NFA.NFAState state : nfa.getStates()) {
+      if (state.enterGroup != null
+          || state.exitGroup != null
+          || state.backrefCheck != null
+          || state.anchor != null
+          || !state.getEpsilonTransitions().isEmpty()
+          || acceptIds.contains(state.id)) {
+        closureStates.add(state);
+      }
+    }
+    List<NFA.NFAState> consumeStates = new ArrayList<>();
+    for (NFA.NFAState state : nfa.getStates()) {
+      if (!state.getTransitions().isEmpty()) consumeStates.add(state);
+    }
+
+    final int width = groupCount + 1; // capture-row width (Alt A: per-config capture columns)
+    int lenVar = allocator.allocateInt();
+    int tryPosVar = allocator.allocateInt();
+    int groupStartsVar = allocator.allocateRef();
+    int groupEndsVar = allocator.allocateRef();
+    int wlStateVar = allocator.allocateRef();
+    int wlPosVar = allocator.allocateRef();
+    int wlGSVar = allocator.allocateRef();
+    int wlGEVar = allocator.allocateRef();
+    int wlSizeVar = allocator.allocateInt();
+    int seenVar = allocator.allocateRef();
+    int curStateVar = allocator.allocateInt();
+    int curPosVar = allocator.allocateInt();
+    int inWlVar = allocator.allocateRef();
+    int inSizeVar = allocator.allocateInt();
+    int inStateVar = allocator.allocateInt();
+    int chVar = allocator.allocateInt();
+
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    pushInt(mv, groupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, groupStartsVar);
+    pushInt(mv, groupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, groupEndsVar);
+    for (int i = 0; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitVarInsn(ALOAD, groupStartsVar);
     mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+
+    pushInt(mv, PER_CONFIG_CAP);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlStateVar);
+    pushInt(mv, PER_CONFIG_CAP);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlPosVar);
+    pushInt(mv, seenSize);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, seenVar);
+    pushInt(mv, seenSize);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, inWlVar);
+    pushInt(mv, PER_CONFIG_CAP * width);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlGSVar);
+    pushInt(mv, PER_CONFIG_CAP * width);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlGEVar);
+
+    mv.visitVarInsn(ILOAD, 2); // start
+    mv.visitVarInsn(ISTORE, tryPosVar);
+
+    Label metaLoop = new Label();
+    Label noMatch = new Label();
+    mv.visitLabel(metaLoop);
+    mv.visitVarInsn(ILOAD, tryPosVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGT, noMatch);
+
+    // Reset group arrays for this tryPos attempt.
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitInsn(ICONST_M1);
+    mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([II)V", false);
+    mv.visitVarInsn(ALOAD, groupEndsVar);
+    mv.visitInsn(ICONST_M1);
+    mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([II)V", false);
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, tryPosVar);
+    mv.visitInsn(IASTORE);
+
+    // Reset worklist for this tryPos.
+    mv.visitVarInsn(ALOAD, wlStateVar);
+    mv.visitInsn(ICONST_0);
+    pushInt(mv, startStateId);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, wlPosVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, tryPosVar);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, wlSizeVar);
+    // seed config's capture row (row 0) = the reset working row for this tryPos.
+    emitRowCopy(
+        mv,
+        groupStartsVar,
+        () -> mv.visitInsn(ICONST_0),
+        wlGSVar,
+        () -> mv.visitInsn(ICONST_0),
+        width);
+    emitRowCopy(
+        mv,
+        groupEndsVar,
+        () -> mv.visitInsn(ICONST_0),
+        wlGEVar,
+        () -> mv.visitInsn(ICONST_0),
+        width);
+
+    Label outerLoop = new Label();
+    Label outerEnd = new Label();
+    mv.visitLabel(outerLoop);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitJumpInsn(IFLE, outerEnd);
+
+    mv.visitIincInsn(wlSizeVar, -1);
+    mv.visitVarInsn(ALOAD, wlStateVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, curStateVar);
+    mv.visitVarInsn(ALOAD, wlPosVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, curPosVar);
+
+    // Load this config's capture row into the working arrays (Alt A: per-config captures).
+    Runnable popSrcPos =
+        () -> {
+          mv.visitVarInsn(ILOAD, wlSizeVar);
+          pushInt(mv, width);
+          mv.visitInsn(IMUL);
+        };
+    emitRowCopy(mv, wlGSVar, popSrcPos, groupStartsVar, () -> mv.visitInsn(ICONST_0), width);
+    emitRowCopy(mv, wlGEVar, popSrcPos, groupEndsVar, () -> mv.visitInsn(ICONST_0), width);
+
+    mv.visitVarInsn(ALOAD, seenVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([II)V", false);
+
+    mv.visitVarInsn(ALOAD, inWlVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, curStateVar);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, inSizeVar);
+    mv.visitVarInsn(ALOAD, seenVar);
+    mv.visitVarInsn(ILOAD, curStateVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IASTORE);
+
+    Label innerLoop = new Label();
+    Label innerEnd = new Label();
+    mv.visitLabel(innerLoop);
+    mv.visitVarInsn(ILOAD, inSizeVar);
+    mv.visitJumpInsn(IFLE, innerEnd);
+    mv.visitIincInsn(inSizeVar, -1);
+    mv.visitVarInsn(ALOAD, inWlVar);
+    mv.visitVarInsn(ILOAD, inSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, inStateVar);
+
+    Label noConsume = new Label();
+    mv.visitVarInsn(ILOAD, curPosVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGE, noConsume);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, curPosVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    emitPerConfigConsume(
+        mv,
+        consumeStates,
+        inStateVar,
+        chVar,
+        curPosVar,
+        wlStateVar,
+        wlPosVar,
+        wlSizeVar,
+        wlGSVar,
+        wlGEVar,
+        groupStartsVar,
+        groupEndsVar,
+        width);
+    mv.visitLabel(noConsume);
+
+    // Accept: any accept state reached → return tryPos (Phase-1: no span correctness).
+    PerConfigAcceptCond findFromCond = (skip) -> {};
+    PerConfigAcceptAct findFromAct =
+        () -> {
+          mv.visitVarInsn(ILOAD, tryPosVar);
+          mv.visitInsn(IRETURN);
+        };
+
+    emitPerConfigInnerSwitch(
+        mv,
+        allocator,
+        closureStates,
+        acceptIds,
+        groupStartsVar,
+        groupEndsVar,
+        seenVar,
+        inWlVar,
+        inSizeVar,
+        inStateVar,
+        curPosVar,
+        lenVar,
+        wlStateVar,
+        wlPosVar,
+        wlSizeVar,
+        wlGSVar,
+        wlGEVar,
+        width,
+        innerLoop,
+        findFromCond,
+        findFromAct);
+
+    mv.visitJumpInsn(GOTO, innerLoop);
+    mv.visitLabel(innerEnd);
+    mv.visitJumpInsn(GOTO, outerLoop);
+    mv.visitLabel(outerEnd);
+
+    mv.visitIincInsn(tryPosVar, 1);
+    mv.visitJumpInsn(GOTO, metaLoop);
+
+    mv.visitLabel(noMatch);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Per-config body for {@link PerConfigMode#FIND_LONGEST_END}: runs the NFA from {@code startPos}
+   * (slot 2) and returns the largest position at which an accept state was reached, or -1 if none.
+   */
+  private void emitPerConfigFindLongestEndBody(
+      MethodVisitor mv, LocalVariableAllocator allocator, String className) {
+    final int startStateId = nfa.getStartState().id;
+    int maxStateId = 0;
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.id > maxStateId) maxStateId = s.id;
+    }
+    final int seenSize = maxStateId + 1;
+    final int groupCount = nfa.getGroupCount();
+
+    Set<Integer> acceptIds = new HashSet<>();
+    for (NFA.NFAState a : nfa.getAcceptStates()) acceptIds.add(a.id);
+
+    List<NFA.NFAState> closureStates = new ArrayList<>();
+    for (NFA.NFAState state : nfa.getStates()) {
+      if (state.enterGroup != null
+          || state.exitGroup != null
+          || state.backrefCheck != null
+          || state.anchor != null
+          || !state.getEpsilonTransitions().isEmpty()
+          || acceptIds.contains(state.id)) {
+        closureStates.add(state);
+      }
+    }
+    List<NFA.NFAState> consumeStates = new ArrayList<>();
+    for (NFA.NFAState state : nfa.getStates()) {
+      if (!state.getTransitions().isEmpty()) consumeStates.add(state);
+    }
+
+    final int width = groupCount + 1; // capture-row width (Alt A: per-config capture columns)
+    int lenVar = allocator.allocateInt();
+    int maxEndVar = allocator.allocateInt();
+    int groupStartsVar = allocator.allocateRef();
+    int groupEndsVar = allocator.allocateRef();
+    int wlStateVar = allocator.allocateRef();
+    int wlPosVar = allocator.allocateRef();
+    int wlGSVar = allocator.allocateRef();
+    int wlGEVar = allocator.allocateRef();
+    int wlSizeVar = allocator.allocateInt();
+    int seenVar = allocator.allocateRef();
+    int curStateVar = allocator.allocateInt();
+    int curPosVar = allocator.allocateInt();
+    int inWlVar = allocator.allocateRef();
+    int inSizeVar = allocator.allocateInt();
+    int inStateVar = allocator.allocateInt();
+    int chVar = allocator.allocateInt();
+
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
+    mv.visitInsn(ICONST_M1);
+    mv.visitVarInsn(ISTORE, maxEndVar);
+
+    pushInt(mv, groupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, groupStartsVar);
+    pushInt(mv, groupCount + 1);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, groupEndsVar);
+    for (int i = 0; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+
+    pushInt(mv, PER_CONFIG_CAP);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlStateVar);
+    pushInt(mv, PER_CONFIG_CAP);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlPosVar);
+    pushInt(mv, seenSize);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, seenVar);
+    pushInt(mv, seenSize);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, inWlVar);
+    pushInt(mv, PER_CONFIG_CAP * width);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlGSVar);
+    pushInt(mv, PER_CONFIG_CAP * width);
+    mv.visitIntInsn(NEWARRAY, T_INT);
+    mv.visitVarInsn(ASTORE, wlGEVar);
+
+    // Seed from startPos (slot 2).
+    mv.visitVarInsn(ALOAD, wlStateVar);
+    mv.visitInsn(ICONST_0);
+    pushInt(mv, startStateId);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, wlPosVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, wlSizeVar);
+    // seed config's capture row (row 0) = the initial working row.
+    emitRowCopy(
+        mv,
+        groupStartsVar,
+        () -> mv.visitInsn(ICONST_0),
+        wlGSVar,
+        () -> mv.visitInsn(ICONST_0),
+        width);
+    emitRowCopy(
+        mv,
+        groupEndsVar,
+        () -> mv.visitInsn(ICONST_0),
+        wlGEVar,
+        () -> mv.visitInsn(ICONST_0),
+        width);
+
+    Label outerLoop = new Label();
+    Label outerEnd = new Label();
+    mv.visitLabel(outerLoop);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitJumpInsn(IFLE, outerEnd);
+
+    mv.visitIincInsn(wlSizeVar, -1);
+    mv.visitVarInsn(ALOAD, wlStateVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, curStateVar);
+    mv.visitVarInsn(ALOAD, wlPosVar);
+    mv.visitVarInsn(ILOAD, wlSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, curPosVar);
+
+    // Load this config's capture row into the working arrays (Alt A: per-config captures).
+    Runnable popSrcPos =
+        () -> {
+          mv.visitVarInsn(ILOAD, wlSizeVar);
+          pushInt(mv, width);
+          mv.visitInsn(IMUL);
+        };
+    emitRowCopy(mv, wlGSVar, popSrcPos, groupStartsVar, () -> mv.visitInsn(ICONST_0), width);
+    emitRowCopy(mv, wlGEVar, popSrcPos, groupEndsVar, () -> mv.visitInsn(ICONST_0), width);
+
+    mv.visitVarInsn(ALOAD, seenVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([II)V", false);
+
+    mv.visitVarInsn(ALOAD, inWlVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, curStateVar);
+    mv.visitInsn(IASTORE);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, inSizeVar);
+    mv.visitVarInsn(ALOAD, seenVar);
+    mv.visitVarInsn(ILOAD, curStateVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IASTORE);
+
+    Label innerLoop = new Label();
+    Label innerEnd = new Label();
+    mv.visitLabel(innerLoop);
+    mv.visitVarInsn(ILOAD, inSizeVar);
+    mv.visitJumpInsn(IFLE, innerEnd);
+    mv.visitIincInsn(inSizeVar, -1);
+    mv.visitVarInsn(ALOAD, inWlVar);
+    mv.visitVarInsn(ILOAD, inSizeVar);
+    mv.visitInsn(IALOAD);
+    mv.visitVarInsn(ISTORE, inStateVar);
+
+    Label noConsume = new Label();
+    mv.visitVarInsn(ILOAD, curPosVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPGE, noConsume);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, curPosVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    emitPerConfigConsume(
+        mv,
+        consumeStates,
+        inStateVar,
+        chVar,
+        curPosVar,
+        wlStateVar,
+        wlPosVar,
+        wlSizeVar,
+        wlGSVar,
+        wlGEVar,
+        groupStartsVar,
+        groupEndsVar,
+        width);
+    mv.visitLabel(noConsume);
+
+    // Accept: update maxEnd and fall through — do NOT return early; keep exploring for longer
+    // match.
+    PerConfigAcceptCond fle_cond = (skip) -> {};
+    PerConfigAcceptAct fle_act =
+        () -> {
+          Label noUpdate = new Label();
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitVarInsn(ILOAD, maxEndVar);
+          mv.visitJumpInsn(IF_ICMPLE, noUpdate);
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitVarInsn(ISTORE, maxEndVar);
+          mv.visitLabel(noUpdate);
+          // fall through to notAccept → closure dispatch continues
+        };
+
+    emitPerConfigInnerSwitch(
+        mv,
+        allocator,
+        closureStates,
+        acceptIds,
+        groupStartsVar,
+        groupEndsVar,
+        seenVar,
+        inWlVar,
+        inSizeVar,
+        inStateVar,
+        curPosVar,
+        lenVar,
+        wlStateVar,
+        wlPosVar,
+        wlSizeVar,
+        wlGSVar,
+        wlGEVar,
+        width,
+        innerLoop,
+        fle_cond,
+        fle_act);
+
+    mv.visitJumpInsn(GOTO, innerLoop);
+    mv.visitLabel(innerEnd);
+    mv.visitJumpInsn(GOTO, outerLoop);
+    mv.visitLabel(outerEnd);
+
+    mv.visitVarInsn(ILOAD, maxEndVar);
     mv.visitInsn(IRETURN);
   }
 
@@ -670,12 +1393,16 @@ public class NFABytecodeGenerator {
       int wlStateVar,
       int wlPosVar,
       int wlSizeVar,
-      Label worklistContinue) {
-    // Accept check: if (curState in accept && curPos == len) { groupEnds[0]=len; return true; }
-    // Done first so it fires regardless of whether the state also has eps/group behavior.
+      int wlGSVar,
+      int wlGEVar,
+      int width,
+      Label worklistContinue,
+      PerConfigAcceptCond acceptCond,
+      PerConfigAcceptAct acceptAct) {
+    // Accept check: fired first so it fires regardless of whether the state also has eps/group
+    // behavior. acceptCond guards entry; acceptAct either returns or falls through to notAccept.
     if (!acceptIds.isEmpty()) {
       Label notAccept = new Label();
-      // switch over accept ids: build a lookupswitch that jumps to a shared accept-attempt label
       Label acceptAttempt = new Label();
       int[] keys = acceptIds.stream().mapToInt(Integer::intValue).sorted().toArray();
       Label[] labels = new Label[keys.length];
@@ -683,16 +1410,8 @@ public class NFABytecodeGenerator {
       mv.visitVarInsn(ILOAD, inStateVar);
       mv.visitLookupSwitchInsn(notAccept, keys, labels);
       mv.visitLabel(acceptAttempt);
-      // if (curPos == len) accept
-      mv.visitVarInsn(ILOAD, curPosVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitJumpInsn(IF_ICMPNE, notAccept);
-      mv.visitVarInsn(ALOAD, groupEndsVar);
-      mv.visitInsn(ICONST_0);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitInsn(IASTORE);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(IRETURN);
+      acceptCond.emit(notAccept);
+      acceptAct.emit();
       mv.visitLabel(notAccept);
     }
 
@@ -754,6 +1473,9 @@ public class NFABytecodeGenerator {
             wlStateVar,
             wlPosVar,
             wlSizeVar,
+            wlGSVar,
+            wlGEVar,
+            width,
             worklistContinue);
       } else if (state.anchor != null) {
         emitPerConfigAnchorAndEps(
@@ -892,6 +1614,9 @@ public class NFABytecodeGenerator {
       int wlStateVar,
       int wlPosVar,
       int wlSizeVar,
+      int wlGSVar,
+      int wlGEVar,
+      int width,
       Label worklistContinue) {
     final int groupNum = state.backrefCheck;
     int gsLocal = allocator.allocateInt();
@@ -964,6 +1689,11 @@ public class NFABytecodeGenerator {
           wlStateVar,
           wlPosVar,
           wlSizeVar,
+          wlGSVar,
+          wlGEVar,
+          groupStartsVar,
+          groupEndsVar,
+          width,
           () -> pushInt(mv, target.id),
           () -> {
             mv.visitVarInsn(ILOAD, curPosVar);
@@ -988,7 +1718,12 @@ public class NFABytecodeGenerator {
       int curPosVar,
       int wlStateVar,
       int wlPosVar,
-      int wlSizeVar) {
+      int wlSizeVar,
+      int wlGSVar,
+      int wlGEVar,
+      int groupStartsVar,
+      int groupEndsVar,
+      int width) {
     if (consumeStates.isEmpty()) {
       return;
     }
@@ -1022,6 +1757,11 @@ public class NFABytecodeGenerator {
             wlStateVar,
             wlPosVar,
             wlSizeVar,
+            wlGSVar,
+            wlGEVar,
+            groupStartsVar,
+            groupEndsVar,
+            width,
             () -> pushInt(mv, trans.target.id),
             () -> {
               mv.visitVarInsn(ILOAD, curPosVar);
@@ -2182,7 +2922,7 @@ public class NFABytecodeGenerator {
     mv.visitInsn(IRETURN);
     mv.visitLabel(inputNotNull);
 
-    if (perConfigEligible() && Boolean.getBoolean("reggie.perconfig")) {
+    if (perConfigEligible()) {
       generatePerConfigBody(mv, allocator, PerConfigMode.MATCHES, className);
       mv.visitMaxs(0, 0);
       mv.visitEnd();
@@ -3286,6 +4026,13 @@ public class NFABytecodeGenerator {
     mv.visitInsn(IRETURN);
 
     mv.visitLabel(checksPass);
+
+    if (perConfigEligible()) {
+      generatePerConfigBody(mv, allocator, PerConfigMode.FIND_FROM, className);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
 
     // PHASE 3: Separated atomic lookahead checking + main pattern execution
     // Check if all lookaheads have NFAs for separated execution
@@ -6746,6 +7493,13 @@ public class NFABytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(inputNotNull);
 
+    if (perConfigEligible()) {
+      generatePerConfigBody(mv, allocator, PerConfigMode.MATCH, className);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
+
     // Allocate all local variables using allocator
     int groupStartsVar = allocator.allocateRef(); // int[]
     int groupEndsVar = allocator.allocateRef(); // int[]
@@ -7110,6 +7864,13 @@ public class NFABytecodeGenerator {
     generateGroupArrayTooSmallThrow(mv, requiredGroups);
     mv.visitLabel(endsLengthOk);
 
+    if (perConfigEligible()) {
+      generatePerConfigBody(mv, allocator, PerConfigMode.MATCH_INTO, className);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
+
     int groupStartsVar = allocator.allocateRef();
     int groupEndsVar = allocator.allocateRef();
     int currentStatesVar;
@@ -7469,6 +8230,13 @@ public class NFABytecodeGenerator {
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
     mv.visitLabel(inputNotNull);
+
+    if (perConfigEligible()) {
+      generatePerConfigBody(mv, allocator, PerConfigMode.MATCH_BOUNDED, className);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
 
     // Allocate all local variables using allocator
     int groupStartsVar = allocator.allocateRef();
@@ -8752,6 +9520,13 @@ public class NFABytecodeGenerator {
     // Create local variable allocator
     // Slots: 0=this, 1=input, 2=startPos, 3+ = local variables
     LocalVariableAllocator allocator = new LocalVariableAllocator(3);
+
+    if (perConfigEligible()) {
+      generatePerConfigBody(mv, allocator, PerConfigMode.FIND_LONGEST_END, className);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
 
     // Allocate NFA state tracking variables - for dual-long, slot values are encoded (negative =
     // dual-long)
