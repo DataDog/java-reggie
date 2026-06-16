@@ -375,9 +375,9 @@ Expected: builds; no `VerifyError`.
 
 ---
 
-## Phase 2 — Alt 1: per-config captures + dedup key (fixes the 3 targets)
+## Phase 2 — Alt A: per-config capture columns (fixes the 3 targets)
 
-Goal: give each configuration its own capture spans so `\1` resolves against the spans on *its own* path, and add a dedup key so the worklist cannot blow up on revisited configurations.
+Goal: give each configuration its own capture spans so `\1` resolves against the spans on *its own* path. (The dedup key + priority ordering originally scoped here moved to Phase 3 / Task 8 after the design reviews — see that phase.)
 
 ### Task 7: Per-config capture columns — ✅ DONE (Alt A: outer columns only)
 
@@ -424,97 +424,222 @@ The inner epsilon-closure still dedups by `stateId` only (`emitPerConfigInnerPus
 paths reaching the same state at the same pos with *different* group spans are merged
 (last-write-wins on the working row). This cannot affect the 3 targets or the current regression
 corpus (verified: the backref states are reached after their referenced group is closed, so no
-same-pos re-entry occurs). **Close A2 only if the Task 12 fuzz gate surfaces a pattern that needs
-it** — at which point implement "Alt B" (capture-aware inner closure: per-entry rows + dedup keyed
-on `(state, row)`). Do not build it speculatively.
+same-pos re-entry occurs). **A2 is closed by Task 8** — the priority-ordered frontier dedups on
+`(state, pos, referenced spans)` with full per-config rows, so divergent-span paths get distinct
+keys and are no longer merged. (This supersedes the earlier "build Alt B only if the fuzz gate needs
+it" note: Task 8's restructure *is* the Alt C unification, and closing A2 falls out of it.)
 
-### Task 8: Configuration dedup key + leftmost-priority ordering
+## Phase 3 — Correct + bounded backref matching: PikeVM engine → AVD gate → cap
+
+Goal: every backref pattern Reggie matches itself (i.e. not JDK-delegated) is correct (JDK-equal
+spans) **and** bounded (no exponential blow-up, no silent drops). Order: **Task 8 → Task 10 → Task 9.**
+
+- **Task 8** delivers the principled priority + capture engine. **Decision (2026-06-16): start with a
+  backref-capable interpreted PikeVM** (reuse the already-correct priority machinery), then a
+  **benchmark gate vs JDK** decides whether to stay interpreted or escalate to a native design
+  (8-minimal / 8-full). This is the linchpin: it makes spans JDK-correct, makes the search
+  finite/polynomial (refspan-keyed memo), and closes the Task 7 **A2** gap.
+- **Task 10** adds a compile-time **AVD gate** that bounds the polynomial *degree* and routes
+  over-budget patterns to fallback, riding on the referenced-group set Task 8 needs.
+- **Task 9** adds a fixed **cap / memo ceiling** as a pure DoS backstop.
+
+> **Engine is benchmark-selected (Task 8 Step 4).** Tasks 9 & 10 apply to *whichever* engine wins:
+> if the interpreted PikeVM ships, the cap/memo live in `PikeVMMatcher` and the AVD gate routes
+> PikeVM-vs-JDK-fallback; if a native design is escalated to, they live in the generated engine as
+> originally written. The cross-cutting design below holds either way.
+
+### Cross-cutting design (applies to Tasks 8, 9, 10)
+
+These were settled across the 2026-06-16 design reviews; each task references them rather than
+re-deriving:
+
+1. **Target semantics = Perl / `java.util.regex`, NOT POSIX.** The regression + meta tests compare
+   directly to `java.util.regex`: **leftmost match, first-alternative priority, greedy/lazy as
+   written, last-iteration capture for repeated groups.** The misleadingly-named `usePosixLastMatch`
+   flag in the legacy methods happens to encode "repeated group keeps its last iteration", which
+   *is* Java's behavior — but the **per-config path does not implement it at all today** (it does
+   last-write-wins on the working row). Task 8 must add real priority selection on this path.
+2. **Dedup key = `(stateId, pos, referenced-group spans)` — referenced groups ONLY.** Including
+   non-referenced groups would break the AVD bound. Two configs equal on this key but differing in
+   *non-referenced* spans MUST be merged keeping the **higher-priority** one (Task 8) — otherwise the
+   reported non-referenced spans go wrong (this is what would regress P1's group-2 span). So
+   **dedup and priority are inseparable**; they are one task, not two.
+3. **Referenced-group set is shared analysis.** Task 8's dedup key and Task 10's AVD both need "which
+   groups are targets of some `\k`". Compute once (`collectBackrefsInSubtree`) and thread it to both
+   the generator (Task 8) and the analyzer (Task 10).
+4. **Fixed, preallocated, reused resource arrays — no input-length scaling.** Both the dedup
+   structure (Task 8) and the worklist arrays (Task 9) are fixed-size, allocated once as
+   `ReggieMatcher` instance fields (mirroring `initNFAState`, `:187`), reused across match calls.
+   `8*len` scaling is rejected (O(n²) worst case is un-preallocatable; defeats the cap).
+5. **Unified fallback model — no AOT-vs-runtime asymmetry.** Both the compile-time AVD gate (Task 10)
+   and the runtime cap-overflow (Task 9) route to fallback via the **same** existing
+   `allowJdkFallback` flag (runtime `ReggieOptions.allowJdkFallback()`; AOT
+   `ReggieOption.ALLOW_JDK_FALLBACK` via `resolveRealization(boolean)`):
+   - **allowed** → delegate to `java.util.regex` (AVD gate → `DELEGATE_FALLBACK` /
+     `JavaRegexFallbackMatcher`; cap-overflow → base-class `jdk*` helpers; the AOT path *can*
+     delegate at runtime when annotated `ALLOW_JDK_FALLBACK`).
+   - **not allowed** → **fail** (AOT: build error; runtime: throw).
+   The generator takes one generation-time boolean and emits delegate-or-throw — no runtime field,
+   no path-specific branching.
+
+### Task 8: Backref-capable PikeVM (interpreted, principled priority) — ⚠️ NEXT
+
+> **Decided 2026-06-16 (design pass → adversarial review → fork resolution).** Two earlier framings
+> were rejected: "small open-addressing hash" (under-scoped — dedup without priority regresses P1's
+> non-referenced spans) and "priority-ordered frontier generated in bytecode" (design v1 —
+> principled but high-risk: explicit-stack DFS faithfulness, PikeVM priority corrections like
+> `clistViaMultipleAnchors`, large test burden). **Chosen approach: extend the already-correct
+> interpreted `PikeVMMatcher` to handle backreferences**, reusing its proven Perl-priority +
+> capture machinery (risks A/B/F from the review do not apply to interpreted code). Then **gate on a
+> benchmark**: if the interpreted engine is **slower than `java.util.regex`** on backref patterns,
+> escalate to a native design (8-minimal dedup, or 8-full generated DFS). The principled
+> algorithm is the same memoized-priority-backtracking as design v1, but expressed in interpreted
+> Java where it is straightforward and testable.
+
+**Status of the generated per-config engine (Tasks 1–7):** retained as the **native-escalation
+candidate**, not deleted. If the benchmark gate fails, it (plus 8-minimal/8-full) is the fallback
+path. Until then, backref patterns route to the PikeVM engine for correctness.
+
+> **Shape decided 2026-06-16: B — new sibling matcher, `PikeVMMatcher` untouched.** PikeVM is strictly
+> lock-step (`clist`/`nlist`, `stepChar(pos+1)`), which cannot express a backref's variable `+L`
+> advance. Rather than destabilize the shipping `PIKEVM_CAPTURE` engine by generalizing its loop
+> (option A), build a **separate interpreted memoized-priority backtracker** (design v1's algorithm)
+> that *reuses PikeVM's conventions* — capture-array slot layout, NFA priority-ordered epsilon edges,
+> and the `*Backref*` / priority test corpus — but leaves `PikeVMMatcher` alone.
 
 **Files:**
-- Modify: `reggie-codegen/.../codegen/NFABytecodeGenerator.java`
+- Create: `reggie-runtime/.../<BackrefBacktrackMatcher>.java` (new interpreted engine extending
+  `ReggieMatcher`; mirrors `PikeVMMatcher`'s construction + capture/priority conventions)
+- Modify: routing — `reggie-codegen/.../analysis/PatternAnalyzer.java` and the delegate realization
+  (`RuntimeCompiler` + `ReggieMatcherBytecodeGenerator.resolveRealization`) so AVD-eligible
+  `OPTIMIZED_NFA_WITH_BACKREFS` patterns route to the new matcher
+- Test: `PerConfigBackrefRegressionTest`, `*Backref*`, `StrategyCorrectnessMetaTest`
 
-- [ ] **Step 1: Dedup on `(state, pos, referenced-group spans)`**
+- [ ] **Step 1: Build the interpreted memoized-priority backtracker**
 
-Maintain a seen-set keyed by `(stateId, pos, gs_g, ge_g)` for each *referenced* group `g` (active-variable set; see Task 10 for how `g` is identified). Before `pushConfig`, skip if the key was already pushed at this `pos`-frontier. This bounds the worklist by the number of distinct referenced-span configurations (AVD-driven), restoring near-linear behavior for AVD≤1.
+New matcher running the NFA as priority-ordered DFS: expand epsilon edges in priority order (greedy /
+first-alternative first, per `getEpsilonTransitions()` order); on `state.backrefCheck`, read the
+referenced group's span from the current capture vector, consume `L` matching chars, continue at
+`pos+L`; memoize on **`(state, pos, referenced-group spans)`** (cross-cutting #2) so divergent-`\k`-span
+paths are distinct and the first (highest-priority) arrival wins. First accepting path in preorder is
+the Perl-correct match (incl. non-referenced spans). Use an explicit stack (no deep recursion) to
+avoid `StackOverflowError` on large inputs.
 
-Implementation: a small open-addressing int hash over a preallocated `int[]` keyed by a mix of `(stateId, pos, gs, ge)`, cleared per top-level search. Keep allocation-free (preallocate at method entry).
+- [ ] **Step 2: Route AVD-eligible backref patterns to it**
 
-- [ ] **Step 2: Preserve capture last-match semantics**
+Make `OPTIMIZED_NFA_WITH_BACKREFS` (within the Task 10 AVD bound) realize as the backref PikeVM
+(`DELEGATE_PIKEVM`) on both paths. Governed by the unified fallback model (cross-cutting #5) for
+patterns outside the bound.
 
-For group spans (POSIX last-match, mirroring `usePosixLastMatch`), when two configs share `(state,pos)` but differ only in *non-referenced* group spans, prefer the higher-priority (leftmost / latest-iteration) per existing semantics. Verify against `regressionPatternsStayCorrect` and the existing `*Backref*` and `SelfReferencingBackrefTest` suites.
-
-- [ ] **Step 3: Run full backref + meta + integration smoke**
+- [ ] **Step 3: Validate spans, not just booleans**
 
 Run: `./gradlew :reggie-runtime:test --tests "*Backref*" --tests StrategyCorrectnessMetaTest --tests PerConfigBackrefRegressionTest`
-Expected: all green.
+Expected all green — **especially** P1's non-referenced group-2 span (the priority canary) and the
+alternation/quantifier span cases in `StrategyCorrectnessMetaTest`. Also `./gradlew :reggie-benchmark:build`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Benchmark gate vs JDK (decides escalation)**
 
-```bash
-./gradlew spotlessApply && git add -A && git commit -m "perf/correctness: per-config dedup key bounds worklist (near-linear for low AVD)"
-```
+Benchmark backref patterns (reuse `reggie-benchmark` / `AllStrategyVsJdkBenchmark`) Reggie-PikeVM vs
+`java.util.regex`. **If Reggie ≥ 1× JDK on affected patterns → ship this; Tasks 9/10 adjust to the
+PikeVM engine (cap/memo live in `PikeVMMatcher`; AVD gate routes PikeVM-vs-fallback).** **If < 1× JDK
+→ escalate** to 8-minimal (native dedup on all spans) or 8-full (generated priority-DFS), recorded as
+alternatives below.
 
----
-
-## Phase 3 — Alt 3: AVD bound (compile-time) + runtime cap backstop
-
-Goal: guarantee O(n) **by construction**. Primary mechanism = compile-time active-variable-degree routing: patterns whose AVD exceeds a threshold route to fallback so every *natively compiled* backref pattern is near-linear. Runtime cap = defensive backstop.
-
-### Task 9: Runtime configuration cap (defensive) — ⚠️ URGENT (re-ranked 2026-06-16)
-
-**Priority bump:** Task 6 already removed the `-Dreggie.perconfig` gate, so the per-config path is
-live for all backref NFAs, and `PER_CONFIG_CAP=256` currently **silently drops** configs on
-overflow — a false negative that violates the project Correctness Guarantee. Task 7 (Alt A) added
-per-config capture rows, which modestly increases config count. Until this task lands, an
-AVD>1 / high-fan-out backref pattern can overflow and return a wrong answer with no signal. This
-should be done **before** Tasks 10–11.
-
-**Files:**
-- Modify: `reggie-codegen/.../codegen/NFABytecodeGenerator.java`
-- Test: `PerConfigBackrefRegressionTest.java`
-
-- [ ] **Step 1: Enforce the worklist cap**
-
-`CAP` becomes a hard ceiling. If `wlSize` would exceed `CAP`, the generated code must signal "give up natively". For a stateless matcher the cleanest signal is to **delegate to a lazily-compiled `java.util.regex` matcher field** on overflow (same pattern as `RICH_API_HYBRID`: a `Pattern` field compiled on first overflow). Emit: on overflow, call the hybrid delegate and return its result. Set `CAP` from input length scaling (e.g. `CAP = max(256, 8*len)`) so legitimate AVD-1 patterns never overflow but pathological blowups are caught.
-
-- [ ] **Step 2: Add an overflow test**
-
-Add to `PerConfigBackrefRegressionTest` a pattern engineered to exceed the cap and assert it still agrees with the JDK (via the hybrid delegate). Choose a known-high-AVD pattern from `BackrefEngineGapsTest.java`. If none exists, document that the cap is unreachable by the current corpus and the backstop is exercised only by a synthetic `-Dreggie...` test.
-
-- [ ] **Step 3: Run + commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-./gradlew :reggie-runtime:test --tests PerConfigBackrefRegressionTest
-./gradlew spotlessApply && git add -A && git commit -m "feat: runtime config-cap backstop delegates to java.util.regex on overflow (Alt 3)"
+./gradlew spotlessApply && git add -A && git commit -m "feat: backref-capable PikeVM — principled Perl-priority backref matching"
 ```
 
-### Task 10: Compile-time active-variable-degree routing (primary O(n) guarantee)
+#### Escalation alternatives (only if Step 4 benchmark < 1× JDK)
+
+- **8-minimal:** in the generated per-config engine, dedup key = `(state, pos, ALL spans)` (never
+  merges span-divergent configs → no priority logic, no P1 regression); relies on the Task 9 cap for
+  the (non-AVD, weaker) bound; closes A2 only at the outer level. Low risk, native speed, best-effort
+  priority.
+- **8-full:** generated priority-ordered memoized DFS (design v1) — principled + native + tight AVD
+  bound, but carries review risks A (explicit-stack DFS faithfulness), B (no recursion in bytecode),
+  F (replicating PikeVM priority corrections). Highest risk/effort.
+
+### Task 10: Compile-time active-variable-degree gate (rides on Task 8's referenced-group key)
+
+> **Decisions (2026-06-16):** new `FallbackPatternDetector.needsFallback` reason joining the existing
+> `OPTIMIZED_NFA_WITH_BACKREFS` rules (`:116-140`). **Scope: gate ONLY `OPTIMIZED_NFA_WITH_BACKREFS`**
+> (the per-config Thompson engine — the one the AVD polynomial bound is derived for). **AVD basis:
+> AST-conservative** (reuse the referenced-group analysis from Task 8 / `collectBackrefsInSubtree`).
+> **Threshold = 2** (AVD>2 → fallback). Only meaningful *after* Task 8 makes the worklist polynomial.
+>
+> **Measured coverage cost (corpus of 162 distinct backref patterns):** 93.2% are single-reference
+> (AVD=1, unaffected); upper bound on over-routing at threshold=2 is **6 patterns (3.7%)** (only
+> ≥3-distinct-reference patterns can be affected; AVD ≤ distinct-referenced-groups). The
+> AST-conservative-vs-precise penalty is a *subset* of those, concentrated in staggered
+> self-referencing patterns (`^(a\1?)(a\1?)(a\2?)(a\3?)$`); real-world usage is essentially all
+> AVD=1. Over-routed patterns remain *correct* via fallback.
+
+> **TODO — gate the OTHER backref engines separately (recorded 2026-06-16).** `VARIABLE_CAPTURE_BACKREF`,
+> `FIXED_REPETITION_BACKREF`, and `RECURSIVE_DESCENT` are **backtracking** engines
+> (`PatternAnalyzer.java:80,375`) with exponential worst-case time on ambiguous/high-AVD patterns —
+> the per-config AVD bound does NOT apply to them. They need their own engine-specific complexity
+> guard, not this AVD rule. Out of scope here; file as a follow-up so the O(n)-by-construction goal
+> eventually covers every native backref engine.
 
 **Files:**
 - Modify: `reggie-codegen/.../codegen/analysis/PatternAnalyzer.java` and/or `reggie-codegen/.../codegen/analysis/FallbackPatternDetector.java`
 - Test: `reggie-codegen/src/test/java/.../analysis/` (new `ActiveVariableDegreeTest.java`)
 
-- [ ] **Step 1: Compute AVD**
+- [ ] **Step 1: Compute AVD (AST-conservative)** — max overlap of referenced-group live spans (a
+  referenced group is live across the smallest subtree spanning its definition and all its `\k`
+  uses). Reuse Task 8's referenced-group set. For the 3 targets AVD=1.
 
-Add a static analysis: AVD = max number of *referenced* groups (targets of some `\k`) simultaneously *live* (captured-and-still-referenceable) at any NFA state. For the 3 targets AVD=1. Reuse the AST/NFA already built in the analyzer.
+- [ ] **Step 2: Route high-AVD patterns to fallback** — if `AVD > 2` **and**
+  `strategy == OPTIMIZED_NFA_WITH_BACKREFS`, add a `FallbackPatternDetector` reason `"backref
+  active-variable-degree N exceeds native bound: would not run in linear time"` (handled by the
+  unified `allowJdkFallback` model — cross-cutting #5). Do NOT gate the other backref strategies.
+  Update the AGENTS.md fallback table.
 
-- [ ] **Step 2: Route high-AVD patterns to fallback**
-
-If `AVD > AVD_THRESHOLD` (start with `AVD_THRESHOLD = 2`), add a `FallbackPatternDetector` reason `"backref active-variable-degree N exceeds native bound: would not run in linear time"` so the pattern falls back at compile time. This preserves the O(n) guarantee for every natively compiled backref pattern. Update the AGENTS.md fallback table.
-
-- [ ] **Step 3: Unit-test AVD computation**
-
-```java
-// ActiveVariableDegreeTest: assert AVD==1 for the 3 targets and a chosen AVD>=3 pattern routes to fallback.
-```
-
-Run: `./gradlew :reggie-codegen:test --tests ActiveVariableDegreeTest`
-Expected: PASS.
+- [ ] **Step 3: Unit-test** — `ActiveVariableDegreeTest`: AVD==1 for the 3 targets; a chosen AVD≥3
+  pattern routes to fallback. `./gradlew :reggie-codegen:test --tests ActiveVariableDegreeTest`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-./gradlew spotlessApply && git add -A && git commit -m "feat: compile-time AVD routing keeps native backref patterns O(n) (Alt 3)"
+./gradlew spotlessApply && git add -A && git commit -m "feat: compile-time AVD gate keeps native backref patterns O(n)"
+```
+
+### Task 9: Post-dedup configuration cap (DoS backstop, unified fallback)
+
+**Depends on Tasks 8 + 10.** After dedup (Task 8) the worklist is finite and polynomial
+(≈ `states × distinct referenced-span vectors`; O(states·n²) worst case at AVD=1), and Task 10 keeps
+the degree low. So the cap is **a pure resource governor, not a correctness crutch** — hitting it
+means "this pattern×input is too expensive natively" → unified fallback model (cross-cutting #5).
+(Pre-dedup, the cap did double duty — bounding memory *and* corrupting answers by dropping configs;
+Task 8 removes that.)
+
+**Files:**
+- Modify: `reggie-codegen/.../codegen/NFABytecodeGenerator.java`, `reggie-runtime/.../ReggieMatcher.java`
+- Test: `PerConfigBackrefRegressionTest.java`
+
+- [ ] **Step 1: Base-class delegation helpers** — `ReggieMatcher` already has the lazy `jdkRich`
+  Pattern (`:96`) and `jdkMatch`/`jdkFindMatch`/`jdkFindMatchFrom` (`:148-164`, MatchResult; boolean
+  = `!= null`). Add the missing siblings the boolean/int/array per-config methods need:
+  `jdkMatches→boolean`, `jdkFindLongestEnd→int`, array-fill for `matchInto`, region for
+  `matchBounded`. (Delegation is base-class, NOT an emitted field.)
+
+- [ ] **Step 2: Enforce the fixed cap** — `CAP` is a fixed hard ceiling (no `8*len`). On
+  `wlSize > CAP`, the generated overflow branch emits delegate-or-throw per the generation-time
+  `allowJdkFallback` flag (cross-cutting #5). Worklist arrays are reused `ReggieMatcher` instance
+  fields (cross-cutting #4).
+
+- [ ] **Step 3: Overflow tests (both fallback modes)** — engineer a pattern×input exceeding the cap;
+  assert (a) with fallback it agrees with the JDK via the `jdk*` delegate, (b) without fallback it
+  throws cleanly (no wrong answer). Post-dedup the cap may be unreachable by corpus patterns — if so,
+  force a tiny cap synthetically and document that the corpus does not reach the production cap.
+
+- [ ] **Step 4: Run + commit**
+
+```bash
+./gradlew :reggie-runtime:test --tests PerConfigBackrefRegressionTest
+./gradlew spotlessApply && git add -A && git commit -m "feat: post-dedup config-cap backstop (delegate if fallback allowed, else fail)"
 ```
 
 ---
@@ -528,7 +653,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Determine whether any hashed input changed**
 
-We add **no** new `DFAState`/`DFATransition`/`NFAState`/`PatternInfo` field — `backrefCheck` is already hashed (`NFA.contentHashCode` line 318) and the strategy is already part of the cache key. The AVD-routing decision changes the *selected strategy*, which is already reflected. **Expected: no change required.** If Task 10 introduces a new flag that influences which bytecode is emitted for the *same* strategy, add it to `StructuralHash.compute()` per the AGENTS.md checklist.
+We add **no** new `DFAState`/`DFATransition`/`NFAState`/`PatternInfo` field — `backrefCheck` is already hashed (`NFA.contentHashCode` line 318) and the strategy is already part of the cache key. The AVD-routing decision (Task 10) changes the *selected strategy* / fallback routing, already reflected. **Likely no change required**, BUT verify one thing introduced by Task 9: the `allowJdkFallback` generation-time boolean now changes which bytecode is emitted for the **same** strategy (delegate vs throw on cap overflow). Confirm `allowJdkFallback` is already part of the compiled-class cache key (it is a `ReggieOption`); if the cache key is keyed only on pattern+strategy and not options, add `allowJdkFallback` to `StructuralHash.compute()` per the AGENTS.md checklist — otherwise two compiles of the same pattern with different fallback settings could collide.
 
 - [ ] **Step 2: Verify cache correctness**
 
@@ -563,9 +688,9 @@ Expected: PASS, coverage thresholds met.
 
 ## Self-review checklist (run before handing off to execution)
 
-- [ ] **Spec coverage:** Defect B (Task 4 — config-local pos), Alt 1 (Tasks 7–8 — per-config captures + dedup), Alt 3 (Tasks 9–10 — runtime cap + compile-time AVD routing). ✅
+- [ ] **Spec coverage:** Defect B (Task 4 — config-local pos), per-config captures (Task 7 — Alt A), priority frontier + dedup + A2 (Task 8 — Alt C), AVD gate (Task 10), cap backstop (Task 9). ✅
 - [ ] **Regression guard:** Task 0 corpus + `*Backref*` suite run after every code task. ✅
 - [ ] **Dual-path:** both `RuntimeCompiler` and `ReggieMatcherBytecodeGenerator` delegate to the shared generator; verified via `:reggie-runtime:test` + `:reggie-benchmark:build`. ✅
-- [ ] **No new dependencies; allocation-free hot loop** (all worklist arrays preallocated at method entry). ✅
+- [ ] **No new dependencies; allocation-free hot loop** (worklist + dedup arrays preallocated once as reused `ReggieMatcher` instance fields — Phase 3 cross-cutting #4). ✅
 - [ ] **Type consistency:** `PerConfigMode` enum + `generatePerConfigBody` signature used identically across all 12 method guards. ✅
-- [ ] **Open risk:** find*/findMatch* span semantics in Phase 1 are temporarily legacy; Phase 2 dedup ordering must restore leftmost-longest. If a find-span regression appears in `*Backref*`, fix in Task 8 Step 2 before proceeding.
+- [ ] **Semantics target:** spans must match `java.util.regex` = **leftmost / first-alternative / last-iteration (Perl)**, NOT POSIX leftmost-longest. Task 8's priority ordering is what delivers this; P1's non-referenced group-2 span is the canary. (See Phase 3 cross-cutting #1.)
