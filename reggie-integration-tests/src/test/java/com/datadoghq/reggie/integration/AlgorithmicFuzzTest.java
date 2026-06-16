@@ -52,8 +52,13 @@ public class AlgorithmicFuzzTest {
    * native strategy — not a regression. When this count changes, update the budget and document the
    * new/fixed finding in {@code doc/temp/prod-readiness/fuzz-inventory.md}. Override via {@code
    * -Dreggie.fuzz.maxFindings=N} for stricter local runs.
+   *
+   * <p>Lowered 18 → 13 (2026-06-16): the 5 backref repros (patterns P1/P2/P3) were not engine bugs
+   * but {@code STRUCTURE_CACHE} false-hits from a topology-blind 32-bit {@code
+   * NFA.contentHashCode}; fixing that hash (topology-aware, 64-bit) removed them. The remaining 13
+   * are pre-existing non-backref findings.
    */
-  private static final int KNOWN_FINDINGS_BUDGET = 18;
+  private static final int KNOWN_FINDINGS_BUDGET = 13;
 
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)

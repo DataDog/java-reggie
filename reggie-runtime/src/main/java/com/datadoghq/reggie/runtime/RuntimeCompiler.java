@@ -164,8 +164,27 @@ public class RuntimeCompiler {
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
   // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
   // sets; an int key was observed to cause structural-cache false-hits with wrong match semantics.
-  private static final ConcurrentHashMap<Long, Class<? extends ReggieMatcher>> STRUCTURE_CACHE =
+  // Each entry also carries an INDEPENDENT verification hash so a hit can be confirmed before reuse
+  // (verify-on-hit): if the verification differs, the 64-bit key collided across structurally
+  // distinct patterns, and we regenerate the correct class rather than return a wrong matcher.
+  private static final ConcurrentHashMap<Long, CachedStructure> STRUCTURE_CACHE =
       new ConcurrentHashMap<>();
+
+  /** A cached generated class plus the independent verification hash of its structure. */
+  private static final class CachedStructure {
+    final Class<? extends ReggieMatcher> clazz;
+    final long verify;
+
+    CachedStructure(Class<? extends ReggieMatcher> clazz, long verify) {
+      this.clazz = clazz;
+      this.verify = verify;
+    }
+  }
+
+  // Fires once if a structural-cache key collision is ever detected at runtime (verify mismatch),
+  // so the (astronomically rare) event is observable rather than silent.
+  private static final java.util.concurrent.atomic.AtomicBoolean STRUCT_COLLISION_WARNED =
+      new java.util.concurrent.atomic.AtomicBoolean(false);
 
   // Lookup for hidden class definition (Java 21+)
   private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
@@ -484,17 +503,42 @@ public class RuntimeCompiler {
         // Hybrid DFA anchor-diluted: skip hybrid, fall through to NFA-only routing below.
       }
 
-      // 5. Compute structural hash for level 2 cache lookup (64-bit key)
-      long structHash =
-          (nfa != null)
-              ? StructuralHash.compute(result, nfa, caseInsensitive)
-              : StructuralHash.computeWithoutGroupCount(result);
+      // 5. Compute structural hash (64-bit cache key) + an independent verification hash.
+      long structHash;
+      long verifyHash;
+      if (nfa != null) {
+        structHash = StructuralHash.compute(result, nfa, caseInsensitive);
+        verifyHash = StructuralHash.computeVerification(result, nfa, caseInsensitive);
+      } else {
+        structHash = StructuralHash.computeWithoutGroupCount(result);
+        verifyHash = StructuralHash.computeVerificationWithoutGroupCount(result);
+      }
 
-      // 6. Check structural cache (level 2)
-      Class<? extends ReggieMatcher> matcherClass = STRUCTURE_CACHE.get(structHash);
+      // 6. Check structural cache (level 2), verifying the hit before trusting it.
+      CachedStructure cached = STRUCTURE_CACHE.get(structHash);
+      Class<? extends ReggieMatcher> matcherClass = null;
+      boolean cacheable = true;
+      if (cached != null) {
+        if (cached.verify == verifyHash) {
+          matcherClass = cached.clazz; // verified structural match — safe to reuse
+        } else {
+          // 64-bit key collision across structurally distinct patterns (~astronomically rare).
+          // Do NOT reuse the wrong class and do NOT evict the legitimate entry: regenerate the
+          // correct class for this pattern (the per-pattern L1 caches will hold it). This converts
+          // a would-be silent wrong answer into a correct (re-generated) result.
+          cacheable = false;
+          if (STRUCT_COLLISION_WARNED.compareAndSet(false, true)) {
+            LOG.warning(
+                "Reggie structural-cache key collision detected (verify-on-hit) for pattern '"
+                    + pattern
+                    + "'; regenerating to avoid a wrong matcher. This is expected to be vanishingly"
+                    + " rare; if it recurs, StructuralHash needs more discriminating fields.");
+          }
+        }
+      }
 
       if (matcherClass == null) {
-        // 7. Cache miss: Generate bytecode and define hidden class
+        // 7. Cache miss (or collision): Generate bytecode and define hidden class
         byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
 
         MethodHandles.Lookup hiddenLookup =
@@ -505,8 +549,10 @@ public class RuntimeCompiler {
 
         matcherClass = hiddenLookup.lookupClass().asSubclass(ReggieMatcher.class);
 
-        // 8. Cache the generated class for future patterns with same structure
-        STRUCTURE_CACHE.put(structHash, matcherClass);
+        // 8. Cache for future structurally-identical patterns (skip on a detected key collision).
+        if (cacheable) {
+          STRUCTURE_CACHE.put(structHash, new CachedStructure(matcherClass, verifyHash));
+        }
       }
 
       // 8b. For NFA-backed strategies: register a factory in NFA_CLASS_CACHE so that compile()
