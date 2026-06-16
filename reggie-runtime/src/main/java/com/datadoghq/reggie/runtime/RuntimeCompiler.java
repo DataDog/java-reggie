@@ -161,34 +161,6 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<String, PikeVMEntry> PIKEVM_NFA_CACHE =
       new ConcurrentHashMap<>();
 
-  /**
-   * Cached entry for {@code OPTIMIZED_NFA_WITH_BACKREFS} patterns routed to {@link
-   * BackrefBacktrackMatcher} (Task 8): holds the immutable NFA and name map so each compile() call
-   * yields a fresh matcher. The matcher itself is stateless, but a fresh instance per compile keeps
-   * the codebase-wide "NFA-backed matchers are never shared across compile() calls" invariant.
-   */
-  private static final class BackrefEntry {
-    final NFA nfa;
-    final Map<String, Integer> nameMap;
-
-    BackrefEntry(NFA nfa, Map<String, Integer> nameMap) {
-      this.nfa = nfa;
-      this.nameMap = nameMap;
-    }
-
-    ReggieMatcher newMatcher(String pattern) {
-      ReggieMatcher m = new BackrefBacktrackMatcher(nfa, pattern);
-      m.setNameToIndex(nameMap);
-      if (!nameMap.isEmpty()) {
-        m = new NameEnrichingMatcher(m);
-      }
-      return m;
-    }
-  }
-
-  private static final ConcurrentHashMap<String, BackrefEntry> BACKREF_NFA_CACHE =
-      new ConcurrentHashMap<>();
-
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
   // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
   // sets; an int key was observed to cause structural-cache false-hits with wrong match semantics.
@@ -221,12 +193,6 @@ public class RuntimeCompiler {
       return pikevmEntry.newMatcher(pattern);
     }
 
-    // Fast path: OPTIMIZED_NFA_WITH_BACKREFS patterns routed to the interpreted backref engine.
-    BackrefEntry backrefEntry = BACKREF_NFA_CACHE.get(cacheKey);
-    if (backrefEntry != null) {
-      return backrefEntry.newMatcher(pattern);
-    }
-
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
     // NFA matchers mutate shared instance fields during matching and cannot be shared across
     // threads or calls; we cache a factory and instantiate per-call instead.
@@ -247,13 +213,6 @@ public class RuntimeCompiler {
     if (pikevmEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
       return pikevmEntry.newMatcher(pattern);
-    }
-
-    // Post-compilation fixup: backref engine registered — return a fresh matcher per compile.
-    backrefEntry = BACKREF_NFA_CACHE.get(cacheKey);
-    if (backrefEntry != null) {
-      PATTERN_CACHE.remove(cacheKey, compiled);
-      return backrefEntry.newMatcher(pattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
@@ -372,7 +331,6 @@ public class RuntimeCompiler {
     PATTERN_CACHE.clear();
     NFA_CLASS_CACHE.clear();
     PIKEVM_NFA_CACHE.clear();
-    BACKREF_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
   }
 
@@ -508,15 +466,6 @@ public class RuntimeCompiler {
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
         return fallbackOrThrow(pattern, fallbackReason, nameMap, options);
-      }
-
-      // 3.7. OPTIMIZED_NFA_WITH_BACKREFS: route to the interpreted memoized-priority backref engine
-      // (Task 8, shape B). Reached only after the fallback detector has filtered out the backref
-      // constructs that must delegate to java.util.regex (lazy / cross-alternative / nullable).
-      // Cache NFA + name map; compile() returns a fresh matcher per call (invariant + fixup below).
-      if (result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS) {
-        BACKREF_NFA_CACHE.putIfAbsent(cacheKey, new BackrefEntry(nfa, nameMap));
-        return BACKREF_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
