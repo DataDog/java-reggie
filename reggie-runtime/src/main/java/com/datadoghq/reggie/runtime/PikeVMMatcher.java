@@ -103,7 +103,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private final LazyDFACache findDfa;
   private final NfaStep findStep;
   private final boolean findCanMatchEmpty;
-  private int[] startClosureIds; // set in ctor before findStep is used; immutable thereafter
+  private int[] startClosureIds; // pos-0 closure (START/\A anchors crossed); set in ctor
+  private int[] reinjectClosureIds; // pos>0 closure (START/\A anchors blocked); set in ctor
 
   // T1.6 boolean matches() fast path: a STRICT (non-self-anchoring) lazy DFA over the same NFA.
   // matches() asks whether the WHOLE input matches from the start, which is priority-independent,
@@ -150,7 +151,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // T1.4: build the self-anchoring boolean find() DFA when the pattern is anchor/assertion/
     // backref-free (those need position context the position-independent step can't supply).
     if (findDfaEligible(nfa)) {
-      startClosureIds = sortedEpsilonClosure(new int[] {nfa.getStartState().id});
+      int[] start = {nfa.getStartState().id};
+      // Initial state (pos 0): START/\A anchors are satisfied → cross them.
+      startClosureIds = sortedEpsilonClosure(start, false);
+      // Re-inject / step (pos > 0): START/\A unsatisfied → block them, so ^-gated branches can
+      // only begin at pos 0. For anchor-free patterns this equals startClosureIds.
+      reinjectClosureIds = sortedEpsilonClosure(start, true);
       boolean empty = false;
       for (int id : startClosureIds) {
         if (isAccept[id]) {
@@ -163,11 +169,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
       int ai = 0;
       for (NFA.NFAState s : nfa.getAcceptStates()) acceptArr[ai++] = s.id;
       findDfa = new LazyDFACache(startClosureIds, acceptArr);
-      // Self-anchoring step: closure(targets(cur, c)) UNION startClosure.
-      findStep = (cur, c) -> sortedClosureUnionStart(transitionTargets(cur, (char) c));
-      // Strict step for matches() (whole-input): closure(targets) only, no start re-injection.
+      // Self-anchoring find step: closureNoStart(targets) UNION reinjectClosure.
+      findStep = (cur, c) -> findStepClosure(transitionTargets(cur, (char) c));
+      // Strict matches() step (whole-input, pos>0): closureNoStart(targets), no re-injection.
       matchesDfa = new LazyDFACache(startClosureIds, acceptArr);
-      matchesStep = (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c));
+      matchesStep = (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c), true);
     } else {
       findDfa = null;
       findStep = null;
@@ -181,8 +187,37 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   /** Eligible for the boolean find() fast path: no anchors, assertions, or backreferences. */
   private static boolean findDfaEligible(NFA nfa) {
+    boolean hasStartAnchor = false;
     for (NFA.NFAState s : nfa.getStates()) {
-      if (s.anchor != null || s.assertionType != null || s.backrefCheck != null) return false;
+      if (s.assertionType != null || s.backrefCheck != null) return false;
+      // Only START (^) / STRING_START (\A) anchors are handleable (pos-0-only, via the
+      // initial-vs-reinject closure split). \b, $, multiline ^, end-class need char/end context
+      // the position-independent step can't supply → ineligible.
+      NFA.AnchorType a = s.anchor;
+      if (a != null && a != NFA.AnchorType.START && a != NFA.AnchorType.STRING_START) return false;
+      if (a == NFA.AnchorType.START || a == NFA.AnchorType.STRING_START) hasStartAnchor = true;
+    }
+    if (!hasStartAnchor) return true; // anchor-free: always eligible
+
+    // START-anchored: the pos-0-only model is sound ONLY if every START/\A anchor is leading —
+    // i.e. NOT reachable after consuming a character. A ^ inside a loop/quantifier (e.g.
+    // `(0|^a?){3}`) is reachable via a consume+loop-back and can fire across empty iterations that
+    // stay at pos 0; the set-based closure cannot model that, so decline it (stays on PikeVM).
+    java.util.Set<Integer> reached = new java.util.HashSet<>();
+    java.util.ArrayDeque<NFA.NFAState> q = new java.util.ArrayDeque<>();
+    for (NFA.NFAState s : nfa.getStates()) {
+      for (NFA.Transition t : s.getTransitions()) {
+        if (reached.add(t.target.id)) q.add(t.target);
+      }
+    }
+    while (!q.isEmpty()) {
+      NFA.NFAState s = q.poll();
+      if (s.anchor == NFA.AnchorType.START || s.anchor == NFA.AnchorType.STRING_START) {
+        return false; // START anchor reachable after a consume → not leading-only
+      }
+      for (NFA.NFAState e : s.getEpsilonTransitions()) {
+        if (reached.add(e.id)) q.add(e);
+      }
     }
     return true;
   }
@@ -204,7 +239,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /** Sorted, de-duplicated epsilon closure of the given seed ids (anchor-free patterns). */
-  private int[] sortedEpsilonClosure(int[] seed) {
+  /**
+   * Sorted epsilon closure of {@code seed}. When {@code blockStartAnchor} is true, START/\A anchor
+   * states are not traversed past (their anchor is unsatisfied at any position &gt; 0); this models
+   * PikeVM's checkAnchor returning false for those anchors at pos&gt;0. With it false (pos 0) the
+   * closure crosses them. For anchor-free patterns both behave identically.
+   */
+  private int[] sortedEpsilonClosure(int[] seed, boolean blockStartAnchor) {
     boolean[] inSet = new boolean[stateCount];
     int[] stack = new int[stateCount];
     int sp = 0;
@@ -217,6 +258,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
     int count = sp;
     while (sp > 0) {
       int id = stack[--sp];
+      if (blockStartAnchor) {
+        NFA.AnchorType a = statesById[id].anchor;
+        if (a == NFA.AnchorType.START || a == NFA.AnchorType.STRING_START) continue;
+      }
       for (NFA.NFAState e : statesById[id].getEpsilonTransitions()) {
         if (!inSet[e.id]) {
           inSet[e.id] = true;
@@ -232,33 +277,20 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /** Sorted closure of {@code targets} UNIONed with the start closure (the self-anchoring step). */
-  private int[] sortedClosureUnionStart(int[] targets) {
+  /**
+   * The self-anchoring find() step: {@code sortedEpsilonClosure(targets, blockStart=true)} UNION
+   * {@code reinjectClosureIds}. Re-injecting the pos&gt;0 start closure each character lets a match
+   * begin at any position (implicit ".*?" prefix); blocking START/\A means a {@code ^}-gated branch
+   * can only begin at pos 0 (it is in {@code startClosureIds}, the DFA's initial state, but never
+   * re-injected). {@code reinjectClosureIds} is already closed, so unioning it stays closed.
+   */
+  private int[] findStepClosure(int[] targets) {
+    int[] tc = sortedEpsilonClosure(targets, true);
     boolean[] inSet = new boolean[stateCount];
-    int[] stack = new int[stateCount];
-    int sp = 0;
-    for (int id : targets) {
-      if (!inSet[id]) {
-        inSet[id] = true;
-        stack[sp++] = id;
-      }
-    }
-    for (int id : startClosureIds) {
-      if (!inSet[id]) {
-        inSet[id] = true;
-        stack[sp++] = id;
-      }
-    }
-    int count = sp;
-    while (sp > 0) {
-      int id = stack[--sp];
-      for (NFA.NFAState e : statesById[id].getEpsilonTransitions()) {
-        if (!inSet[e.id]) {
-          inSet[e.id] = true;
-          stack[sp++] = e.id;
-          count++;
-        }
-      }
-    }
+    for (int id : tc) inSet[id] = true;
+    for (int id : reinjectClosureIds) inSet[id] = true;
+    int count = 0;
+    for (boolean b : inSet) if (b) count++;
     int[] out = new int[count];
     int oi = 0;
     for (int id = 0; id < stateCount; id++) if (inSet[id]) out[oi++] = id;
