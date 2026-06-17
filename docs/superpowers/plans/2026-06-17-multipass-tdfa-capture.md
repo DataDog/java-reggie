@@ -115,10 +115,33 @@ it only if T0.2 attributes nonzero cost to it.
   but the thread *scheduling* (priority DFS, anchor handling) must be untouched.
 - Acceptance: green parity suites.
 
-**T1.4 — (optional) re-route zero-capture patterns off PIKEVM_CAPTURE.** Only where anchor
-semantics allow a boolean lazy-DFA strategy (these route to PikeVM *because* DFA mishandles
-`$`/`\b`/`^`-in-alternation — `PatternAnalyzer.java:782-866`). Likely not applicable to SQL/QOBF;
-keep T1.1/T1.2 as the real win. Skip unless T0.2 says otherwise.
+**T1.4 — self-anchoring boolean find() DFA for QOBF — ✅ DONE (verified + measured, 2026-06-17).**
+First attempt (naive `LazyDFACache.findFrom` over the raw NFA) was reverted after the parity gate
+exposed two unsoundnesses (empty-match, and the consume-past-later-start bug — witness
+`(a|b){2,3}x` find `"ababx"`→false; JDK=true). The **correct** version, now shipped in
+`PikeVMMatcher`: boolean `find()` for anchor/assertion/backref-free patterns uses a **self-anchoring
+lazy DFA** whose step re-injects the start-state closure each char (an implicit `.*?` prefix), so
+all start positions are tracked in one O(n) pass. Empty-matchable patterns short-circuit to `true`.
+`findFrom()` (position), `matches()`, `findMatch()`/`match()`/`group` all stay on the
+priority-correct thread simulation (spans unchanged).
+- Correctness: full runtime/codegen/integration suites green; **≥50k zero-divergence fuzz at the
+  18-finding baseline → zero new divergences** (the prior-attempt bugs are gone).
+- Perf: **QOBF no-match 29→~6700 ops/ms (~231×), now ~29× faster than JDK**; **QOBF find(match)
+  692→~47000 ops/ms (~68×), ~7.7× faster than JDK.** SQL is anchor-ineligible → untouched (still
+  beats JDK via T1.2). **QOBF residual gap CLOSED.**
+- Lesson reinforced: the 7-input de-risk passed but missed both bugs; only the ≥50k fuzz gate
+  validated the correct version. De-risk with the fuzz, not a handful of inputs.
+
+> **Discovered latent issue — INVESTIGATED 2026-06-17:** `LazyDFACache.findFrom` is unsound for
+> general unanchored find (restart-on-DEAD skips viable later starts; witness `(a|b){2,3}x`/`ababx`,
+> proven at the component level by the reverted T1.4). **Verification of shipped exposure:** I
+> reached `LAZY_DFA` via `[ab]*a[ab]{350}` and find() was *correct* there — because `LAZY_DFA` is
+> only reached by **star-led, self-anchoring** patterns (DFA explosion requires star-driven
+> nondeterminism; the `[ab]*` lead is a `.*?` prefix that makes findFrom's restart moot). Every
+> non-self-anchoring candidate routed to `DFA_TABLE` (correct find) or `PIKEVM_CAPTURE` (alternation
+> intercept at `:1098`, correct find). **Verdict:** real component defect, but **not observably
+> reachable via current `LAZY_DFA` routing** → low production risk. Fixing it (a correct
+> unanchored boolean search with a `.*?` start self-loop) is the prerequisite for T1.4-done-right.
 
 **[gate] G1 (Phase-1 exit):**
 1. Differential fuzz: **boolean AND span/offset parity** (group-0 start+end for `find()`, all
