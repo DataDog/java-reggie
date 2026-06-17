@@ -105,6 +105,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private final boolean findCanMatchEmpty;
   private int[] startClosureIds; // set in ctor before findStep is used; immutable thereafter
 
+  // T1.6 boolean matches() fast path: a STRICT (non-self-anchoring) lazy DFA over the same NFA.
+  // matches() asks whether the WHOLE input matches from the start, which is priority-independent,
+  // so the DFA's yes/no equals the thread simulation's. Built under the same anchor/assertion/
+  // backref-free eligibility as findDfa; null when ineligible.
+  private final LazyDFACache matchesDfa;
+  private final NfaStep matchesStep;
+
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
     super(pattern);
@@ -158,10 +165,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
       findDfa = new LazyDFACache(startClosureIds, acceptArr);
       // Self-anchoring step: closure(targets(cur, c)) UNION startClosure.
       findStep = (cur, c) -> sortedClosureUnionStart(transitionTargets(cur, (char) c));
+      // Strict step for matches() (whole-input): closure(targets) only, no start re-injection.
+      matchesDfa = new LazyDFACache(startClosureIds, acceptArr);
+      matchesStep = (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c));
     } else {
       findDfa = null;
       findStep = null;
       findCanMatchEmpty = false;
+      matchesDfa = null;
+      matchesStep = null;
     }
 
     markNativeRichApi();
@@ -295,6 +307,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   @Override
   public boolean matches(String input) {
+    if (matchesDfa != null) {
+      return matchesDfa.matches(input, matchesStep);
+    }
     return runMatches(input, 0, input.length());
   }
 
