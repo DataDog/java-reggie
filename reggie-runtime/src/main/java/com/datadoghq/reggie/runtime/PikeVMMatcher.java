@@ -50,6 +50,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int clistSize;
   private int nlistSize;
 
+  // T1.5: index of the first (highest-priority) accepting thread currently in clist, or -1.
+  // Maintained incrementally as clist is populated (resetClist / addThread leaf / swapLists) so the
+  // per-position accept check is O(1) instead of an O(clistSize) scan over isAccept[] every step.
+  private int clistFirstAccept = -1;
+
   // "in-list" guards: prevent adding the same NFA state twice per step.
   private final boolean[] inClist;
   private final boolean[] inNlist;
@@ -79,6 +84,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // GroupExit). Used by the trailing-empty-iteration rebind to avoid propagating captures when
   // the loop body requires character consumption (e.g. `(.)+` vs `(.*[_]*)+`).
   private final boolean[] groupBodyNullable;
+
+  // T1.2 required-first-char prefilter. firstByteAscii[c] is true when some first-consuming
+  // transition reachable from the start state (via the epsilon closure, crossing anchor states)
+  // can accept ASCII char c. A find() start position whose (ASCII) char is not in this set cannot
+  // begin a match — UNLESS the pattern can match the empty string, in which case prefilterUsable is
+  // false and no position is skipped. Non-ASCII positions are conservatively never skipped (sound).
+  private final boolean[] firstByteAscii;
+  private final boolean prefilterUsable;
 
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
@@ -110,7 +123,48 @@ public final class PikeVMMatcher extends ReggieMatcher {
     for (NFA.NFAState s : nfa.getAcceptStates()) {
       isAccept[s.id] = true;
     }
+
+    // T1.2: precompute the required-first-char prefilter from the start-state epsilon closure.
+    firstByteAscii = new boolean[128];
+    prefilterUsable = computeFirstByteFilter(nfa, firstByteAscii);
+
     markNativeRichApi();
+  }
+
+  /**
+   * Populate {@code firstByteAscii} with the ASCII chars that some first-consuming transition can
+   * accept, by walking the epsilon closure of the start state (crossing anchor states, which never
+   * consume). Returns {@code true} iff the prefilter is usable: the pattern cannot match the empty
+   * string (no accept state is reachable epsilon-only from start) AND at least one ASCII char
+   * cannot begin a match (otherwise skipping never fires and the per-position check is pure
+   * overhead).
+   */
+  private static boolean computeFirstByteFilter(NFA nfa, boolean[] firstByteAscii) {
+    java.util.Set<Integer> seen = new java.util.HashSet<>();
+    java.util.ArrayDeque<NFA.NFAState> q = new java.util.ArrayDeque<>();
+    NFA.NFAState start = nfa.getStartState();
+    q.add(start);
+    seen.add(start.id);
+    boolean canMatchEmpty = false;
+    while (!q.isEmpty()) {
+      NFA.NFAState s = q.poll();
+      if (nfa.getAcceptStates().contains(s)) {
+        canMatchEmpty = true; // accept reachable without consuming any char
+      }
+      for (NFA.Transition t : s.getTransitions()) {
+        for (int c = 0; c < 128; c++) {
+          if (t.chars.contains((char) c)) firstByteAscii[c] = true;
+        }
+      }
+      for (NFA.NFAState e : s.getEpsilonTransitions()) {
+        if (seen.add(e.id)) q.add(e);
+      }
+    }
+    if (canMatchEmpty) return false;
+    for (boolean b : firstByteAscii) {
+      if (!b) return true; // some ASCII char cannot start a match → skipping can fire
+    }
+    return false; // every ASCII char can start (e.g. \S+/.* lead) → prefilter is a no-op
   }
 
   // -------------------------------------------------------------------------
@@ -168,19 +222,18 @@ public final class PikeVMMatcher extends ReggieMatcher {
     initClist(input, regionStart, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
-      // Look for an accept thread in the current list.
-      for (int t = 0; t < clistSize; t++) {
-        if (isAccept[clistIds[t]]) {
-          if (pos == regionEnd) return true;
-          // Zero-length accept at region start: JDK prevents consuming threads that traversed
-          // two or more distinct anchor states (e.g. copy2-^ and copy3-^ in (^a?){3}) from
-          // extending a zero-length match into a full-input match. Threads that passed through
-          // only one anchor (e.g. \A then 1 in \A(?:b|1)?) are retained as legitimate paths.
-          if (pos == regionStart) {
-            // keepLowerPriority=true: lower-priority threads may still produce a full-input match.
-            pruneAnchorDerivedAtStart(t, true);
-            break;
-          }
+      // First (highest-priority) accept thread in the current list, or -1 (O(1), see
+      // clistFirstAccept).
+      int t = clistFirstAccept;
+      if (t >= 0) {
+        if (pos == regionEnd) return true;
+        // Zero-length accept at region start: JDK prevents consuming threads that traversed
+        // two or more distinct anchor states (e.g. copy2-^ and copy3-^ in (^a?){3}) from
+        // extending a zero-length match into a full-input match. Threads that passed through
+        // only one anchor (e.g. \A then 1 in \A(?:b|1)?) are retained as legitimate paths.
+        if (pos == regionStart) {
+          // keepLowerPriority=true: lower-priority threads may still produce a full-input match.
+          pruneAnchorDerivedAtStart(t, true);
         }
       }
       if (pos == regionEnd) break;
@@ -197,18 +250,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
     initClist(input, regionStart, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
-      for (int t = 0; t < clistSize; t++) {
-        if (isAccept[clistIds[t]]) {
-          if (pos == regionEnd) {
-            int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
-            caps[1] = pos;
-            return buildResult(input, caps);
-          }
-          // Same zero-length-accept pruning as runMatches(), keeping lower-priority threads.
-          if (pos == regionStart) {
-            pruneAnchorDerivedAtStart(t, true);
-            break;
-          }
+      int t = clistFirstAccept;
+      if (t >= 0) {
+        if (pos == regionEnd) {
+          int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
+          caps[1] = pos;
+          return buildResult(input, caps);
+        }
+        // Same zero-length-accept pruning as runMatches(), keeping lower-priority threads.
+        if (pos == regionStart) {
+          pruneAnchorDerivedAtStart(t, true);
         }
       }
       if (pos == regionEnd) break;
@@ -228,6 +279,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int findStartFrom(String input, int fromPos) {
     int len = input.length();
     for (int start = fromPos; start <= len; start++) {
+      // T1.2 prefilter: skip start positions whose char cannot begin any match.
+      if (prefilterUsable && start < len) {
+        char c = input.charAt(start);
+        if (c < 128 && !firstByteAscii[c]) continue;
+      }
       if (tryFindAt(input, start, fromPos, len) >= 0) return start;
     }
     return -1;
@@ -242,10 +298,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
     initClist(input, tryPos, regionStart, regionEnd);
 
     for (int pos = tryPos; pos <= regionEnd; pos++) {
-      for (int t = 0; t < clistSize; t++) {
-        if (isAccept[clistIds[t]]) {
-          return pos; // match ends here
-        }
+      if (clistFirstAccept >= 0) {
+        return pos; // match ends here
       }
       if (pos == regionEnd) break;
 
@@ -260,6 +314,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private MatchResult findMatchResultFrom(String input, int fromPos) {
     int len = input.length();
     for (int start = fromPos; start <= len; start++) {
+      // T1.2 prefilter: skip start positions whose char cannot begin any match.
+      if (prefilterUsable && start < len) {
+        char c = input.charAt(start);
+        if (c < 128 && !firstByteAscii[c]) continue;
+      }
       MatchResult r = tryFindMatchAt(input, start, fromPos, len);
       if (r != null) return r;
     }
@@ -284,19 +343,17 @@ public final class PikeVMMatcher extends ReggieMatcher {
     MatchResult best = null;
 
     for (int pos = tryPos; pos <= regionEnd; pos++) {
-      for (int t = 0; t < clistSize; t++) {
-        if (isAccept[clistIds[t]]) {
-          int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
-          caps[1] = pos;
-          best = buildResult(input, caps);
-          if (pos == tryPos) {
-            // Zero-length match at start: prune anchor-derived high-priority threads; discard
-            // lower-priority threads (keepLowerPriority=false) per Perl priority rules.
-            pruneAnchorDerivedAtStart(t, false);
-          } else {
-            clistSize = t;
-          }
-          break;
+      int t = clistFirstAccept;
+      if (t >= 0) {
+        int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
+        caps[1] = pos;
+        best = buildResult(input, caps);
+        if (pos == tryPos) {
+          // Zero-length match at start: prune anchor-derived high-priority threads; discard
+          // lower-priority threads (keepLowerPriority=false) per Perl priority rules.
+          pruneAnchorDerivedAtStart(t, false);
+        } else {
+          clistSize = t;
         }
       }
       if (pos == regionEnd) break;
@@ -446,6 +503,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // consuming threads that must not override a zero-length match (e.g. `a copy3` in
     // `(^a?){3}` but NOT `a` in `\A{3}a` where anchorFollowedBySkip remains false).
     clistViaMultipleAnchors[clistSize] = anchorFollowedBySkip && anchorCount >= 2;
+    if (clistFirstAccept < 0 && isAccept[state.id]) clistFirstAccept = clistSize;
     clistSize++;
   }
 
@@ -566,6 +624,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     Arrays.fill(inClist, false);
     Arrays.fill(clistViaMultipleAnchors, false);
     clistSize = 0;
+    clistFirstAccept = -1;
   }
 
   /**
@@ -597,6 +656,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
       }
       // multi-anchor-derived: leave inClist[id]=true so the thread cannot re-enter
     }
+    // The accepting thread at acceptIdx is dropped here; the compacted clist's first-accept index
+    // is recomputed by the next swapLists. Invalidate to avoid observing a stale positive.
+    clistFirstAccept = -1;
     if (keepLowerPriority) {
       // Append lower-priority threads (t > acceptIdx) — needed for full-input match checks.
       for (int t = acceptIdx + 1; t < clistSize; t++) {
@@ -626,11 +688,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
     // Full reset of clist guards then re-set from nlist.
     Arrays.fill(inClist, false);
+    clistFirstAccept = -1;
     for (int i = 0; i < nlistSize; i++) {
       clistIds[i] = nlistIds[i];
       System.arraycopy(nlistCaptures[i], 0, clistCaptures[i], 0, len);
       inClist[nlistIds[i]] = true;
       inNlist[nlistIds[i]] = false;
+      // nlist is built in priority order, so the first accepting entry is the highest priority.
+      if (clistFirstAccept < 0 && isAccept[nlistIds[i]]) clistFirstAccept = i;
     }
     clistSize = nlistSize;
     nlistSize = 0;
