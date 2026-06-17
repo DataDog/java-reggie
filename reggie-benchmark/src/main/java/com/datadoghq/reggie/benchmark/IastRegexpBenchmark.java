@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
 import java.util.concurrent.TimeUnit;
@@ -188,6 +189,35 @@ public class IastRegexpBenchmark {
     return re2jCommand.matcher(COMMAND_INPUT).find();
   }
 
+  // ----- Command capture (span extraction) -----
+
+  @Benchmark
+  public long reggieCommandCapture() {
+    MatchResult r = reggieCommand.findMatch(COMMAND_INPUT);
+    if (r == null) {
+      return -1L;
+    }
+    return (long) r.start(1) + r.end(1);
+  }
+
+  @Benchmark
+  public long jdkCommandCapture() {
+    java.util.regex.Matcher m = jdkCommand.matcher(COMMAND_INPUT);
+    if (!m.find()) {
+      return -1L;
+    }
+    return (long) m.start(1) + m.end(1);
+  }
+
+  @Benchmark
+  public long re2jCommandCapture() {
+    com.google.re2j.Matcher m = re2jCommand.matcher(COMMAND_INPUT);
+    if (!m.find()) {
+      return -1L;
+    }
+    return (long) m.start(1) + m.end(1);
+  }
+
   // ===== URL =====
 
   @Benchmark
@@ -218,6 +248,68 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jUrlQueryFind() {
     return re2jUrl.matcher(URL_QUERY_MATCH).find();
+  }
+
+  // ----- URL capture (span extraction) -----
+  // Group 1 = AUTHORITY (auth branch); groups 2 and 3 = param-name and QUERY (query branch).
+  // Sum all participating group offsets; -1 (non-participating) is skipped.
+
+  private static long sumGroupOffsets(MatchResult r, int maxGroup) {
+    long sum = 0;
+    for (int g = 1; g <= maxGroup; g++) {
+      int s = r.start(g);
+      if (s >= 0) {
+        sum += s + r.end(g);
+      }
+    }
+    return sum;
+  }
+
+  private static long sumGroupOffsets(java.util.regex.MatchResult r, int maxGroup) {
+    long sum = 0;
+    for (int g = 1; g <= maxGroup; g++) {
+      int s = r.start(g);
+      if (s >= 0) {
+        sum += s + r.end(g);
+      }
+    }
+    return sum;
+  }
+
+  @Benchmark
+  public long reggieUrlAuthCapture() {
+    MatchResult r = reggieUrl.findMatch(URL_AUTH_MATCH);
+    if (r == null) {
+      return -1L;
+    }
+    return sumGroupOffsets(r, 3);
+  }
+
+  @Benchmark
+  public long jdkUrlAuthCapture() {
+    java.util.regex.Matcher m = jdkUrl.matcher(URL_AUTH_MATCH);
+    if (!m.find()) {
+      return -1L;
+    }
+    return sumGroupOffsets(m, 3);
+  }
+
+  @Benchmark
+  public long reggieUrlQueryCapture() {
+    MatchResult r = reggieUrl.findMatch(URL_QUERY_MATCH);
+    if (r == null) {
+      return -1L;
+    }
+    return sumGroupOffsets(r, 3);
+  }
+
+  @Benchmark
+  public long jdkUrlQueryCapture() {
+    java.util.regex.Matcher m = jdkUrl.matcher(URL_QUERY_MATCH);
+    if (!m.find()) {
+      return -1L;
+    }
+    return sumGroupOffsets(m, 3);
   }
 
   @Benchmark
