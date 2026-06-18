@@ -1034,6 +1034,24 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
+        // Class E: two interacting variable-length capturing alternations (e.g. (a|ab)(c|bcd)). The
+        // first alternation's branches share a prefix, so its capture span is ambiguous until the
+        // second alternation resolves it — which the single-register TDFA cannot track
+        // ((a|ab)(c|bcd)
+        // on "abcd" → g1=[0,2) vs JDK [0,1)). PikeVM gives correct spans. A single capturing
+        // alternation followed by a fixed element (e.g. (a|ab)\d) is disambiguated
+        // deterministically
+        // and stays on the DFA.
+        if (hasInteractingCapturingAlternations(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
         int stateCount = dfa.getStateCount();
         if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
           return new MatchingStrategyResult(
@@ -1887,6 +1905,68 @@ public class PatternAnalyzer {
    * '@', so no backtracking needed - ([bc]*)(c+d) : [bc] overlaps with 'c', so backtracking IS
    * needed
    */
+  /**
+   * Class E detector: a {@link ConcatNode} containing two or more capturing groups that each wrap
+   * an alternation, where at least one of those alternations has branches with overlapping
+   * first-sets (a shared prefix, e.g. {@code a|ab}). Such a pair, e.g. {@code (a|ab)(c|bcd)}, is
+   * mis-captured by the single-register TDFA (g1=[0,2) vs JDK [0,1) on "abcd"). A lone capturing
+   * alternation, or one followed by a fixed element, is fine and stays on the DFA.
+   */
+  private boolean hasInteractingCapturingAlternations(RegexNode node) {
+    if (node instanceof GroupNode) {
+      return hasInteractingCapturingAlternations(((GroupNode) node).child);
+    }
+    if (node instanceof QuantifierNode) {
+      return hasInteractingCapturingAlternations(((QuantifierNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasInteractingCapturingAlternations(a)) return true;
+      }
+      return false;
+    }
+    if (!(node instanceof ConcatNode)) {
+      return false;
+    }
+    ConcatNode concat = (ConcatNode) node;
+    int capturingAltGroups = 0;
+    boolean anyOverlapping = false;
+    for (RegexNode child : concat.children) {
+      AlternationNode alt = capturingGroupAlternation(child);
+      if (alt != null) {
+        capturingAltGroups++;
+        if (hasOverlappingBranchFirstSets(alt)) anyOverlapping = true;
+      }
+      if (hasInteractingCapturingAlternations(child)) return true; // nested
+    }
+    return capturingAltGroups >= 2 && anyOverlapping;
+  }
+
+  /** If {@code node} is a capturing group whose body is directly an alternation, return it. */
+  private AlternationNode capturingGroupAlternation(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && g.child instanceof AlternationNode) {
+        return (AlternationNode) g.child;
+      }
+    }
+    return null;
+  }
+
+  /** True if two branches of {@code alt} have intersecting first-sets (a shared leading char). */
+  private boolean hasOverlappingBranchFirstSets(AlternationNode alt) {
+    List<RegexNode> alts = alt.alternatives;
+    for (int i = 0; i < alts.size(); i++) {
+      CharSet fi = getFirstCharSet(alts.get(i));
+      if (fi == null) continue;
+      for (int j = i + 1; j < alts.size(); j++) {
+        CharSet fj = getFirstCharSet(alts.get(j));
+        if (fj != null && fi.intersects(fj)) return true;
+      }
+    }
+    return false;
+  }
+
   private boolean requiresBacktrackingForGroups(RegexNode node) {
     if (!(node instanceof ConcatNode)) {
       return false;
