@@ -380,8 +380,14 @@ public class PatternAnalyzer {
           MatchingStrategy.GREEDY_BACKTRACK, null, greedyBacktrackInfo, false, requiredLiterals);
     }
 
-    // Check for multi-group greedy patterns
-    MultiGroupGreedyInfo multiGroupInfo = detectMultiGroupGreedyPattern(ast);
+    // Check for multi-group greedy patterns. Decline give-back patterns: a greedy quantified
+    // capturing group whose charset overlaps what must follow needs character give-back that the
+    // non-backtracking MULTI_GROUP_GREEDY strategy cannot do — it returns NO_MATCH (e.g. (\w+)0 on
+    // "ab00"). Declining lets such patterns fall through to the backtracking-capable routing
+    // (the :753 requiresBacktrackingForGroups guard → RECURSIVE_DESCENT), which produces correct
+    // spans. (GREEDY_BACKTRACK above already handles the (.*)literal shape.)
+    MultiGroupGreedyInfo multiGroupInfo =
+        requiresBacktrackingForGroups(ast) ? null : detectMultiGroupGreedyPattern(ast);
     if (multiGroupInfo != null) {
       return new MatchingStrategyResult(
           MatchingStrategy.SPECIALIZED_MULTI_GROUP_GREEDY,
