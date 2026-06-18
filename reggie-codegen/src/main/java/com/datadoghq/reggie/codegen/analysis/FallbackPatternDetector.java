@@ -193,7 +193,8 @@ public final class FallbackPatternDetector {
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
       return "variable-capture backref with unsupported prefix node type: "
-          + "generator only handles literal and char-class prefix nodes";
+          + "generator only handles literal, char-class, anchor, non-capturing group, "
+          + "and unbounded/exact quantifier prefix nodes";
     }
 
     // B13 [NEEDS-RND]: Outer quantifier wraps the entire capturing group: (X)+\N or (X){n,}\N.
