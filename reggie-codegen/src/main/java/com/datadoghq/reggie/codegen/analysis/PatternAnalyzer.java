@@ -950,6 +950,21 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // Class A: a NULLABLE capturing group in an alternation branch (e.g. 1|()b, ()b|x). The
+            // TDFA/group-action capture path commits the zero-width group even when the
+            // priority-winning branch bypasses it (binds g1=[0,0); JDK leaves it -1). PikeVM gives
+            // correct spans. A non-nullable group like (a) in (a)|b never leaks and stays on the
+            // DFA.
+            if (FallbackPatternDetector.hasNullableCapturingGroupInAlternationBranch(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
             if (stateCount < DFA_UNROLLED_STATE_LIMIT) {

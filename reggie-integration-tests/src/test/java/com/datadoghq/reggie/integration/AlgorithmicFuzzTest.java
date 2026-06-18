@@ -57,10 +57,11 @@ public class AlgorithmicFuzzTest {
    * checks per-match group spans (≥1) on the FIND path — the first oracle to do so. It surfaced
    * pre-existing find-path group-capture bugs in the codegen TDFA / PikeVM (untaken-branch group
    * not reset to −1; empty-iteration binding; greedy give-back inner-span). These are tracked as
-   * the capture-correctness effort and will ratchet this budget back toward 0 as each root-cause
-   * class is fixed.
+   * the capture-correctness effort and ratchet this budget back toward 0 as each root-cause class
+   * is fixed. Ratcheted 78→69: Class A (nullable capturing group in an alternation branch, e.g.
+   * {@code 1|()b}) now routes to PIKEVM_CAPTURE for correct spans.
    */
-  private static final int KNOWN_FINDINGS_BUDGET = 78;
+  private static final int KNOWN_FINDINGS_BUDGET = 69;
 
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)
