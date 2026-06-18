@@ -106,6 +106,17 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int[] startClosureIds; // pos-0 closure (START/\A anchors crossed); set in ctor
   private int[] reinjectClosureIds; // pos>0 closure (START/\A anchors blocked); set in ctor
 
+  // Over-approximating "reject DFA": built for anchored patterns where the EXACT findDfa cannot be
+  // (its anchors need per-position context), but only when there are no assertions/backrefs. Every
+  // anchor is treated as always-passable (crossed as epsilon — no position threaded into the state,
+  // so no state-space fracture), so the DFA accepts a SUPERSET of the language. Used ONLY by the
+  // findMatchResultFrom fast-reject: if this DFA finds NO match at/after a position, there is
+  // definitely no real match (sound necessary condition). null when not built (e.g. assertions
+  // present, or the over-approximation can itself match empty so it would accept everywhere).
+  private final LazyDFACache rejectDfa;
+  private final NfaStep rejectStep;
+  private int[] rejectStartClosureIds; // start closure with ALL anchors crossed; set in ctor
+
   // T1.6 boolean matches() fast path: a STRICT (non-self-anchoring) lazy DFA over the same NFA.
   // matches() asks whether the WHOLE input matches from the start, which is priority-independent,
   // so the DFA's yes/no equals the thread simulation's. Built under the same anchor/assertion/
@@ -180,6 +191,37 @@ public final class PikeVMMatcher extends ReggieMatcher {
       findCanMatchEmpty = false;
       matchesDfa = null;
       matchesStep = null;
+    }
+
+    // Build the over-approximating reject DFA for anchored (but assertion/backref-free) patterns
+    // the
+    // exact findDfa rejected. It crosses every anchor as epsilon → accepts a superset → a sound
+    // fast-reject (see field doc). Skipped when the over-approximation can match empty (it would
+    // then
+    // accept at every position, making it useless as a reject filter).
+    if (findDfa == null && noAssertionsOrBackrefs(nfa)) {
+      int[] startAll = sortedEpsilonClosure(new int[] {nfa.getStartState().id}, false);
+      boolean approxEmpty = false;
+      for (int id : startAll) {
+        if (isAccept[id]) {
+          approxEmpty = true;
+          break;
+        }
+      }
+      if (approxEmpty) {
+        rejectDfa = null;
+        rejectStep = null;
+      } else {
+        rejectStartClosureIds = startAll;
+        int[] acceptArr = new int[nfa.getAcceptStates().size()];
+        int ai = 0;
+        for (NFA.NFAState s : nfa.getAcceptStates()) acceptArr[ai++] = s.id;
+        rejectDfa = new LazyDFACache(startAll, acceptArr);
+        rejectStep = (cur, c) -> rejectStepClosure(transitionTargets(cur, (char) c));
+      }
+    } else {
+      rejectDfa = null;
+      rejectStep = null;
     }
 
     markNativeRichApi();
@@ -295,6 +337,34 @@ public final class PikeVMMatcher extends ReggieMatcher {
     int oi = 0;
     for (int id = 0; id < stateCount; id++) if (inSet[id]) out[oi++] = id;
     return out; // ascending
+  }
+
+  /**
+   * The reject-DFA step: {@code sortedEpsilonClosure(targets, blockStart=false)} (cross ALL
+   * anchors, including START/\A) UNION {@link #rejectStartClosureIds}. Re-injecting the
+   * all-anchors-crossed start closure each char makes a match begin at any position
+   * (self-anchoring); crossing every anchor is the over-approximation that keeps this a sound
+   * necessary-condition filter.
+   */
+  private int[] rejectStepClosure(int[] targets) {
+    int[] tc = sortedEpsilonClosure(targets, false);
+    boolean[] inSet = new boolean[stateCount];
+    for (int id : tc) inSet[id] = true;
+    for (int id : rejectStartClosureIds) inSet[id] = true;
+    int count = 0;
+    for (boolean b : inSet) if (b) count++;
+    int[] out = new int[count];
+    int oi = 0;
+    for (int id = 0; id < stateCount; id++) if (inSet[id]) out[oi++] = id;
+    return out; // ascending
+  }
+
+  /** True when no NFA state carries a lookaround assertion or a backreference check. */
+  private static boolean noAssertionsOrBackrefs(NFA nfa) {
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.assertionType != null || s.backrefCheck != null) return false;
+    }
+    return true;
   }
 
   /**
@@ -452,94 +522,117 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // -------------------------------------------------------------------------
 
   private int findStartFrom(String input, int fromPos) {
-    int len = input.length();
-    for (int start = fromPos; start <= len; start++) {
-      // T1.2 prefilter: skip start positions whose char cannot begin any match.
-      if (prefilterUsable && start < len) {
-        char c = input.charAt(start);
-        if (c < 128 && !firstByteAscii[c]) continue;
-      }
-      if (tryFindAt(input, start, fromPos, len) >= 0) return start;
-    }
-    return -1;
+    MatchResult r = findMatchResultFrom(input, fromPos);
+    return r == null ? -1 : r.start();
   }
 
   /**
-   * Try matching starting at {@code tryPos}; returns match-end position or -1. {@code regionStart}
-   * is the fixed search-region origin used for start-anchor evaluation (^, \A); it does not move
-   * with {@code tryPos}.
+   * One continuing left-to-right pass returning the leftmost match at or after {@code fromPos}, or
+   * {@code null}. Replaces the former per-start retry loop (the O(n^2) PCRE "try every start"
+   * anti-pattern): the start thread is re-seeded at LOWEST priority at every position — the
+   * implicit {@code .*?} prefix with RE2's "Mark" priority separator — so a single pass tracks
+   * every candidate start in parallel and {@code inClist} dedup-by-PC collapses them to &le; {@code
+   * stateCount} live threads, giving O(n*m). Leftmost-first is preserved because an earlier seed
+   * has higher priority and survives the accept-time priority cut, overriding a later seed that
+   * happens to accept first.
+   *
+   * <p>The greedy/zero-length finalization is identical to the former {@code tryFindMatchAt}: on
+   * the highest-priority accept, record it as {@code best} and cut strictly-lower-priority threads;
+   * higher-priority non-accept threads keep running and may overwrite {@code best} with a longer
+   * end (greedy give-back). Finalize when the in-progress match's threads are all gone.
+   *
+   * <p>The anchor origin is PINNED to absolute 0 (not {@code fromPos}), so {@code ^}/{@code \A}
+   * match only at input start exactly like {@code java.util.regex.Matcher.find(start)} — this is
+   * why find-all no longer spuriously re-anchors {@code ^} at each restart.
    */
-  private int tryFindAt(String input, int tryPos, int regionStart, int regionEnd) {
-    initClist(input, tryPos, regionStart, regionEnd);
-
-    for (int pos = tryPos; pos <= regionEnd; pos++) {
-      if (clistFirstAccept >= 0) {
-        return pos; // match ends here
-      }
-      if (pos == regionEnd) break;
-
-      char ch = input.charAt(pos);
-      resetNlist();
-      stepChar(ch, pos + 1, input, regionStart, regionEnd);
-      swapLists();
-    }
-    return -1;
-  }
-
   private MatchResult findMatchResultFrom(String input, int fromPos) {
-    int len = input.length();
-    for (int start = fromPos; start <= len; start++) {
-      // T1.2 prefilter: skip start positions whose char cannot begin any match.
-      if (prefilterUsable && start < len) {
-        char c = input.charAt(start);
-        if (c < 128 && !firstByteAscii[c]) continue;
+    int regionEnd = input.length();
+    // Fast reject: the T1.4 boolean find DFA (when present) decides whether ANY match exists at or
+    // after fromPos in one cheap O(n) single-state DFA scan — far cheaper than the per-char thread
+    // simulation below. If it proves none, skip the thread sim entirely. This is the dominant win
+    // on
+    // no-match drains (e.g. malformed payloads with zero matches). Soundness: the self-anchoring
+    // DFA
+    // re-injects the start closure each char so it tracks every start position (no false
+    // negatives);
+    // a ^/\A over-acceptance at fromPos>0 is only a false positive (we harmlessly fall through to
+    // the
+    // thread sim). Skipped when the pattern can match empty (a match always exists at fromPos, so
+    // the
+    // DFA would never report -1 anyway).
+    if (findDfa != null && !findCanMatchEmpty) {
+      if (findDfa.findFrom(input, fromPos, findStep) < 0) {
+        return null;
       }
-      MatchResult r = tryFindMatchAt(input, start, fromPos, len);
-      if (r != null) return r;
+    } else if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) {
+      // Over-approximating reject DFA proved no match exists at/after fromPos (sound: it accepts a
+      // superset, so -1 means truly no match). Only built when it cannot match empty, so no
+      // findCanMatchEmpty guard is needed here.
+      return null;
     }
-    return null;
-  }
-
-  private MatchResult tryFindMatchAt(String input, int tryPos, int regionStart, int regionEnd) {
-    initClist(input, tryPos, regionStart, regionEnd);
-
-    // Greedy PikeVM rule: when a thread at index t accepts, threads at indices > t (lower priority)
-    // cannot produce a better match. Truncate the clist to [0..t-1] so only higher-priority
-    // non-accept threads continue. This lets a higher-priority thread that hasn't accepted yet
-    // (but will at a later position) override the current accept — giving greedy longest-match from
-    // the highest-priority thread (e.g. (_)? prefers consuming _ over the empty match, while
-    // (fo|foo) prefers "fo" over "foo" since "fo" is the higher-priority first alternative).
-    //
-    // Exception — zero-length match at tryPos: JDK semantics prevent anchor-derived consuming
-    // threads from overriding a zero-length accept. When the first accept fires at tryPos,
-    // retain only non-anchor-derived higher-priority threads so that legitimate greedy consuming
-    // paths (e.g. `a` in `(a)*`) can still extend the match while anchor-driven empty-iteration
-    // consuming paths (e.g. `a` copy3 in `(^a?){3}`) cannot.
+    resetClist();
     MatchResult best = null;
 
-    for (int pos = tryPos; pos <= regionEnd; pos++) {
+    for (int pos = fromPos; pos <= regionEnd; pos++) {
+      // Re-seed the start thread (appended last = lowest priority) until a match accepts. Once
+      // `best` is set the accept-time cut removes lower-priority threads (incl. any new seed), so a
+      // later start cannot beat the already-found leftmost match; stop seeding. A still-running
+      // higher-priority thread can still override `best` (greedy give-back).
+      if (best == null) {
+        // T1.2 prefilter: don't seed a start whose char cannot begin any match (the single-pass
+        // equivalent of the former per-start `continue`). Live higher-priority threads still step.
+        boolean skipSeed = false;
+        if (prefilterUsable && pos < regionEnd) {
+          char c = input.charAt(pos);
+          skipSeed = c < 128 && !firstByteAscii[c];
+        }
+        if (!skipSeed) {
+          seedStart(input, pos, regionEnd);
+        }
+      }
+
       int t = clistFirstAccept;
       if (t >= 0) {
         int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
         caps[1] = pos;
         best = buildResult(input, caps);
-        if (pos == tryPos) {
-          // Zero-length match at start: prune anchor-derived high-priority threads; discard
+        if (pos == fromPos) {
+          // Zero-length accept at the origin-most seed (caps[0] == fromPos == pos): the
+          // clistViaMultipleAnchors flags are still fresh (no swapLists yet), so the anchor-derived
+          // pruning is valid here exactly as in the former tryFindMatchAt first iteration. Discard
           // lower-priority threads (keepLowerPriority=false) per Perl priority rules.
           pruneAnchorDerivedAtStart(t, false);
         } else {
+          // Cut strictly-lower-priority threads. The accepting thread started at pos > fromPos, so
+          // (^/\A fire only at the pinned origin 0) it cannot be a multi-anchor-origin thread —
+          // hence no pruning is needed, and the now-stale post-swap flags must not be read.
           clistSize = t;
+          clistFirstAccept = -1;
         }
       }
       if (pos == regionEnd) break;
 
       char ch = input.charAt(pos);
       resetNlist();
-      stepChar(ch, pos + 1, input, regionStart, regionEnd);
+      stepChar(ch, pos + 1, input, 0, regionEnd);
       swapLists();
-      if (clistSize == 0) break;
+      // Finalize only once a match is in progress: when its threads are all gone `best` is final.
+      // With best == null we must keep scanning (and re-seeding) for a start further right.
+      if (best != null && clistSize == 0) break;
     }
     return best;
+  }
+
+  /**
+   * Append the start-state thread for position {@code pos} at the current (lowest) clist priority,
+   * without clearing the clist. Unlike {@link #initClist}, the anchor origin is pinned to absolute
+   * 0; the {@code inClist} dedup collapses this seed into any already-present equivalent thread.
+   */
+  private void seedStart(String input, int pos, int regionEnd) {
+    int[] init = scratchCaptures[0];
+    Arrays.fill(init, -1);
+    init[0] = pos; // tentative whole-match start
+    addThread(nfa.getStartState(), init, pos, 0, 0, false, input, 0, regionEnd);
   }
 
   // -------------------------------------------------------------------------
