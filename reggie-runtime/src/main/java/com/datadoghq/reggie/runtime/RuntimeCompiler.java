@@ -17,8 +17,9 @@ package com.datadoghq.reggie.runtime;
 
 import static org.objectweb.asm.Opcodes.*;
 
-import com.datadoghq.reggie.CapturePolicy;
+import com.datadoghq.reggie.ReggieOption;
 import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import com.datadoghq.reggie.codegen.analysis.BackreferencePatternInfo;
 import com.datadoghq.reggie.codegen.analysis.CaptureProjection;
 import com.datadoghq.reggie.codegen.analysis.ConcatGreedyGroupInfo;
@@ -183,10 +184,7 @@ public class RuntimeCompiler {
 
   /** Compile pattern with runtime compilation options. */
   public static ReggieMatcher compile(String pattern, ReggieOptions options) {
-    String cacheKey =
-        options.capturePolicy() == CapturePolicy.ALL
-            ? pattern
-            : pattern + "\u0000capturePolicy=" + options.capturePolicy();
+    String cacheKey = cacheKeyFor(pattern, options);
 
     // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
@@ -207,12 +205,7 @@ public class RuntimeCompiler {
     // compileInternal will populate NFA_CLASS_CACHE if the strategy is NFA-backed, in which case
     // the L1 entry is immediately removed so that subsequent calls hit the fast path above.
     ReggieMatcher compiled =
-        PATTERN_CACHE.computeIfAbsent(
-            cacheKey,
-            k ->
-                options.capturePolicy() == CapturePolicy.ALL
-                    ? compileInternal(pattern, ReggieOptions.DEFAULT, k)
-                    : compileInternal(pattern, options, k));
+        PATTERN_CACHE.computeIfAbsent(cacheKey, k -> compileInternal(pattern, options, k));
 
     // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
     // remove it from L1 and return a fresh matcher so callers never share mutable state.
@@ -230,6 +223,68 @@ public class RuntimeCompiler {
       return factory.newInstance(pattern);
     }
     return compiled;
+  }
+
+  private static final char NAME_SEP = ''; // US (unit separator)
+  private static final char PAIR_SEP = ''; // RS (record separator)
+
+  /** Encodes a group-name-to-index map into a compact string for baking into a delegating stub. */
+  public static String encodeNameMap(Map<String, Integer> nameMap) {
+    if (nameMap == null || nameMap.isEmpty()) {
+      return "";
+    }
+    StringBuilder sb = new StringBuilder();
+    for (Map.Entry<String, Integer> e : nameMap.entrySet()) {
+      if (sb.length() > 0) {
+        sb.append(PAIR_SEP);
+      }
+      sb.append(e.getKey()).append(NAME_SEP).append(e.getValue());
+    }
+    return sb.toString();
+  }
+
+  /** Inverse of {@link #encodeNameMap}. Returns an empty map for an empty string. */
+  public static Map<String, Integer> decodeNameMap(String encoded) {
+    if (encoded == null || encoded.isEmpty()) {
+      return java.util.Collections.emptyMap();
+    }
+    Map<String, Integer> m = new java.util.LinkedHashMap<>();
+    int i = 0;
+    while (i < encoded.length()) {
+      int pairEnd = encoded.indexOf(PAIR_SEP, i);
+      if (pairEnd < 0) {
+        pairEnd = encoded.length();
+      }
+      int sep = encoded.indexOf(NAME_SEP, i);
+      String name = encoded.substring(i, sep);
+      int idx = Integer.parseInt(encoded.substring(sep + 1, pairEnd));
+      m.put(name, idx);
+      i = pairEnd + 1;
+    }
+    return m;
+  }
+
+  /**
+   * Compile a pattern that the annotation processor resolved to {@code PIKEVM_CAPTURE}, skipping
+   * strategy re-analysis. The NFA is still built by the canonical runtime builder; only the routing
+   * decision and name map are carried from compile time. Used by generated delegating stubs.
+   */
+  public static ReggieMatcher compilePikeVm(String pattern, String encodedNames) {
+    PikeVMEntry entry = PIKEVM_NFA_CACHE.get(pattern);
+    if (entry != null) {
+      return entry.newMatcher(pattern);
+    }
+    try {
+      RegexParser parser = new RegexParser();
+      RegexNode ast = parser.parse(pattern);
+      Map<String, Integer> nameMap = decodeNameMap(encodedNames);
+      int groupCount = countGroups(pattern);
+      NFA nfa = new ThompsonBuilder().build(ast, groupCount);
+      PIKEVM_NFA_CACHE.putIfAbsent(pattern, new PikeVMEntry(nfa, nameMap));
+      return PIKEVM_NFA_CACHE.get(pattern).newMatcher(pattern);
+    } catch (RegexParser.ParseException e) {
+      throw new java.util.regex.PatternSyntaxException(e.getMessage(), pattern, -1);
+    }
   }
 
   /**
@@ -310,6 +365,31 @@ public class RuntimeCompiler {
     return compileInternal(pattern, options, pattern);
   }
 
+  private static String cacheKeyFor(String pattern, ReggieOptions options) {
+    StringBuilder sb = null;
+    for (ReggieOption o : ReggieOption.values()) {
+      if (options.has(o)) {
+        if (sb == null) {
+          sb = new StringBuilder(pattern);
+        }
+        sb.append(' ').append(o.name());
+      }
+    }
+    return sb == null ? pattern : sb.toString();
+  }
+
+  private static ReggieMatcher fallbackOrThrow(
+      String pattern, String reason, Map<String, Integer> nameMap, ReggieOptions options) {
+    if (!options.has(ReggieOption.ALLOW_JDK_FALLBACK)) {
+      throw new UnsupportedPatternException(reason);
+    }
+    ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, reason);
+    if (nameMap != null && !nameMap.isEmpty()) {
+      fallback.setNameToIndex(nameMap);
+    }
+    return fallback;
+  }
+
   /**
    * Compile a pattern with an explicit L1 cache key. When the strategy is NFA-backed, the compiled
    * class is stored in NFA_CLASS_CACHE under {@code cacheKey} so that compile() can skip L1 and
@@ -322,7 +402,7 @@ public class RuntimeCompiler {
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
-      if (options.capturePolicy() == CapturePolicy.NAMED_ONLY) {
+      if (options.has(ReggieOption.CAPTURE_NAMED_ONLY)) {
         ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
         ReggieMatcher linearTokenSequenceMatcher =
             tryCompileLinearTokenSequence(pattern, ast, nameMap);
@@ -354,36 +434,26 @@ public class RuntimeCompiler {
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
       // results for these patterns (e.g. dot matching newline, group-span bugs).
       if (result.anchorConditionDiluted) {
-        ReggieMatcher fallback =
-            new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in DFA construction");
-        if (!nameMap.isEmpty()) {
-          fallback.setNameToIndex(nameMap);
-        }
-        return fallback;
+        return fallbackOrThrow(
+            pattern, "anchor condition diluted in DFA construction", nameMap, options);
       }
       if (result.alternationPriorityConflict) {
-        ReggieMatcher fallback =
-            new JavaRegexFallbackMatcher(
-                pattern,
-                "alternation priority conflict: DFA longest-match vs NFA first-alternative");
-        if (!nameMap.isEmpty()) {
-          fallback.setNameToIndex(nameMap);
-        }
-        return fallback;
+        return fallbackOrThrow(
+            pattern,
+            "alternation priority conflict: DFA longest-match vs NFA first-alternative",
+            nameMap,
+            options);
       }
       // A6 [NEEDS-RND]: captureAmbiguous=true means the NFA has a bypass path around at least one
       // capturing group (reachable accept state without entering that group's enterGroup marker).
       // Native backref strategies cannot resolve which thread's binding wins in that case.
       // Fix requires per-state group arrays (issue #38 Cat B). See BackrefEngineGapsTest.a6.
       if (result.captureAmbiguous) {
-        ReggieMatcher fallback =
-            new JavaRegexFallbackMatcher(
-                pattern,
-                "capture-ambiguous group bindings: group spans require java.util.regex semantics");
-        if (!nameMap.isEmpty()) {
-          fallback.setNameToIndex(nameMap);
-        }
-        return fallback;
+        return fallbackOrThrow(
+            pattern,
+            "capture-ambiguous group bindings: group spans require java.util.regex semantics",
+            nameMap,
+            options);
       }
 
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
@@ -395,16 +465,13 @@ public class RuntimeCompiler {
 
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (fallbackReason != null) {
-        ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, fallbackReason);
-        if (!nameMap.isEmpty()) {
-          fallback.setNameToIndex(nameMap);
-        }
-        return fallback;
+        return fallbackOrThrow(pattern, fallbackReason, nameMap, options);
       }
 
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
-        ReggieMatcher hybrid = compileHybrid(pattern, ast, nfa, analyzer, result, caseInsensitive);
+        ReggieMatcher hybrid =
+            compileHybrid(pattern, ast, nfa, analyzer, result, caseInsensitive, options);
         hybrid.setNameToIndex(nameMap);
         return hybrid;
       }
@@ -470,20 +537,22 @@ public class RuntimeCompiler {
       // reach this path for extremely large alternations. Preserve drop-in behavior by falling back
       // to java.util.regex, and include the generated method and bytecode size in the warning so
       // the responsible generator can be identified and fixed.
-      ReggieMatcher fallback =
-          new JavaRegexFallbackMatcher(
-              pattern,
-              "generated method too large: "
-                  + e.getClassName()
-                  + "."
-                  + e.getMethodName()
-                  + e.getDescriptor()
-                  + " codeSize="
-                  + e.getCodeSize());
-      return fallback;
+      return fallbackOrThrow(
+          pattern,
+          "generated method too large: "
+              + e.getClassName()
+              + "."
+              + e.getMethodName()
+              + e.getDescriptor()
+              + " codeSize="
+              + e.getCodeSize(),
+          null,
+          options);
     } catch (RegexParser.UnsupportedPatternException | UnsupportedOperationException e) {
-      throw new com.datadoghq.reggie.UnsupportedPatternException(
+      throw new UnsupportedPatternException(
           "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), e);
+    } catch (UnsupportedPatternException e) {
+      throw e;
     } catch (RegexParser.ParseException e) {
       // Parser reported a structural error — expose as PatternSyntaxException so callers
       // receive a typed, documented exception rather than a generic RuntimeException.
@@ -561,7 +630,8 @@ public class RuntimeCompiler {
       NFA nfa,
       PatternAnalyzer analyzer,
       PatternAnalyzer.MatchingStrategyResult originalResult,
-      boolean caseInsensitive)
+      boolean caseInsensitive,
+      ReggieOptions options)
       throws Exception {
     // 1. Get DFA strategy (ignore group count)
     PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
@@ -569,7 +639,8 @@ public class RuntimeCompiler {
     // If DFA construction failed due to anchor-condition dilution, the pure NFA fallback may
     // produce incorrect results (e.g. dot matching newline). Route to JDK instead.
     if (dfaResult.anchorConditionDiluted) {
-      return new JavaRegexFallbackMatcher(pattern, "anchor condition diluted in hybrid DFA build");
+      return fallbackOrThrow(
+          pattern, "anchor condition diluted in hybrid DFA build", null, options);
     }
     // If DFA construction failed or pattern needs NFA anyway, fall back to pure NFA
     if (dfaResult.dfa == null) {

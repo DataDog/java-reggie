@@ -22,10 +22,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class MatchIntoAPITest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -70,7 +74,7 @@ class MatchIntoAPITest {
 
   @Test
   void dfaSwitchMatcherOverridesMatchInto() throws Exception {
-    ReggieMatcher matcher = Reggie.compile("([a-z]|[0-9]|[A-Z]|_){10}x");
+    ReggieMatcher matcher = Reggie.compile("([a-z]|[0-9]|[A-Z]|_){10}x", WITH_FALLBACK);
     int[] starts = new int[2];
     int[] ends = new int[2];
 

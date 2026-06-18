@@ -126,13 +126,14 @@ public final class FallbackPatternDetector {
       return "cross-alternative backref: group captured in one branch, used in another";
     }
 
-    // B7 [FIXABLE-NOW]: Parallel NFA simulation uses shared group arrays across all active paths.
-    // When a backref \N references a group that can capture the empty string (nullable), the greedy
-    // path may record a non-zero groupLen while the empty-capture path needs groupLen=0. The shared
-    // array records the wrong value, causing the backref check to fail or spuriously succeed.
-    // Fix: add a zero-length early-accept in backrefCheck (if groupLen==0 accept unconditionally).
+    // B7 [PARTIALLY-FIXED]: The zero-length early-accept in generateBackreferenceCheck fixes the
+    // simplest class of nullable-group contamination: groups whose body can capture at most 1
+    // character (e.g. a?, [x]?). For these, contamination produces groupLen≤1 and the longest-match
+    // semantics plus the early-accept ensure correct results. Groups whose body can capture strings
+    // of length > 1 (e.g. [0]?-*, a{0,2}) can produce contaminated groupLen > 1, causing spurious
+    // bounds-check failures that the early-accept cannot prevent. Those cases still need fallback.
     if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
-        && hasNullableBackrefGroup(ast)) {
+        && hasAmbiguouslyNullableBackrefGroup(ast)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
@@ -158,17 +159,8 @@ public final class FallbackPatternDetector {
           + "recursive descent parser mishandles zero-length capture in nested group context";
     }
 
-    // Tagged DFA (DFA_UNROLLED_WITH_GROUPS, DFA_SWITCH_WITH_GROUPS) group-span computation is
-    // unreliable when an optional element (quantifier with min=0) at the top-level concat precedes
-    // a capturing group. The TDFA priority-ordering cannot correctly resolve whether the group
-    // start position belongs to the skipped or matched optional prefix path, producing wrong
-    // group-start values (e.g. "-?(-?.{3})." gives g1=[1,3] instead of [0,3]).
-    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
-        && hasOptionalPrefixBeforeCapturingGroup(ast)) {
-      return "optional prefix before capturing group: "
-          + "tagged DFA group-span computation produces wrong group-start position";
-    }
+    // B10 [ELIMINATED]: DFA_*_WITH_GROUPS optional-prefix-before-capturing-group.
+    // PatternAnalyzer now routes these to PIKEVM_CAPTURE before the DFA ladder.
 
     // B11 — Lookahead inside alternation branch, NFA path only (OPTIMIZED_NFA_WITH_LOOKAROUND).
     // Root cause (NEEDS-RND): The NFA epsilon-closure worklist is shared across all active
@@ -192,10 +184,9 @@ public final class FallbackPatternDetector {
     // Generator now caps the initial groupEnd to info.groupMaxCount when the group has a bounded
     // quantifier, so this fallback condition is no longer needed.
 
-    // B12 [FIXABLE-NOW]: Generator handles LiteralNode and CharClassNode prefix nodes via
-    // emitPrefixMatch. Still fall back for patterns with complex prefix nodes the generator cannot
-    // handle (non-capturing GroupNode, QuantifierNode, etc). Fix: extend emitPrefixMatch to inline
-    // non-capturing group content — bounded, allocation-free change.
+    // B12 [PARTIALLY-FIXED]: emitPrefixMatch handles Literal, CharClass, Anchor, and non-capturing
+    // GroupNode (via isPrefixNodeHandleable recursion). Prefix patterns whose top-level node is a
+    // QuantifierNode or another unsupported type still fall back.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
       return "variable-capture backref with unsupported prefix node type: "
@@ -238,27 +229,19 @@ public final class FallbackPatternDetector {
     // (routing to OPTIMIZED_NFA instead of JDK when alternation priority is not a correctness
     // concern) is deferred.
 
-    // The capture-ambiguous TDFA (DFA_UNROLLED_WITH_GROUPS / DFA_SWITCH_WITH_GROUPS) produces
-    // incorrect boolean results when the pattern has both alternation and a capturing group
-    // inside a quantifier. The TDFA priority thread for the quantified-group body can mark NFA
-    // states as visited before the alternation's other branches are explored, causing those
-    // branches to be silently skipped and producing a wrong false-negative result.
-    if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
-        && containsAlternation(ast)
-        && hasCapturingGroupInQuantifiedSection(ast)) {
-      return "capturing group in quantifier with alternation: "
-          + "TDFA thread ordering silently skips alternation branches";
-    }
+    // B15 [ELIMINATED]: DFA_*_WITH_GROUPS capturing-group-in-quantified-alternation.
+    // PatternAnalyzer now routes these to PIKEVM_CAPTURE before the DFA ladder.
 
-    // The TDFA does not correctly model POSIX last-match semantics when a capturing group is
-    // directly wrapped by an outer quantifier with min=0 (nullable). The last zero-width iteration
-    // should set group to the last non-empty capture, but the TDFA may report the wrong span.
+    // B16 [PARTIAL]: nullable outer quantifier on capturing group with nullable content.
+    // When the group content is itself nullable (e.g. (0*-?){0,}), PIKEVM_CAPTURE also diverges
+    // (wrong last-iteration spans), so these still fall back to JDK. The non-nullable-content
+    // sub-case (e.g. (a)?) is handled by PatternAnalyzer routing to PIKEVM_CAPTURE.
     if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS)
-        && hasNullableOuterQuantifierOnCapturingGroup(ast)) {
-      return "capturing group with nullable outer quantifier: "
-          + "TDFA POSIX last-match span incorrect for zero-width last iteration";
+            || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS
+            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+        && hasNullableGroupContentWithNullableQuantifier(ast)) {
+      return "capturing group with nullable content and nullable outer quantifier: "
+          + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect";
     }
 
     // OPTIMIZED_NFA: \Z (STRING_END) in an alternation combined with capturing groups,
@@ -595,6 +578,105 @@ public final class FallbackPatternDetector {
     return false;
   }
 
+  /**
+   * Returns true if any backref references a group that is nullable AND whose body can capture
+   * strings of length greater than 1. These are the cases where shared-array contamination can
+   * produce a corrupt {@code groupLen > 1}, causing spurious bounds-check failures in the backref
+   * check that the zero-length early-accept cannot prevent.
+   *
+   * <p>Groups whose body can capture at most 1 character (e.g. {@code a?}, {@code [x]?}) are safe
+   * without a fallback: contamination at most produces {@code groupLen=1}, and the longest-match
+   * semantics in {@code findMatch} ensure the non-empty path wins when it independently produces
+   * the correct result; the empty-input path ({@code matches("")}) has no competing threads. Groups
+   * whose body can capture ALWAYS-empty strings (like {@code ()}) are trivially safe.
+   */
+  private static boolean hasAmbiguouslyNullableBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    for (int groupNum : backrefNums) {
+      if (isGroupNullable(ast, groupNum) && isGroupBodyCapableOfLengthGtOne(ast, groupNum))
+        return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the capturing group with the given number can capture a string of length > 1.
+   */
+  private static boolean isGroupBodyCapableOfLengthGtOne(RegexNode node, int groupNum) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && g.groupNumber == groupNum) {
+        return subtreeMaxCaptureLength(g.child) > 1;
+      }
+      return isGroupBodyCapableOfLengthGtOne(g.child, groupNum);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (isGroupBodyCapableOfLengthGtOne(c, groupNum)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (isGroupBodyCapableOfLengthGtOne(a, groupNum)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return isGroupBodyCapableOfLengthGtOne(((QuantifierNode) node).child, groupNum);
+    }
+    return false;
+  }
+
+  /**
+   * Returns the maximum number of characters the subtree can match, or {@link Integer#MAX_VALUE}
+   * for unbounded. Returns 0 for always-empty subtrees (epsilon literals, anchors).
+   */
+  private static int subtreeMaxCaptureLength(RegexNode node) {
+    if (node instanceof LiteralNode) {
+      return ((LiteralNode) node).ch == 0 ? 0 : 1; // epsilon literal is always empty
+    }
+    if (node instanceof CharClassNode) {
+      return 1; // always matches exactly one character
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.max == 0) return 0;
+      int childMax = subtreeMaxCaptureLength(q.child);
+      if (childMax == 0) return 0;
+      // q.max == -1 means unbounded (*); Integer.MAX_VALUE is also treated as unbounded.
+      if (q.max == -1 || q.max == Integer.MAX_VALUE || childMax == Integer.MAX_VALUE)
+        return Integer.MAX_VALUE;
+      return q.max * childMax;
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode c : ((ConcatNode) node).children) {
+        int cm = subtreeMaxCaptureLength(c);
+        if (cm == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        total += cm;
+        if (total < 0) return Integer.MAX_VALUE; // overflow guard
+      }
+      return total;
+    }
+    if (node instanceof AlternationNode) {
+      int max = 0;
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        int am = subtreeMaxCaptureLength(a);
+        if (am == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        if (am > max) max = am;
+      }
+      return max;
+    }
+    if (node instanceof GroupNode) {
+      return subtreeMaxCaptureLength(((GroupNode) node).child);
+    }
+    // AnchorNode, AssertionNode — zero-width
+    return 0;
+  }
+
   /** Walk the AST to find the capturing group with the given number and test nullability. */
   private static boolean isGroupNullable(RegexNode node, int groupNum) {
     if (node instanceof GroupNode) {
@@ -623,7 +705,7 @@ public final class FallbackPatternDetector {
   }
 
   /** Returns true if the subtree can match the empty string (zero characters). */
-  private static boolean subtreeIsNullable(RegexNode node) {
+  static boolean subtreeIsNullable(RegexNode node) {
     if (node instanceof QuantifierNode) {
       return ((QuantifierNode) node).min == 0 || subtreeIsNullable(((QuantifierNode) node).child);
     }
@@ -776,7 +858,7 @@ public final class FallbackPatternDetector {
    * computation cannot resolve the group-start position correctly when an optional element may or
    * may not be consumed before the group opens.
    */
-  private static boolean hasOptionalPrefixBeforeCapturingGroup(RegexNode ast) {
+  static boolean hasOptionalPrefixBeforeCapturingGroup(RegexNode ast) {
     if (ast instanceof ConcatNode) {
       ConcatNode concat = (ConcatNode) ast;
       boolean seenOptional = false;
@@ -893,9 +975,34 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if the given prefix node can be handled by {@code emitPrefixNode} in the bytecode
+   * generator. Handles AnchorNode (zero-width), LiteralNode, CharClassNode, non-capturing GroupNode
+   * (by recursing into its child), and ConcatNode (by checking all children).
+   */
+  private static boolean isPrefixNodeHandleable(RegexNode node) {
+    if (node instanceof AnchorNode
+        || node instanceof LiteralNode
+        || node instanceof CharClassNode) {
+      return true;
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      return !g.capturing && isPrefixNodeHandleable(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (!isPrefixNodeHandleable(child)) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Returns true if the VARIABLE_CAPTURE_BACKREF pattern has a prefix node type that the bytecode
-   * generator cannot handle (QuantifierNode, non-capturing GroupNode, or unknown node type).
-   * LiteralNode and CharClassNode prefix nodes are now handled by emitPrefixMatch.
+   * generator cannot handle (QuantifierNode, or unknown node type). LiteralNode, CharClassNode,
+   * AnchorNode, and non-capturing GroupNode prefixes with handleable content are supported by
+   * emitPrefixNode.
    */
   private static boolean hasNonAnchorPrefixBeforeBackrefGroup(RegexNode ast) {
     Set<Integer> backrefNums = new HashSet<>();
@@ -910,7 +1017,8 @@ public final class FallbackPatternDetector {
       if (child instanceof GroupNode) {
         GroupNode g = (GroupNode) child;
         if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
-        return true; // non-capturing group in prefix: not handled
+        if (!g.capturing && isPrefixNodeHandleable(g.child)) continue; // handled by emitPrefixNode
+        return true;
       }
       if (child instanceof QuantifierNode) {
         QuantifierNode q = (QuantifierNode) child;
@@ -957,10 +1065,41 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
+   * the group's content is itself nullable (can match the empty string). Example: {@code
+   * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is
+   * nullable. PIKEVM diverges for this sub-case; only non-nullable-content B16 patterns are safe to
+   * route to PIKEVM_CAPTURE.
+   */
+  static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
+    if (ast instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) ast;
+      if (q.min == 0 && q.child instanceof GroupNode) {
+        GroupNode g = (GroupNode) q.child;
+        if (g.capturing && subtreeIsNullable(g.child)) return true;
+      }
+      return hasNullableGroupContentWithNullableQuantifier(q.child);
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasNullableGroupContentWithNullableQuantifier(c)) return true;
+      }
+    }
+    if (ast instanceof GroupNode)
+      return hasNullableGroupContentWithNullableQuantifier(((GroupNode) ast).child);
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives) {
+        if (hasNullableGroupContentWithNullableQuantifier(a)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0.
    * Example: {@code (0*-?){0,}} has the group quantified by {@code {0,}} (min=0).
    */
-  private static boolean hasNullableOuterQuantifierOnCapturingGroup(RegexNode ast) {
+  static boolean hasNullableOuterQuantifierOnCapturingGroup(RegexNode ast) {
     if (ast instanceof QuantifierNode) {
       QuantifierNode q = (QuantifierNode) ast;
       if (q.min == 0 && q.child instanceof GroupNode && ((GroupNode) q.child).capturing)
@@ -1127,7 +1266,7 @@ public final class FallbackPatternDetector {
   }
 
   /** Returns true if the AST contains at least one {@link AlternationNode}. */
-  private static boolean containsAlternation(RegexNode node) {
+  static boolean containsAlternation(RegexNode node) {
     if (node instanceof AlternationNode) return true;
     if (node instanceof ConcatNode) {
       for (RegexNode c : ((ConcatNode) node).children) if (containsAlternation(c)) return true;

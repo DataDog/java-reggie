@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.NFA;
@@ -56,6 +57,8 @@ import org.junit.jupiter.api.Test;
 public class StrategyCorrectnessMetaTest {
 
   private static final boolean ENFORCE = Boolean.getBoolean("reggie.metatest.enforce");
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   /** A representative pattern plus the inputs to exercise against it. */
   private record Spec(String pattern, List<String> inputs) {}
@@ -356,7 +359,7 @@ public class StrategyCorrectnessMetaTest {
       ReggieMatcher reggie;
       Pattern jdk;
       try {
-        reggie = Reggie.compile(pattern);
+        reggie = Reggie.compile(pattern, WITH_FALLBACK);
         jdk = Pattern.compile(pattern);
       } catch (Throwable ex) {
         mismatches.add(
@@ -742,7 +745,7 @@ public class StrategyCorrectnessMetaTest {
       ReggieMatcher reggie;
       Pattern jdk;
       try {
-        reggie = Reggie.compile(pattern);
+        reggie = Reggie.compile(pattern, WITH_FALLBACK);
         jdk = Pattern.compile(pattern);
       } catch (Throwable ex) {
         mismatches.add(

@@ -21,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.datadoghq.reggie.CapturePolicy;
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.LinearTokenSequencePlan;
@@ -84,7 +83,7 @@ class LinearTokenSequenceMatcherTest {
     ReggieMatcher matcher =
         Reggie.compile(
             "host=(?<host>\\S+) status=(?<status>[+-]?\\d+)",
-            ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build());
+            ReggieOptions.builder().namedOnly().build());
 
     MatchResult result = matcher.match("host=api.example.com status=200");
 
@@ -158,7 +157,7 @@ class LinearTokenSequenceMatcherTest {
   }
 
   private static final ReggieOptions NAMED_ONLY_OPTIONS =
-      ReggieOptions.builder().capturePolicy(CapturePolicy.NAMED_ONLY).build();
+      ReggieOptions.builder().namedOnly().build();
 
   private static void assertDelegateType(ReggieMatcher matcher, Class<?> expectedType)
       throws Exception {

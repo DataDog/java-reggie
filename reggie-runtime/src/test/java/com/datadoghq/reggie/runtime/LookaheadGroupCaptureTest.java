@@ -18,10 +18,14 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
 
 /** Tests for capturing groups inside lookahead assertions. */
 public class LookaheadGroupCaptureTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @Test
   public void testLookaheadWithCapturingGroup() {
@@ -52,7 +56,7 @@ public class LookaheadGroupCaptureTest {
   public void testOptionalLookaheadWithGroup() {
     // Pattern (?=(a))?. - optional lookahead with group, then any char
     // JDK: On "ab", group 1 captures "a"
-    ReggieMatcher m = Reggie.compile("(?=(a))?.");
+    ReggieMatcher m = Reggie.compile("(?=(a))?.", WITH_FALLBACK);
     MatchResult mr = m.findMatch("ab");
 
     assertNotNull(mr, "Should find match");
@@ -98,7 +102,7 @@ public class LookaheadGroupCaptureTest {
     //   Group 1: the outer capturing group (\.\d\d((?=0)|\d(?=\d)))
     //   Group 2: the inner alternation group ((?=0)|\d(?=\d))
     // The second alternative \d(?=\d) matches "5" and the lookahead confirms "5" is followed by "0"
-    ReggieMatcher m = Reggie.compile("(\\.\\d\\d((?=0)|\\d(?=\\d)))");
+    ReggieMatcher m = Reggie.compile("(\\.\\d\\d((?=0)|\\d(?=\\d)))", WITH_FALLBACK);
     MatchResult mr = m.findMatch("1.875000282");
 
     assertNotNull(mr, "Should find match");

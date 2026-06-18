@@ -18,12 +18,16 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /** Tests for the rich MatchResult API of the NESTED_QUANTIFIED_GROUPS strategy. */
 class NestedQuantifiedGroupsMatchResultTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -65,7 +69,7 @@ class NestedQuantifiedGroupsMatchResultTest {
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
         StrategyCorrectnessMetaTest.routeOf("((a|bc)+)*"),
         "pattern '((a|bc)+)*' must route to OPTIMIZED_NFA");
-    MatchResult r = Reggie.compile("((a|bc)+)*").match("abcbc");
+    MatchResult r = Reggie.compile("((a|bc)+)*", WITH_FALLBACK).match("abcbc");
     assertNotNull(r, "match must succeed on 'abcbc'");
     assertEquals("abcbc", r.group(0));
     assertNotNull(r.group(1), "group 1 (outer) must have participated");

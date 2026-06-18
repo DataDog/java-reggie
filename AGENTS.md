@@ -59,14 +59,14 @@ When working with this project:
 
 ## Project Overview
 
-Reggie is a high-performance Java regex library with dual compilation modes (compile-time and runtime) that generates specialized bytecode for each pattern, achieving 7-389x speedup over JDK Pattern.
+Reggie is a high-performance Java regex library with dual compilation modes (compile-time and runtime) that generates specialized bytecode for each pattern, achieving 2–132x speedup over JDK Pattern (strategy-dependent).
 
 **Key Facts**:
 - Language: Java 21+
 - Build: Gradle 8.11+
 - Architecture: Thompson NFA → DFA → Specialized Bytecode
-- Performance: 7-389x faster than JDK Pattern
-- PCRE Conformance: 95.4% (329/345 evaluated tests)
+- Performance: 2–132x faster than JDK Pattern (strategy-dependent; see benchmark results)
+- PCRE Conformance: 97.1% (340/364 evaluated tests)
 - Modules: 6 (annotations, codegen, processor, runtime, benchmark, integration-tests)
 
 ## Architecture
@@ -92,7 +92,7 @@ Pattern String → RegexParser → AST → ThompsonBuilder → NFA → SubsetCon
   - `codegen/`: 20+ bytecode generators
 - **reggie-processor**: Annotation processor (compile-time path)
 - **reggie-runtime**: Public API + RuntimeCompiler (runtime path)
-- **reggie-benchmark**: 322 JMH benchmarks
+- **reggie-benchmark**: 511 JMH benchmarks across 31 benchmark classes
 - **reggie-integration-tests**: PCRE/RE2 test suites
 
 ### Key Design Patterns
@@ -206,8 +206,8 @@ open build/reports/jacoco/aggregate/html/index.html
 ```
 
 **Coverage Targets**:
-- Overall: 70-75% line (Current: 73.0% ✅)
-- Branch: 70% (Current: 59.5% ⚠️)
+- Overall: ~85% instruction (target: 70-75%) ✅
+- Branch: ~72% (target: 70%) ✅
 - reggie-codegen: 75% line, 70% branch
 - reggie-runtime: 75% line
 - reggie-processor: 65% line
@@ -254,7 +254,7 @@ open build/reports/jacoco/aggregate/html/index.html
 ### Test Locations
 - Unit tests: `src/test/java/` in each module (mirrored package structure)
 - Integration tests: `reggie-integration-tests/src/test/java/`
-  - `CorrectnessTest.java`: PCRE and RE2 integration tests (95.4% PCRE passing)
+  - `CorrectnessTest.java`: PCRE and RE2 integration tests (97.1% PCRE passing)
 - Benchmarks: `reggie-benchmark/src/main/java/`
 
 ### Documentation
@@ -318,7 +318,7 @@ open build/reports/jacoco/aggregate/html/index.html
 6. Profile if needed: Use async-profiler
 
 ### Improving PCRE Conformance
-Current: 95.4% (329/345 evaluated tests), Target: 97%+
+Current: 97.1% (340/364 evaluated tests), Target: 99%+
 1. Run: `./gradlew :reggie-integration-tests:test --tests CorrectnessTest`
 2. Analyze failures by category
 3. Implement fix (follow "Adding Feature" workflow)
@@ -705,14 +705,14 @@ cd reggie
 ## Project Status
 
 - **Maturity**: Production-ready
-- **PCRE Conformance**: 95.4% (329/345 evaluated tests, 364-entry corpus)
-- **Performance**: 7-389x faster than JDK Pattern
+- **PCRE Conformance**: 97.1% (340/364 evaluated tests; 10 failures, 14 unsupported-syntax errors)
+- **Performance**: 2–132x faster than JDK Pattern (strategy-dependent; SPECIALIZED_FIXED_SEQUENCE 132x, ONEPASS_NFA 91x, DFA_UNROLLED 40x, OPTIMIZED_NFA ~1x for short inputs)
 - **Test Coverage**:
-  - Line Coverage: 73.0% (within 70-75% target) ✅
-  - Branch Coverage: 59.5% (target: 70%) ⚠️
-  - 322 JMH benchmarks, 364-entry PCRE corpus (345 evaluated, 5 skipped, 14 unsupported-feature errors)
-  - 699 unit tests across 86 test classes
-- **Active Development**: PCRE conformance improvements ongoing
+  - Instruction Coverage: ~85% ✅
+  - Branch Coverage: ~72% (meets 70% target) ✅
+  - 511 JMH benchmarks across 31 benchmark classes
+  - 1,844 unit tests across 197 test classes
+- **Active Development**: PCRE conformance improvements ongoing (lazy quantifiers, lookahead bugs, Unicode property escapes)
 
 ## Correctness Guarantee
 
@@ -744,24 +744,33 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 
 ### `FallbackPatternDetector` (AST-level checks, `reggie-codegen`)
 
-| Condition | Example | Reason string |
-|-----------|---------|---------------|
-| Lookahead inside a quantified group | `(?:(?=\d)\d)+` | `lookahead inside quantified group` |
-| Anchor repeated by a quantifier (other than `{1}`) | `${2}` | `anchor inside quantifier: ${n}, \z{n}, etc.` |
-| END-type anchor immediately before a char-consuming element | `$\n` | `end-anchor before consumer: $ or \Z followed by char-consuming element` |
-| Lazy quantifier with `RECURSIVE_DESCENT` or `OPTIMIZED_NFA_WITH_BACKREFS` strategy | `(a+?)b` | `lazy quantifier: requires shortest-match semantics not supported by this strategy` |
-| Backref used in one alternation branch whose group is defined in a different branch (`RECURSIVE_DESCENT` or `OPTIMIZED_NFA_WITH_BACKREFS`) | `(a)|\1` | `cross-alternative backref: group captured in one branch, used in another` |
-| Backref to a nullable group under `OPTIMIZED_NFA_WITH_BACKREFS` | `(a?)\1` | `backref to nullable group: parallel NFA simulation records wrong capture span` |
-| Optional `(X)?` group with backref under `OPTIONAL_GROUP_BACKREF` (X non-nullable) | `(abc)?\1` | `optional group backref with non-nullable (X)? form: unmatched group wrongly treated as empty` |
+| Condition | Strategy scope | Reason string |
+|-----------|---------------|---------------|
+| Lookahead inside a quantified group (#28) | all | `lookahead inside quantified group` |
+| Anchor inside a quantifier within a capturing group | all | `anchor inside quantifier within capturing group: capture span tracking incorrect` |
+| Anchor inside any quantifier (range ≠ {1,1}) | all | `anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions` |
+| END/STRING_END anchor immediately before a non-newline char consumer | all | `end-anchor before non-newline consumer: DFA does not model this path correctly` |
+| Lazy quantifier | `RECURSIVE_DESCENT`, `OPTIMIZED_NFA_WITH_BACKREFS` | `lazy quantifier: requires shortest-match semantics not supported by this strategy` |
+| Backref used in one branch whose capturing group is in a different branch | `RECURSIVE_DESCENT`, `OPTIMIZED_NFA_WITH_BACKREFS` | `cross-alternative backref: group captured in one branch, used in another` |
+| Backref to an ambiguously nullable group (content can capture strings of length > 1, e.g. `([0]?-*)\1`) | `OPTIMIZED_NFA_WITH_BACKREFS` | `backref to nullable group: parallel NFA simulation records wrong capture span` |
+| Backref to a nullable group inside a capturing group | `RECURSIVE_DESCENT` | `backref to nullable group inside capturing group: recursive descent parser mishandles zero-length capture in nested group context` |
+| Lookahead assertion inside an alternation branch | `OPTIMIZED_NFA_WITH_LOOKAROUND` | `lookahead inside alternation branch: NFA thread scheduler does not correctly isolate assertions per branch` |
+| Non-anchor, non-handleable node before the capturing group (e.g. QuantifierNode prefix) | `VARIABLE_CAPTURE_BACKREF` | `variable-capture backref with unsupported prefix node type: generator only handles literal and char-class prefix nodes` |
+| Outer quantifier wraps the entire capturing group (e.g. `(X)+\1`) | `VARIABLE_CAPTURE_BACKREF` | `quantified capturing group with backref: outer quantifier on group not supported by backref engine` |
+| Nullable or alternation-body group wrapped in outer quantifier | `OPTIONAL_GROUP_BACKREF` | `optional-group backref to unsupported capturing group: nullable or alternation-body group not handled by optional-group backref engine` |
+| Capturing group with nullable content under a nullable outer quantifier (e.g. `(0*-?){0,}`) | `DFA_UNROLLED_WITH_GROUPS`, `DFA_SWITCH_WITH_GROUPS`, `PIKEVM_CAPTURE` | `capturing group with nullable content and nullable outer quantifier: PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect` |
+| STRING_END (`\Z`/`$`) anchor inside an alternation combined with capturing group, nullable/empty branch, or broad char-class branch | `OPTIMIZED_NFA` | `string-end anchor in alternation with capturing group or nullable/empty branch: OPTIMIZED_NFA find() span or group-span tracking incorrect` |
+| Start-class anchor (`\A`/`^`) inside an alternation branch alongside a capturing group | `OPTIMIZED_NFA` | `start anchor in alternation with capturing group: OPTIMIZED_NFA group span tracking for unmatched branches incorrect` |
+| Any alternation branch is nullable (can match the empty string) | `OPTIMIZED_NFA` | `nullable alternation branch: find() first-alternative semantics incorrect for empty/nullable branch` |
 
 ### `RuntimeCompiler` (analyzer-flag checks)
 
 | Condition | Example | Reason string |
 |-----------|---------|---------------|
 | DFA construction diluted an anchor condition | patterns where DFA state merging loses `^`/`$` precision | `anchor condition diluted in DFA construction` |
-| DFA longest-match conflicts with NFA first-alternative priority | `(a|ab)` in find context | `alternation priority conflict: DFA longest-match vs NFA first-alternative` |
-| `VARIABLE_CAPTURE_BACKREF` strategy — MatchResult API not yet implemented | `(\w+)\s+\1` (variable capture) | `MatchResult API not yet implemented for VARIABLE_CAPTURE_BACKREF strategy` |
-| `NESTED_QUANTIFIED_GROUPS` strategy — MatchResult API not yet implemented | `((a+)+)` | `MatchResult API not yet implemented for NESTED_QUANTIFIED_GROUPS strategy` |
+| Hybrid DFA build (group extraction path) diluted an anchor condition | patterns with groups where DFA merge loses anchor precision | `anchor condition diluted in hybrid DFA build` |
+| DFA longest-match conflicts with NFA first-alternative priority | `(a\|ab)` in find context | `alternation priority conflict: DFA longest-match vs NFA first-alternative` |
+| Capture-ambiguous group bindings requiring POSIX last-match semantics | `(a\|a)+` | `capture-ambiguous group bindings: group spans require java.util.regex semantics` |
 | Generated method exceeds JVM 64 KB method-size limit (large alternations) | large Grok patterns | `generated method too large: <class>.<method><desc> codeSize=<n>` |
 
 In addition to full fallback, two strategies use a **hybrid** approach: `SPECIALIZED_LITERAL_ALTERNATION`
@@ -775,34 +784,50 @@ pattern. `Reggie.compile()` logs a one-time WARNING; `@RegexPattern` emits a `MA
 
 **RICH_API_HYBRID strategies** (2): `SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`.
 
-The fallback applies only to `Reggie.compile()` (runtime path). Patterns compiled via the
-`@RegexPattern` annotation processor that trigger a FULL_FALLBACK condition will fail at build time
-with an `UnsupportedOperationException` — use `Reggie.compile()` instead for those patterns.
+**`@RegexPattern` delegating-stub policy:**
+
+- **PIKEVM_CAPTURE patterns** (capture-ambiguous without backrefs): the processor emits a delegating
+  stub that calls `RuntimeCompiler.compilePikeVm()` at runtime — no `ALLOW_JDK_FALLBACK` flag needed.
+  Example: `(<\w+>).*(</\w+>)`.
+
+- **FULL_FALLBACK patterns** (patterns that require `java.util.regex` for correctness — e.g.
+  `captureAmbiguous` backref bypass, anchor-in-quantifier, lazy-backref): if the method carries
+  `options = ReggieOption.ALLOW_JDK_FALLBACK`, the processor emits a delegating stub that calls
+  `Reggie.compileAllowingFallback()` at runtime and emits a `MANDATORY_WARNING`. Without
+  `ALLOW_JDK_FALLBACK` such patterns are a **build error** — use `Reggie.compile()` at runtime
+  instead.
 
 The fallback is transparent to callers of `Reggie.compile()` — correctness is guaranteed at the
-cost of reggie's allocation-free performance. All other patterns continue to use the fast reggie
-engine.
+cost of Reggie's allocation-free performance. All other patterns use the fast Reggie engine.
+
+For `@RegexPattern` (compile-time path): patterns matching a fallback condition fail at build time
+with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for those patterns.
 
 **Previously documented fallback reasons that no longer exist in production code:**
-- `multiple backreferences to group 1 in NFA mode` — removed; multi-backref patterns are now
-  handled correctly or routed via specific strategies
+- `multiple backreferences to group 1 in NFA mode` — removed; multi-backref patterns are now handled correctly or routed via specific strategies
 - `lookbehind followed by unbounded quantifier` — removed; this case is no longer a known bug
 - `alternation inside lookbehind` — removed; this case is no longer a known bug
+- `SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`, `HYBRID_DFA_LOOKAHEAD` boolean-engine defects — fixed (Wave 3); all three strategies now generate correct `find()`/`findFrom()` native code
+- `VARIABLE_CAPTURE_BACKREF` MatchResult API not implemented — fixed (Wave 2); full native `match()`/`findMatch()` generated
+- `NESTED_QUANTIFIED_GROUPS` MatchResult API not implemented — fixed (Wave 2); full native group-extraction generated
+- `SPECIALIZED_LITERAL_ALTERNATION` and `FIXED_REPETITION_BACKREF` hybrid group-extraction — fixed (Wave 1); both strategies now emit complete native rich API
+- `DFA with capturing group inside quantifier: DFA cannot track per-iteration spans` (`DFA_UNROLLED`, `DFA_UNROLLED_WITH_ASSERTIONS`) — eliminated (Wave 2); `PatternAnalyzer` now routes these patterns to `PIKEVM_CAPTURE` before the DFA ladder
+- `nullable alternation branch in anchor context`, `end-anchor in leading-nullable alternation`, `optional-branch alternation` (`DFA_*` strategies) — eliminated (Wave 1); `PatternAnalyzer` routes these to `PIKEVM_CAPTURE`
+- `variable-capture backref to nullable group: empty-capture path handled incorrectly` (`VARIABLE_CAPTURE_BACKREF`) — removed; the bounded-quantifier cap fix in Wave 2 made this condition obsolete
+- `nested quantified groups with alternation in inner content` (`NESTED_QUANTIFIED_GROUPS`) — removed; the NESTED_QUANTIFIED_GROUPS generator was extended to handle alternation content natively
+- `variable-capture backref with bounded inner quantifier` (`VARIABLE_CAPTURE_BACKREF`) — removed (Wave 2); generator caps initial `groupEnd` to `groupMaxCount` for bounded quantifiers
+- `alternation with prefix-overlap: leftmost-first ordering diverges from JDK longest-match` (FallbackPatternDetector, `OPTIMIZED_NFA`) — removed from `FallbackPatternDetector`; the check is now handled at the `RuntimeCompiler` level via `alternationPriorityConflict`
+- `non-capturing GroupNode prefix before backref group` (subset of `VARIABLE_CAPTURE_BACKREF`) — fixed (Wave 3/B12); `emitPrefixMatch` now recurses into handleable non-capturing group content
+- `backref to nullable group with max capture length ≤ 1` (subset of `OPTIMIZED_NFA_WITH_BACKREFS`) — fixed (Wave 3/B7); zero-length early-accept in `generateBackreferenceCheck` handles these correctly
 
 ## Known Limitations
 
-- **Capturing groups**: Work in progress (Phase 5 hybrid approach)
-- **Backreferences**: Partially supported with significant limitations:
-  - Patterns with fixed quantifiers work: `(a{2})\1` matches "aaaa"
-  - Patterns with variable quantifiers (*, +, ?, {n,m}) in capturing groups require backtracking and only work for minimal matches
-  - Example: `(a+)\1` matches "aa" but NOT "aaaa" (would need backtracking to try group="aa", backref="aa")
-  - Root cause: Thompson NFA doesn't support backtracking, which is required for greedy/non-greedy quantifiers with backreferences
-  - Specialized patterns like `<(\w+)>.*</\1>` (HTML tags) use optimized non-NFA implementations and work correctly
-  - **Self-referencing backreferences**: Patterns where a group references itself (e.g., `(a\1?){4}`, `(a\1?)(a\2?)`) don't work correctly
-    - Root cause: Quantifiers don't implement "last iteration semantics" - they don't update the group's captured value on each iteration
-    - Example: `(a\1?){4}` matching "aaaa" should work by having `\1` reference the previous iteration's capture, but currently fails
-    - Fix requires implementing per-iteration group capture updates in RecursiveDescentBytecodeGenerator.visitQuantifier()
-    - Tests for this are skipped by default; run with `-Dreggie.test.knownFailures=true` to enable
+- **Backreferences**: Broadly supported with targeted limitations:
+  - Most backreference patterns work natively: `(a{2})\1`, `<(\w+)>.*</\1>`, `(\w+)\s+\1`, etc.
+  - Specific structural patterns still fall back to `java.util.regex` (see `FallbackPatternDetector` table above)
+  - **Self-referencing backreferences**: `(a\1?){4}`, `(a\1?)(a\2?)` — the quantifier does not implement "last-iteration semantics"; `\N` inside a repeated group sees the group's value from the previous iteration only when that iteration fully succeeded. `(a\1?){4}` on "aaaa" currently fails.
+    - Fix: per-iteration group capture updates in `RecursiveDescentBytecodeGenerator.visitQuantifier()`
+    - Tests skipped by default; enable with `-Dreggie.test.knownFailures=true`
 - **Recursive patterns**: Limited support via RECURSIVE_DESCENT strategy:
   - Subroutines (`(?R)`, `(?1)`) and conditionals (`(?(1)yes|no)`) work for most cases
   - **Recursive palindromes**: Patterns like `^(\w)(?:(?1)|\w?)\1$` (palindrome checker) don't work
@@ -819,16 +844,13 @@ engine.
 
 ### Performance known gaps
 
-The following are **performance-only** issues — not correctness issues. Both items were observed
-in the JMH benchmark suite and deferred as follow-up work:
+The following are **performance-only** issues — not correctness issues. Observed in the JMH
+benchmark suite and deferred as follow-up work:
 
-- **Literal-alternation `match()` / group-extraction hybrid overhead**: `SPECIALIZED_LITERAL_ALTERNATION`
-  and `FIXED_REPETITION_BACKREF` delegate group-extraction to a lazily-compiled JDK pattern. This
-  per-call wrapper cost produces 0.57–0.62x JDK throughput on the group-extraction path. The boolean
-  path (`matches()`/`find()`) is still faster than JDK. Root cause: JDK delegate invocation overhead
-  on every `match()`/`findMatch()` call; investigating in a deferred effort.
-- **`ONEPASS_NFA` `find()` regression**: `find()` on `ONEPASS_NFA` patterns measures ~0.28x JDK.
-  This is a pre-existing gap in the native path, unrelated to the hybrid delegation work.
+- **`ONEPASS_NFA` `find()` regression**: `find()` on `ONEPASS_NFA` patterns measures below JDK
+  throughput. This is a pre-existing gap in the native path.
+- **`SPECIALIZED_MULTI_GROUP_GREEDY` and `SPECIALIZED_BOUNDED_QUANTIFIERS`**: ~2–2.5x over JDK, the
+  weakest gains among generated strategies. Profiling may reveal further optimization opportunities.
 
 ## Questions & Support
 

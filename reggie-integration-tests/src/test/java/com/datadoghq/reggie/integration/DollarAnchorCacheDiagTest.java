@@ -18,6 +18,7 @@ package com.datadoghq.reggie.integration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.integration.fuzz.RandomRegexGenerator;
 import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
@@ -34,6 +35,8 @@ import org.junit.jupiter.api.Test;
 public class DollarAnchorCacheDiagTest {
 
   private static final long BASE_SEED = 0xC0DEFEED_DEADBEEFL;
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @Test
   void remainingReprosDiagnosticAfterSweep() {
@@ -86,7 +89,7 @@ public class DollarAnchorCacheDiagTest {
       com.datadoghq.reggie.integration.fuzz.RegexFuzzOracle.Result r = oracle.check(tc[0], tc[1]);
       String cls = "?";
       try {
-        cls = Reggie.compile(tc[0]).getClass().getSimpleName();
+        cls = Reggie.compile(tc[0], WITH_FALLBACK).getClass().getSimpleName();
       } catch (Exception ignored) {
       }
       System.out.printf(
@@ -174,7 +177,7 @@ public class DollarAnchorCacheDiagTest {
       Matcher jm = jdk.matcher(inp);
       boolean jdkFound = jm.find();
 
-      ReggieMatcher rm = Reggie.compile(pat);
+      ReggieMatcher rm = Reggie.compile(pat, WITH_FALLBACK);
       // Call matches() first, like the oracle does — this may corrupt NFA state
       rm.matches(inp);
       MatchResult r = rm.findMatch(inp);
@@ -213,7 +216,7 @@ public class DollarAnchorCacheDiagTest {
     for (String[] tc : cases) {
       String pat = tc[0], inp = tc[1];
       Pattern jdk = Pattern.compile(pat);
-      ReggieMatcher rm = Reggie.compile(pat);
+      ReggieMatcher rm = Reggie.compile(pat, WITH_FALLBACK);
       boolean jdkM = jdk.matcher(inp).matches();
       boolean reggieM = rm.matches(inp);
       Matcher jm = jdk.matcher(inp);

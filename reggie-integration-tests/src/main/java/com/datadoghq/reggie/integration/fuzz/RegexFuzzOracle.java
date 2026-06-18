@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.integration.fuzz;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import java.util.ArrayList;
@@ -85,9 +86,15 @@ public final class RegexFuzzOracle {
       return Result.skipped("JDK rejected pattern: " + e.getDescription());
     }
 
+    // Compile with ALLOW_JDK_FALLBACK so that patterns the native engine cannot handle still
+    // delegate to java.util.regex (agreeing by construction) rather than throwing and being
+    // skipped.
+    // This preserves oracle coverage: fallback patterns are tested via JDK, native patterns are
+    // tested via the native engine. Patterns where the native engine produces wrong results will
+    // still surface as findings.
     ReggieMatcher reggie;
     try {
-      reggie = Reggie.compile(pattern);
+      reggie = Reggie.compile(pattern, ReggieOptions.builder().allowJdkFallback().build());
     } catch (Throwable t) {
       return Result.skipped(
           "Reggie rejected pattern: " + t.getClass().getSimpleName() + ": " + t.getMessage());

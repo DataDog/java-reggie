@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,6 +36,9 @@ import org.junit.jupiter.api.Test;
  * rules now applied.
  */
 public class AnchorRegressionTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -228,7 +232,7 @@ public class AnchorRegressionTest {
       throw new IllegalArgumentException(
           "Test premise wrong: JDK matches('" + input + "') for /" + regex + "/ returned false");
     }
-    ReggieMatcher m = Reggie.compile(regex);
+    ReggieMatcher m = Reggie.compile(regex, WITH_FALLBACK);
     org.junit.jupiter.api.Assertions.assertTrue(
         m.matches(input),
         () -> "Reggie matches('" + input + "') for /" + regex + "/ should be true");
@@ -240,7 +244,7 @@ public class AnchorRegressionTest {
       throw new IllegalArgumentException(
           "Test premise wrong: JDK matches('" + input + "') for /" + regex + "/ returned true");
     }
-    ReggieMatcher m = Reggie.compile(regex);
+    ReggieMatcher m = Reggie.compile(regex, WITH_FALLBACK);
     org.junit.jupiter.api.Assertions.assertFalse(
         m.matches(input),
         () -> "Reggie matches('" + input + "') for /" + regex + "/ should be false");
@@ -262,7 +266,7 @@ public class AnchorRegressionTest {
               + end
               + ")");
     }
-    ReggieMatcher m = Reggie.compile(regex);
+    ReggieMatcher m = Reggie.compile(regex, WITH_FALLBACK);
     MatchResult mr = m.findMatch(input);
     assertEquals(
         "[" + start + "," + end + ")",
@@ -285,7 +289,7 @@ public class AnchorRegressionTest {
       throw new IllegalArgumentException(
           "Test premise wrong: JDK matched pattern '" + regex + "' on '" + input + "'");
     }
-    ReggieMatcher m = Reggie.compile(regex);
+    ReggieMatcher m = Reggie.compile(regex, WITH_FALLBACK);
     MatchResult mr = m.findMatch(input);
     assertEquals(
         null, mr, () -> "Reggie find('" + input + "') for /" + regex + "/ should not match");

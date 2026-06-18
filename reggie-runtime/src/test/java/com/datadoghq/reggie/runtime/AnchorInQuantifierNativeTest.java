@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -53,6 +54,9 @@ import org.junit.jupiter.params.provider.ValueSource;
  */
 public class AnchorInQuantifierNativeTest {
 
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   // ---------------------------------------------------------------------------
   // B2: anchor inside a quantifier inside a capturing group
   // e.g. (${0,3}), (^{0,2}ab)
@@ -76,7 +80,7 @@ public class AnchorInQuantifierNativeTest {
   @MethodSource("b2Patterns")
   void b2_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + repr(in);
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -126,7 +130,7 @@ public class AnchorInQuantifierNativeTest {
   @MethodSource("b3Patterns")
   void b3_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + repr(in);
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
@@ -166,7 +170,7 @@ public class AnchorInQuantifierNativeTest {
   @MethodSource("b4Patterns")
   void b4_agreesWithJdk(String pat, String in) throws Exception {
     Pattern jdk = Pattern.compile(pat);
-    ReggieMatcher reggie = Reggie.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
     String ctx = "pat=" + pat + " in=" + repr(in);
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);

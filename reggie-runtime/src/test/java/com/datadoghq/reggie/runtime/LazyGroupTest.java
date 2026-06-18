@@ -18,15 +18,19 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 public class LazyGroupTest {
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   private void check(String pat, String input) {
     Matcher jdk = Pattern.compile(pat).matcher(input);
     boolean jdkMatch = jdk.find();
-    ReggieMatcher reg = Reggie.compile(pat);
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     MatchResult r = reg.findMatch(input);
     System.out.printf(
         "%-30s on %-15s JDK=%s Reggie=%s%n",

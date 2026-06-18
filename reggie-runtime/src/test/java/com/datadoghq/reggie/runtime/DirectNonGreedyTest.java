@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -26,6 +27,9 @@ import org.junit.jupiter.api.Test;
  */
 public class DirectNonGreedyTest {
 
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @Test
   void testDirectPCREPatterns() {
     // These patterns from pcre-capturing-groups.txt
@@ -33,7 +37,7 @@ public class DirectNonGreedyTest {
 
     // Test 1: a(?:b|c|d){5,6}?(.) on acdbcdbe - expected group 1 = b
     {
-      ReggieMatcher m = Reggie.compile("a(?:b|c|d){5,6}?(.)");
+      ReggieMatcher m = Reggie.compile("a(?:b|c|d){5,6}?(.)", WITH_FALLBACK);
       MatchResult r = m.findMatch("acdbcdbe");
       assertNotNull(r, "Pattern should find match");
       System.out.println("Pattern 1: a(?:b|c|d){5,6}?(.)");
@@ -45,7 +49,7 @@ public class DirectNonGreedyTest {
 
     // Test 2: a(?:b|c|d){5,7}?(.) on acdbcdbe - expected group 1 = b
     {
-      ReggieMatcher m = Reggie.compile("a(?:b|c|d){5,7}?(.)");
+      ReggieMatcher m = Reggie.compile("a(?:b|c|d){5,7}?(.)", WITH_FALLBACK);
       MatchResult r = m.findMatch("acdbcdbe");
       assertNotNull(r, "Pattern should find match");
       System.out.println("\nPattern 2: a(?:b|c|d){5,7}?(.)");
@@ -57,7 +61,7 @@ public class DirectNonGreedyTest {
 
     // Test 3: a(?:b|c|d){4,5}?(.) on acdbcdbe - expected group 1 = d
     {
-      ReggieMatcher m = Reggie.compile("a(?:b|c|d){4,5}?(.)");
+      ReggieMatcher m = Reggie.compile("a(?:b|c|d){4,5}?(.)", WITH_FALLBACK);
       MatchResult r = m.findMatch("acdbcdbe");
       assertNotNull(r, "Pattern should find match");
       System.out.println("\nPattern 3: a(?:b|c|d){4,5}?(.)");

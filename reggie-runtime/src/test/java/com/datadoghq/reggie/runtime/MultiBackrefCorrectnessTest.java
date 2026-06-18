@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +27,9 @@ import org.junit.jupiter.api.Test;
  * native NFA engine produces correct results without falling back to java.util.regex.
  */
 class MultiBackrefCorrectnessTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -119,7 +123,7 @@ class MultiBackrefCorrectnessTest {
   // T-11: double backref with empty-capable group (.*)
   @Test
   void doubleBackrefEmptyCapable() {
-    ReggieMatcher m = Reggie.compile("(\\w*) \\1 \\1");
+    ReggieMatcher m = Reggie.compile("(\\w*) \\1 \\1", WITH_FALLBACK);
     assertTrue(m.find("  "), "empty group matches three times with spaces");
     assertTrue(m.find("x x x"), "non-empty group");
     assertFalse(m.find("x x y"), "third differs");

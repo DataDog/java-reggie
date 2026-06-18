@@ -18,30 +18,37 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import org.junit.jupiter.api.Test;
 
 class PikeVMRoutingTest {
 
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
   @Test
-  void captureAmbiguousRoutes_toDfaWithGroups() throws Exception {
+  void captureAmbiguousRoutes_toPikevmCapture() throws Exception {
+    // (a)?b has a nullable outer quantifier on a capturing group (B16): PIKEVM_CAPTURE gives
+    // correct per-iteration spans; DFA_UNROLLED_WITH_GROUPS POSIX last-match span is wrong.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("(a)?b"),
-        "(a)?b must route to DFA_UNROLLED_WITH_GROUPS");
+        "(a)?b must route to PIKEVM_CAPTURE");
   }
 
   @Test
   void captureAmbiguousRoutes_dotOptionalB() throws Exception {
+    // (.)?b: nullable outer quantifier on capturing group — PIKEVM_CAPTURE.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("(.)?b"),
-        "(.)?b must route to DFA_UNROLLED_WITH_GROUPS");
+        "(.)?b must route to PIKEVM_CAPTURE");
   }
 
   @Test
   void captureAmbiguousMatcher_matchesCorrectly() {
-    ReggieMatcher m = Reggie.compile("(a)?b");
+    ReggieMatcher m = Reggie.compile("(a)?b", WITH_FALLBACK);
     assertTrue(m.matches("ab"), "should match 'ab'");
     assertTrue(m.matches("b"), "should match 'b'");
     assertFalse(m.matches("a"), "should not match 'a'");

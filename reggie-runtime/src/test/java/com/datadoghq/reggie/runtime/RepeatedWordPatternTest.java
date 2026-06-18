@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -27,6 +28,9 @@ import org.junit.jupiter.api.Test;
  * detectVariableCaptureBackref analysis paths in PatternAnalyzer.
  */
 class RepeatedWordPatternTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -151,7 +155,7 @@ class RepeatedWordPatternTest {
 
   @Test
   void optionalGroupBackref() {
-    ReggieMatcher m = Reggie.compile("(a?)b\\1");
+    ReggieMatcher m = Reggie.compile("(a?)b\\1", WITH_FALLBACK);
     assertTrue(m.find("ab a")); // group1=a, then b, then \1=a → "aba"
     assertTrue(m.find("b")); // group1= (empty), b, \1= (empty) → "b"
   }

@@ -155,6 +155,16 @@ public final class Reggie {
   }
 
   /**
+   * Compile a pattern permitting {@code java.util.regex} fallback for constructs Reggie cannot
+   * compile natively. Equivalent to {@code compile(pattern,
+   * ReggieOptions.builder().allowJdkFallback().build())}. Used by generated stubs for
+   * {@code @RegexPattern(options = ALLOW_JDK_FALLBACK)} patterns.
+   */
+  public static ReggieMatcher compileAllowingFallback(String pattern) {
+    return RuntimeCompiler.compile(pattern, ReggieOptions.builder().allowJdkFallback().build());
+  }
+
+  /**
    * Clear the entire runtime pattern cache. Removes all cached compiled patterns and releases
    * hidden-class references held in the structural cache, allowing the JVM to reclaim the metaspace
    * they occupied. Future calls to {@link #compile(String)} or {@link #cached(String, String)} will

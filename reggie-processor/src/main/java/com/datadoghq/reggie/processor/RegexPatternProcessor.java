@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.processor;
 
+import com.datadoghq.reggie.ReggieOption;
 import com.datadoghq.reggie.annotations.RegexPattern;
 import com.google.auto.service.AutoService;
 import java.io.IOException;
@@ -151,13 +152,18 @@ public class RegexPatternProcessor extends AbstractProcessor {
         Diagnostic.Kind.NOTE,
         "Processing class " + simpleClassName + " with " + methods.size() + " annotated methods");
 
-    // Generate matcher classes for each method
+    // Generate matcher classes for each method; collect MethodInfo per realization kind
+    List<ImplClassBytecodeGenerator.MethodInfo> methodInfos = new ArrayList<>();
     for (ExecutableElement method : methods) {
-      generateMatcherClass(packageName, simpleClassName, method);
+      ImplClassBytecodeGenerator.MethodInfo info =
+          generateMatcherClass(packageName, simpleClassName, method);
+      if (info != null) {
+        methodInfos.add(info);
+      }
     }
 
-    // Generate implementation class
-    generateImplementationClass(packageName, simpleClassName, methods);
+    // Generate implementation class for all realized methods
+    generateImplementationClass(packageName, simpleClassName, methodInfos);
   }
 
   private String generateMatcherClassName(String providerClassName, String methodName) {
@@ -170,7 +176,12 @@ public class RegexPatternProcessor extends AbstractProcessor {
         + "Matcher";
   }
 
-  private void generateMatcherClass(
+  /**
+   * Generates the matcher class file (for NATIVE) and returns a {@link
+   * ImplClassBytecodeGenerator.MethodInfo} describing how the impl class should wire this method.
+   * Returns {@code null} on error (error already reported to messager).
+   */
+  private ImplClassBytecodeGenerator.MethodInfo generateMatcherClass(
       String packageName, String providerClassName, ExecutableElement method) throws Exception {
     RegexPattern annotation = method.getAnnotation(RegexPattern.class);
     String pattern = annotation.value();
@@ -181,62 +192,111 @@ public class RegexPatternProcessor extends AbstractProcessor {
         Diagnostic.Kind.NOTE,
         "Generating bytecode for matcher " + matcherClassName + " for pattern: " + pattern);
 
-    // Use ASM to generate bytecode
+    // Determine whether ALLOW_JDK_FALLBACK is set in options()
+    boolean allowJdkFallback = false;
+    for (ReggieOption opt : annotation.options()) {
+      if (opt == ReggieOption.ALLOW_JDK_FALLBACK) {
+        allowJdkFallback = true;
+        break;
+      }
+    }
+
     ReggieMatcherBytecodeGenerator generator =
         new ReggieMatcherBytecodeGenerator(packageName, matcherClassName, pattern);
+    ReggieMatcherBytecodeGenerator.Realization realization;
+    try {
+      realization = generator.resolveRealization(allowJdkFallback);
+    } catch (UnsupportedOperationException e) {
+      messager.printMessage(Diagnostic.Kind.ERROR, e.getMessage(), method);
+      // Return null — processClass skips errored methods; build already fails via ERROR message.
+      return null;
+    }
 
-    byte[] bytecode = generator.generate();
+    if (realization == ReggieMatcherBytecodeGenerator.Realization.NATIVE) {
+      byte[] bytecode = generator.generate();
 
-    // Loud compile-time warning for RICH_API_HYBRID patterns: native boolean matching, but the
-    // rich MatchResult API (match/findMatch/findMatchFrom/matchBounded) delegates to
-    // java.util.regex. These are fully correct at compile time (native correct booleans +
-    // JDK-correct group extraction via the base defaults), so we still generate.
-    //
-    // FULL_FALLBACK strategies never reach here: ReggieMatcherBytecodeGenerator.generate() rejects
-    // them with UnsupportedOperationException (turned into a build ERROR by process()) because a
-    // fixed @RegexPattern class cannot fall back to java.util.regex at runtime the way
-    // Reggie.compile() does.
-    com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy strategy =
-        generator.resolvedStrategy();
-    com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.StrategyJdkClass jdkClass =
-        com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.classifyJdkDependency(strategy);
-    if (jdkClass
-        == com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.StrategyJdkClass
-            .RICH_API_HYBRID) {
+      // Loud compile-time warning for RICH_API_HYBRID patterns: native boolean matching, but the
+      // rich MatchResult API (match/findMatch/findMatchFrom/matchBounded) delegates to
+      // java.util.regex. These are fully correct at compile time (native correct booleans +
+      // JDK-correct group extraction via the base defaults), so we still generate.
+      com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy strategy =
+          generator.resolvedStrategy();
+      com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.StrategyJdkClass jdkClass =
+          com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.classifyJdkDependency(
+              strategy);
+      if (jdkClass
+          == com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier.StrategyJdkClass
+              .RICH_API_HYBRID) {
+        messager.printMessage(
+            Diagnostic.Kind.MANDATORY_WARNING,
+            "@RegexPattern '"
+                + pattern
+                + "' compiles to a HYBRID matcher: native boolean matching but group extraction"
+                + " (match/findMatch) delegates to java.util.regex (strategy "
+                + strategy
+                + ").",
+            method);
+      }
+
+      // Write bytecode to .class file
+      String qualifiedName = packageName + "." + matcherClassName;
+      FileObject classFile = processingEnv.getFiler().createClassFile(qualifiedName);
+      try (OutputStream os = classFile.openOutputStream()) {
+        os.write(bytecode);
+      }
+      return ImplClassBytecodeGenerator.MethodInfo.native_(methodName, matcherClassName);
+    } else if (realization == ReggieMatcherBytecodeGenerator.Realization.DELEGATE_PIKEVM) {
+      messager.printMessage(
+          Diagnostic.Kind.NOTE,
+          "@RegexPattern '"
+              + pattern
+              + "' delegates to runtime PikeVM (native, not bakeable at compile time).",
+          method);
+      String encodedNames = encodeNameMap(generator.resolvedNameMap());
+      return ImplClassBytecodeGenerator.MethodInfo.pikevm(methodName, pattern, encodedNames);
+    } else {
+      // DELEGATE_FALLBACK
       messager.printMessage(
           Diagnostic.Kind.MANDATORY_WARNING,
           "@RegexPattern '"
               + pattern
-              + "' compiles to a HYBRID matcher: native boolean matching but group extraction"
-              + " (match/findMatch) delegates to java.util.regex (strategy "
-              + strategy
-              + ").",
+              + "' compiles to a JDK-delegating stub (java.util.regex at runtime) because"
+              + " ALLOW_JDK_FALLBACK is set.",
           method);
-    }
-
-    // Write bytecode to .class file
-    String qualifiedName = packageName + "." + matcherClassName;
-    FileObject classFile = processingEnv.getFiler().createClassFile(qualifiedName);
-
-    try (OutputStream os = classFile.openOutputStream()) {
-      os.write(bytecode);
+      return ImplClassBytecodeGenerator.MethodInfo.fallback(methodName, pattern);
     }
   }
 
+  /**
+   * Encodes a group-name-to-index map into a compact string for baking into delegating stubs.
+   * Mirrors {@code RuntimeCompiler.encodeNameMap} — kept here to avoid a compile-time dependency on
+   * reggie-runtime from the annotation processor. Uses US (0x1F) as name/index separator and RS
+   * (0x1E) as pair separator, identical to {@code RuntimeCompiler}.
+   */
+  private static String encodeNameMap(Map<String, Integer> nameMap) {
+    if (nameMap == null || nameMap.isEmpty()) {
+      return "";
+    }
+    // US (unit separator) between name and index; RS (record separator) between pairs
+    char nameSep = '';
+    char pairSep = '';
+    StringBuilder sb = new StringBuilder();
+    for (Map.Entry<String, Integer> e : nameMap.entrySet()) {
+      if (sb.length() > 0) {
+        sb.append(pairSep);
+      }
+      sb.append(e.getKey()).append(nameSep).append(e.getValue());
+    }
+    return sb.toString();
+  }
+
   private void generateImplementationClass(
-      String packageName, String className, List<ExecutableElement> methods) throws IOException {
+      String packageName, String className, List<ImplClassBytecodeGenerator.MethodInfo> methodInfos)
+      throws IOException {
     String implClassName = className + "$Impl";
 
     messager.printMessage(
         Diagnostic.Kind.NOTE, "Generating bytecode for implementation class " + implClassName);
-
-    // Prepare method info for bytecode generator
-    java.util.List<ImplClassBytecodeGenerator.MethodInfo> methodInfos = new java.util.ArrayList<>();
-    for (ExecutableElement method : methods) {
-      String methodName = method.getSimpleName().toString();
-      String matcherClassName = generateMatcherClassName(className, methodName);
-      methodInfos.add(new ImplClassBytecodeGenerator.MethodInfo(methodName, matcherClassName));
-    }
 
     // Use ASM to generate bytecode
     ImplClassBytecodeGenerator generator =

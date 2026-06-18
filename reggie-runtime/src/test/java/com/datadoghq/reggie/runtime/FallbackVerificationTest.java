@@ -18,11 +18,15 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /** Verifies that known-broken patterns fall back to java.util.regex and produce correct results. */
 class FallbackVerificationTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @BeforeEach
   void clearCache() {
@@ -40,7 +44,7 @@ class FallbackVerificationTest {
   // Bug 2: lookahead inside quantified group
   @Test
   void lookaheadInQuantifiedGroup() {
-    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+");
+    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+", WITH_FALLBACK);
     assertTrue(m instanceof JavaRegexFallbackMatcher);
     assertTrue(m.find("123"));
     assertFalse(m.find("abc"));

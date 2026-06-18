@@ -18,10 +18,14 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import org.junit.jupiter.api.Test;
 
 /** Tests for dotall mode (?s) where . matches newlines */
 class DotallModeTest {
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
 
   @Test
   void testDotMatchesNewlineInDotallMode() {
@@ -58,7 +62,7 @@ class DotallModeTest {
   @Test
   void testDotallWithAlternation() {
     // Pattern from PCRE test: (?s)(.*X|^B)
-    ReggieMatcher rm = Reggie.compile("(?s)(.*X|^B)");
+    ReggieMatcher rm = Reggie.compile("(?s)(.*X|^B)", WITH_FALLBACK);
 
     // Should match "abcde\n1234X" with group 1 = "abcde\n1234X"
     MatchResult result = rm.findMatch("abcde\n1234Xyz");
@@ -70,7 +74,7 @@ class DotallModeTest {
   @Test
   void testDotallWithAlternationStartAnchor() {
     // Pattern: (?s)(.*X|^B) with input starting with B
-    ReggieMatcher rm = Reggie.compile("(?s)(.*X|^B)");
+    ReggieMatcher rm = Reggie.compile("(?s)(.*X|^B)", WITH_FALLBACK);
 
     MatchResult result = rm.findMatch("BarFoo");
     assertNotNull(result);
