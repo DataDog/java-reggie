@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
@@ -174,7 +175,8 @@ public class IastTokenizerDrainBenchmark {
     if (isLdap(scenario)) {
       jdkPat = Pattern.compile(jp, Pattern.MULTILINE);
       re2jPat = com.google.re2j.Pattern.compile(rp, com.google.re2j.Pattern.MULTILINE);
-      reggieMatcher = RuntimeCompiler.compile("(?m)" + jp);
+      reggieMatcher =
+          RuntimeCompiler.compile("(?m)" + jp, ReggieOptions.builder().allowJdkFallback().build());
     } else {
       jdkPat = Pattern.compile(jp);
       re2jPat = com.google.re2j.Pattern.compile(rp);

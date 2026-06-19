@@ -429,6 +429,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   @Override
   public boolean find(String input) {
+    if (input == null) throw new NullPointerException("input");
     if (findDfa != null) {
       // Empty-matchable patterns match (the empty string) at every position, including "".
       if (findCanMatchEmpty) return true;
