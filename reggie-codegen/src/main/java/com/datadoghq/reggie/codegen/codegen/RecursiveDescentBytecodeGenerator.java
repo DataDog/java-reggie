@@ -3938,15 +3938,16 @@ public class RecursiveDescentBytecodeGenerator {
         // NEL, LS, or PS
         Label atEnd = new Label();
         Label failLabel = new Label();
+        Label checkCrlf = new Label();
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
         mv.visitJumpInsn(IF_ICMPEQ, atEnd); // if pos == end → pass
-        // Check pos == end-1 && input.charAt(pos) == '\n'
+        // pos == end-1?
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
         mv.visitInsn(ICONST_1);
         mv.visitInsn(ISUB); // end - 1
-        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if pos != end-1 → fail
+        mv.visitJumpInsn(IF_ICMPNE, checkCrlf); // if pos != end-1 → check end-2
         mv.visitVarInsn(ALOAD, 1); // input
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
