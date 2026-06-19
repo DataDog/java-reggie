@@ -77,8 +77,10 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
 
   @Override
   public int findFrom(String input, int start) {
+    int s = Math.max(0, start);
+    if (s > input.length()) return -1;
     java.util.regex.Matcher m = javaPattern.matcher(input);
-    return m.find(start) ? m.start() : -1;
+    return m.find(s) ? m.start() : -1;
   }
 
   @Override
@@ -111,8 +113,10 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult findMatchFrom(String input, int start) {
+    int s = Math.max(0, start);
+    if (s > input.length()) return null;
     java.util.regex.Matcher m = javaPattern.matcher(input);
-    return m.find(start) ? toMatchResult(input, m) : null;
+    return m.find(s) ? toMatchResult(input, m) : null;
   }
 
   @Override
@@ -127,8 +131,10 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
 
   @Override
   public boolean findMatchInto(String input, int start, int[] groupStarts, int[] groupEnds) {
+    int s = Math.max(0, start);
+    if (s > input.length()) return false;
     java.util.regex.Matcher m = javaPattern.matcher(input);
-    if (!m.find(start)) {
+    if (!m.find(s)) {
       return false;
     }
     copyGroups(m, groupStarts, groupEnds);

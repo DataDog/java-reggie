@@ -128,4 +128,29 @@ class FromPosClampingRegressionTest {
     assertNotNull(r, "backref: negative start clamped to 0 should find match");
     assertEquals(0, r.start());
   }
+
+  // -------------------------------------------------------------------------
+  // T10 — JavaRegexFallbackMatcher negative start (lazy quantifier → fallback)
+  // -------------------------------------------------------------------------
+
+  @Test
+  void fallbackMatcher_findFrom_negativeStart_clampsToZero() {
+    // a*?b has a lazy quantifier → RECURSIVE_DESCENT + needsFallback → JavaRegexFallbackMatcher
+    ReggieMatcher m = Reggie.compile("a*?b", WITH_FALLBACK);
+    assertEquals(0, m.findFrom("ab", -1), "fallback: negative start must clamp to 0");
+  }
+
+  @Test
+  void fallbackMatcher_findFrom_startPastEnd_returnsMinusOne() {
+    ReggieMatcher m = Reggie.compile("a*?b", WITH_FALLBACK);
+    assertEquals(-1, m.findFrom("ab", 10), "fallback: start past end must return -1");
+  }
+
+  @Test
+  void fallbackMatcher_findMatchFrom_negativeStart_returnsMatchAtZero() {
+    ReggieMatcher m = Reggie.compile("a*?b", WITH_FALLBACK);
+    MatchResult r = m.findMatchFrom("ab", -1);
+    assertNotNull(r, "fallback: negative start clamped to 0 should find match");
+    assertEquals(0, r.start());
+  }
 }
