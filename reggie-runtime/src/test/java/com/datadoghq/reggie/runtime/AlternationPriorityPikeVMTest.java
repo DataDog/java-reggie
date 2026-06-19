@@ -83,9 +83,9 @@ class AlternationPriorityPikeVMTest {
     assertAgrees(pat, in);
   }
 
-  // quantifiedAlt patterns have quantified capturing groups (e.g. (a|b)+) and are correctly
-  // excluded from PIKEVM routing — they remain in the alternationPriorityConflict fallback path.
-  // No routesToPikeVm test here; the agreesWithJdk test (via WITH_FALLBACK) is sufficient.
+  // Simple quantified capturing-group alternations (e.g. (a|b)+x, (a|b)*x, (a|b){2,3}x) route to
+  // PIKEVM_CAPTURE (asserted by QuantifiedGroupAltPriorityTest). The quantifiedAlt patterns used
+  // here match WITH_FALLBACK only; the agreesWithJdk test verifies correctness via JDK delegation.
 
   private static void assertAgrees(String pat, String in) {
     ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);

@@ -831,13 +831,24 @@ public class VariableCaptureBackrefBytecodeGenerator {
         emitPrefixNode(mv, q.child, groupStartVar, lenVar, failLabel, alloc);
       }
       // For unbounded quantifiers (max == -1): greedy loop for optional repetitions.
-      // Use loopEnd as the child's failLabel so the loop exits without failing the match.
+      // Each repetition is atomic: snapshot groupStartVar before the attempt and
+      // restore it on failure so a partial advance does not corrupt the position.
       if (q.max == -1) {
+        int savedStart = alloc.allocate();
         Label loopStart = new Label();
+        Label iterFail = new Label();
         Label loopEnd = new Label();
         mv.visitLabel(loopStart);
-        emitPrefixNode(mv, q.child, groupStartVar, lenVar, loopEnd, alloc);
+        // Snapshot position before attempting one repetition.
+        mv.visitVarInsn(ILOAD, groupStartVar);
+        mv.visitVarInsn(ISTORE, savedStart);
+        // Attempt one repetition; on any sub-failure jump to iterFail (not loopEnd).
+        emitPrefixNode(mv, q.child, groupStartVar, lenVar, iterFail, alloc);
         mv.visitJumpInsn(GOTO, loopStart);
+        // Failed repetition: restore the snapshot, then exit the loop.
+        mv.visitLabel(iterFail);
+        mv.visitVarInsn(ILOAD, savedStart);
+        mv.visitVarInsn(ISTORE, groupStartVar);
         mv.visitLabel(loopEnd);
       }
       // For exact quantifiers (q.min == q.max): mandatory repetitions already emitted above.
