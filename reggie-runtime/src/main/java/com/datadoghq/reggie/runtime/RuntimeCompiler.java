@@ -458,7 +458,18 @@ public class RuntimeCompiler {
 
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
       // correctly-enriched PikeVMMatcher without re-parsing the pattern.
+      // B16 guard: nullable group content under a nullable outer quantifier diverges even in PikeVM
+      // (wrong last-iteration spans). This must be checked before the early return so patterns
+      // arriving via the StateExplosionException path still fall back to JDK.
       if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+        if (FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return fallbackOrThrow(
+              pattern,
+              "capturing group with nullable content and nullable outer quantifier: "
+                  + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect",
+              nameMap,
+              options);
+        }
         PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }

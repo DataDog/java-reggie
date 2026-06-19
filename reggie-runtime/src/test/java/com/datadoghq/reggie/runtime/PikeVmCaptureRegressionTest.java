@@ -16,8 +16,11 @@
 package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -87,6 +90,28 @@ public class PikeVmCaptureRegressionTest {
     assertGroupsAgree("^(?:)a|(.*[_]*)+", "-");
     assertGroupsAgree("^(?:)a|(.*[_]*)+", "0");
     assertGroupsAgree("^(?:)a|(.*[_]*)+", "1");
+  }
+
+  // ---- B16 PIKEVM_CAPTURE bypass regression ----
+
+  @Test
+  void b16NullableContent_pikeVmCapture_throwsWithoutFallback() {
+    // ((x*){0,}|a)(c|bcd): nullable group content (x*) under nullable outer quantifier ({0,})
+    // triggers B16. Must throw UnsupportedPatternException, not silently route to PikeVM.
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("((x*){0,}|a)(c|bcd)"));
+  }
+
+  @Test
+  void b16NullableContent_pikeVmCapture_agreesWithJdkWhenFallbackAllowed() {
+    String pat = "((x*){0,}|a)(c|bcd)";
+    ReggieOptions opts = ReggieOptions.builder().allowJdkFallback().build();
+    ReggieMatcher m = RuntimeCompiler.compile(pat, opts);
+    Pattern jdk = Pattern.compile(pat);
+    for (String input : new String[] {"xbc", "ac", "abcd", "", "bcd", "xc"}) {
+      Matcher jm = jdk.matcher(input);
+      boolean jdkF = jm.find();
+      assertEquals(jdkF, m.find(input), "find() for \"" + input + "\"");
+    }
   }
 
   // ---- Controls ----

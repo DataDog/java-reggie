@@ -711,6 +711,84 @@ public final class FallbackPatternDetector {
     return false;
   }
 
+  /** Returns true if the subtree contains at least one character-consuming node. */
+  private static boolean subtreeHasConsumingNode(RegexNode node) {
+    return Boolean.TRUE.equals(node.accept(HasConsumingNodeVisitor.INSTANCE));
+  }
+
+  private static final class HasConsumingNodeVisitor implements RegexVisitor<Boolean> {
+    static final HasConsumingNodeVisitor INSTANCE = new HasConsumingNodeVisitor();
+
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return node.ch != 0;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      for (RegexNode c : node.children) {
+        if (Boolean.TRUE.equals(c.accept(this))) return true;
+      }
+      return false;
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      for (RegexNode a : node.alternatives) {
+        if (Boolean.TRUE.equals(a.accept(this))) return true;
+      }
+      return false;
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      for (RegexNode a : node.alternatives) {
+        if (Boolean.TRUE.equals(a.accept(this))) return true;
+      }
+      return false;
+    }
+  }
+
   /** Returns true if the subtree can match the empty string (zero characters). */
   static boolean subtreeIsNullable(RegexNode node) {
     if (node instanceof QuantifierNode) {
@@ -1141,17 +1219,19 @@ public final class FallbackPatternDetector {
 
   /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
-   * the group's content is itself nullable (can match the empty string). Example: {@code
-   * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is
-   * nullable. PIKEVM diverges for this sub-case; only non-nullable-content B16 patterns are safe to
-   * route to PIKEVM_CAPTURE.
+   * the group's content is itself nullable AND contains at least one character-consuming node.
+   * Example: {@code (0*-?){0,}} — group content {@code 0*-?} is nullable and character-consuming.
+   * Anchor-only groups like {@code (^)*} are excluded: they are nullable but zero-width, and PIKEVM
+   * correctly evaluates them without divergence. PIKEVM diverges for this sub-case; only
+   * non-nullable-content B16 patterns are safe to route to PIKEVM_CAPTURE.
    */
-  static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
+  public static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
     if (ast instanceof QuantifierNode) {
       QuantifierNode q = (QuantifierNode) ast;
       if (q.min == 0 && q.child instanceof GroupNode) {
         GroupNode g = (GroupNode) q.child;
-        if (g.capturing && subtreeIsNullable(g.child)) return true;
+        if (g.capturing && subtreeIsNullable(g.child) && subtreeHasConsumingNode(g.child))
+          return true;
       }
       return hasNullableGroupContentWithNullableQuantifier(q.child);
     }
