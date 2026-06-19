@@ -156,11 +156,10 @@ public class AlgorithmicFuzzTest {
    * Companion entry point that is <em>not</em> {@code @Disabled}: it self-skips unless {@code
    * -Dreggie.fuzz.enforceZero=true} is set, letting CI exercise the gate without editing source.
    *
-   * <p>An optional budget can be set via {@code -Dreggie.fuzz.maxFindings=N} (default 0). A budget
-   * greater than 0 allows a known number of pre-existing divergences to pass without failing the
-   * gate — new regressions still fail because they push the count above the budget. Always pair a
-   * non-zero budget with a comment in {@code doc/temp/prod-readiness/fuzz-inventory.md} explaining
-   * the known finding.
+   * <p>An optional budget can be set via {@code -Dreggie.fuzz.maxFindings=N} (default: {@code
+   * KNOWN_FINDINGS_BUDGET}). A non-zero budget allows known pre-existing divergences to pass
+   * without failing the gate — new regressions still fail because they push the count above the
+   * budget.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)

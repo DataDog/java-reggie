@@ -3614,25 +3614,91 @@ public class NFABytecodeGenerator {
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
             case END:
-            // $ (non-multiline): same as \Z — pos == length OR before final '\n'.
-            // Fall through to STRING_END.
+            // $ (non-multiline): same semantics as \Z; all Java line terminators recognized. Fall
+            // through.
             case STRING_END:
-              // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
+              // \Z/$ pos==length; pos==length-1 with lone '\n'(CRLF guard)/'\r'/NEL/LS/PS;
+              // pos==length-2 with '\r\n'
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-              mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
-              mv.visitVarInsn(ALOAD, inputVar);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-              mv.visitInsn(ICONST_1);
-              mv.visitInsn(ISUB);
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
-              mv.visitVarInsn(ALOAD, inputVar);
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-              pushInt(mv, '\n');
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              mv.visitJumpInsn(IF_ICMPEQ, anchorPassed); // pos == length → ok
+              // pos == length-1?
+              {
+                Label nfaCheckEndM2a = new Label();
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+                mv.visitInsn(ICONST_1);
+                mv.visitInsn(ISUB);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitJumpInsn(IF_ICMPNE, nfaCheckEndM2a);
+                // charAt(pos) == '\n'?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\n');
+                Label nfaNotNewlineA = new Label();
+                mv.visitJumpInsn(IF_ICMPNE, nfaNotNewlineA);
+                // '\n': CRLF guard
+                Label nfaLoneNewlineA = new Label();
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitJumpInsn(IFEQ, nfaLoneNewlineA); // pos==0 → lone \n
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitInsn(ICONST_1);
+                mv.visitInsn(ISUB);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\r');
+                mv.visitJumpInsn(IF_ICMPEQ, worklistLoop); // CRLF tail → fail
+                mv.visitLabel(nfaLoneNewlineA);
+                mv.visitJumpInsn(GOTO, anchorPassed);
+                mv.visitLabel(nfaNotNewlineA);
+                // '\r'?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\r');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
+                // NEL?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\u0085');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
+                // LS?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\u2028');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
+                // PS?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\u2029');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
+                mv.visitJumpInsn(GOTO, worklistLoop);
+                // pos == length-2? '\r\n' pair
+                mv.visitLabel(nfaCheckEndM2a);
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+                mv.visitInsn(ICONST_2);
+                mv.visitInsn(ISUB);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\r');
+                mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitInsn(ICONST_1);
+                mv.visitInsn(IADD);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\n');
+                mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              }
               break;
             case END_MULTILINE:
               // pos == input.length() || input.charAt(pos) == '\n'
@@ -8992,24 +9058,91 @@ public class NFABytecodeGenerator {
               mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
               break;
             case END:
-            // $ (non-multiline): same as \Z. Fall through to STRING_END.
+            // $ (non-multiline): same semantics as \Z; all Java line terminators recognized. Fall
+            // through.
             case STRING_END:
-              // \Z: pos == length || (pos == length-1 && charAt(pos) == '\n')
+              // \Z/$ pos==length; pos==length-1 with lone '\n'(CRLF guard)/'\r'/NEL/LS/PS;
+              // pos==length-2 with '\r\n'
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-              mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
-              mv.visitVarInsn(ALOAD, inputVar);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-              mv.visitInsn(ICONST_1);
-              mv.visitInsn(ISUB);
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
-              mv.visitVarInsn(ALOAD, inputVar);
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-              pushInt(mv, '\n');
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG); // pos == length → ok
+              // pos == length-1?
+              {
+                Label nfaCheckEndM2b = new Label();
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+                mv.visitInsn(ICONST_1);
+                mv.visitInsn(ISUB);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitJumpInsn(IF_ICMPNE, nfaCheckEndM2b);
+                // charAt(pos) == '\n'?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\n');
+                Label nfaNotNewlineB = new Label();
+                mv.visitJumpInsn(IF_ICMPNE, nfaNotNewlineB);
+                // '\n': CRLF guard
+                Label nfaLoneNewlineB = new Label();
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitJumpInsn(IFEQ, nfaLoneNewlineB); // pos==0 → lone \n
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitInsn(ICONST_1);
+                mv.visitInsn(ISUB);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\r');
+                mv.visitJumpInsn(IF_ICMPEQ, worklistLoop); // CRLF tail → fail
+                mv.visitLabel(nfaLoneNewlineB);
+                mv.visitJumpInsn(GOTO, anchorPassedWG);
+                mv.visitLabel(nfaNotNewlineB);
+                // '\r'?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\r');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
+                // NEL?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\u0085');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
+                // LS?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\u2028');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
+                // PS?
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\u2029');
+                mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
+                mv.visitJumpInsn(GOTO, worklistLoop);
+                // pos == length-2? '\r\n' pair
+                mv.visitLabel(nfaCheckEndM2b);
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+                mv.visitInsn(ICONST_2);
+                mv.visitInsn(ISUB);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\r');
+                mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+                mv.visitVarInsn(ALOAD, inputVar);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitInsn(ICONST_1);
+                mv.visitInsn(IADD);
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+                pushInt(mv, '\n');
+                mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              }
               break;
             case END_MULTILINE:
               mv.visitVarInsn(ILOAD, posVar);

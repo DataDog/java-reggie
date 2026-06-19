@@ -2055,27 +2055,91 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitJumpInsn(IF_ICMPGE, endOfInput);
 
-    // Special check for \Z (STRING_END): if accepting and pos == length-1 and charAt(pos) == '\n',
-    // record and return
+    // Special check for \Z (STRING_END): accepting and at a final terminator position — record and
+    // return.
+    // Handles lone '\n' (CRLF guard), lone '\r', '\r\n' pair, NEL, LS, PS.
     if (state.accepting && hasStringEndAnchor) {
       Label notStringEnd = new Label();
+      Label checkEndMinus2U = new Label();
+      Label acceptU = new Label();
 
-      // Check if pos == length - 1
+      // pos == length-1?
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ALOAD, 1);
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
       mv.visitInsn(ICONST_1);
       mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
+      mv.visitJumpInsn(IF_ICMPNE, checkEndMinus2U);
 
-      // Check if charAt(pos) == '\n'
+      // charAt(pos) == '\n'?
       mv.visitVarInsn(ALOAD, 1);
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
       pushInt(mv, '\n');
+      Label notNewlineU = new Label();
+      mv.visitJumpInsn(IF_ICMPNE, notNewlineU);
+      // '\n': CRLF guard — lone \n only
+      Label loneNewlineU = new Label();
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitJumpInsn(IFEQ, loneNewlineU); // pos==0 → lone \n
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(ISUB);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\r');
+      mv.visitJumpInsn(IF_ICMPEQ, notStringEnd); // CRLF tail → skip
+      mv.visitLabel(loneNewlineU);
+      mv.visitJumpInsn(GOTO, acceptU);
+      mv.visitLabel(notNewlineU);
+      // '\r'?
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\r');
+      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
+      // NEL?
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\u0085');
+      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
+      // LS?
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\u2028');
+      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
+      // PS?
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\u2029');
+      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
+      mv.visitJumpInsn(GOTO, notStringEnd);
+
+      // pos == length-2? '\r\n' pair
+      mv.visitLabel(checkEndMinus2U);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitInsn(ICONST_2);
+      mv.visitInsn(ISUB);
+      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\r');
+      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\n');
       mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
 
-      // Both conditions met - record position and return
+      mv.visitLabel(acceptU);
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ISTORE, longestMatchEndVar);
       mv.visitVarInsn(ILOAD, longestMatchEndVar);
@@ -3423,23 +3487,86 @@ public class DFAUnrolledBytecodeGenerator {
         mv.visitJumpInsn(IFNE, failed);
         break;
       case END:
-      // $ (non-multiline) — same semantics as \Z: matches at end OR before final '\n'.
+      // $ (non-multiline): same semantics as \Z; all Java line terminators recognized. Fall
+      // through.
       // Java's $ is NOT strict: Pattern.compile("x$").matcher("x\n").find() == true.
-      // Fall through to STRING_END.
       case STRING_END:
         {
-          // OK iff pos == end OR (pos == end - 1 AND charAt(pos) == '\n')
+          // OK iff: pos==end; pos==end-1 with lone '\n' (CRLF guard), '\r', NEL, LS, PS; pos==end-2
+          // with '\r\n'
           Label ok = new Label();
+          Label checkEndMinus2 = new Label();
           mv.visitVarInsn(ILOAD, posVar);
           access.loadLength.run();
           mv.visitJumpInsn(IF_ICMPEQ, ok);
+          // pos == end-1?
           mv.visitVarInsn(ILOAD, posVar);
           access.loadLength.run();
           mv.visitInsn(ICONST_1);
           mv.visitInsn(ISUB);
+          mv.visitJumpInsn(IF_ICMPNE, checkEndMinus2);
+          // charAt(pos) == '\n'?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\n');
+          Label notNewline = new Label();
+          mv.visitJumpInsn(IF_ICMPNE, notNewline);
+          // '\n': CRLF guard — lone \n only; \r\n tail fails
+          Label loneNewline = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitJumpInsn(IFEQ, loneNewline); // pos == 0 → lone \n
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          access.invokeCharAt.run();
+          pushInt(mv, '\r');
+          mv.visitJumpInsn(IF_ICMPEQ, failed); // CRLF tail
+          mv.visitLabel(loneNewline);
+          mv.visitJumpInsn(GOTO, ok);
+          mv.visitLabel(notNewline);
+          // '\r' at end-1?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\r');
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          // NEL (U+0085) at end-1?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\u0085');
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          // LS (U+2028) at end-1?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\u2028');
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          // PS (U+2029) at end-1?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\u2029');
+          mv.visitJumpInsn(IF_ICMPEQ, ok);
+          mv.visitJumpInsn(GOTO, failed);
+          // pos == end-2? '\r\n' pair
+          mv.visitLabel(checkEndMinus2);
+          mv.visitVarInsn(ILOAD, posVar);
+          access.loadLength.run();
+          mv.visitInsn(ICONST_2);
+          mv.visitInsn(ISUB);
           mv.visitJumpInsn(IF_ICMPNE, failed);
           mv.visitVarInsn(ALOAD, 1);
           mv.visitVarInsn(ILOAD, posVar);
+          access.invokeCharAt.run();
+          pushInt(mv, '\r');
+          mv.visitJumpInsn(IF_ICMPNE, failed);
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(IADD);
           access.invokeCharAt.run();
           pushInt(mv, '\n');
           mv.visitJumpInsn(IF_ICMPNE, failed);

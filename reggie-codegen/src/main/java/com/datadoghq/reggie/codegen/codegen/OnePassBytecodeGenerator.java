@@ -600,30 +600,94 @@ public class OnePassBytecodeGenerator {
         break;
 
       case STRING_END:
-        // \Z - end of string or before final newline
-        // if (pos == length || (pos == length-1 && charAt(pos) == '\n')) pass; else fail;
+        // \Z: pos==end; pos==end-1 with lone '\n' (CRLF guard), '\r', NEL, LS, PS; pos==end-2 with
+        // '\r\n'
         // if (pos == length) goto pass;
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
         mv.visitJumpInsn(IF_ICMPEQ, passLabel);
 
-        // if (pos == length-1 && charAt(pos) == '\n') goto pass;
-        Label checkNewline = new Label();
+        // pos == length-1?
+        Label checkEndMinus2 = new Label();
+        Label failZ = new Label();
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(ISUB);
-        mv.visitJumpInsn(IF_ICMPNE, checkNewline);
+        mv.visitJumpInsn(IF_ICMPNE, checkEndMinus2);
 
+        // charAt(pos) == '\n'?
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         pushInt(mv, '\n');
+        Label notNewlineZ = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, notNewlineZ);
+        // '\n': CRLF guard — lone \n only; \r\n tail fails
+        Label loneNewlineZ = new Label();
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitJumpInsn(IFEQ, loneNewlineZ); // pos == 0 → lone \n
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\r');
+        mv.visitJumpInsn(IF_ICMPEQ, failZ); // CRLF tail
+        mv.visitLabel(loneNewlineZ);
+        mv.visitJumpInsn(GOTO, passLabel);
+        mv.visitLabel(notNewlineZ);
+        // '\r' at end-1?
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\r');
         mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+        // NEL at end-1?
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\u0085');
+        mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+        // LS at end-1?
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\u2028');
+        mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+        // PS at end-1?
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\u2029');
+        mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+        mv.visitJumpInsn(GOTO, failZ);
 
-        mv.visitLabel(checkNewline);
+        // pos == end-2? '\r\n' pair
+        mv.visitLabel(checkEndMinus2);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitInsn(ICONST_2);
+        mv.visitInsn(ISUB);
+        mv.visitJumpInsn(IF_ICMPNE, failZ);
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\r');
+        mv.visitJumpInsn(IF_ICMPNE, failZ);
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IADD);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        pushInt(mv, '\n');
+        mv.visitJumpInsn(IF_ICMPNE, failZ);
+        mv.visitJumpInsn(GOTO, passLabel);
+
+        mv.visitLabel(failZ);
         // Anchor failed - return false/null
         if (returnBoolean) {
           mv.visitInsn(ICONST_0);

@@ -3934,7 +3934,8 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       } else if (node.type == AnchorNode.Type.STRING_END) {
-        // \Z: matches at end of input OR one position before a terminal '\n'
+        // \Z: matches at end of input, before terminal lone '\n' (CRLF guard), lone '\r', '\r\n',
+        // NEL, LS, or PS
         Label atEnd = new Label();
         Label failLabel = new Label();
         mv.visitVarInsn(ILOAD, 2); // pos
@@ -3950,8 +3951,61 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         mv.visitIntInsn(BIPUSH, '\n');
-        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if charAt(pos) != '\n' → fail
+        Label notNewlineZ = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, notNewlineZ);
+        // '\n': CRLF guard — lone \n only; \r\n tail does not match \Z
+        Label loneNewlineZ = new Label();
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitJumpInsn(IFEQ, loneNewlineZ); // pos == 0 → lone \n
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPEQ, failLabel); // CRLF tail → \Z can't match here
+        mv.visitLabel(loneNewlineZ);
         mv.visitJumpInsn(GOTO, atEnd);
+        mv.visitLabel(notNewlineZ);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd); // lone '\r' at end-1 → pass
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u0085'); // NEL
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2028'); // LS
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2029'); // PS
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        mv.visitJumpInsn(GOTO, failLabel); // end-1 but no recognized terminator: fail
+        mv.visitLabel(checkCrlf);
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitVarInsn(ILOAD, 3); // end
+        mv.visitInsn(ICONST_2);
+        mv.visitInsn(ISUB);
+        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if pos != end-2 → fail
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPNE, failLabel); // if charAt(pos) != '\r' → fail
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IADD);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\n');
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd); // '\r\n' at end-2..end-1 → pass
         mv.visitLabel(failLabel);
         mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
@@ -3970,20 +4024,75 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       } else if (node.type == AnchorNode.Type.END) {
-        // $ (non-multiline): same as \Z — pos == end OR (pos == end-1 AND charAt(pos) == '\n')
+        // $ (non-multiline): pos==end; pos==end-1 with lone '\n' (CRLF guard)/'\r'/NEL/LS/PS;
+        // pos==end-2 with '\r\n'
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
         Label dollarOk = new Label();
         mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
-        // pos != end: check if pos == end-1 AND charAt(pos) == '\n'
+        Label dollarCheckCrlf = new Label();
+        Label dollarFail = new Label();
         mv.visitVarInsn(ILOAD, 2);
         mv.visitVarInsn(ILOAD, 3);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(ISUB);
-        Label dollarFail = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, dollarCheckCrlf);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\n');
+        Label dollarNotNewline = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, dollarNotNewline);
+        // '\n': CRLF guard — lone \n only; \r\n tail does not match $
+        Label dollarLoneNewline = new Label();
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitJumpInsn(IFEQ, dollarLoneNewline); // pos == 0 → lone \n
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPEQ, dollarFail); // CRLF tail → $ not here
+        mv.visitLabel(dollarLoneNewline);
+        mv.visitJumpInsn(GOTO, dollarOk);
+        mv.visitLabel(dollarNotNewline);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk); // lone '\r' at end-1 → pass
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u0085'); // NEL
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2028'); // LS
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2029'); // PS
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        mv.visitJumpInsn(GOTO, dollarFail);
+        mv.visitLabel(dollarCheckCrlf);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitVarInsn(ILOAD, 3);
+        mv.visitInsn(ICONST_2);
+        mv.visitInsn(ISUB);
         mv.visitJumpInsn(IF_ICMPNE, dollarFail);
         mv.visitVarInsn(ALOAD, 1); // input
         mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPNE, dollarFail);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IADD);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         mv.visitIntInsn(BIPUSH, '\n');
         mv.visitJumpInsn(IF_ICMPNE, dollarFail);
