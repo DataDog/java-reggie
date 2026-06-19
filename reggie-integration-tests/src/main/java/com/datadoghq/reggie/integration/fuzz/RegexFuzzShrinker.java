@@ -71,6 +71,13 @@ public final class RegexFuzzShrinker {
         changed = true;
       }
     }
+    // Re-verify the shrunken pair. The shrink loop accepts a deletion if ANY finding of the same
+    // kind exists in the oracle report for that (pattern, input) — but the kind check is coarse
+    // and can be satisfied by a finding produced by a completely different pattern in a multi-
+    // pattern run. If the final shrunken pair no longer diverges, fall back to the original.
+    if (!stillDivergesSameKind(pattern, input, kind)) {
+      return new Shrunk(original.pattern, original.input, kind);
+    }
     return new Shrunk(pattern, input, kind);
   }
 

@@ -33,6 +33,14 @@ public final class CharSet {
 
   private final List<Range> ranges;
 
+  // ASCII (0..127) membership bitmap, derived from {@link #ranges} at construction. asciiBits0
+  // covers chars 0..63, asciiBits1 covers 64..127. This gives a branchless O(1) {@link #contains}
+  // fast path for the ASCII case (the hot path in PikeVM/closure transition scans), avoiding the
+  // ranges binary search + List/Range indirection. NOT part of equals/hashCode — those stay
+  // range-based, so the structural cache (StructuralHash / NFA.contentHashCode) is unaffected.
+  private final long asciiBits0;
+  private final long asciiBits1;
+
   /** Represents an inclusive character range [start, end]. */
   public static final class Range {
     public final char start;
@@ -94,6 +102,16 @@ public final class CharSet {
   // Private constructor - use factory methods
   private CharSet(List<Range> ranges) {
     this.ranges = ranges;
+    long b0 = 0L, b1 = 0L;
+    for (Range r : ranges) {
+      int hi = r.end > 127 ? 127 : r.end;
+      for (int c = r.start; c <= hi; c++) {
+        if (c < 64) b0 |= 1L << c;
+        else b1 |= 1L << (c - 64);
+      }
+    }
+    this.asciiBits0 = b0;
+    this.asciiBits1 = b1;
   }
 
   // Factory methods
@@ -398,7 +416,12 @@ public final class CharSet {
   }
 
   public boolean contains(char ch) {
-    // Binary search since ranges are sorted
+    // ASCII fast path: branchless bitmap test (the hot path in transition scans).
+    if (ch < 128) {
+      long w = ch < 64 ? asciiBits0 : asciiBits1;
+      return ((w >>> (ch & 63)) & 1L) != 0L;
+    }
+    // Non-ASCII: binary search since ranges are sorted.
     int left = 0, right = ranges.size() - 1;
     while (left <= right) {
       int mid = (left + right) >>> 1;

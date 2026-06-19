@@ -60,9 +60,12 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   @RegexPattern("(\\d{3})-(\\d+)-(\\d{4})")
   public abstract ReggieMatcher phoneWithVariableLength();
 
-  // PIKEVM_CAPTURE: processor generates a delegating stub that calls compilePikeVm() at runtime.
-  @RegexPattern("(<\\w+>).*(</\\w+>)")
-  public abstract ReggieMatcher xmlTags();
+  // Uses runtime compilation: DFA_UNROLLED_WITH_GROUPS is chosen for this capture-ambiguous
+  // pattern, but FallbackPatternDetector B10 rejects it (optional .* before the second
+  // capturing group). Reggie.compile() routes to java.util.regex at runtime.
+  public ReggieMatcher xmlTags() {
+    return XML_TAGS;
+  }
 
   // ====================
   // COMPLEX ASSERTIONS (forces NFA)
@@ -133,6 +136,7 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   // Runtime-compiled matchers for FULL_FALLBACK patterns (see methods above). These cannot be
   // generated at annotation-processing time, so they go through Reggie.compile()'s runtime path,
   // which delegates to java.util.regex — preserving each benchmark's intended pattern.
+  private static final ReggieMatcher XML_TAGS = Reggie.compile("(<\\w+>).*(</\\w+>)");
   private static final ReggieMatcher DUPLICATE_WORD = Reggie.compile("(\\w+)\\s+\\1");
   private static final ReggieMatcher REPEATED_SEQUENCE = Reggie.compile("(a+)\\1");
   private static final ReggieMatcher LOOKAHEAD_WITH_QUANTIFIER = Reggie.compile("(?=.*\\d{3})\\w+");

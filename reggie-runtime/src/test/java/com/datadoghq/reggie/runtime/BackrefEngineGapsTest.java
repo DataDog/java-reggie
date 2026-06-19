@@ -18,6 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
@@ -144,6 +146,18 @@ class BackrefEngineGapsTest {
     assertEquals(
         2, r.end(), "B5: lazy match must end at 2 (group 'a' + backref 'a'); reggie returns 4");
     assertEquals("a", r.group(1), "B5: group 1 must be 'a' (lazy shortest); reggie returns 'aa'");
+  }
+
+  /** B5 guard active: lazy backref now throws instead of silently giving wrong spans. */
+  @Test
+  void b5_lazyBackref_guardActive() {
+    assertThrows(
+        UnsupportedPatternException.class,
+        () -> Reggie.compile("(a+?)\\1"),
+        "B5: lazy backref must throw, not silently produce wrong spans");
+    ReggieMatcher m =
+        Reggie.compile("(a+?)\\1", ReggieOptions.builder().allowJdkFallback().build());
+    assertTrue(m instanceof JavaRegexFallbackMatcher, "B5: with fallback enabled, must use JDK");
   }
 
   // ── B6: cross-alternative backref ──────────────────────────────────────────────────────────────
@@ -283,6 +297,34 @@ class BackrefEngineGapsTest {
 
     // No match when backref fails
     assertNull(m.findMatch("xab"), "B12: (?:x)(a)\\1 must not match 'xab'");
+  }
+
+  /**
+   * B12 regression: unbounded quantifier prefix cannot backtrack. {@code a*(a+)\1} on {@code "aa"}
+   * requires {@code a*} to yield characters to {@code (a+)}, but the native prefix loop commits
+   * greedily. Unbounded prefixes are now rejected by {@code isPrefixNodeHandleable}, routing to JDK
+   * fallback (or throwing when fallback is disabled).
+   */
+  @Test
+  void b12_unboundedPrefixBacktracking_routesToFallback() {
+    assertThrows(
+        UnsupportedPatternException.class,
+        () -> Reggie.compile("a*(a+)\\1"),
+        "B12: unbounded prefix a*(a+)\\1 must throw — native loop cannot backtrack");
+
+    ReggieMatcher m =
+        Reggie.compile("a*(a+)\\1", ReggieOptions.builder().allowJdkFallback().build());
+    assertTrue(m instanceof JavaRegexFallbackMatcher, "B12: with fallback, must use JDK");
+
+    // JDK: a*="" (0 chars), (a+)="a", \1="a" → match at [0,2)
+    MatchResult r = m.findMatch("aa");
+    assertNotNull(r, "B12: a*(a+)\\1 must match 'aa' via JDK");
+    assertEquals(0, r.start(), "B12: match must start at 0");
+    assertEquals(2, r.end(), "B12: match must end at 2");
+    assertEquals("a", r.group(1), "B12: group 1 must be 'a'");
+
+    // Non-matching input
+    assertNull(m.findMatch("ab"), "B12: a*(a+)\\1 must not match 'ab'");
   }
 
   // ── B13: outer quantifier on backref group in VARIABLE_CAPTURE_BACKREF ────────────────────────

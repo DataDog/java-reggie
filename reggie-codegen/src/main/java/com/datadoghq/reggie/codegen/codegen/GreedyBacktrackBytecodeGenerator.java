@@ -1253,20 +1253,34 @@ public class GreedyBacktrackBytecodeGenerator {
     int nextVar = allocator.peek();
 
     if (info.prefix.isEmpty() && info.suffixType == GreedyBacktrackInfo.SuffixType.LITERAL) {
-      // For (.*)literal, use indexOf to find the literal
+      // For (.*)literal, use indexOf to find the literal.
+      // We use two variables:
+      //   posVar      — the current match-start (may be bumped by the newline adjustment)
+      //   searchFromVar — where to search for the next literal occurrence
+      // These differ when greedyMinCount > 0 and the first literal occurrence is too close
+      // to the match start: in that case we keep posVar fixed and advance searchFromVar to
+      // look for a later occurrence of the literal.
       String literal = info.suffixLiteral;
+
+      int foundVar = nextVar;
+      int searchFromVar = nextVar + 1;
+
+      // searchFrom = pos (= startPos initially)
+      // S: [] -> [I]
+      mv.visitVarInsn(ILOAD, posVar);
+      // S: [I] -> []
+      mv.visitVarInsn(ISTORE, searchFromVar);
 
       Label searchLoop = new Label();
       mv.visitLabel(searchLoop);
 
-      // int found = input.indexOf(literal, pos);
-      int foundVar = nextVar;
+      // int found = input.indexOf(literal, searchFrom);
       // S: [] -> [A:String]
       mv.visitVarInsn(ALOAD, inputVar);
       // S: [A:String] -> [A:String, A:String]
       mv.visitLdcInsn(literal);
       // S: [A:String, A:String] -> [A:String, A:String, I]
-      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, searchFromVar);
       // S: [A:String, A:String, I] -> [I]
       mv.visitMethodInsn(
           INVOKEVIRTUAL, "java/lang/String", "indexOf", "(Ljava/lang/String;I)I", false);
@@ -1283,11 +1297,11 @@ public class GreedyBacktrackBytecodeGenerator {
       // leftmost valid start in find context is therefore just after the last '\n' that precedes
       // the suffix (clamped to the current scan position). Adjust pos accordingly so the run only
       // covers characters '.' actually matches; the min-count check below then validates the length
-      // (and advances past this occurrence if it is now too short). With CharSet.ANY (DOTALL) this
-      // adjustment is skipped and the original behavior is preserved.
+      // (and advances searchFrom past this occurrence if it is now too short). With CharSet.ANY
+      // (DOTALL) this adjustment is skipped and the original behavior is preserved.
       if (info.greedyCharSet != null && info.greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE)) {
         // int nl = input.lastIndexOf('\n', found - 1);
-        int nlVar = nextVar + 1;
+        int nlVar = nextVar + 2;
         // S: [] -> [A:String]
         mv.visitVarInsn(ALOAD, inputVar);
         // S: [A:String] -> [A:String, I]  (newline code point)
@@ -1335,14 +1349,21 @@ public class GreedyBacktrackBytecodeGenerator {
         // S: [I, I] -> []
         mv.visitJumpInsn(IF_ICMPGE, minOk);
 
-        // greedyLen < min, try next occurrence
-        // pos = found + 1
+        // greedyLen < min: this literal occurrence is too close to the match start.
+        // Advance searchFrom to look for a later occurrence; reset pos to startPos
+        // so the newline adjustment is re-evaluated for the new found position.
+        // searchFrom = found + 1
         // S: [] -> [I]
         mv.visitVarInsn(ILOAD, foundVar);
         // S: [I] -> [I, I]
         mv.visitInsn(ICONST_1);
         // S: [I, I] -> [I]
         mv.visitInsn(IADD);
+        // S: [I] -> []
+        mv.visitVarInsn(ISTORE, searchFromVar);
+        // pos = startPos (reset match-start for next iteration)
+        // S: [] -> [I]
+        mv.visitVarInsn(ILOAD, startPosVar);
         // S: [I] -> []
         mv.visitVarInsn(ISTORE, posVar);
         mv.visitJumpInsn(GOTO, searchLoop);

@@ -24,6 +24,7 @@ import com.datadoghq.reggie.codegen.ast.CharClassNode;
 import com.datadoghq.reggie.codegen.ast.ConcatNode;
 import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
+import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import org.objectweb.asm.ClassWriter;
@@ -712,9 +713,31 @@ public class VariableCaptureBackrefBytecodeGenerator {
   private int getPrefixLength() {
     int n = 0;
     for (RegexNode node : info.prefix) {
-      if (!(node instanceof AnchorNode)) n++;
+      n += prefixNodeMinLength(node);
     }
     return n;
+  }
+
+  /** Returns the minimum number of characters consumed by a single prefix node. */
+  private static int prefixNodeMinLength(RegexNode node) {
+    if (node instanceof AnchorNode) return 0;
+    if (node instanceof LiteralNode || node instanceof CharClassNode) return 1;
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      return q.min * prefixNodeMinLength(q.child);
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      return g.capturing ? 0 : prefixNodeMinLength(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode child : ((ConcatNode) node).children) {
+        total += prefixNodeMinLength(child);
+      }
+      return total;
+    }
+    return 0;
   }
 
   private void emitCharSetCheck(
@@ -801,6 +824,34 @@ public class VariableCaptureBackrefBytecodeGenerator {
       for (RegexNode child : ((ConcatNode) node).children) {
         emitPrefixNode(mv, child, groupStartVar, lenVar, failLabel, alloc);
       }
+    } else if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      // Emit min mandatory repetitions — if too few chars, jump to failLabel (match fails).
+      for (int i = 0; i < q.min; i++) {
+        emitPrefixNode(mv, q.child, groupStartVar, lenVar, failLabel, alloc);
+      }
+      // For unbounded quantifiers (max == -1): greedy loop for optional repetitions.
+      // Each repetition is atomic: snapshot groupStartVar before the attempt and
+      // restore it on failure so a partial advance does not corrupt the position.
+      if (q.max == -1) {
+        int savedStart = alloc.allocate();
+        Label loopStart = new Label();
+        Label iterFail = new Label();
+        Label loopEnd = new Label();
+        mv.visitLabel(loopStart);
+        // Snapshot position before attempting one repetition.
+        mv.visitVarInsn(ILOAD, groupStartVar);
+        mv.visitVarInsn(ISTORE, savedStart);
+        // Attempt one repetition; on any sub-failure jump to iterFail (not loopEnd).
+        emitPrefixNode(mv, q.child, groupStartVar, lenVar, iterFail, alloc);
+        mv.visitJumpInsn(GOTO, loopStart);
+        // Failed repetition: restore the snapshot, then exit the loop.
+        mv.visitLabel(iterFail);
+        mv.visitVarInsn(ILOAD, savedStart);
+        mv.visitVarInsn(ISTORE, groupStartVar);
+        mv.visitLabel(loopEnd);
+      }
+      // For exact quantifiers (q.min == q.max): mandatory repetitions already emitted above.
     }
   }
 
