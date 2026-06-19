@@ -124,60 +124,64 @@ public class AlgorithmicFuzzTest {
   }
 
   /**
-   * Large deterministic sweep that asserts <em>zero</em> divergences between Reggie and the JDK.
-   * This is the production-readiness gate. It runs from the same fixed {@link #BASE_SEED} as the
-   * smoke test, so the (pattern, input) stream and minimal repro set are fully reproducible.
+   * Large deterministic sweep that asserts divergences between Reggie and the JDK stay within the
+   * known budget. This is the production-readiness gate. It runs from the same fixed {@link
+   * #BASE_SEED} as the smoke test, so the (pattern, input) stream and minimal repro set are fully
+   * reproducible.
    *
-   * <p>Runs unconditionally. The companion {@link #zeroDivergenceGate_enforcedViaProperty()} can
-   * also be triggered via {@code -Dreggie.fuzz.enforceZero=true} without editing source.
+   * <p>Runs unconditionally. The companion {@link #divergenceGate_enforcedViaProperty()} can also
+   * be triggered via {@code -Dreggie.fuzz.enforce=true} without editing source.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
-  public void zeroDivergenceGate() {
-    runZeroDivergenceGate();
+  public void divergenceGate() {
+    runDivergenceGate();
   }
 
   /**
-   * Second-seed gate: same dimensions as {@link #zeroDivergenceGate} but with an independent seed,
-   * so it covers a disjoint area of the pattern/input space. Self-skips unless {@code
+   * Second-seed gate: same dimensions as {@link #divergenceGate} but with an independent seed, so
+   * it covers a disjoint area of the pattern/input space. Self-skips unless {@code
    * -Dreggie.fuzz.altSeed=true} is set — the alt seed can surface pre-existing bugs in strategies
    * not reached by {@link #BASE_SEED}, so it serves as a discovery tool rather than a hard CI gate.
    * Use {@code -Dreggie.fuzz.maxFindings=N} to allow a known number of pre-existing divergences.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
-  public void zeroDivergenceGate_altSeed() {
+  public void divergenceGate_altSeed() {
     assumeTrue(
         Boolean.getBoolean("reggie.fuzz.altSeed"),
         "set -Dreggie.fuzz.altSeed=true to run the alt-seed discovery sweep");
     FuzzRunner.Config cfg = largeSweepConfig();
     cfg.seed = BASE_SEED ^ 0x5555_AAAA_1234_5678L;
-    runZeroDivergenceGate(cfg, "[zero-divergence-gate-alt]");
+    runDivergenceGate(cfg, "[divergence-gate-alt]");
   }
 
   /**
    * Companion entry point that is <em>not</em> {@code @Disabled}: it self-skips unless {@code
-   * -Dreggie.fuzz.enforceZero=true} is set, letting CI exercise the gate without editing source.
+   * -Dreggie.fuzz.enforce=true} is set, letting CI exercise the gate without editing source.
    *
-   * <p>An optional budget can be set via {@code -Dreggie.fuzz.maxFindings=N} (default: {@code
-   * KNOWN_FINDINGS_BUDGET}). A non-zero budget allows known pre-existing divergences to pass
-   * without failing the gate — new regressions still fail because they push the count above the
-   * budget.
+   * <p>An optional budget can be set via {@code -Dreggie.fuzz.maxFindings=N} (default 0). A budget
+   * greater than 0 allows a known number of pre-existing divergences to pass without failing the
+   * gate — new regressions still fail because they push the count above the budget.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
-  public void zeroDivergenceGate_enforcedViaProperty() {
+  public void divergenceGate_enforcedViaProperty() {
     assumeTrue(
-        Boolean.getBoolean("reggie.fuzz.enforceZero"),
-        "set -Dreggie.fuzz.enforceZero=true to enforce the zero-divergence gate");
-    runZeroDivergenceGate();
+        Boolean.getBoolean("reggie.fuzz.enforce"),
+        "set -Dreggie.fuzz.enforce=true to activate the divergence gate");
+    runDivergenceGate(largeSweepConfig(), "[divergence-gate]", 0);
   }
 
-  private void runZeroDivergenceGate() {
-    runZeroDivergenceGate(largeSweepConfig(), "[zero-divergence-gate]");
+  private void runDivergenceGate() {
+    runDivergenceGate(largeSweepConfig(), "[divergence-gate]");
   }
 
-  private void runZeroDivergenceGate(FuzzRunner.Config cfg, String tag) {
+  private void runDivergenceGate(FuzzRunner.Config cfg, String tag) {
+    runDivergenceGate(cfg, tag, KNOWN_FINDINGS_BUDGET);
+  }
+
+  private void runDivergenceGate(FuzzRunner.Config cfg, String tag, int maxFindingsDefault) {
     FuzzRunner.Report report = new FuzzRunner().run(cfg);
     System.out.println(tag + " " + report.summary());
 
@@ -192,7 +196,7 @@ public class AlgorithmicFuzzTest {
           tag + "-repro " + s.findingKind + ": pattern=" + s.pattern + " input=" + s.input);
     }
 
-    int maxFindings = Integer.getInteger("reggie.fuzz.maxFindings", KNOWN_FINDINGS_BUDGET);
+    int maxFindings = Integer.getInteger("reggie.fuzz.maxFindings", maxFindingsDefault);
     if (maxFindings > 0) {
       System.out.println(tag + " budget=" + maxFindings + " (known pre-existing findings)");
     }
