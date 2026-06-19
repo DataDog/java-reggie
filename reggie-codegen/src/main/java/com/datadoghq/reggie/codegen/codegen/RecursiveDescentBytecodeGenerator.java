@@ -3939,7 +3939,8 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       } else if (node.type == AnchorNode.Type.STRING_END) {
-        // \Z: matches at end of input, before terminal '\n', '\r', or '\r\n'
+        // \Z: matches at end of input, before terminal lone '\n' (CRLF guard), lone '\r', '\r\n',
+        // NEL, LS, or PS
         Label atEnd = new Label();
         Label failLabel = new Label();
         Label checkCrlf = new Label();
@@ -3955,13 +3956,43 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         mv.visitIntInsn(BIPUSH, '\n');
-        mv.visitJumpInsn(IF_ICMPEQ, atEnd); // '\n' at end-1 → pass
+        Label notNewlineZ = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, notNewlineZ);
+        // '\n': CRLF guard — lone \n only; \r\n tail does not match \Z
+        Label loneNewlineZ = new Label();
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitJumpInsn(IFEQ, loneNewlineZ); // pos == 0 → lone \n
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPEQ, failLabel); // CRLF tail → \Z can't match here
+        mv.visitLabel(loneNewlineZ);
+        mv.visitJumpInsn(GOTO, atEnd);
+        mv.visitLabel(notNewlineZ);
         mv.visitVarInsn(ALOAD, 1); // input
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         mv.visitIntInsn(BIPUSH, '\r');
         mv.visitJumpInsn(IF_ICMPEQ, atEnd); // lone '\r' at end-1 → pass
-        mv.visitJumpInsn(GOTO, failLabel); // end-1 but neither '\n' nor '\r': fail
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u0085'); // NEL
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2028'); // LS
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2029'); // PS
+        mv.visitJumpInsn(IF_ICMPEQ, atEnd);
+        mv.visitJumpInsn(GOTO, failLabel); // end-1 but no recognized terminator: fail
         mv.visitLabel(checkCrlf);
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
@@ -3998,12 +4029,14 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       } else if (node.type == AnchorNode.Type.END) {
-        // $ (non-multiline): pos==end, or pos==end-1 with '\n'/'\r', or pos==end-2 with '\r\n'
+        // $ (non-multiline): pos==end; pos==end-1 with lone '\n' (CRLF guard)/'\r'/NEL/LS/PS;
+        // pos==end-2 with '\r\n'
         mv.visitVarInsn(ILOAD, 2); // pos
         mv.visitVarInsn(ILOAD, 3); // end
         Label dollarOk = new Label();
         mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
         Label dollarCheckCrlf = new Label();
+        Label dollarFail = new Label();
         mv.visitVarInsn(ILOAD, 2);
         mv.visitVarInsn(ILOAD, 3);
         mv.visitInsn(ICONST_1);
@@ -4013,13 +4046,42 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         mv.visitIntInsn(BIPUSH, '\n');
-        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        Label dollarNotNewline = new Label();
+        mv.visitJumpInsn(IF_ICMPNE, dollarNotNewline);
+        // '\n': CRLF guard — lone \n only; \r\n tail does not match $
+        Label dollarLoneNewline = new Label();
+        mv.visitVarInsn(ILOAD, 2); // pos
+        mv.visitJumpInsn(IFEQ, dollarLoneNewline); // pos == 0 → lone \n
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitIntInsn(BIPUSH, '\r');
+        mv.visitJumpInsn(IF_ICMPEQ, dollarFail); // CRLF tail → $ not here
+        mv.visitLabel(dollarLoneNewline);
+        mv.visitJumpInsn(GOTO, dollarOk);
+        mv.visitLabel(dollarNotNewline);
         mv.visitVarInsn(ALOAD, 1); // input
         mv.visitVarInsn(ILOAD, 2);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         mv.visitIntInsn(BIPUSH, '\r');
         mv.visitJumpInsn(IF_ICMPEQ, dollarOk); // lone '\r' at end-1 → pass
-        Label dollarFail = new Label();
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u0085'); // NEL
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2028'); // LS
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        BytecodeUtil.pushInt(mv, '\u2029'); // PS
+        mv.visitJumpInsn(IF_ICMPEQ, dollarOk);
         mv.visitJumpInsn(GOTO, dollarFail);
         mv.visitLabel(dollarCheckCrlf);
         mv.visitVarInsn(ILOAD, 2);
