@@ -2062,4 +2062,70 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitLabel(inSet);
     }
   }
+
+  /**
+   * Emits an inline bytecode check for {@code $}/{@code \Z} anchors. Jumps to {@code isEnd} on
+   * success; falls through to caller-placed {@code fails} label on failure.
+   *
+   * <p>Accepts: {@code pos == len}, {@code pos == len-1} with {@code '\n'}, or {@code pos == len-2}
+   * with a {@code "\r\n"} sequence (matching Java regex semantics).
+   */
+  private void emitEndAnchorCheck(
+      MethodVisitor mv, int posVar, int lenVar, int inputVar, Label isEnd, Label fails) {
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    Label checkCrlf = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitJumpInsn(IF_ICMPNE, checkCrlf);
+    // pos == len-1: check for lone \n (not CRLF tail), lone \r
+    Label notNewline = new Label();
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\n');
+    mv.visitJumpInsn(IF_ICMPNE, notNewline);
+    // charAt(pos) == '\n': only match if NOT preceded by '\r' (would be CRLF tail)
+    Label loneNewline = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitJumpInsn(IFEQ, loneNewline); // pos == 0 → lone \n
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPEQ, fails); // preceded by '\r' → CRLF tail → $ doesn't match
+    mv.visitLabel(loneNewline);
+    mv.visitJumpInsn(GOTO, isEnd); // lone '\n' → match
+    mv.visitLabel(notNewline);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd); // lone '\r' at len-1 → pass
+    mv.visitJumpInsn(GOTO, fails);
+    mv.visitLabel(checkCrlf);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    pushInt(mv, 2);
+    mv.visitInsn(ISUB);
+    mv.visitJumpInsn(IF_ICMPNE, fails);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPNE, fails);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\n');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    // falls through to fails
+  }
 }
