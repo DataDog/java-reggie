@@ -433,7 +433,10 @@ public class RuntimeCompiler {
       // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
       // results for these patterns (e.g. dot matching newline, group-span bugs).
-      if (result.anchorConditionDiluted) {
+      // PIKEVM_CAPTURE evaluates anchors correctly at every search position; anchorConditionDiluted
+      // on a PIKEVM result is only used by the hybrid pre-check (§4 below) to skip the DFA pass.
+      if (result.anchorConditionDiluted
+          && result.strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
         return fallbackOrThrow(
             pattern, "anchor condition diluted in DFA construction", nameMap, options);
       }

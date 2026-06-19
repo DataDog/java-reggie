@@ -97,4 +97,27 @@ public class AnchorDilutedNativeTest {
       }
     }
   }
+
+  // ---- Group-free anchor-diluted PIKEVM path ----
+  // Previously threw UnsupportedPatternException due to anchorConditionDiluted=true on the result
+  // being checked unconditionally before the PIKEVM_CAPTURE branch in RuntimeCompiler.
+
+  @ParameterizedTest
+  @ValueSource(strings = {"^c|[^1][b]", "^x|xa", "\\Aa|ab"})
+  void groupFreeAnchorDiluted_usesNativePath(String pat) {
+    assertFalse(
+        Reggie.compile(pat) instanceof JavaRegexFallbackMatcher,
+        "Expected native matcher for: " + pat);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"^c|[^1][b]", "^x|xa", "\\Aa|ab"})
+  void groupFreeAnchorDiluted_agreesWithJdk(String pat) {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat);
+    for (String in : new String[] {"c", "1b", "2b", "xc", "xa", "a", "ab", "xab"}) {
+      String ctx = "pat=" + pat + " in=" + in;
+      assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+    }
+  }
 }
