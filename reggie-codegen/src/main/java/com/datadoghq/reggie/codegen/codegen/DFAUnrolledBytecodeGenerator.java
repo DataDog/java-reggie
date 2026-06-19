@@ -1686,26 +1686,37 @@ public class DFAUnrolledBytecodeGenerator {
   private void emitAcceptStateGroupActions(
       MethodVisitor mv, DFA.DFAState state, int posVar, int tagsVar) {
     if (state.groupActions.isEmpty()) return;
-    Set<Integer> enteredGroups = new HashSet<>();
+    // Collect which groups have both ENTER and EXIT in this accepting state, and whether the ENTER
+    // is zero-width (epsilonGroup=true). For zero-width groups both tags must be set to posVar. For
+    // consuming groups the START tag was already correctly set by the transition tagOp; only the
+    // END
+    // tag needs to be written here (it too was set by a tagOp, but we write it as a safety net).
+    Map<Integer, Boolean> completedGroups = new HashMap<>();
     Set<Integer> exitedGroups = new HashSet<>();
     for (DFA.GroupAction action : state.groupActions) {
-      if (action.type == DFA.GroupAction.ActionType.ENTER) enteredGroups.add(action.groupId);
-      else exitedGroups.add(action.groupId);
+      if (action.type == DFA.GroupAction.ActionType.ENTER) {
+        completedGroups.put(action.groupId, action.epsilonGroup);
+      } else {
+        exitedGroups.add(action.groupId);
+      }
     }
-    // Only fix up groups that complete their full enter+exit cycle here.
-    Set<Integer> zeroWidthGroups = new HashSet<>(enteredGroups);
-    zeroWidthGroups.retainAll(exitedGroups);
-    for (int g : zeroWidthGroups) {
-      // tags[2*g] = posVar  (START)
-      mv.visitVarInsn(ALOAD, tagsVar);
-      pushInt(mv, 2 * g);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(IASTORE);
-      // tags[2*g+1] = posVar  (END)
-      mv.visitVarInsn(ALOAD, tagsVar);
-      pushInt(mv, 2 * g + 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(IASTORE);
+    completedGroups.keySet().retainAll(exitedGroups);
+    for (Map.Entry<Integer, Boolean> entry : completedGroups.entrySet()) {
+      int g = entry.getKey();
+      boolean zeroWidth = entry.getValue();
+      if (zeroWidth) {
+        // Zero-width group: both START and END are at posVar (the group matches empty string here).
+        mv.visitVarInsn(ALOAD, tagsVar);
+        pushInt(mv, 2 * g);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(IASTORE);
+        mv.visitVarInsn(ALOAD, tagsVar);
+        pushInt(mv, 2 * g + 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(IASTORE);
+      }
+      // Consuming group: START was already set to the correct pre-character position by the
+      // transition tagOp; END was set to posVar by the tagOp. No override needed.
     }
   }
 

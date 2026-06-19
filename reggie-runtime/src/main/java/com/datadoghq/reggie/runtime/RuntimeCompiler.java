@@ -391,7 +391,7 @@ public class RuntimeCompiler {
         if (sb == null) {
           sb = new StringBuilder(pattern);
         }
-        sb.append(' ').append(o.name());
+        sb.append('\0').append(o.name());
       }
     }
     return sb == null ? pattern : sb.toString();
@@ -478,6 +478,10 @@ public class RuntimeCompiler {
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
       // correctly-enriched PikeVMMatcher without re-parsing the pattern.
       if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+        String pikeVmFallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+        if (pikeVmFallbackReason != null) {
+          return fallbackOrThrow(pattern, pikeVmFallbackReason, nameMap, options);
+        }
         PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }

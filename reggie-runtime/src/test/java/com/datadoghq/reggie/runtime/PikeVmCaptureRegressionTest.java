@@ -93,7 +93,11 @@ public class PikeVmCaptureRegressionTest {
 
   @Test
   void control_anchorLoop_terminates() throws Exception {
-    assertAgrees("(^)*a", "a");
+    // (^)*a has nullable group content under a nullable quantifier (B16); PIKEVM_CAPTURE diverges
+    // and the pattern now falls back to JDK. Verify fallback compilation terminates and agrees.
+    Pattern jdk = Pattern.compile("(^)*a");
+    ReggieMatcher reggie = Reggie.compileAllowingFallback("(^)*a");
+    assertEquals(jdk.matcher("a").find(), reggie.find("a"));
   }
 
   @Test

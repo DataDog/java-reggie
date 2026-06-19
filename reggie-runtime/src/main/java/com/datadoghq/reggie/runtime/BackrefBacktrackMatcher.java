@@ -114,7 +114,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   @Override
   public int findFrom(String input, int start) {
     int len = input.length();
-    for (int s = start; s <= len; s++) {
+    int clamped = Math.max(0, start);
+    if (clamped > len) return -1;
+    for (int s = clamped; s <= len; s++) {
       if (runSearch(input, s, len, false) != null) {
         return s;
       }
@@ -136,7 +138,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   @Override
   public MatchResult findMatchFrom(String input, int start) {
     int len = input.length();
-    for (int s = start; s <= len; s++) {
+    int clamped = Math.max(0, start);
+    if (clamped > len) return null;
+    for (int s = clamped; s <= len; s++) {
       int[] caps = runSearch(input, s, len, false);
       if (caps != null) {
         return buildResult(input, caps);

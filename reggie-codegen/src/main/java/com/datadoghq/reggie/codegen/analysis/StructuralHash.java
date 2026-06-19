@@ -174,6 +174,7 @@ public final class StructuralHash {
       for (var ga : state.groupActions) {
         hash = mult * hash + ga.groupId;
         hash = mult * hash + ga.type.ordinal();
+        hash = mult * hash + (ga.epsilonGroup ? 1 : 0);
       }
 
       hash = mult * hash + state.assertionChecks.size();
