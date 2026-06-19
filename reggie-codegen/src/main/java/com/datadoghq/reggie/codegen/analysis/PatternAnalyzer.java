@@ -1950,12 +1950,21 @@ public class PatternAnalyzer {
     return capturingAltGroups >= 2 && anyOverlapping;
   }
 
-  /** If {@code node} is a capturing group whose body is directly an alternation, return it. */
+  /**
+   * If {@code node} is a capturing group whose body is (after unwrapping any transparent
+   * non-capturing groups) an alternation, return that alternation.
+   */
   private AlternationNode capturingGroupAlternation(RegexNode node) {
     if (node instanceof GroupNode) {
       GroupNode g = (GroupNode) node;
-      if (g.capturing && g.child instanceof AlternationNode) {
-        return (AlternationNode) g.child;
+      if (g.capturing) {
+        RegexNode body = g.child;
+        while (body instanceof GroupNode && !((GroupNode) body).capturing) {
+          body = ((GroupNode) body).child;
+        }
+        if (body instanceof AlternationNode) {
+          return (AlternationNode) body;
+        }
       }
     }
     return null;
