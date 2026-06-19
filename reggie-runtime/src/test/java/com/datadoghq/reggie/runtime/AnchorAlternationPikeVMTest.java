@@ -202,6 +202,48 @@ class AnchorAlternationPikeVMTest {
         "guard1: expected native matcher for: " + pat);
   }
 
+  // ---------------------------------------------------------------------------
+  // Wrapped-anchor branches: (?:\Z) and (?:$) must be treated as pure-anchor
+  // branches, same as bare \Z/$, so they do not trigger OPTIMIZED_NFA fallback.
+  // ---------------------------------------------------------------------------
+
+  static Stream<Arguments> wrappedAnchorPatterns() {
+    return Stream.of(
+        Arguments.of("(?:\\Z)|abc", ""),
+        Arguments.of("(?:\\Z)|abc", "abc"),
+        Arguments.of("(?:\\Z)|abc", "xyz"),
+        Arguments.of("(?:$)|abc", ""),
+        Arguments.of("(?:$)|abc", "abc"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("wrappedAnchorPatterns")
+  void wrappedAnchor_agreesWithJdk(String pat, String in) {
+    ReggieMatcher reggie = Reggie.compile(pat);
+    Pattern jdk = Pattern.compile(pat);
+    String ctx = "pat=" + pat + " in=" + repr(in);
+
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+
+    Matcher jm = jdk.matcher(in);
+    boolean jFound = jm.find();
+    MatchResult rf = reggie.findMatch(in);
+    assertEquals(jFound, rf != null, "findMatch() null " + ctx);
+    if (jFound && rf != null) {
+      assertEquals(jm.start(), rf.start(), "findMatch() start " + ctx);
+      assertEquals(jm.end(), rf.end(), "findMatch() end " + ctx);
+    }
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("wrappedAnchorPatterns")
+  void wrappedAnchor_routesToPikeVm(String pat, String in) {
+    assertFalse(
+        Reggie.compile(pat) instanceof JavaRegexFallbackMatcher,
+        "wrapped-anchor: expected native matcher for: " + pat);
+  }
+
   private static String repr(String s) {
     return s.isEmpty() ? "(empty)" : "\"" + s.replace("\n", "\\n") + "\"";
   }

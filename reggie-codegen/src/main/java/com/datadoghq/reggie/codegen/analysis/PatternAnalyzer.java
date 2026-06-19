@@ -786,18 +786,10 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         if (hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
-          // \Z or $ in alternation without capturing groups: OPTIMIZED_NFA mishandles find()
-          // anchor semantics; route to PIKEVM_CAPTURE which handles \Z/$ correctly.
-          if (nfa.getGroupCount() == 0) {
-            return new MatchingStrategyResult(
-                MatchingStrategy.PIKEVM_CAPTURE,
-                null,
-                null,
-                false,
-                requiredLiterals,
-                null,
-                needsPosixSemantics);
-          }
+          // \Z or $ in alternation with capturing groups: OPTIMIZED_NFA handles anchors as
+          // zero-width NFA assertions. The nfa.getGroupCount() == 0 branch that previously
+          // appeared here was unreachable (this block is guarded by nfa.getGroupCount() > 0).
+          // Zero-group patterns with \Z in alternation are handled outside this block.
           return new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA,
               null,

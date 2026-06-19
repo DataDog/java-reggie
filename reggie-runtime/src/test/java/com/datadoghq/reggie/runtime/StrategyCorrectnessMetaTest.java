@@ -184,6 +184,9 @@ public class StrategyCorrectnessMetaTest {
     // alternationPriorityConflict: quantified capturing group with a nested quantifier in its body
     // causes DFA priority-ordering to be unreliable → OPTIMIZED_NFA (JDK fallback).
     // Simple bodies like (a|b) are now routed to PIKEVM_CAPTURE instead.
+    // NOTE: this representative tests the routing decision and JDK-delegated correctness,
+    // not native OPTIMIZED_NFA bytecode — RuntimeCompiler calls fallbackOrThrow for
+    // alternationPriorityConflict patterns before reaching the native NFA compiler.
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
         new Spec("(a+|b)+c", List.of("abc", "xabcy", "xyz", "", "abcé")));

@@ -188,13 +188,14 @@ public final class FallbackPatternDetector {
     // quantifier, so this fallback condition is no longer needed.
 
     // B12 [PARTIALLY-FIXED]: emitPrefixMatch handles Literal, CharClass, Anchor, non-capturing
-    // GroupNode (via isPrefixNodeHandleable recursion), and unbounded/exact QuantifierNodes (e.g.
-    // a*, a+, [0-9]*, x{3}). Bounded-range quantifiers {n,m} still fall back.
+    // GroupNode (via isPrefixNodeHandleable recursion), and exact QuantifierNodes (e.g. x{3}).
+    // Unbounded quantifiers (*, +, {n,}) and bounded-range quantifiers {n,m} still fall back:
+    // unbounded greedy loops commit without backtracking, so a*(a+)\1 on "aa" would fail natively.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
       return "variable-capture backref with unsupported prefix node type: "
           + "generator only handles literal, char-class, anchor, non-capturing group, "
-          + "and unbounded/exact quantifier prefix nodes";
+          + "and exact quantifier prefix nodes";
     }
 
     // B13 [NEEDS-RND]: Outer quantifier wraps the entire capturing group: (X)+\N or (X){n,}\N.
@@ -303,7 +304,12 @@ public final class FallbackPatternDetector {
           // Pure-anchor branches (\Z, $, ^) are always zero-width; their nullability is
           // definitional, not a structural problem — PikeVM handles them correctly.
           // Only non-anchor nullable branches cause OPTIMIZED_NFA span tracking to fail.
-          if (branch instanceof AnchorNode) continue;
+          // Unwrap non-capturing groups so (?:\Z) is treated the same as bare \Z.
+          RegexNode unwrapped = branch;
+          while (unwrapped instanceof GroupNode ncg && !ncg.capturing) {
+            unwrapped = ncg.child;
+          }
+          if (unwrapped instanceof AnchorNode) continue;
           if (isNullableOrEmptyBranch(branch) || startsWithZeroWidthQuantifier(branch)) {
             return true;
           }
@@ -1006,17 +1012,18 @@ public final class FallbackPatternDetector {
       return true;
     }
     if (node instanceof QuantifierNode q) {
-      // Handle unbounded (max == -1: *, +, {n,}) and exact ({n}) quantifiers.
-      // Bounded ranges {n,m} with m > n are not yet implemented in emitPrefixNode.
+      // Unbounded quantifiers (max == -1: *, +, {n,}) are not handleable as prefixes:
+      // the generated loop commits greedily and cannot backtrack if the following
+      // capture/backref fails. Example: a*(a+)\1 on "aa" — the prefix loop consumes
+      // both 'a' characters, leaving none for (a+). Route to the fallback engine instead.
       if (q.max == -1) {
-        // Unbounded greedy prefix loop would spin forever on a nullable child
-        // (zero-progress re-entry). Reject so the pattern routes to a fallback
-        // engine that handles it correctly.
-        return !subtreeIsNullable(q.child) && isPrefixNodeHandleable(q.child);
+        return false;
       }
+      // Exact quantifiers {n} are safe: fixed repetition, no backtracking needed.
       if (q.min == q.max) {
         return isPrefixNodeHandleable(q.child);
       }
+      // Bounded-range {n,m} not yet implemented in emitPrefixNode.
       return false;
     }
     return false;
