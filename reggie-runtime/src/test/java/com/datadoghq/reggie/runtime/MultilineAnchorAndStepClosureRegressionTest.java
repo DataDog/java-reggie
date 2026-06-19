@@ -244,8 +244,8 @@ public class MultilineAnchorAndStepClosureRegressionTest {
     ReggieMatcher m = Reggie.compile(pattern);
     List<MatchResult> all = m.findAll(input);
 
-    // Expect at least the two line starts: pos=0 and pos=2 (after '\n')
-    assertTrue(all.size() >= 2, "must find at least 2 zero-length matches; got " + all.size());
+    // Expect exactly two line starts: pos=0 and pos=2 (after '\n'); over-matching is a regression.
+    assertEquals(2, all.size(), "(?m)^ on \"a\\nb\" must produce exactly 2 zero-length matches");
 
     assertEquals(0, all.get(0).start(), "first zero-length match at input start");
     assertEquals(0, all.get(0).end(), "first match is zero-length");

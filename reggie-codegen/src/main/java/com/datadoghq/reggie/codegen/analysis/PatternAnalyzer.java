@@ -912,6 +912,13 @@ public class PatternAnalyzer {
           // handles all anchor types natively (since commit 0acfc66), and RuntimeCompiler wraps
           // the result in NameEnrichingMatcher when named groups are present.
           if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
+            // INVARIANT for any new Class A route that returns PIKEVM_CAPTURE for patterns
+            // containing nullable capturing groups in alternation branches:
+            // always guard with
+            // !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)
+            // before returning PIKEVM_CAPTURE, as PikeVM diverges for nullable-content groups
+            // (e.g. (0*-?){0,}). RuntimeCompiler also enforces this via needsFallback(), but
+            // the PatternAnalyzer guard is the first line of defence.
             // B16: nullable outer quantifier on non-nullable capturing group — TDFA POSIX
             // last-match span wrong. PIKEVM gives correct spans when the group content itself is
             // non-nullable; nullable-content groups (e.g. (0*-?){0,}) are left on the TDFA path
@@ -955,7 +962,8 @@ public class PatternAnalyzer {
             // priority-winning branch bypasses it (binds g1=[0,0); JDK leaves it -1). PikeVM gives
             // correct spans. A non-nullable group like (a) in (a)|b never leaks and stays on the
             // DFA.
-            if (FallbackPatternDetector.hasNullableCapturingGroupInAlternationBranch(ast)) {
+            if (FallbackPatternDetector.hasNullableCapturingGroupInAlternationBranch(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
                   null,

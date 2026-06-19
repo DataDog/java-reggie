@@ -858,7 +858,16 @@ public class RecursiveDescentBytecodeGenerator {
     Label foundMatch = new Label();
     Label firstCharOptimizationSkip = new Label();
 
-    // pos starts at fromIndex
+    // if (fromIndex < 0) fromIndex = 0;
+    // S: []
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2); // fromIndex
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
+
+    // pos starts at fromIndex (clamped)
     // S: []
     mv.visitVarInsn(ILOAD, 2); // fromIndex
     // S: [I]

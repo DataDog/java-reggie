@@ -395,7 +395,15 @@ public class FixedSequenceBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, lenVar);
 
-    // int i = start;
+    // Clamp start to 0 if negative
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
+
+    // int i = start; (clamped)
     int iVar = allocator.allocate();
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ISTORE, iVar);

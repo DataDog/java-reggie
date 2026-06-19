@@ -199,11 +199,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     // Build the over-approximating reject DFA for anchored (but assertion/backref-free) patterns
-    // the
-    // exact findDfa rejected. It crosses every anchor as epsilon → accepts a superset → a sound
-    // fast-reject (see field doc). Skipped when the over-approximation can match empty (it would
-    // then
-    // accept at every position, making it useless as a reject filter).
+    // the exact findDfa rejected. It crosses every anchor as epsilon → accepts a superset → a
+    // sound fast-reject (see field doc). Skipped when the over-approximation can match empty (it
+    // would then accept at every position, making it useless as a reject filter).
     if (findDfa == null && noAssertionsOrBackrefs(nfa)) {
       int[] startAll = sortedEpsilonClosure(new int[] {nfa.getStartState().id}, false);
       boolean approxEmpty = false;
@@ -442,7 +440,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   @Override
   public int findFrom(String input, int start) {
-    return findStartFrom(input, start);
+    int clamped = Math.max(0, start);
+    if (clamped > input.length()) return -1;
+    return findStartFrom(input, clamped);
   }
 
   @Override
@@ -457,7 +457,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult findMatchFrom(String input, int start) {
-    return findMatchResultFrom(input, start);
+    int clamped = Math.max(0, start);
+    if (clamped > input.length()) return null;
+    return findMatchResultFrom(input, clamped);
   }
 
   @Override
