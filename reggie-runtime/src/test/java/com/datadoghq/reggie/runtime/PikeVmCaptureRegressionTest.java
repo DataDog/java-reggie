@@ -117,8 +117,12 @@ public class PikeVmCaptureRegressionTest {
   // ---- Controls ----
 
   @Test
-  void control_anchorLoop_terminates() throws Exception {
-    assertAgrees("(^)*a", "a");
+  void control_anchorLoop_terminates() {
+    // Anchor-loop patterns are caught by B16 or B3 guards and must throw cleanly rather than
+    // hang. (^)* triggers B16 (nullable capturing group under nullable quantifier);
+    // (?:^)* triggers B3 (any anchor inside a quantifier).
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("(^)*a"));
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("(?:^)*a"));
   }
 
   @Test
