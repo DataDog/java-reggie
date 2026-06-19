@@ -276,6 +276,17 @@ public class IastRegexpBenchmark {
     return sum;
   }
 
+  private static long sumGroupOffsets(com.google.re2j.Matcher m, int maxGroup) {
+    long sum = 0;
+    for (int g = 1; g <= maxGroup; g++) {
+      int s = m.start(g);
+      if (s >= 0) {
+        sum += s + m.end(g);
+      }
+    }
+    return sum;
+  }
+
   @Benchmark
   public long reggieUrlAuthCapture() {
     MatchResult r = reggieUrl.findMatch(URL_AUTH_MATCH);
@@ -306,6 +317,24 @@ public class IastRegexpBenchmark {
   @Benchmark
   public long jdkUrlQueryCapture() {
     java.util.regex.Matcher m = jdkUrl.matcher(URL_QUERY_MATCH);
+    if (!m.find()) {
+      return -1L;
+    }
+    return sumGroupOffsets(m, 3);
+  }
+
+  @Benchmark
+  public long re2jUrlAuthCapture() {
+    com.google.re2j.Matcher m = re2jUrl.matcher(URL_AUTH_MATCH);
+    if (!m.find()) {
+      return -1L;
+    }
+    return sumGroupOffsets(m, 3);
+  }
+
+  @Benchmark
+  public long re2jUrlQueryCapture() {
+    com.google.re2j.Matcher m = re2jUrl.matcher(URL_QUERY_MATCH);
     if (!m.find()) {
       return -1L;
     }

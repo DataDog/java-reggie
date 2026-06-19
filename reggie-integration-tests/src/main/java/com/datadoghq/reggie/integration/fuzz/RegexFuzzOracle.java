@@ -178,6 +178,52 @@ public final class RegexFuzzOracle {
       return Result.skipped("find() threw: " + t);
     }
 
+    // findAll() — every non-overlapping match with all group spans (the IAST tokenizer "drain"
+    // path). JDK is the oracle: iterating Matcher.find() yields non-overlapping leftmost matches
+    // with its own empty-match advance, which is the semantics findAll must reproduce.
+    try {
+      Matcher jm = jdk.matcher(input);
+      List<int[]> jdkAll = new ArrayList<>();
+      while (jm.find()) {
+        int gc = jm.groupCount();
+        int[] spans = new int[2 * (gc + 1)];
+        for (int g = 0; g <= gc; g++) {
+          spans[2 * g] = jm.start(g);
+          spans[2 * g + 1] = jm.end(g);
+        }
+        jdkAll.add(spans);
+      }
+      List<MatchResult> reggieAll = reggie.findAll(input);
+      if (jdkAll.size() != reggieAll.size()) {
+        findings.add(
+            new Finding(
+                pattern,
+                input,
+                String.format(
+                    "findAll() count differs: jdk=%d reggie=%d", jdkAll.size(), reggieAll.size())));
+      } else {
+        for (int i = 0; i < jdkAll.size(); i++) {
+          int[] j = jdkAll.get(i);
+          MatchResult r = reggieAll.get(i);
+          int gc = (j.length / 2) - 1;
+          for (int g = 0; g <= gc; g++) {
+            if (j[2 * g] != r.start(g) || j[2 * g + 1] != r.end(g)) {
+              findings.add(
+                  new Finding(
+                      pattern,
+                      input,
+                      String.format(
+                          "findAll() match %d group %d span differs: jdk=[%d,%d) reggie=[%d,%d)",
+                          i, g, j[2 * g], j[2 * g + 1], r.start(g), r.end(g))));
+              break; // one finding per match is enough signal
+            }
+          }
+        }
+      }
+    } catch (Throwable t) {
+      return Result.skipped("findAll() threw: " + t);
+    }
+
     return Result.ran(findings);
   }
 
