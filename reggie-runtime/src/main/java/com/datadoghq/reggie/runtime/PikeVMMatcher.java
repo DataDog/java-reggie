@@ -925,7 +925,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
         if (pos == regionEnd) return true;
         if (pos == regionEnd - 1) {
           char c = input.charAt(pos);
-          if (c == '\n' || c == '\r') return true;
+          if (c == '\r') return true;
+          // lone \n matches; \n that is the tail of a \r\n pair does not
+          if (c == '\n' && (pos == 0 || input.charAt(pos - 1) != '\r')) return true;
         }
         if (pos == regionEnd - 2 && input.charAt(pos) == '\r' && input.charAt(pos + 1) == '\n')
           return true;

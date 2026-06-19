@@ -2026,11 +2026,27 @@ public class MultiGroupGreedyBytecodeGenerator {
     mv.visitInsn(ICONST_1);
     mv.visitInsn(ISUB);
     mv.visitJumpInsn(IF_ICMPNE, checkCrlf);
+    // pos == len-1: check for lone \n (not CRLF tail), lone \r
+    Label notNewline = new Label();
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     pushInt(mv, '\n');
-    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    mv.visitJumpInsn(IF_ICMPNE, notNewline);
+    // charAt(pos) == '\n': only match if NOT preceded by '\r' (would be CRLF tail)
+    Label loneNewline = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitJumpInsn(IFEQ, loneNewline); // pos == 0 → lone \n
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPEQ, fails); // preceded by '\r' → CRLF tail → $ doesn't match
+    mv.visitLabel(loneNewline);
+    mv.visitJumpInsn(GOTO, isEnd); // lone '\n' → match
+    mv.visitLabel(notNewline);
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
