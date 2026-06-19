@@ -928,6 +928,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
           if (c == '\r') return true;
           // lone \n matches; \n that is the tail of a \r\n pair does not
           if (c == '\n' && (pos == 0 || input.charAt(pos - 1) != '\r')) return true;
+          // Java also treats NEL (\u0085), LS (\u2028), PS (\u2029) as final line terminators
+          if (c == '\u0085' || c == '\u2028' || c == '\u2029') return true;
         }
         if (pos == regionEnd - 2 && input.charAt(pos) == '\r' && input.charAt(pos + 1) == '\n')
           return true;
