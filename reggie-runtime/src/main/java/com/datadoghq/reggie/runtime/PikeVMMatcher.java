@@ -537,9 +537,56 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Core PikeVM — find() semantics (match anywhere)
   // -------------------------------------------------------------------------
 
+  /**
+   * Allocation-free variant of {@link #findMatchResultFrom}: returns the start position of the
+   * leftmost match at or after {@code fromPos}, or {@code -1}. Mirrors the full find loop but reads
+   * {@code clistCaptures[t][0]} directly — no {@code Arrays.copyOf}, no {@code MatchResult}.
+   */
+  private int findPosFrom(String input, int fromPos) {
+    int regionEnd = input.length();
+    if (findDfa != null && !findCanMatchEmpty) {
+      if (findDfa.findFrom(input, fromPos, findStep) < 0) return -1;
+    } else if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) {
+      return -1;
+    }
+    resetClist();
+    int bestStart = -1;
+
+    for (int pos = fromPos; pos <= regionEnd; pos++) {
+      if (bestStart < 0) {
+        boolean skipSeed = false;
+        if (prefilterUsable && pos < regionEnd) {
+          char c = input.charAt(pos);
+          skipSeed = c < 128 && !firstByteAscii[c];
+        }
+        if (!skipSeed) {
+          seedStart(input, pos, regionEnd);
+        }
+      }
+
+      int t = clistFirstAccept;
+      if (t >= 0) {
+        bestStart = clistCaptures[t][0];
+        if (pos == clistCaptures[t][0]) {
+          pruneAnchorDerivedAtStart(t, false);
+        } else {
+          clistSize = t;
+          clistFirstAccept = -1;
+        }
+      }
+      if (pos == regionEnd) break;
+
+      char ch = input.charAt(pos);
+      resetNlist();
+      stepChar(ch, pos + 1, input, 0, regionEnd);
+      swapLists();
+      if (bestStart >= 0 && clistSize == 0) break;
+    }
+    return bestStart;
+  }
+
   private int findStartFrom(String input, int fromPos) {
-    MatchResult r = findMatchResultFrom(input, fromPos);
-    return r == null ? -1 : r.start();
+    return findPosFrom(input, fromPos);
   }
 
   /**
