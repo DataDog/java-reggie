@@ -2107,6 +2107,22 @@ public class MultiGroupGreedyBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     pushInt(mv, '\r');
     mv.visitJumpInsn(IF_ICMPEQ, isEnd); // lone '\r' at len-1 → pass
+    // Java also treats NEL (\u0085), LS (\u2028), PS (\u2029) as final line terminators
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\u0085');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\u2028');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\u2029');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
     mv.visitJumpInsn(GOTO, fails);
     mv.visitLabel(checkCrlf);
     mv.visitVarInsn(ILOAD, posVar);
