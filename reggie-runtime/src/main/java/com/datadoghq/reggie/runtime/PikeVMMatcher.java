@@ -921,9 +921,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
         return pos == regionStart;
       case END:
       case STRING_END:
-        // $ and \Z both match at end of input or just before a trailing \n.
+        // $ and \Z match at end-of-input or before any final line terminator (\n, \r, \r\n).
         if (pos == regionEnd) return true;
-        return pos == regionEnd - 1 && input.charAt(pos) == '\n';
+        if (pos == regionEnd - 1) {
+          char c = input.charAt(pos);
+          if (c == '\n' || c == '\r') return true;
+        }
+        if (pos == regionEnd - 2 && input.charAt(pos) == '\r' && input.charAt(pos + 1) == '\n')
+          return true;
+        return false;
       case STRING_END_ABSOLUTE:
         // \z matches only at the absolute end of input.
         return pos == regionEnd;

@@ -1617,30 +1617,14 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitLabel(isStart);
       // S: []
     } else if (seg.type == AnchorNode.Type.END || seg.type == AnchorNode.Type.STRING_END) {
-      // $ and \Z: match at pos == len, or pos == len-1 with a trailing '\n'.
+      // $ and \Z: match at pos == len, pos == len-1 with '\n', or pos == len-2 with '\r\n'.
       Label isEnd = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitJumpInsn(IF_ICMPEQ, isEnd);
-      // pos != len: check pos == len - 1 && input.charAt(pos) == '\n'
       Label fails = new Label();
-      // if (pos != len - 1) fail
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, fails);
-      // if (input.charAt(pos) != '\n') fail
-      mv.visitVarInsn(ALOAD, inputVar);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+      emitEndAnchorCheck(mv, posVar, lenVar, inputVar, isEnd, fails);
       mv.visitLabel(fails);
       mv.visitInsn(ACONST_NULL);
       mv.visitInsn(ARETURN);
       mv.visitLabel(isEnd);
-      // S: []
     } else if (seg.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
       // \z: require pos == len
       Label isEnd = new Label();
@@ -1650,7 +1634,6 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitInsn(ACONST_NULL);
       mv.visitInsn(ARETURN);
       mv.visitLabel(isEnd);
-      // S: []
     }
     // Anchor matched - continue
   }
@@ -1676,23 +1659,10 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitInsn(ARETURN);
       mv.visitLabel(isStart);
     } else if (seg.type == AnchorNode.Type.END || seg.type == AnchorNode.Type.STRING_END) {
-      // $ and \Z: match at pos == len, or pos == len-1 with a trailing '\n'.
+      // $ and \Z: match at pos == len, pos == len-1 with '\n', or pos == len-2 with '\r\n'.
       Label isEnd = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitJumpInsn(IF_ICMPEQ, isEnd);
-      // pos != len: check pos == len - 1 && input.charAt(pos) == '\n'
       Label fails = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, fails);
-      mv.visitVarInsn(ALOAD, inputVar);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+      emitEndAnchorCheck(mv, posVar, lenVar, inputVar, isEnd, fails);
       mv.visitLabel(fails);
       mv.visitInsn(ACONST_NULL);
       mv.visitInsn(ARETURN);
@@ -1728,23 +1698,10 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitInsn(IRETURN);
       mv.visitLabel(isStart);
     } else if (seg.type == AnchorNode.Type.END || seg.type == AnchorNode.Type.STRING_END) {
-      // $ and \Z: match at pos == len, or pos == len-1 with a trailing '\n'.
+      // $ and \Z: match at pos == len, pos == len-1 with '\n', or pos == len-2 with '\r\n'.
       Label isEnd = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitJumpInsn(IF_ICMPEQ, isEnd);
-      // pos != len: check pos == len - 1 && input.charAt(pos) == '\n'
       Label fails = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, fails);
-      mv.visitVarInsn(ALOAD, inputVar);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+      emitEndAnchorCheck(mv, posVar, lenVar, inputVar, isEnd, fails);
       mv.visitLabel(fails);
       mv.visitInsn(ICONST_0);
       mv.visitInsn(IRETURN);
@@ -2049,5 +2006,55 @@ public class MultiGroupGreedyBytecodeGenerator {
       // Character is in one of the ranges: continue
       mv.visitLabel(inSet);
     }
+  }
+
+  /**
+   * Emits an inline bytecode check for {@code $}/{@code \Z} anchors. Jumps to {@code isEnd} on
+   * success; falls through to caller-placed {@code fails} label on failure.
+   *
+   * <p>Accepts: {@code pos == len}, {@code pos == len-1} with {@code '\n'}, or {@code pos == len-2}
+   * with a {@code "\r\n"} sequence (matching Java regex semantics).
+   */
+  private void emitEndAnchorCheck(
+      MethodVisitor mv, int posVar, int lenVar, int inputVar, Label isEnd, Label fails) {
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    Label checkCrlf = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitJumpInsn(IF_ICMPNE, checkCrlf);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\n');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd); // lone '\r' at len-1 → pass
+    mv.visitJumpInsn(GOTO, fails);
+    mv.visitLabel(checkCrlf);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    pushInt(mv, 2);
+    mv.visitInsn(ISUB);
+    mv.visitJumpInsn(IF_ICMPNE, fails);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPNE, fails);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\n');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    // falls through to fails
   }
 }

@@ -77,6 +77,26 @@ public class AbsoluteAnchorRegressionTest {
     assertAgrees("^([-]*)", "--");
   }
 
+  // ---- CRLF trailing-sequence support for $ and \Z ----
+  // MGG bytecode now accepts pos==len-2 with '\r\n' for END/STRING_END anchors.
+  // The patterns below may or may not route through MGG; they verify correctness
+  // independent of routing strategy.
+
+  @Test
+  void endAnchorZ_matchesBeforeCrLf() {
+    assertAgrees("([a-z]+)\\Z", "a\r\n");
+    assertAgrees("([a-z]+)\\Z", "abc\r\n");
+    assertAgrees("([a-z]+)\\Z", "a\n");
+    assertAgrees("([a-z]+)\\Z", "abc");
+    assertAgrees("([a-z]+)\\Z", "a\r");
+  }
+
+  @Test
+  void endAnchorDollar_matchesBeforeCrLf() {
+    assertAgrees("([a-z]+)$", "a\r\n");
+    assertAgrees("([a-z]+)$", "abc\r\n");
+  }
+
   // ---- Controls ----
 
   @Test
