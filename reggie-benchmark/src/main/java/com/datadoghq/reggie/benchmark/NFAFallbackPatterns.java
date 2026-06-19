@@ -60,9 +60,12 @@ public abstract class NFAFallbackPatterns implements ReggiePatterns {
   @RegexPattern("(\\d{3})-(\\d+)-(\\d{4})")
   public abstract ReggieMatcher phoneWithVariableLength();
 
-  // PIKEVM_CAPTURE: processor generates a delegating stub that calls compilePikeVm() at runtime.
-  @RegexPattern("(<\\w+>).*(</\\w+>)")
-  public abstract ReggieMatcher xmlTags();
+  // Uses runtime compilation: DFA_UNROLLED_WITH_GROUPS is chosen for this capture-ambiguous
+  // pattern, but FallbackPatternDetector B10 rejects it (optional .* before the second
+  // capturing group). Reggie.compile() routes to java.util.regex at runtime.
+  public ReggieMatcher xmlTags() {
+    return XML_TAGS;
+  }
 
   // ====================
   // COMPLEX ASSERTIONS (forces NFA)

@@ -380,8 +380,14 @@ public class PatternAnalyzer {
           MatchingStrategy.GREEDY_BACKTRACK, null, greedyBacktrackInfo, false, requiredLiterals);
     }
 
-    // Check for multi-group greedy patterns
-    MultiGroupGreedyInfo multiGroupInfo = detectMultiGroupGreedyPattern(ast);
+    // Check for multi-group greedy patterns. Decline give-back patterns: a greedy quantified
+    // capturing group whose charset overlaps what must follow needs character give-back that the
+    // non-backtracking MULTI_GROUP_GREEDY strategy cannot do — it returns NO_MATCH (e.g. (\w+)0 on
+    // "ab00"). Declining lets such patterns fall through to the backtracking-capable routing
+    // (the :753 requiresBacktrackingForGroups guard → RECURSIVE_DESCENT), which produces correct
+    // spans. (GREEDY_BACKTRACK above already handles the (.*)literal shape.)
+    MultiGroupGreedyInfo multiGroupInfo =
+        requiresBacktrackingForGroups(ast) ? null : detectMultiGroupGreedyPattern(ast);
     if (multiGroupInfo != null) {
       return new MatchingStrategyResult(
           MatchingStrategy.SPECIALIZED_MULTI_GROUP_GREEDY,
@@ -801,15 +807,17 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
-        // Anchor-diluted alternation patterns: PIKEVM_CAPTURE gives correct leftmost-first
-        // semantics for nullable/optional/end-anchor alternation branches. Guards for
-        // hasNullableAlternationBranch, subtreeContainsOptional, and
-        // hasEndAnchorLeadingInAlternationBranch are removed: ThompsonBuilder wraps {0,n}
-        // fragments in a skip-entry state (preventing mixed char+epsilon DFA states), and
-        // PikeVMMatcher.checkAnchor correctly handles $ before a trailing newline.
-        // This mirrors the identical guard-free routing in the ignoreGroupCount=true path.
+        // Anchor-diluted patterns: PIKEVM_CAPTURE gives correct leftmost-first semantics for
+        // all anchor types. Dilution occurs when the DFA subset construction merges NFA states
+        // with disjoint anchor conditions (e.g. ^x and x(y) sharing the same DFA state), causing
+        // the DFA to lose the anchor guard. PikeVMMatcher.checkAnchor evaluates all anchor types
+        // correctly against the actual search position, so PIKEVM is safe for all diluted shapes —
+        // not just alternation patterns. The alternation+accepting-transitions guard is removed.
         if (dfa.isAnchorConditionDiluted()) {
-          if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+          // Anchor condition diluted in DFA: capture-ambiguous patterns are safe for PikeVM
+          // because PikeVM evaluates anchors natively per position (via checkAnchor) and tracks
+          // captures per thread. Non-capture-ambiguous patterns fall back to OPTIMIZED_NFA.
+          if (dfa.isCaptureAmbiguous()) {
             return new MatchingStrategyResult(
                 MatchingStrategy.PIKEVM_CAPTURE,
                 null,
@@ -904,6 +912,13 @@ public class PatternAnalyzer {
           // handles all anchor types natively (since commit 0acfc66), and RuntimeCompiler wraps
           // the result in NameEnrichingMatcher when named groups are present.
           if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
+            // INVARIANT for any new Class A route that returns PIKEVM_CAPTURE for patterns
+            // containing nullable capturing groups in alternation branches:
+            // always guard with
+            // !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)
+            // before returning PIKEVM_CAPTURE, as PikeVM diverges for nullable-content groups
+            // (e.g. (0*-?){0,}). RuntimeCompiler also enforces this via needsFallback(), but
+            // the PatternAnalyzer guard is the first line of defence.
             // B16: nullable outer quantifier on non-nullable capturing group — TDFA POSIX
             // last-match span wrong. PIKEVM gives correct spans when the group content itself is
             // non-nullable; nullable-content groups (e.g. (0*-?){0,}) are left on the TDFA path
@@ -933,6 +948,22 @@ public class PatternAnalyzer {
             // B15: capturing group inside quantified alternation — TDFA thread ordering wrong.
             if (FallbackPatternDetector.containsAlternation(ast)
                 && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // Class A: a NULLABLE capturing group in an alternation branch (e.g. 1|()b, ()b|x). The
+            // TDFA/group-action capture path commits the zero-width group even when the
+            // priority-winning branch bypasses it (binds g1=[0,0); JDK leaves it -1). PikeVM gives
+            // correct spans. A non-nullable group like (a) in (a)|b never leaks and stays on the
+            // DFA.
+            if (FallbackPatternDetector.hasNullableCapturingGroupInAlternationBranch(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
                   null,
@@ -1002,6 +1033,24 @@ public class PatternAnalyzer {
         }
         if (FallbackPatternDetector.containsAlternation(ast)
             && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // Class E: two interacting variable-length capturing alternations (e.g. (a|ab)(c|bcd)). The
+        // first alternation's branches share a prefix, so its capture span is ambiguous until the
+        // second alternation resolves it — which the single-register TDFA cannot track
+        // ((a|ab)(c|bcd)
+        // on "abcd" → g1=[0,2) vs JDK [0,1)). PikeVM gives correct spans. A single capturing
+        // alternation followed by a fixed element (e.g. (a|ab)\d) is disambiguated
+        // deterministically
+        // and stays on the DFA.
+        if (hasInteractingCapturingAlternations(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1097,12 +1146,14 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
-      // Anchor condition diluted in DFA construction and NOT claimed by PIKEVM above.
-      // OPTIMIZED_NFA mishandles find() anchors for these, so fall back to java.util.regex.
+      // Anchor-diluted: same as the capturing-group path — PIKEVM_CAPTURE evaluates anchors
+      // correctly at each search position, whereas OPTIMIZED_NFA mishandles diluted conditions.
+      // anchorConditionDiluted=true on the result signals RuntimeCompiler's hybrid pre-check to
+      // skip the hybrid DFA path (a diluted DFA is not safe for the fast-matching pass).
       if (dfa.isAnchorConditionDiluted()) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
-                MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+                MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
         r.anchorConditionDiluted = true;
         return r;
       }
@@ -1862,6 +1913,77 @@ public class PatternAnalyzer {
    * '@', so no backtracking needed - ([bc]*)(c+d) : [bc] overlaps with 'c', so backtracking IS
    * needed
    */
+  /**
+   * Class E detector: a {@link ConcatNode} containing two or more capturing groups that each wrap
+   * an alternation, where at least one of those alternations has branches with overlapping
+   * first-sets (a shared prefix, e.g. {@code a|ab}). Such a pair, e.g. {@code (a|ab)(c|bcd)}, is
+   * mis-captured by the single-register TDFA (g1=[0,2) vs JDK [0,1) on "abcd"). A lone capturing
+   * alternation, or one followed by a fixed element, is fine and stays on the DFA.
+   */
+  private boolean hasInteractingCapturingAlternations(RegexNode node) {
+    if (node instanceof GroupNode) {
+      return hasInteractingCapturingAlternations(((GroupNode) node).child);
+    }
+    if (node instanceof QuantifierNode) {
+      return hasInteractingCapturingAlternations(((QuantifierNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasInteractingCapturingAlternations(a)) return true;
+      }
+      return false;
+    }
+    if (!(node instanceof ConcatNode)) {
+      return false;
+    }
+    ConcatNode concat = (ConcatNode) node;
+    int capturingAltGroups = 0;
+    boolean anyOverlapping = false;
+    for (RegexNode child : concat.children) {
+      AlternationNode alt = capturingGroupAlternation(child);
+      if (alt != null) {
+        capturingAltGroups++;
+        if (hasOverlappingBranchFirstSets(alt)) anyOverlapping = true;
+      }
+      if (hasInteractingCapturingAlternations(child)) return true; // nested
+    }
+    return capturingAltGroups >= 2 && anyOverlapping;
+  }
+
+  /**
+   * If {@code node} is a capturing group whose body is (after unwrapping any transparent
+   * non-capturing groups) an alternation, return that alternation.
+   */
+  private AlternationNode capturingGroupAlternation(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing) {
+        RegexNode body = g.child;
+        while (body instanceof GroupNode && !((GroupNode) body).capturing) {
+          body = ((GroupNode) body).child;
+        }
+        if (body instanceof AlternationNode) {
+          return (AlternationNode) body;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** True if two branches of {@code alt} have intersecting first-sets (a shared leading char). */
+  private boolean hasOverlappingBranchFirstSets(AlternationNode alt) {
+    List<RegexNode> alts = alt.alternatives;
+    for (int i = 0; i < alts.size(); i++) {
+      CharSet fi = getFirstCharSet(alts.get(i));
+      if (fi == null) continue;
+      for (int j = i + 1; j < alts.size(); j++) {
+        CharSet fj = getFirstCharSet(alts.get(j));
+        if (fj != null && fi.intersects(fj)) return true;
+      }
+    }
+    return false;
+  }
+
   private boolean requiresBacktrackingForGroups(RegexNode node) {
     if (!(node instanceof ConcatNode)) {
       return false;
@@ -6592,6 +6714,11 @@ public class PatternAnalyzer {
     // Handle anchors - support START and END
     if (node instanceof AnchorNode) {
       AnchorNode anchor = (AnchorNode) node;
+      // Multiline ^ / $ match line boundaries; the MGG generator only models pos==0 and pos==len.
+      // Decline both so these patterns are routed to a correct strategy.
+      if (anchor.multiline) {
+        return null;
+      }
       return new AnchorSegment(anchor.type);
     }
 

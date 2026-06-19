@@ -977,6 +977,14 @@ public class QuantifiedGroupBytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(notNull);
 
+    // if (startPos < 0) startPos = 0;
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, startPosVar);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, startPosVar);
+    mv.visitLabel(startNotNeg);
+
     // int len = input.length();
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);

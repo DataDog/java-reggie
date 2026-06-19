@@ -277,6 +277,13 @@ public class RuntimeCompiler {
     try {
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
+      if (FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+        throw new UnsupportedPatternException(
+            "capturing group with nullable content and nullable outer quantifier: "
+                + "PIKEVM_CAPTURE diverges in /"
+                + pattern
+                + "/");
+      }
       Map<String, Integer> nameMap = decodeNameMap(encodedNames);
       int groupCount = countGroups(pattern);
       NFA nfa = new ThompsonBuilder().build(ast, groupCount);
@@ -433,7 +440,10 @@ public class RuntimeCompiler {
       // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
       // results for these patterns (e.g. dot matching newline, group-span bugs).
-      if (result.anchorConditionDiluted) {
+      // PIKEVM_CAPTURE evaluates anchors correctly at every search position; anchorConditionDiluted
+      // on a PIKEVM result is only used by the hybrid pre-check (§4 below) to skip the DFA pass.
+      if (result.anchorConditionDiluted
+          && result.strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
         return fallbackOrThrow(
             pattern, "anchor condition diluted in DFA construction", nameMap, options);
       }
@@ -458,7 +468,18 @@ public class RuntimeCompiler {
 
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
       // correctly-enriched PikeVMMatcher without re-parsing the pattern.
+      // B16 guard: nullable group content under a nullable outer quantifier diverges even in PikeVM
+      // (wrong last-iteration spans). This must be checked before the early return so patterns
+      // arriving via the StateExplosionException path still fall back to JDK.
       if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+        if (FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return fallbackOrThrow(
+              pattern,
+              "capturing group with nullable content and nullable outer quantifier: "
+                  + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect",
+              nameMap,
+              options);
+        }
         PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
@@ -471,6 +492,10 @@ public class RuntimeCompiler {
       // 4. Check if we should use hybrid mode (DFA + NFA for groups)
       if (groupCount > 0 && shouldUseHybrid(result)) {
         PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+        // Skip hybrid when the anchor-free DFA is anchor-diluted: the DFA incorrectly models
+        // anchor conditions so it cannot serve as the fast-matching pass. compileHybrid handles
+        // dfaResult.dfa==null by generating a pure NFA matcher, so non-diluted PIKEVM results
+        // (e.g. from hasCapturingGroupInQuantifiedSection) still reach the NFA fallback inside.
         if (!dfaResult.anchorConditionDiluted) {
           ReggieMatcher hybrid =
               compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);
@@ -638,8 +663,26 @@ public class RuntimeCompiler {
       ReggieOptions options)
       throws Exception {
     // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
-    // If DFA construction failed or pattern needs NFA anyway, fall back to pure NFA
+    // When dfaResult.dfa==null but originalResult.dfa!=null, use original DFA for booleans + NFA.
     if (dfaResult.dfa == null) {
+      if (originalResult.dfa != null) {
+        // Use the original DFA for boolean matching, NFA for group extraction.
+        byte[] dfaBytecode = generateBytecode(pattern, originalResult, nfa, ast, caseInsensitive);
+        ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
+        PatternAnalyzer.MatchingStrategyResult nfaResult =
+            new PatternAnalyzer.MatchingStrategyResult(
+                PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
+                null,
+                null,
+                false,
+                originalResult.requiredLiterals,
+                originalResult.lookaheadGreedyInfo,
+                originalResult.usePosixLastMatch);
+        byte[] nfaBytecode = generateBytecode(pattern, nfaResult, nfa, ast, caseInsensitive);
+        ReggieMatcher nfaMatcher = instantiateMatcher(nfaBytecode, pattern);
+        return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
+      }
+      // No DFA available: fall back to pure NFA
       PatternAnalyzer.MatchingStrategyResult nfaResult =
           new PatternAnalyzer.MatchingStrategyResult(
               PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,

@@ -167,7 +167,7 @@ public class MultiGroupGreedyBytecodeGenerator {
         generateFixedGroupMatch(
             mv, (FixedGroupSegment) seg, inputVar, posVar, lenVar, startsVar, endsVar, allocator);
       } else if (seg instanceof PatternAnalyzer.AnchorSegment) {
-        generateAnchorMatch(mv, (PatternAnalyzer.AnchorSegment) seg, posVar, lenVar);
+        generateAnchorMatch(mv, (PatternAnalyzer.AnchorSegment) seg, inputVar, posVar, lenVar);
       } else if (seg instanceof PatternAnalyzer.LiteralGroupSegment) {
         generateLiteralGroupMatch(
             mv, (PatternAnalyzer.LiteralGroupSegment) seg, inputVar, posVar, lenVar, startsVar);
@@ -665,23 +665,29 @@ public class MultiGroupGreedyBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, lenVar);
 
-    // Scan loop: for (int pos = start; pos < len; pos++)
+    // Scan loop: for (int pos = start; pos <= len; pos++)
     Label loopStart = new Label();
     Label loopEnd = new Label();
 
     mv.visitLabel(loopStart);
 
-    // if (start >= len) return null;
+    // if (start > len) return null;
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+    mv.visitJumpInsn(IF_ICMPGT, loopEnd);
 
     // OPTIMIZATION: First-character pre-check before substring allocation
-    // Check if first segment matches at this position
+    // Check if first segment matches at this position (only when start < len)
     if (!segments.isEmpty() && segments.get(0) instanceof LiteralSegment) {
       LiteralSegment firstLit = (LiteralSegment) segments.get(0);
       if (firstLit.literal.length() == 1) {
-        // Single character: if (input.charAt(start) != firstChar) skip
+        // Single character: skip pre-check when start == len (zero-width match attempt)
+        Label skipPreCheck = new Label();
+        mv.visitVarInsn(ILOAD, startVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        mv.visitJumpInsn(IF_ICMPGE, skipPreCheck);
+
+        // if (input.charAt(start) != firstChar) skip to next position
         Label firstCharMatches = new Label();
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitVarInsn(ILOAD, startVar);
@@ -694,6 +700,7 @@ public class MultiGroupGreedyBytecodeGenerator {
         mv.visitJumpInsn(GOTO, loopStart);
 
         mv.visitLabel(firstCharMatches);
+        mv.visitLabel(skipPreCheck);
       }
     }
 
@@ -789,7 +796,7 @@ public class MultiGroupGreedyBytecodeGenerator {
             mv, (FixedGroupSegment) seg, posVar, lenVar, inputVar, startsVar, endsVar);
       } else if (seg instanceof PatternAnalyzer.AnchorSegment) {
         generateAnchorMatchInline(
-            mv, (PatternAnalyzer.AnchorSegment) seg, posVar, lenVar, startPosVar);
+            mv, (PatternAnalyzer.AnchorSegment) seg, inputVar, posVar, lenVar, startPosVar);
       } else if (seg instanceof PatternAnalyzer.LiteralGroupSegment) {
         generateLiteralGroupMatchInline(
             mv,
@@ -1224,16 +1231,16 @@ public class MultiGroupGreedyBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, 4); // len in var 4
 
-    // Scan loop: for (int pos = start; pos < len; pos++)
+    // Scan loop: for (int pos = start; pos <= len; pos++)
     Label loopStart = new Label();
     Label loopEnd = new Label();
 
     mv.visitLabel(loopStart);
 
-    // if (start >= len) return false;
+    // if (start > len) return false;
     mv.visitVarInsn(ILOAD, 2); // start
     mv.visitVarInsn(ILOAD, 4); // len
-    mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+    mv.visitJumpInsn(IF_ICMPGT, loopEnd);
 
     // OPTIMIZATION: First-character pre-check before trying match
     Label skipToNext = new Label();
@@ -1243,7 +1250,13 @@ public class MultiGroupGreedyBytecodeGenerator {
       if (firstSeg instanceof LiteralSegment) {
         LiteralSegment firstLit = (LiteralSegment) firstSeg;
         if (firstLit.literal.length() == 1) {
-          // Single literal character: if (input.charAt(start) != firstChar) skip
+          // Single literal character: skip pre-check when start == len (zero-width match attempt)
+          Label skipPreCheck = new Label();
+          mv.visitVarInsn(ILOAD, 2); // start
+          mv.visitVarInsn(ILOAD, 4); // len
+          mv.visitJumpInsn(IF_ICMPGE, skipPreCheck);
+
+          // if (input.charAt(start) != firstChar) skip to next position
           Label firstCharMatches = new Label();
           mv.visitVarInsn(ALOAD, 1);
           mv.visitVarInsn(ILOAD, 2);
@@ -1255,6 +1268,7 @@ public class MultiGroupGreedyBytecodeGenerator {
           mv.visitJumpInsn(GOTO, skipToNext);
 
           mv.visitLabel(firstCharMatches);
+          mv.visitLabel(skipPreCheck);
         } else if (firstLit.literal.length() > 1) {
           // Multi-character literal: use indexOf for better performance
           // int foundPos = input.indexOf(literal, start);
@@ -1387,7 +1401,7 @@ public class MultiGroupGreedyBytecodeGenerator {
       } else if (seg instanceof FixedGroupSegment) {
         generateFixedGroupMatchInlineForBounds(mv, (FixedGroupSegment) seg, 5, 3, 1);
       } else if (seg instanceof PatternAnalyzer.AnchorSegment) {
-        generateAnchorMatchInlineForBounds(mv, (PatternAnalyzer.AnchorSegment) seg, 5, 3, 2);
+        generateAnchorMatchInlineForBounds(mv, (PatternAnalyzer.AnchorSegment) seg, 1, 5, 3, 2);
       } else if (seg instanceof PatternAnalyzer.LiteralGroupSegment) {
         generateLiteralGroupMatchInlineForBounds(
             mv, (PatternAnalyzer.LiteralGroupSegment) seg, 5, 3, 1);
@@ -1592,8 +1606,8 @@ public class MultiGroupGreedyBytecodeGenerator {
 
   /** Generate bytecode for anchor segment in match() method. */
   private void generateAnchorMatch(
-      MethodVisitor mv, PatternAnalyzer.AnchorSegment seg, int posVar, int lenVar) {
-    if (seg.type == AnchorNode.Type.START) {
+      MethodVisitor mv, PatternAnalyzer.AnchorSegment seg, int inputVar, int posVar, int lenVar) {
+    if (seg.type == AnchorNode.Type.START || seg.type == AnchorNode.Type.STRING_START) {
       // if (pos != 0) return null;
       Label isStart = new Label();
       mv.visitVarInsn(ILOAD, posVar);
@@ -1602,8 +1616,17 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitInsn(ARETURN);
       mv.visitLabel(isStart);
       // S: []
-    } else if (seg.type == AnchorNode.Type.END) {
-      // if (pos != len) return null;
+    } else if (seg.type == AnchorNode.Type.END || seg.type == AnchorNode.Type.STRING_END) {
+      // $ and \Z: match at pos == len, pos == len-1 with '\n', or pos == len-2 with '\r\n'.
+      Label isEnd = new Label();
+      Label fails = new Label();
+      emitEndAnchorCheck(mv, posVar, lenVar, inputVar, isEnd, fails);
+      mv.visitLabel(fails);
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+      mv.visitLabel(isEnd);
+    } else if (seg.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
+      // \z: require pos == len
       Label isEnd = new Label();
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ILOAD, lenVar);
@@ -1611,7 +1634,6 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitInsn(ACONST_NULL);
       mv.visitInsn(ARETURN);
       mv.visitLabel(isEnd);
-      // S: []
     }
     // Anchor matched - continue
   }
@@ -1620,20 +1642,33 @@ public class MultiGroupGreedyBytecodeGenerator {
   private void generateAnchorMatchInline(
       MethodVisitor mv,
       PatternAnalyzer.AnchorSegment seg,
+      int inputVar,
       int posVar,
       int lenVar,
       int startOffsetVar) {
-    if (seg.type == AnchorNode.Type.START) {
-      // if (pos != startOffset) return null;
+    if (seg.type == AnchorNode.Type.START || seg.type == AnchorNode.Type.STRING_START) {
+      // ^ (non-multiline) and \A both anchor to the ABSOLUTE input start (pos == 0), independent of
+      // the scan start. Comparing pos to startOffset re-anchored ^ at every scan position, so a
+      // findAll/findMatchFrom(start>0) over e.g. `^([-]*)` wrongly produced a match at start>0;
+      // java.util.regex.Matcher.find(start) anchors ^/\A at input start (0). (match() at :1610
+      // already does this.)
       Label isStart = new Label();
       mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, startOffsetVar);
-      mv.visitJumpInsn(IF_ICMPEQ, isStart);
+      mv.visitJumpInsn(IFEQ, isStart);
       mv.visitInsn(ACONST_NULL);
       mv.visitInsn(ARETURN);
       mv.visitLabel(isStart);
-    } else if (seg.type == AnchorNode.Type.END) {
-      // if (pos != len) return null;
+    } else if (seg.type == AnchorNode.Type.END || seg.type == AnchorNode.Type.STRING_END) {
+      // $ and \Z: match at pos == len, pos == len-1 with '\n', or pos == len-2 with '\r\n'.
+      Label isEnd = new Label();
+      Label fails = new Label();
+      emitEndAnchorCheck(mv, posVar, lenVar, inputVar, isEnd, fails);
+      mv.visitLabel(fails);
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+      mv.visitLabel(isEnd);
+    } else if (seg.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
+      // \z: require pos == len
       Label isEnd = new Label();
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ILOAD, lenVar);
@@ -1644,24 +1679,35 @@ public class MultiGroupGreedyBytecodeGenerator {
     }
   }
 
-  /** Generate bytecode for anchor segment (for findBoundsFrom). */
+  /** Generate bytecode for anchor segment (for findBoundsFrom / tryMatchBoundsFromPosition). */
   private void generateAnchorMatchInlineForBounds(
       MethodVisitor mv,
       PatternAnalyzer.AnchorSegment seg,
+      int inputVar,
       int posVar,
       int lenVar,
       int startOffsetVar) {
-    if (seg.type == AnchorNode.Type.START) {
-      // if (pos != startOffset) return false;
+    if (seg.type == AnchorNode.Type.START || seg.type == AnchorNode.Type.STRING_START) {
+      // ^ (non-multiline) and \A both anchor to the ABSOLUTE input start (pos == 0), not the scan
+      // start — see generateAnchorMatchInline. Comparing pos to startOffset re-anchored ^ at every
+      // scan position (spurious findAll matches for `^...`).
       Label isStart = new Label();
       mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, startOffsetVar);
-      mv.visitJumpInsn(IF_ICMPEQ, isStart);
+      mv.visitJumpInsn(IFEQ, isStart);
       mv.visitInsn(ICONST_0);
       mv.visitInsn(IRETURN);
       mv.visitLabel(isStart);
-    } else if (seg.type == AnchorNode.Type.END) {
-      // if (pos != len) return false;
+    } else if (seg.type == AnchorNode.Type.END || seg.type == AnchorNode.Type.STRING_END) {
+      // $ and \Z: match at pos == len, pos == len-1 with '\n', or pos == len-2 with '\r\n'.
+      Label isEnd = new Label();
+      Label fails = new Label();
+      emitEndAnchorCheck(mv, posVar, lenVar, inputVar, isEnd, fails);
+      mv.visitLabel(fails);
+      mv.visitInsn(ICONST_0);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(isEnd);
+    } else if (seg.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
+      // \z: require pos == len
       Label isEnd = new Label();
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ILOAD, lenVar);
@@ -1960,5 +2006,55 @@ public class MultiGroupGreedyBytecodeGenerator {
       // Character is in one of the ranges: continue
       mv.visitLabel(inSet);
     }
+  }
+
+  /**
+   * Emits an inline bytecode check for {@code $}/{@code \Z} anchors. Jumps to {@code isEnd} on
+   * success; falls through to caller-placed {@code fails} label on failure.
+   *
+   * <p>Accepts: {@code pos == len}, {@code pos == len-1} with {@code '\n'}, or {@code pos == len-2}
+   * with a {@code "\r\n"} sequence (matching Java regex semantics).
+   */
+  private void emitEndAnchorCheck(
+      MethodVisitor mv, int posVar, int lenVar, int inputVar, Label isEnd, Label fails) {
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    Label checkCrlf = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitJumpInsn(IF_ICMPNE, checkCrlf);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\n');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd); // lone '\r' at len-1 → pass
+    mv.visitJumpInsn(GOTO, fails);
+    mv.visitLabel(checkCrlf);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    pushInt(mv, 2);
+    mv.visitInsn(ISUB);
+    mv.visitJumpInsn(IF_ICMPNE, fails);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\r');
+    mv.visitJumpInsn(IF_ICMPNE, fails);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    pushInt(mv, '\n');
+    mv.visitJumpInsn(IF_ICMPEQ, isEnd);
+    // falls through to fails
   }
 }

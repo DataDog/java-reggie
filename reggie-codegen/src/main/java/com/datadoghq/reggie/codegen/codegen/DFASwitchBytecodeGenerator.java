@@ -1081,10 +1081,9 @@ public class DFASwitchBytecodeGenerator {
     mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
 
     // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors.
-    // {@link NFA#requiresStartAnchor()} treats both START (^) and STRING_START (\A) as barriers,
-    // so it returns true only when ALL paths to a useful target go through one of them. Or-ing
-    // in {@code hasStringStartAnchor} on top short-circuits on patterns like `]\A|b` where only
-    // one branch has \A but the other can still match anywhere.
+    // {@link NFA#requiresStartAnchor()} returns true only when ALL paths to a character-consuming
+    // transition go through a START (^) or STRING_START (\A) anchor, guaranteeing that only
+    // tryPos==0 can ever yield a match.
     if (requiresStartAnchor) {
       // Non-multiline ^ or \A: Only try position 0
       // if (tryPos != 0) return -1;
@@ -1121,7 +1120,14 @@ public class DFASwitchBytecodeGenerator {
       mv.visitLabel(validPosition);
     }
 
-    if (swarOpt != null && !dfa.getStartState().accepting) {
+    // First-char / SWAR optimizations must be suppressed when a start anchor pins the find loop
+    // to a single position. The anchor check above ensures tryPos==0 is the only attempt; if
+    // SWAR or the first-char filter advanced tryPos past 0 before calling matchesAtStart, the
+    // anchor-gated DFA transition guard would be skipped and a false match could occur.
+    if (!requiresStartAnchor
+        && !hasMultilineStart
+        && swarOpt != null
+        && !dfa.getStartState().accepting) {
       // SWAR OPTIMIZATION: Use pattern-specific optimized search for first char
       // Generates: tryPos = SWARHelper.findNext...(input, tryPos, len);
       swarOpt.generateFindNextBytecode(mv, 1, tryPosVar, lenVar);
@@ -1134,7 +1140,10 @@ public class DFASwitchBytecodeGenerator {
       mv.visitVarInsn(ILOAD, tryPosVar);
       mv.visitVarInsn(ILOAD, lenVar);
       mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
-    } else if (validFirstChars != null && !dfa.getStartState().accepting) {
+    } else if (!requiresStartAnchor
+        && !hasMultilineStart
+        && validFirstChars != null
+        && !dfa.getStartState().accepting) {
       // STANDARD OPTIMIZATION: First char skip using charAt()
       Label canStartMatch = new Label();
 

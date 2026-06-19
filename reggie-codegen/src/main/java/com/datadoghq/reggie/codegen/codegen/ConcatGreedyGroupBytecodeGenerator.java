@@ -325,6 +325,14 @@ public class ConcatGreedyGroupBytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(notNull);
 
+    // if (start < 0) start = 0;
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, startVar);
+    mv.visitLabel(startNotNeg);
+
     // int len = input.length();
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);

@@ -1090,13 +1090,71 @@ public final class FallbackPatternDetector {
   }
 
   /**
-   * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
-   * the group's content is itself nullable (can match the empty string). Example: {@code
-   * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is
-   * nullable. PIKEVM diverges for this sub-case; only non-nullable-content B16 patterns are safe to
-   * route to PIKEVM_CAPTURE.
+   * Class A: returns true if any {@link AlternationNode} has a branch containing a NULLABLE
+   * capturing group — a capturing group whose body can match the empty string, sitting in an
+   * alternation branch that other branches can bypass (e.g. {@code 1|()b}, {@code ()b|x}). The TDFA
+   * / group-action capture path commits such a zero-width group even when the priority-winning
+   * branch bypassed it (binds {@code g1=[0,0)} where JDK leaves it {@code -1}). PikeVM gives
+   * correct spans. A non-nullable group such as {@code (a)} in {@code (a)|b} never leaks (its
+   * enter/exit straddle a consumed character) and stays on the fast DFA path.
    */
-  static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
+  static boolean hasNullableCapturingGroupInAlternationBranch(RegexNode ast) {
+    if (ast instanceof AlternationNode) {
+      for (RegexNode branch : ((AlternationNode) ast).alternatives) {
+        if (containsNullableCapturingGroup(branch)) return true;
+      }
+      for (RegexNode branch : ((AlternationNode) ast).alternatives) {
+        if (hasNullableCapturingGroupInAlternationBranch(branch)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof GroupNode) {
+      return hasNullableCapturingGroupInAlternationBranch(((GroupNode) ast).child);
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasNullableCapturingGroupInAlternationBranch(c)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasNullableCapturingGroupInAlternationBranch(((QuantifierNode) ast).child);
+    }
+    return false;
+  }
+
+  /** True if the subtree contains a capturing group whose body is nullable (can match empty). */
+  private static boolean containsNullableCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && subtreeIsNullable(g.child)) return true;
+      return containsNullableCapturingGroup(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (containsNullableCapturingGroup(c)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return containsNullableCapturingGroup(((QuantifierNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (containsNullableCapturingGroup(a)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
+   * the group's content is itself nullable. Example: {@code (0*-?){0,}} — group content {@code
+   * 0*-?} is nullable, outer quantifier {@code {0,}} is nullable. PIKEVM diverges for this
+   * sub-case; only non-nullable-content B16 patterns are safe to route to PIKEVM_CAPTURE.
+   */
+  public static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
     if (ast instanceof QuantifierNode) {
       QuantifierNode q = (QuantifierNode) ast;
       if (q.min == 0 && q.child instanceof GroupNode) {

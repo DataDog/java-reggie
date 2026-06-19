@@ -214,6 +214,14 @@ public class BoundedQuantifierBytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(notNull);
 
+    // if (start < 0) start = 0;
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
+
     // int len = input.length();
     mv.visitVarInsn(ALOAD, 1);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
@@ -509,6 +517,14 @@ public class BoundedQuantifierBytecodeGenerator {
     mv.visitInsn(ICONST_M1); // -1
     mv.visitInsn(IRETURN);
     mv.visitLabel(notNull);
+
+    // if (start < 0) start = 0;
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
 
     // int len = input.length();
     mv.visitVarInsn(ALOAD, 1);
