@@ -107,4 +107,29 @@ class PikeVMRoutingTest {
         m.findMatch("ab").group(0),
         "(a|ab) find on 'ab' must return 'a' (first alternative wins)");
   }
+
+  // -------------------------------------------------------------------------
+  // Class E: interacting alternations wrapped in non-capturing groups
+  // -------------------------------------------------------------------------
+
+  @Test
+  void ncgWrappedInteractingAlts_routesToPikeVmCapture() throws Exception {
+    // ((?:a|ab))((?:c|bcd)) — same Class E shape as (a|ab)(c|bcd) but alternations
+    // are wrapped in a transparent non-capturing group; capturingGroupAlternation must
+    // unwrap the NCG layer to detect the interacting variable-length alternations.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("((?:a|ab))((?:c|bcd))"),
+        "((?:a|ab))((?:c|bcd)) must route to PIKEVM_CAPTURE (Class E via NCG unwrap)");
+  }
+
+  @Test
+  void ncgWrappedInteractingAlts_captureCorrect() {
+    // ((?:a|ab))((?:c|bcd)) on "abcd": JDK leftmost-longest → group(1)="a", group(2)="bcd"
+    ReggieMatcher m = Reggie.compile("((?:a|ab))((?:c|bcd))");
+    MatchResult r = m.findMatch("abcd");
+    assertNotNull(r, "must find a match in 'abcd'");
+    assertEquals("a", r.group(1), "group(1) must be 'a'");
+    assertEquals("bcd", r.group(2), "group(2) must be 'bcd'");
+  }
 }

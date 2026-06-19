@@ -74,10 +74,10 @@ public class StateExplosionBenchmark {
     jdkAlternationHeavy = Pattern.compile("(a|ab|abc)(1|12|123)");
     reggieAlternationHeavy = RuntimeCompiler.compile("(a|ab|abc)(1|12|123)");
 
-    // Pattern: Nested quantifiers with capturing
-    // ((a+)|(b+))+
-    jdkNestedQuantifiers = Pattern.compile("((a+)|(b+))+");
-    reggieNestedQuantifiers = RuntimeCompiler.compile("((a+)|(b+))+");
+    // Pattern: Nested quantifiers — repeated group of non-optional sub-quantifiers
+    // (a+b+)+ avoids alternation-priority conflict while still exercising nested quantifiers
+    jdkNestedQuantifiers = Pattern.compile("(a+b+)+");
+    reggieNestedQuantifiers = RuntimeCompiler.compile("(a+b+)+");
 
     // Pattern: Long alternation of keywords
     String longAlt =
@@ -91,7 +91,7 @@ public class StateExplosionBenchmark {
     re2jOptionalSequence =
         com.google.re2j.Pattern.compile("(a)?(a)?(a)?(a)?(a)?(a)?(b)?(b)?(b)?(b)?(b)?(b)?");
     re2jAlternationHeavy = com.google.re2j.Pattern.compile("(a|ab|abc)(1|12|123)");
-    re2jNestedQuantifiers = com.google.re2j.Pattern.compile("((a+)|(b+))+");
+    re2jNestedQuantifiers = com.google.re2j.Pattern.compile("(a+b+)+");
     re2jLongAlternation = com.google.re2j.Pattern.compile(longAlt);
   }
 

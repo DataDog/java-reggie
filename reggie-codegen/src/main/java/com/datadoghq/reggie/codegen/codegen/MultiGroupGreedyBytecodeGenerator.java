@@ -1663,17 +1663,12 @@ public class MultiGroupGreedyBytecodeGenerator {
       int posVar,
       int lenVar,
       int startOffsetVar) {
-    if (seg.type == AnchorNode.Type.START) {
-      // if (pos != startOffset) return null;
-      Label isStart = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, startOffsetVar);
-      mv.visitJumpInsn(IF_ICMPEQ, isStart);
-      mv.visitInsn(ACONST_NULL);
-      mv.visitInsn(ARETURN);
-      mv.visitLabel(isStart);
-    } else if (seg.type == AnchorNode.Type.STRING_START) {
-      // \A always requires pos == 0
+    if (seg.type == AnchorNode.Type.START || seg.type == AnchorNode.Type.STRING_START) {
+      // ^ (non-multiline) and \A both anchor to the ABSOLUTE input start (pos == 0), independent of
+      // the scan start. Comparing pos to startOffset re-anchored ^ at every scan position, so a
+      // findAll/findMatchFrom(start>0) over e.g. `^([-]*)` wrongly produced a match at start>0;
+      // java.util.regex.Matcher.find(start) anchors ^/\A at input start (0). (match() at :1610
+      // already does this.)
       Label isStart = new Label();
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitJumpInsn(IFEQ, isStart);
@@ -1722,17 +1717,10 @@ public class MultiGroupGreedyBytecodeGenerator {
       int posVar,
       int lenVar,
       int startOffsetVar) {
-    if (seg.type == AnchorNode.Type.START) {
-      // if (pos != startOffset) return false;
-      Label isStart = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, startOffsetVar);
-      mv.visitJumpInsn(IF_ICMPEQ, isStart);
-      mv.visitInsn(ICONST_0);
-      mv.visitInsn(IRETURN);
-      mv.visitLabel(isStart);
-    } else if (seg.type == AnchorNode.Type.STRING_START) {
-      // \A always requires pos == 0
+    if (seg.type == AnchorNode.Type.START || seg.type == AnchorNode.Type.STRING_START) {
+      // ^ (non-multiline) and \A both anchor to the ABSOLUTE input start (pos == 0), not the scan
+      // start — see generateAnchorMatchInline. Comparing pos to startOffset re-anchored ^ at every
+      // scan position (spurious findAll matches for `^...`).
       Label isStart = new Label();
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitJumpInsn(IFEQ, isStart);
