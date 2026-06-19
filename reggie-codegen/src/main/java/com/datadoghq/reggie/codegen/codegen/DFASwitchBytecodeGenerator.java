@@ -999,7 +999,9 @@ public class DFASwitchBytecodeGenerator {
    *
    * <pre>{@code
    * int findFrom(String input, int start) {
-   *     if (input == null || start < 0 || start > input.length()) return -1;
+   *     if (input == null) return -1;
+   *     if (start < 0) start = 0;
+   *     if (start > input.length()) return -1;
    *     int len = input.length();
    *
    *     for (int tryPos = start; tryPos < len; tryPos++) {
@@ -1035,16 +1037,22 @@ public class DFASwitchBytecodeGenerator {
     // Create allocator: slots 0=this, 1=input, 2=start
     LocalVarAllocator allocator = new LocalVarAllocator(3);
 
-    // if (input == null || start < 0 || start > input.length()) return -1;
+    // if (input == null) return -1;
     Label checksPass = new Label();
     Label returnMinusOne = new Label();
 
     mv.visitVarInsn(ALOAD, 1);
     mv.visitJumpInsn(IFNULL, returnMinusOne);
 
+    // if (start < 0) start = 0;
+    Label startNotNeg = new Label();
     mv.visitVarInsn(ILOAD, 2);
-    mv.visitJumpInsn(IFLT, returnMinusOne);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
 
+    // if (start > input.length()) return -1;
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
