@@ -117,6 +117,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private final NfaStep rejectStep;
   private int[] rejectStartClosureIds; // start closure with ALL anchors crossed; set in ctor
 
+  // Shared scratch buffer for sorted two-pointer union merges in findStepClosure /
+  // rejectStepClosure. Sized stateCount; never allocated inside the hot step.
+  private final int[] mergeScratch;
+
   // T1.6 boolean matches() fast path: a STRICT (non-self-anchoring) lazy DFA over the same NFA.
   // matches() asks whether the WHOLE input matches from the start, which is priority-independent,
   // so the DFA's yes/no equals the thread simulation's. Built under the same anchor/assertion/
@@ -146,6 +150,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     for (NFA.NFAState s : nfa.getStates()) {
       statesById[s.id] = s;
     }
+    mergeScratch = new int[stateCount];
 
     // Precompute groupBodyNullable: for each GroupExit state, determine whether there is
     // an epsilon-only path from its matching GroupEntry to that GroupExit.
@@ -318,7 +323,32 @@ public final class PikeVMMatcher extends ReggieMatcher {
     return out; // ascending
   }
 
-  /** Sorted closure of {@code targets} UNIONed with the start closure (the self-anchoring step). */
+  /**
+   * Sorted two-pointer union of two ascending int arrays. Writes the merged result into {@link
+   * #mergeScratch} and returns an {@code int[]} sized exactly to the merged count. Neither input
+   * array is modified. Both inputs must be sorted ascending and deduplicated.
+   */
+  private int[] sortedUnion(int[] a, int[] b) {
+    int ai = 0, bi = 0, n = 0;
+    while (ai < a.length && bi < b.length) {
+      int av = a[ai], bv = b[bi];
+      if (av < bv) {
+        mergeScratch[n++] = av;
+        ai++;
+      } else if (bv < av) {
+        mergeScratch[n++] = bv;
+        bi++;
+      } else {
+        mergeScratch[n++] = av;
+        ai++;
+        bi++; // deduplicate equal ids
+      }
+    }
+    while (ai < a.length) mergeScratch[n++] = a[ai++];
+    while (bi < b.length) mergeScratch[n++] = b[bi++];
+    return Arrays.copyOf(mergeScratch, n);
+  }
+
   /**
    * The self-anchoring find() step: {@code sortedEpsilonClosure(targets, blockStart=true)} UNION
    * {@code reinjectClosureIds}. Re-injecting the pos&gt;0 start closure each character lets a match
@@ -328,15 +358,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    */
   private int[] findStepClosure(int[] targets) {
     int[] tc = sortedEpsilonClosure(targets, true);
-    boolean[] inSet = new boolean[stateCount];
-    for (int id : tc) inSet[id] = true;
-    for (int id : reinjectClosureIds) inSet[id] = true;
-    int count = 0;
-    for (boolean b : inSet) if (b) count++;
-    int[] out = new int[count];
-    int oi = 0;
-    for (int id = 0; id < stateCount; id++) if (inSet[id]) out[oi++] = id;
-    return out; // ascending
+    return sortedUnion(tc, reinjectClosureIds);
   }
 
   /**
@@ -348,15 +370,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    */
   private int[] rejectStepClosure(int[] targets) {
     int[] tc = sortedEpsilonClosure(targets, false);
-    boolean[] inSet = new boolean[stateCount];
-    for (int id : tc) inSet[id] = true;
-    for (int id : rejectStartClosureIds) inSet[id] = true;
-    int count = 0;
-    for (boolean b : inSet) if (b) count++;
-    int[] out = new int[count];
-    int oi = 0;
-    for (int id = 0; id < stateCount; id++) if (inSet[id]) out[oi++] = id;
-    return out; // ascending
+    return sortedUnion(tc, rejectStartClosureIds);
   }
 
   /** True when no NFA state carries a lookaround assertion or a backreference check. */
@@ -596,16 +610,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
         int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
         caps[1] = pos;
         best = buildResult(input, caps);
-        if (pos == fromPos) {
-          // Zero-length accept at the origin-most seed (caps[0] == fromPos == pos): the
-          // clistViaMultipleAnchors flags are still fresh (no swapLists yet), so the anchor-derived
-          // pruning is valid here exactly as in the former tryFindMatchAt first iteration. Discard
-          // lower-priority threads (keepLowerPriority=false) per Perl priority rules.
+        if (pos == clistCaptures[t][0]) {
+          // Zero-length accept at this thread's own seed position: clistViaMultipleAnchors flags
+          // are still valid (swapLists has not yet cleared them). Prune multi-anchor-derived
+          // threads per Perl priority rules (keepLowerPriority=false for find semantics).
           pruneAnchorDerivedAtStart(t, false);
         } else {
-          // Cut strictly-lower-priority threads. The accepting thread started at pos > fromPos, so
-          // (^/\A fire only at the pinned origin 0) it cannot be a multi-anchor-origin thread —
-          // hence no pruning is needed, and the now-stale post-swap flags must not be read.
+          // Accepting thread started before pos (non-zero-length match). Cut lower-priority
+          // threads.
           clistSize = t;
           clistFirstAccept = -1;
         }
@@ -960,6 +972,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
     for (int i = 0; i < nlistSize; i++) {
       clistIds[i] = nlistIds[i];
       System.arraycopy(nlistCaptures[i], 0, clistCaptures[i], 0, len);
+      // Threads from nlist have advanced past their seed position: anchor-derived pruning no longer
+      // applies, so reset the flag rather than letting a stale value from the previous clist
+      // survive.
+      clistViaMultipleAnchors[i] = false;
       inClist[nlistIds[i]] = true;
       inNlist[nlistIds[i]] = false;
       // nlist is built in priority order, so the first accepting entry is the highest priority.

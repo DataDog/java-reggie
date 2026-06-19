@@ -6697,6 +6697,11 @@ public class PatternAnalyzer {
     // Handle anchors - support START and END
     if (node instanceof AnchorNode) {
       AnchorNode anchor = (AnchorNode) node;
+      // Multiline ^ / $ match line boundaries; the MGG generator only models pos==0 and pos==len.
+      // Decline both so these patterns are routed to a correct strategy.
+      if (anchor.multiline) {
+        return null;
+      }
       return new AnchorSegment(anchor.type);
     }
 
