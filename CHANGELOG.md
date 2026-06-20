@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.0-SNAPSHOT] - unreleased
+
+*In progress: pre-1.0.0 readiness items (correctness guarantee docs, thread-safety tests,
+fuzz gap disclosure, PCRE number reconciliation, release tooling fixes).*
+
 ## [0.4.0] - 2026-06-20
 
 - feat: ReggieOption/@RegexPattern fallback substrate + PIKEVM routing groundwork
