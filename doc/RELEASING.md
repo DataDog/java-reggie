@@ -5,8 +5,8 @@
 Before releasing, ensure:
 1. All changes are merged to `main`
 2. The following AWS SSM parameters are populated (one-time infra setup):
-   - `ci.java-reggie.central_username` — Sonatype Central Portal token username
-   - `ci.java-reggie.central_password` — Sonatype Central Portal token password
+   - `ci.java-reggie.maven_central_username` — Sonatype Central Portal token username
+   - `ci.java-reggie.maven_central_password` — Sonatype Central Portal token password
    - `ci.java-reggie.signing.gpg_private_key` — armored GPG private key (set by `create_key` CI job)
    - `ci.java-reggie.signing.gpg_passphrase` — GPG key passphrase (set by `create_key` CI job)
 
