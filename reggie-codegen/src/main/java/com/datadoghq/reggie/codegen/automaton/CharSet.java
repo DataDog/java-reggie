@@ -218,6 +218,9 @@ public final class CharSet {
       buildUnicodeCategoryRanges(
           Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER, Character.OTHER_NUMBER);
 
+  /** \p{L} ∪ \p{N} — letters or numbers */
+  public static final CharSet UNICODE_ALNUM = UNICODE_L.union(UNICODE_N);
+
   /** \p{Zs} — space separators */
   public static final CharSet UNICODE_Zs = buildUnicodeCategoryRanges(Character.SPACE_SEPARATOR);
 
@@ -368,6 +371,16 @@ public final class CharSet {
     map.put("Cs", UNICODE_Cs);
     map.put("Co", UNICODE_Co);
     map.put("Cn", UNICODE_Cn);
+
+    // POSIX-style aliases accepted by PCRE
+    map.put("alpha", UNICODE_L);
+    map.put("alnum", UNICODE_ALNUM);
+    map.put("digit", DIGIT);
+    map.put("upper", UNICODE_Lu);
+    map.put("lower", UNICODE_Ll);
+    map.put("space", WHITESPACE.union(of('')));
+    map.put("word", WORD);
+
     return Collections.unmodifiableMap(map);
   }
 
