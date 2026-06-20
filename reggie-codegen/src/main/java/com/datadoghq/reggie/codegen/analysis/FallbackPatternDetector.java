@@ -51,6 +51,10 @@ public final class FallbackPatternDetector {
    * @param strategy the strategy selected by {@link PatternAnalyzer}
    */
   public static String needsFallback(RegexNode ast, PatternAnalyzer.MatchingStrategy strategy) {
+    if (requiresIntraCallBacktracking(ast, false)) {
+      return "recursive subroutine requires intra-call backtracking: pattern is context-free, not regular — use compileAllowingFallback() for JDK delegation";
+    }
+
     Visitor v = new Visitor();
     ast.accept(v);
 
@@ -1459,6 +1463,55 @@ public final class FallbackPatternDetector {
     if (node instanceof GroupNode) {
       return containsBackreference(((GroupNode) node).child);
     }
+    return false;
+  }
+
+  /**
+   * Returns true if the pattern contains a subroutine call ((?N) or (?R)) inside an alternation arm
+   * — a structure that requires intra-call backtracking to match correctly. The RECURSIVE_DESCENT
+   * engine does not support this; such patterns must be delegated to JDK. Conservative: may
+   * over-classify (route working patterns to JDK), never under-classifies the validated palindrome
+   * cases.
+   */
+  static boolean requiresIntraCallBacktracking(RegexNode ast, boolean insideAlternationArm) {
+    if (ast instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) ast).alternatives) {
+        if (requiresIntraCallBacktracking(alt, true)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof SubroutineNode) {
+      return insideAlternationArm;
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) ast).children) {
+        if (requiresIntraCallBacktracking(child, insideAlternationArm)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof GroupNode) {
+      return requiresIntraCallBacktracking(((GroupNode) ast).child, insideAlternationArm);
+    }
+    if (ast instanceof QuantifierNode) {
+      return requiresIntraCallBacktracking(((QuantifierNode) ast).child, insideAlternationArm);
+    }
+    if (ast instanceof AssertionNode) {
+      return requiresIntraCallBacktracking(((AssertionNode) ast).subPattern, insideAlternationArm);
+    }
+    if (ast instanceof ConditionalNode) {
+      ConditionalNode cond = (ConditionalNode) ast;
+      if (requiresIntraCallBacktracking(cond.thenBranch, insideAlternationArm)) return true;
+      if (cond.elseBranch != null
+          && requiresIntraCallBacktracking(cond.elseBranch, insideAlternationArm)) return true;
+      return false;
+    }
+    if (ast instanceof BranchResetNode) {
+      for (RegexNode alt : ((BranchResetNode) ast).alternatives) {
+        if (requiresIntraCallBacktracking(alt, insideAlternationArm)) return true;
+      }
+      return false;
+    }
+    // LiteralNode, CharClassNode, AnchorNode, BackreferenceNode — no subroutine children
     return false;
   }
 
