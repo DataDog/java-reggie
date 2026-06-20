@@ -66,7 +66,7 @@ Reggie is a high-performance Java regex library with dual compilation modes (com
 - Build: Gradle 8.11+
 - Architecture: Thompson NFA → DFA → Specialized Bytecode
 - Performance: 2–132x faster than JDK Pattern (strategy-dependent; see benchmark results)
-- PCRE Conformance: 97.1% (340/364 evaluated tests)
+- PCRE Conformance: 100.0% (53/53 evaluated tests)
 - Modules: 6 (annotations, codegen, processor, runtime, benchmark, integration-tests)
 
 ## Architecture
@@ -254,7 +254,7 @@ open build/reports/jacoco/aggregate/html/index.html
 ### Test Locations
 - Unit tests: `src/test/java/` in each module (mirrored package structure)
 - Integration tests: `reggie-integration-tests/src/test/java/`
-  - `CorrectnessTest.java`: PCRE and RE2 integration tests (97.1% PCRE passing)
+  - `CorrectnessTest.java`: PCRE and RE2 integration tests (100.0% PCRE passing)
 - Benchmarks: `reggie-benchmark/src/main/java/`
 
 ### Documentation
@@ -318,7 +318,7 @@ open build/reports/jacoco/aggregate/html/index.html
 6. Profile if needed: Use async-profiler
 
 ### Improving PCRE Conformance
-Current: 97.1% (340/364 evaluated tests), Target: 99%+
+Current: 100.0% (53/53 evaluated tests), Target: 99%+
 1. Run: `./gradlew :reggie-integration-tests:test --tests CorrectnessTest`
 2. Analyze failures by category
 3. Implement fix (follow "Adding Feature" workflow)
@@ -705,7 +705,7 @@ cd reggie
 ## Project Status
 
 - **Maturity**: Production-ready
-- **PCRE Conformance**: 97.1% (340/364 evaluated tests; 10 failures, 14 unsupported-syntax errors)
+- **PCRE Conformance**: 100.0% (53/53 evaluated tests; 0 failures, 2 unsupported-syntax errors)
 - **Performance**: 2–132x faster than JDK Pattern (strategy-dependent; SPECIALIZED_FIXED_SEQUENCE 132x, ONEPASS_NFA 91x, DFA_UNROLLED 40x, OPTIMIZED_NFA ~1x for short inputs)
 - **Test Coverage**:
   - Instruction Coverage: ~85% ✅
