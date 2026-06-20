@@ -150,4 +150,75 @@ class CharSetTest {
     assertTrue(cs.contains('x'));
     assertTrue(cs.contains('z'));
   }
+
+  @Test
+  void posixAlias_alpha() {
+    CharSet cs = CharSet.ofUnicodeCategory("alpha");
+    assertNotNull(cs, "alpha alias must be registered");
+    assertTrue(cs.contains('a'));
+    assertTrue(cs.contains('Z'));
+    assertFalse(cs.contains('0'));
+    assertFalse(cs.contains('_'));
+  }
+
+  @Test
+  void posixAlias_alnum() {
+    CharSet cs = CharSet.ofUnicodeCategory("alnum");
+    assertNotNull(cs, "alnum alias must be registered");
+    assertTrue(cs.contains('a'));
+    assertTrue(cs.contains('9'));
+    assertFalse(cs.contains('_'));
+  }
+
+  @Test
+  void posixAlias_digit() {
+    CharSet cs = CharSet.ofUnicodeCategory("digit");
+    assertNotNull(cs, "digit alias must be registered");
+    assertTrue(cs.contains('0'));
+    assertTrue(cs.contains('9'));
+    assertFalse(cs.contains('a'));
+  }
+
+  @Test
+  void posixAlias_upper() {
+    CharSet cs = CharSet.ofUnicodeCategory("upper");
+    assertNotNull(cs, "upper alias must be registered");
+    assertTrue(cs.contains('A'));
+    assertTrue(cs.contains('Z'));
+    assertFalse(cs.contains('a'));
+  }
+
+  @Test
+  void posixAlias_lower() {
+    CharSet cs = CharSet.ofUnicodeCategory("lower");
+    assertNotNull(cs, "lower alias must be registered");
+    assertTrue(cs.contains('a'));
+    assertTrue(cs.contains('z'));
+    assertFalse(cs.contains('A'));
+  }
+
+  @Test
+  void posixAlias_space_includesVT() {
+    CharSet cs = CharSet.ofUnicodeCategory("space");
+    assertNotNull(cs, "space alias must be registered");
+    assertTrue(cs.contains(' '));
+    assertTrue(cs.contains('\t'));
+    assertTrue(cs.contains('\n'));
+    assertTrue(cs.contains('\r'));
+    assertTrue(cs.contains('\f'));
+    assertTrue(cs.contains('\u000B'), "VT (0x0B) must be included per PCRE [:space:]");
+    assertFalse(cs.contains('a'));
+  }
+
+  @Test
+  void posixAlias_word() {
+    CharSet cs = CharSet.ofUnicodeCategory("word");
+    assertNotNull(cs, "word alias must be registered");
+    assertTrue(cs.contains('a'));
+    assertTrue(cs.contains('Z'));
+    assertTrue(cs.contains('0'));
+    assertTrue(cs.contains('_'));
+    assertFalse(cs.contains(' '));
+    assertFalse(cs.contains('é'), "word is ASCII-only per PCRE [:word:]");
+  }
 }
