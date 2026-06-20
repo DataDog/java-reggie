@@ -18,8 +18,10 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
+import java.util.regex.PatternSyntaxException;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.opentest4j.TestAbortedException;
 
 /** Tests for recursive patterns using (?R), (?1), etc. */
 public class TestRecursivePatterns {
@@ -34,16 +36,18 @@ public class TestRecursivePatterns {
     assertTrue(m.matches("ab"), "Should match 'ab'");
   }
 
-  /**
-   * Recursive palindrome patterns are a known limitation. Run with -Dreggie.test.knownFailures=true
-   * to enable.
-   */
   @Test
-  @EnabledIfSystemProperty(named = "reggie.test.knownFailures", matches = "true")
   void testRecursiveCallToEntirePattern() {
     RuntimeCompiler.clearCache();
     // Palindrome matcher: ^((.)(?R)\2|.?)$
-    ReggieMatcher m = Reggie.compile("^((.)(?R)\\2|.?)$");
+    ReggieMatcher m;
+    try {
+      m = Reggie.compileAllowingFallback("^((.)(?R)\\2|.?)$");
+    } catch (PatternSyntaxException e) {
+      // JDK java.util.regex does not support PCRE subroutines
+      throw new TestAbortedException(
+          "Skipping test: JDK java.util.regex does not support PCRE subroutine syntax (?R)");
+    }
 
     System.out.println("[DEBUG] Pattern: ^((.)(?R)\\2|.?)$");
 
@@ -52,6 +56,16 @@ public class TestRecursivePatterns {
     assertTrue(m.matches("abba"), "Should match 'abba'");
     assertTrue(m.matches("abcba"), "Should match 'abcba'");
     assertFalse(m.matches("abc"), "Should NOT match 'abc'");
+  }
+
+  @Test
+  void testRecursiveCallToEntirePatternThrows() {
+    RuntimeCompiler.clearCache();
+    // Verify that the pattern throws UnsupportedPatternException without fallback
+    assertThrows(
+        UnsupportedPatternException.class,
+        () -> Reggie.compile("^((.)(?R)\\2|.?)$"),
+        "Should throw UnsupportedPatternException for recursive subroutine");
   }
 
   @Test

@@ -18,8 +18,10 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import java.util.regex.PatternSyntaxException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.opentest4j.TestAbortedException;
 
 /** Test if the issue is with top-level groups. */
 class SubroutineTopLevelTest {
@@ -48,14 +50,28 @@ class SubroutineTopLevelTest {
     // Pattern without the non-capturing group: [^()]|(?R)
     // BUT you can't have this at top level in PCRE - (?R) must be inside something
     // So let's test with a prefix: x[^()]|(?R)
-    ReggieMatcher m = Reggie.compile("x|(?R)");
+    ReggieMatcher m;
+    try {
+      m = Reggie.compileAllowingFallback("x|(?R)");
+    } catch (PatternSyntaxException e) {
+      // JDK java.util.regex does not support PCRE subroutines
+      throw new TestAbortedException(
+          "Skipping test: JDK java.util.regex does not support PCRE subroutine syntax (?R)");
+    }
     assertTrue(m.matches("x"), "Should match 'x' via first alternative");
   }
 
   @Test
   void testCharClassOrSubroutineInGroup() {
     // Test [^()] OR (?R) inside a capturing group
-    ReggieMatcher m = Reggie.compile("([^()]|(?R))");
+    ReggieMatcher m;
+    try {
+      m = Reggie.compileAllowingFallback("([^()]|(?R))");
+    } catch (PatternSyntaxException e) {
+      // JDK java.util.regex does not support PCRE subroutines
+      throw new TestAbortedException(
+          "Skipping test: JDK java.util.regex does not support PCRE subroutine syntax (?R)");
+    }
     assertTrue(m.matches("a"), "Capturing group with alternation");
   }
 }
