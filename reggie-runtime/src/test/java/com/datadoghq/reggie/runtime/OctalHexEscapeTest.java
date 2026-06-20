@@ -96,30 +96,23 @@ class OctalHexEscapeTest {
 
   @Test
   void testPatternWithCaptureGroupAndOctal() {
-    // (abc)\100 should match "abc@"
-    // Group 1 captures "abc", then \100 matches '@'
+    // (abc)\100 with 1 group: descending-prefix finds \1 as valid backref (group 1),
+    // then "00" are literal characters. So it matches "abcabc00".
+    // Pure octal \100 ('@') would only apply if there were no groups.
     ReggieMatcher rm = Reggie.compile("(abc)\\100");
 
-    assertTrue(rm.matches("abc@"));
-    assertFalse(rm.matches("abc100"));
-
-    MatchResult result = rm.match("abc@");
-    assertNotNull(result);
-    assertEquals("abc", result.group(1));
+    assertTrue(rm.matches("abcabc00"));
+    assertFalse(rm.matches("abc@"));
   }
 
   @Test
   void testPatternWithCaptureGroupAndOctalPlusDigit() {
-    // (abc)\1000 should match "abc@0"
-    // Group 1 captures "abc", then \100 matches '@', then '0' is literal
+    // (abc)\1000 with 1 group: descending-prefix finds \1 as valid backref (group 1),
+    // then "000" are literal characters. So it matches "abcabc000".
     ReggieMatcher rm = Reggie.compile("(abc)\\1000");
 
-    assertTrue(rm.matches("abc@0"));
-    assertFalse(rm.matches("abc1000"));
-
-    MatchResult result = rm.match("abc@0");
-    assertNotNull(result);
-    assertEquals("abc", result.group(1));
+    assertTrue(rm.matches("abcabc000"));
+    assertFalse(rm.matches("abc@0"));
   }
 
   @Test

@@ -597,12 +597,28 @@ public class RegexParser {
             digitsConsumed++;
           }
 
-          // If the full number is a valid backref, use it
-          if (refNum <= totalGroupCount) {
-            return new BackreferenceNode(refNum);
+          // Descending prefix: try longest valid backref first (PCRE semantics).
+          // Reconstruct individual digits for prefix decomposition.
+          int[] digits = new int[digitsConsumed];
+          {
+            int tmp = refNum;
+            for (int i = digitsConsumed - 1; i >= 0; i--) {
+              digits[i] = tmp % 10;
+              tmp /= 10;
+            }
+          }
+          for (int len = digitsConsumed; len >= 1; len--) {
+            int partial = 0;
+            for (int i = 0; i < len; i++) {
+              partial = partial * 10 + digits[i];
+            }
+            if (partial <= totalGroupCount && partial > 0) {
+              pos = posBeforeFirst + len;
+              return new BackreferenceNode(partial);
+            }
           }
 
-          // Not a valid backref. Try to interpret as octal if first digit is 1-7:
+          // No valid backref found. Try octal if first digit is 1-7:
           if (firstDigit <= 7) {
             // Backtrack to the first digit and re-parse as octal (up to 3 octal digits)
             pos = posBeforeFirst;
