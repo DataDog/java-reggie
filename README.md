@@ -31,6 +31,7 @@ Both approaches use intelligent strategy selection (DFA/NFA) and generate optimi
 - [How It Works](#how-it-works)
 - [Project Structure](#project-structure)
 - [Building from Source](#building-from-source)
+- [Known Limitations](#known-limitations)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -870,6 +871,26 @@ Based on extensive research, Reggie's hybrid compile-time/runtime approach is **
 - Unified codegen for both compile-time and runtime paths
 - Industry-proven hybrid DFA/NFA strategy
 - High PCRE compatibility (100.0%) with linear-time guarantees
+
+## Known Limitations
+
+### Known correctness gaps on adversarial degenerate inputs
+
+The differential fuzzer (`AlgorithmicFuzzTest.divergenceGate`) tracks 69 pre-existing divergences
+between Reggie and JDK on adversarial degenerate inputs, classified into root-cause groups:
+
+- **Span-only** (group boundaries wrong, boolean match correct): `DFA_UNROLLED` capturing-group
+  span tracking (Class A, dominant cluster); `PIKEVM_CAPTURE` quantified-group last-iteration
+  semantics (Class F).
+- **Boolean correctness** (false positives or false negatives on adversarial inputs):
+  `OPTIMIZED_NFA_WITH_BACKREFS` backref over-match (Class B); `RECURSIVE_DESCENT` false negatives
+  on optional/zero-width backrefs (Class C); `PIKEVM_CAPTURE` find() misses and empty-loop (Class
+  D); `\A`/`\z` anchor enforcement in `DFA_SWITCH` and `SPECIALIZED_MULTI_GROUP_GREEDY` (Class E).
+- **Non-reproducible** (shrinker artifacts, not engine bugs): Class G.
+
+All affected patterns are O(n) / ReDoS-safe. These gaps affect adversarial or synthetically
+generated patterns; typical production patterns are unlikely to trigger them. The budget ratchets
+down as each root-cause class is fixed (`-Dreggie.fuzz.enforce=true` activates the gate in CI).
 
 ## Contributing
 
