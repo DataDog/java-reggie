@@ -788,6 +788,7 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | STRING_END (`\Z`/`$`) anchor inside an alternation combined with capturing group, nullable/empty branch, or broad char-class branch | `OPTIMIZED_NFA` | `string-end anchor in alternation with capturing group or nullable/empty branch: OPTIMIZED_NFA find() span or group-span tracking incorrect` |
 | Start-class anchor (`\A`/`^`) inside an alternation branch alongside a capturing group | `OPTIMIZED_NFA` | `start anchor in alternation with capturing group: OPTIMIZED_NFA group span tracking for unmatched branches incorrect` |
 | Any alternation branch is nullable (can match the empty string) | `OPTIMIZED_NFA` | `nullable alternation branch: find() first-alternative semantics incorrect for empty/nullable branch` |
+| Recursive subroutine call inside an alternation arm (palindrome structure) | all | `recursive subroutine requires intra-call backtracking: pattern is context-free, not regular — use compileAllowingFallback() for JDK delegation` |
 
 ### `RuntimeCompiler` (analyzer-flag checks)
 
@@ -851,15 +852,10 @@ with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for thos
 - **Backreferences**: Broadly supported with targeted limitations:
   - Most backreference patterns work natively: `(a{2})\1`, `<(\w+)>.*</\1>`, `(\w+)\s+\1`, etc.
   - Specific structural patterns still fall back to `java.util.regex` (see `FallbackPatternDetector` table above)
-  - **Self-referencing backreferences**: `(a\1?){4}`, `(a\1?)(a\2?)` — the quantifier does not implement "last-iteration semantics"; `\N` inside a repeated group sees the group's value from the previous iteration only when that iteration fully succeeded. `(a\1?){4}` on "aaaa" currently fails.
-    - Fix: per-iteration group capture updates in `RecursiveDescentBytecodeGenerator.visitQuantifier()`
-    - Tests skipped by default; enable with `-Dreggie.test.knownFailures=true`
+  - **Self-referencing backreferences**: `(a\1?){4}`, `(a\1?)(a\2?)` — native support via the C-01 partial-open sentinel code path in `RecursiveDescentBytecodeGenerator` (lines 2041–2090) handles per-iteration capture updates. Canonical cases (`^(a\1?){4}$`, `^(a\1?)+$`, `(a\1?|b){4}`) are verified by `SelfReferencingBackrefTest` (CI-active, no knownFailures gate). Remaining edge cases are an open audit item; issue #39 is partially addressed.
 - **Recursive patterns**: Limited support via RECURSIVE_DESCENT strategy:
   - Subroutines (`(?R)`, `(?1)`) and conditionals (`(?(1)yes|no)`) work for most cases
-  - **Recursive palindromes**: Patterns like `^(\w)(?:(?1)|\w?)\1$` (palindrome checker) don't work
-    - Root cause: Subroutines in RecursiveDescentBytecodeGenerator save/restore groups but don't support backtracking
-    - Proper support requires backtrackable subroutines (estimated 8-12 hours implementation)
-    - Tests for this are skipped by default; run with `-Dreggie.test.knownFailures=true` to enable
+  - **Recursive palindromes**: Palindrome patterns (`^((.)(?1)\2|.?)$`, `^((.)(?R)\2|.?)$`) now throw `UnsupportedPatternException` by default. To match them, use `Reggie.compileAllowingFallback()` which delegates to `java.util.regex`. Issue #38 is closed by explicit JDK routing.
 - **Branch reset groups**: Partially supported — `(?|...)` with numbered groups routes to
   `RECURSIVE_DESCENT` and passes correctness tests. The named-capture variant
   `(?|(?'name'...)|(?'name'...))` is not yet supported and throws at compile time.
