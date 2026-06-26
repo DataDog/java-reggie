@@ -284,6 +284,8 @@ public class DFAUnrolledBytecodeGenerator {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
+    // NOTE: Accepting-state assertions are evaluated at the endOfInput label below (not here),
+    // because they gate final acceptance rather than being transition pre-conditions.
 
     // if (pos >= input.length()) goto endOfInput
     mv.visitVarInsn(ILOAD, posVar);
@@ -1825,6 +1827,10 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ASTORE, 6); // matchedSubstring
 
     // MatchResult groupResult = match(matchedSubstring);
+    // NOTE: For patterns with lookaround assertions, match(substring) may return null because the
+    // substring lacks the surrounding context needed to evaluate the assertions. When that happens
+    // we fall back to the known match bounds [matchStart, longestEnd] for group 0 and -1 for any
+    // inner groups (losing per-group positions, but correctly reporting the overall match).
     mv.visitVarInsn(ALOAD, 0); // this
     mv.visitVarInsn(ALOAD, 6); // matchedSubstring
     mv.visitMethodInsn(
@@ -1846,6 +1852,35 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitVarInsn(ASTORE, 9); // ends array
 
+    // If groupResult is null (e.g., assertion pattern where substring lacks context),
+    // use the known bounds: group 0 = [matchStart, longestEnd], inner groups = -1.
+    Label groupResultNotNull = new Label();
+    Label groupsPopulated = new Label();
+    mv.visitVarInsn(ALOAD, 7); // groupResult
+    mv.visitJumpInsn(IFNONNULL, groupResultNotNull);
+
+    // groupResult == null: group 0 = [matchStart, longestEnd], inner groups = -1
+    mv.visitVarInsn(ALOAD, 8); // starts
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 3); // matchStart
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, 9); // ends
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 4); // longestEnd
+    mv.visitInsn(IASTORE);
+    for (int i = 1; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 8);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, 9);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitJumpInsn(GOTO, groupsPopulated);
+
+    mv.visitLabel(groupResultNotNull);
     // Copy and adjust group positions
     for (int i = 0; i <= groupCount; i++) {
       // starts[i] = groupResult.start(i) + matchStart;
@@ -1890,6 +1925,7 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitLabel(doneEndAdjust);
       mv.visitInsn(IASTORE);
     }
+    mv.visitLabel(groupsPopulated);
 
     // Create MatchResultImpl with adjusted positions
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
@@ -2006,18 +2042,22 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // Generate assertion checks before recording accepting position so a failed
-    // assertion does not advance longestMatchEnd.
-    if (!state.assertionChecks.isEmpty()) {
+    // For non-accepting states, assertions are transition guards checked at state entry.
+    // For accepting states, assertions gate the final acceptance point (checked only when
+    // no more characters match); checking them eagerly at every entry would reject valid
+    // positions mid-match (e.g., a lookahead that can only pass at the true match end).
+    if (!state.accepting && !state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
 
-    // If this is an accepting state, record current position (after assertions pass).
+    // If this is an accepting state WITHOUT assertions, record current position now.
+    // (Accepting states WITH assertions defer recording to the "no transition" / end-of-input
+    // paths where the assertion is evaluated at the correct position.)
     // Per-state acceptance conditions must be satisfied before recording the position.
     // Priority-cut states return immediately after recording (accepting thread wins).
-    if (state.accepting) {
+    if (state.accepting && state.assertionChecks.isEmpty()) {
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ISTORE, longestMatchEndVar);
@@ -2162,19 +2202,54 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitLabel(nextCheck);
     }
 
-    // No transition matched - dead state, return longestMatchEnd
+    // No transition matched - accepting states with assertions: undo pos++ and check assertions
+    if (state.accepting && !state.assertionChecks.isEmpty()) {
+      // pos was incremented before character reading; undo it to get the true accept position
+      mv.visitIincInsn(posVar, -1);
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+      }
+      // Assertions passed: record accept position
+      if (state.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+      } else {
+        Label skipRecordNoTrans = new Label();
+        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecordNoTrans);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+        mv.visitLabel(skipRecordNoTrans);
+      }
+    }
     mv.visitVarInsn(ILOAD, longestMatchEndVar);
     mv.visitInsn(IRETURN);
 
-    // Handle end of input - return longestMatchEnd
+    // Handle end of input - for accepting states with assertions, check them first
     mv.visitLabel(endOfInput);
+    if (state.accepting && !state.assertionChecks.isEmpty()) {
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+      }
+      if (state.acceptanceAnchorConditions.isEmpty()) {
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+      } else {
+        Label skipRecordEnd = new Label();
+        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecordEnd);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, longestMatchEndVar);
+        mv.visitLabel(skipRecordEnd);
+      }
+    }
     mv.visitVarInsn(ILOAD, longestMatchEndVar);
     mv.visitInsn(IRETURN);
 
     // Handle assertion failure
-    mv.visitLabel(assertionFailed);
-    mv.visitVarInsn(ILOAD, longestMatchEndVar);
-    mv.visitInsn(IRETURN);
+    if (!state.assertionChecks.isEmpty()) {
+      mv.visitLabel(assertionFailed);
+      mv.visitVarInsn(ILOAD, longestMatchEndVar);
+      mv.visitInsn(IRETURN);
+    }
   }
 
   /**
