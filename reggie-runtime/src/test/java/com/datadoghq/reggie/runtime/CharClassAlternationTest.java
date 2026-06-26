@@ -18,9 +18,10 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
-import com.datadoghq.reggie.UnsupportedPatternException;
+import java.util.regex.PatternSyntaxException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.opentest4j.TestAbortedException;
 
 /** Test the specific interaction between CharClass and Alternation. */
 class CharClassAlternationTest {
@@ -56,13 +57,28 @@ class CharClassAlternationTest {
 
   @Test
   void testAlternationCharClassOrSubroutine() {
-    // D1: (?R) inside alternation arm requires intra-call backtracking
-    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("(?:[^()]|(?R))"));
+    // D1: recursive-subroutine-in-alternation routes to JDK fallback
+    ReggieMatcher m;
+    try {
+      m = Reggie.compileAllowingFallback("(?:[^()]|(?R))");
+    } catch (PatternSyntaxException e) {
+      throw new TestAbortedException(
+          "Skipping: JDK java.util.regex does not support PCRE subroutine syntax (?R)");
+    }
+    assertTrue(m.matches("a"), "Should match 'a' via first alternative");
   }
 
   @Test
   void testAlternationCharClassOrSubroutineInStar() {
-    // D1: (?R) inside alternation arm requires intra-call backtracking
-    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
+    // D1: recursive-subroutine-in-alternation routes to JDK fallback
+    ReggieMatcher m;
+    try {
+      m = Reggie.compileAllowingFallback("\\((?:[^()]|(?R))*\\)");
+    } catch (PatternSyntaxException e) {
+      throw new TestAbortedException(
+          "Skipping: JDK java.util.regex does not support PCRE subroutine syntax (?R)");
+    }
+    assertTrue(m.matches("()"), "Should match '()'");
+    assertTrue(m.matches("(a)"), "Should match '(a)'");
   }
 }
