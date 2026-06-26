@@ -1071,7 +1071,13 @@ public class DFAUnrolledBytecodeGenerator {
     // there; the DFA must keep consuming until ']'. Check lookahead only at the acceptance point.
     boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
     for (AssertionCheck assertion : state.assertionChecks) {
-      if (assertion.isLookbehind() || (!state.accepting || state == dfa.getStartState())) {
+      // Defer lookahead assertions only on non-start accepting states: those are the states where
+      // the lookahead may fail mid-match but become satisfiable later. For lookbehind,
+      // non-accepting
+      // states, or the start state, check eagerly as a transition guard.
+      boolean deferToAcceptance =
+          assertion.isLookahead() && state.accepting && state != dfa.getStartState();
+      if (!deferToAcceptance) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
@@ -2292,8 +2298,11 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ILOAD, longestMatchEndVar);
     mv.visitInsn(IRETURN);
 
-    // Handle assertion failure
-    if (!state.assertionChecks.isEmpty()) {
+    // Handle assertion failure: assertionFailed is targeted by lookbehind guards (always checked
+    // eagerly) and by deferred lookahead checks in the no-transition / end-of-input blocks.
+    // The label is live whenever any assertion was emitted — same guard as generateStateCode.
+    boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
+    if (hasAnyAssertions) {
       mv.visitLabel(assertionFailed);
       mv.visitVarInsn(ILOAD, longestMatchEndVar);
       mv.visitInsn(IRETURN);
