@@ -59,14 +59,30 @@ public final class FallbackPatternDetector {
     ast.accept(v);
 
     // B1 — Lookahead inside a quantified group (issue #28).
-    // Root cause (NEEDS-RND): Thompson/Pike NFA has no per-thread quantifier-iteration counter.
-    // Multiple threads at the same NFA state after different iteration counts are merged in the
-    // shared state set; when their per-position assertion results diverge, the merge produces
-    // wrong find() results (e.g. (?:(?=\d)\d)+ on "1" returns false instead of true).
-    // Classification: NEEDS-RND — safe-backtracking R&D required for per-thread iteration state.
-    // Confirmed by LookaroundEngineNativeTest (spike: disabling guard causes wrong results).
+    // Root cause: DFA subset construction carries the assertion NFA state into the accepting loop
+    // state, causing the lookahead to be re-evaluated as an acceptance predicate at the end of
+    // each quantifier iteration rather than as a gate at the start of the next iteration.
+    // Concretely: (?:(?=\d)\d)+ on "1" produces DFA state 1 (accepting) with the (?=\d) assertion;
+    // at pos=1 (end of "1") the deferred lookahead check fires, fails (no digit at EOS), and the
+    // DFA returns false instead of true. The guard is scope-correct: position-only assertions that
+    // do NOT reference captured groups are blocked here; those that reference captures are blocked
+    // additionally by hasAssertionReferencingCaptureInQuantifier below.
+    // Classification: NEEDS-RND — DFA construction must not carry assertion NFA states into
+    // loop-back DFA states, or the acceptance predicate logic must distinguish between "assertion
+    // for next-iteration gate" vs "acceptance predicate for current match end".
+    // Confirmed by LookaroundEngineNativeTest (disabling guard causes wrong results for
+    // (?:(?=\d)\d)+ on "1" and "123").
     if (v.lookaheadInQuantifier) {
       return "lookahead inside quantified group";
+    }
+
+    // B1-narrow — Assertion inside quantifier that references a captured group value.
+    // Even after B1 is resolved for position-only lookaheads, assertions that read a backref
+    // (e.g. (?:(?=\1)\d)+) require per-iteration capture state that neither the DFA nor the NFA
+    // engine currently tracks. This guard is additive: when the broad B1 guard above is
+    // eventually removed, this narrow guard ensures capture-referencing assertions still fall back.
+    if (hasAssertionReferencingCaptureInQuantifier(ast)) {
+      return "assertion inside quantifier references captured group value";
     }
 
     // B2 — KEEP-PERMANENT: anchor inside a quantifier that is itself inside a capturing group.
@@ -930,6 +946,69 @@ public final class FallbackPatternDetector {
       return containsCapturingGroup(((QuantifierNode) node).child);
     }
     return false;
+  }
+
+  /**
+   * Returns true if any assertion inside a quantifier references a captured group via a
+   * BackreferenceNode. Position-only assertions like {@code (?=\d)} are safe and not caught here;
+   * only assertions whose sub-pattern contains a {@link BackreferenceNode} (e.g. {@code (?=\1)})
+   * are blocked.
+   */
+  private static boolean hasAssertionReferencingCaptureInQuantifier(RegexNode ast) {
+    return new CaptureRefInQuantifierVisitor().check(ast);
+  }
+
+  private static final class CaptureRefInQuantifierVisitor {
+    private boolean insideQuantifier = false;
+
+    boolean check(RegexNode node) {
+      return visit(node);
+    }
+
+    private boolean visit(RegexNode node) {
+      if (node instanceof QuantifierNode qn) {
+        boolean prev = insideQuantifier;
+        insideQuantifier = true;
+        boolean found = visit(qn.child);
+        insideQuantifier = prev;
+        return found;
+      }
+      if (insideQuantifier && node instanceof AssertionNode an) {
+        if (subtreeContainsBackreference(an.subPattern)) return true;
+      }
+      if (node instanceof GroupNode gn) return visit(gn.child);
+      if (node instanceof ConcatNode cn) {
+        for (RegexNode c : cn.children) {
+          if (visit(c)) return true;
+        }
+        return false;
+      }
+      if (node instanceof AlternationNode aln) {
+        for (RegexNode alt : aln.alternatives) {
+          if (visit(alt)) return true;
+        }
+        return false;
+      }
+      return false;
+    }
+
+    private static boolean subtreeContainsBackreference(RegexNode node) {
+      if (node instanceof BackreferenceNode) return true;
+      if (node instanceof GroupNode gn) return subtreeContainsBackreference(gn.child);
+      if (node instanceof ConcatNode cn) {
+        for (RegexNode c : cn.children) {
+          if (subtreeContainsBackreference(c)) return true;
+        }
+        return false;
+      }
+      if (node instanceof AlternationNode aln) {
+        for (RegexNode alt : aln.alternatives) {
+          if (subtreeContainsBackreference(alt)) return true;
+        }
+        return false;
+      }
+      return false;
+    }
   }
 
   private static boolean isLookahead(AssertionNode.Type t) {
