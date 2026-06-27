@@ -96,9 +96,9 @@ class OctalHexEscapeTest {
 
   @Test
   void testPatternWithCaptureGroupAndOctal() {
-    // PCRE semantics: (abc)\100 with 1 group — greedy 3-digit cap collects "100",
-    // refNum=100 > 1 group, firstDigit=1 ≤ 7 → octal fallback → \100 = '@' (U+0040).
-    // Pattern is group(abc) + '@'; "abcabc00" (old JDK backref behavior) must NOT match.
+    // (abc)\100 with 1 group: full number 100 > totalGroupCount(1), so \100 is octal '@' (codepoint
+    // 64).
+    // PCRE never attempts shorter prefixes.
     ReggieMatcher rm = Reggie.compile("(abc)\\100");
 
     assertTrue(rm.matches("abc@"));
@@ -107,13 +107,30 @@ class OctalHexEscapeTest {
 
   @Test
   void testPatternWithCaptureGroupAndOctalPlusDigit() {
-    // PCRE semantics: (abc)\1000 with 1 group — greedy 3-digit cap collects "100",
-    // refNum=100 > 1 group, firstDigit=1 ≤ 7 → octal fallback → \100 = '@', then literal '0'.
-    // Pattern is group(abc) + '@' + '0'; "abcabc000" (old JDK backref behavior) must NOT match.
+    // (abc)\1000 with 1 group: full number 100 > totalGroupCount(1), so \100 is octal '@'.
+    // The trailing '0' is a literal character.
     ReggieMatcher rm = Reggie.compile("(abc)\\1000");
 
     assertTrue(rm.matches("abc@0"));
     assertFalse(rm.matches("abcabc000"));
+  }
+
+  @Test
+  void backrefEightNineWithNoGroup() {
+    // \8 with 0 groups: no valid backref; \8 is literal '8'.
+    ReggieMatcher rm8 = Reggie.compile("\\8");
+    assertTrue(rm8.matches("8"));
+    assertFalse(rm8.matches("a"));
+
+    // \9 with 0 groups: no valid backref; \9 is literal '9'.
+    ReggieMatcher rm9 = Reggie.compile("\\9");
+    assertTrue(rm9.matches("9"));
+    assertFalse(rm9.matches("a"));
+
+    // \89 with 1 group (totalGroupCount=1 < 89): \8 is literal '8', '9' is parsed as subsequent
+    // token.
+    ReggieMatcher rm89 = Reggie.compile("(a)\\89");
+    assertTrue(rm89.matches("a89"));
   }
 
   @Test

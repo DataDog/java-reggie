@@ -3406,6 +3406,15 @@ public class DFAUnrolledBytecodeGenerator {
     return false;
   }
 
+  private boolean statesHaveAssertionChecks() {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.assertionChecks.isEmpty()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Generate bytecode to apply group actions for a specific state.
    *

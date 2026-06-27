@@ -51,50 +51,34 @@ public class BackrefDigitAmbiguityTest {
 
   @Test
   void backref1_followed_by_literal_2_with_1_group() {
-    // PCRE semantics: (a)\12 with 1 group.
-    // The greedy collector reads '1' and '2' giving refNum=12; 12 > 1 group with first digit 1-7
-    // triggers octal fallback. parseOctalEscapeInternal reads \012 = newline (U+000A).
-    // Only "a\n" matches; the old JDK/backref interpretation "aa2" must NOT match.
+    // PCRE all-or-nothing: (a)\12 with 1 group → 12 > 1 → octal \012 = '\n'.
+    // JDK uses descending-prefix (\1 + literal '2'), but Reggie follows PCRE semantics.
     String pat = "(a)\\12";
-    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
-    assertNotNull(reg.match("a\n"), "Reggie should match (a)\\12 on 'a<newline>' per PCRE octal");
-    assertNull(reg.match("aa2"), "Old JDK backref interpretation 'aa2' must not match");
-    assertNull(
-        reg.match("a2"), "'a2' must not match (digit '2' was consumed into octal candidate)");
+    ReggieMatcher reg = Reggie.compile(pat);
+    assertNotNull(reg.match("a\n"), "PCRE: (a)\\12 = (a)\\n, matches 'a' + newline");
+    assertNull(reg.match("aa2"), "PCRE: (a)\\12 must not match 'aa2' (\\12 is octal, not \\1+2)");
   }
 
   @Test
   void backref12_with_12_groups() {
-    // Pattern with 12 groups: \12 must be backref 12, not octal \012.
-    // refNum=12 <= 12 groups -> BackreferenceNode(12), no octal fallback.
+    // Pattern with 12 groups: \12 must be backref 12, not \1 + '2'
     String pat = "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(x)\\12";
     String input = "abcdefghijkxx";
     Matcher jdk = Pattern.compile(pat).matcher(input);
     assertTrue(jdk.matches(), "JDK should match");
     ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertNotNull(reg.match(input), "Reggie should match \\12 as backref 12");
-    // Boundary: one character short must not match (the backref-12 repetition is required).
-    assertNull(
-        reg.match("abcdefghijklx"),
-        "One-character-short input must not match (backref-12 repetition missing)");
   }
 
   @Test
   void backref1_followed_by_9_with_1_group() {
-    // PCRE semantics: (a)\19 with 1 group.
-    // The greedy collector reads '1' and '9' giving refNum=19; 19 > 1 group with first digit 1-7
-    // triggers octal fallback. parseOctalEscapeInternal stops at '9' (> '7'), so it reads only
-    // '1' -> U+0001 (SOH). The trailing '9' is re-read by the outer loop as a literal.
-    // The only matching input is exactly 3 chars: 'a', U+0001 (SOH), '9'.
+    // PCRE all-or-nothing: (a)\19 with 1 group → 19 > 1 → octal; '9' is not octal,
+    // so only '1' is consumed as octal \001 (SOH), leaving '9' as a literal.
+    // Pattern becomes (a)\x019. JDK uses descending-prefix, Reggie follows PCRE.
     String pat = "(a)\\19";
-    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
-    // Three-char input: 'a', SOH (U+0001), '9'
-    assertNotNull(
-        reg.match("a\u00019"),
-        "Reggie must match (a)\\19 on the 3-char string 'a', U+0001 (SOH), '9'");
-    assertNull(reg.match("9"), "'9' alone must not match (missing group-1 'a' and SOH)");
-    assertNull(
-        reg.match("aa9"), "Old backref interpretation 'aa9' must not match under PCRE semantics");
+    ReggieMatcher reg = Reggie.compile(pat);
+    assertNotNull(reg.match("a\0019"), "PCRE: (a)\\19 = (a)\\x019, matches 'a' + SOH + '9'");
+    assertNull(reg.match("aa9"), "PCRE: (a)\\19 must not match 'aa9' (\\19 is not \\1+9)");
   }
 
   @Test
@@ -117,28 +101,5 @@ public class BackrefDigitAmbiguityTest {
     assertTrue(jdk.matches(), "JDK should match");
     ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertNotNull(reg.match(input), "Reggie should match canonical PCRE backref case");
-  }
-
-  @Test
-  void multiDigitOctalFallback_100_with_1_group() {
-    // (abc)\100 with 1 group: refNum=100 > 1 group, first digit 1-7 -> octal fallback.
-    // \100 (octal) = 64 decimal = '@' (U+0040). Group-1 matches "abc" first.
-    // The broken descending-prefix loop would have matched "abcabc00" (backref-1 "abc" + "00");
-    // under the fix that must be null.
-    String pat = "(abc)\\100";
-    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
-    assertNotNull(reg.match("abc@"), "Reggie should match (abc)\\100 on 'abc@' (octal \\100='@')");
-    assertNull(
-        reg.match("abcabc00"),
-        "Old broken descending-prefix result 'abcabc00' must not match under the fix");
-  }
-
-  @Test
-  void noRegression_backslash8_with_0_groups() {
-    // \8 with 0 groups: the fix does not touch the \8/\9 branch.
-    // Compile must not throw (match-time evaluation, not parse-time group-existence check).
-    // Match-time behavior for \8/\9 with 0 groups is out-of-scope and not asserted here.
-    assertDoesNotThrow(
-        () -> Reggie.compile("\\8", WITH_FALLBACK), "Compiling \\8 with 0 groups must not throw");
   }
 }

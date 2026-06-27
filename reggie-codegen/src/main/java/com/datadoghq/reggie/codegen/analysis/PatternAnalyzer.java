@@ -461,12 +461,24 @@ public class PatternAnalyzer {
               lookaheadGreedyInfo,
               true /* groups in quantifier */);
         }
+        // Patterns with lookbehind AND capturing groups cannot recover inner group positions via
+        // substring re-match: the re-match strips the context before the match start, making the
+        // lookbehind fail on the bare substring. Route to NFA which tracks groups correctly.
+        if (nfa.getGroupCount() > 0 && hasLookbehind(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              lookaheadGreedyInfo,
+              hasGroupsInRepeatingQuantifiers(ast));
+        }
         int stateCount = dfa.getStateCount();
         if (stateCount < 20) {
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS, dfa, null, false, requiredLiterals);
         } else if (stateCount < 300) {
-          // Use switch-based DFA for 20-300 states (better cache behavior)
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_SWITCH_WITH_ASSERTIONS, dfa, null, false, requiredLiterals);
         } else {
@@ -1763,6 +1775,32 @@ public class PatternAnalyzer {
     if (node instanceof QuantifierNode) {
       return hasLookaheadInsideCapturingGroupHelper(((QuantifierNode) node).child, insideCapturing);
     }
+    return false;
+  }
+
+  private boolean hasLookbehind(RegexNode node) {
+    if (node instanceof AssertionNode) {
+      AssertionNode a = (AssertionNode) node;
+      if (a.type == AssertionNode.Type.POSITIVE_LOOKBEHIND
+          || a.type == AssertionNode.Type.NEGATIVE_LOOKBEHIND) {
+        return true;
+      }
+      return hasLookbehind(a.subPattern);
+    }
+    if (node instanceof GroupNode) return hasLookbehind(((GroupNode) node).child);
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasLookbehind(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasLookbehind(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) return hasLookbehind(((QuantifierNode) node).child);
     return false;
   }
 
