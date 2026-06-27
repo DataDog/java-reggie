@@ -18,8 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /** Ultra-simple debug test for subroutine. */
@@ -51,13 +51,10 @@ class SimpleSubroutineDebugTest {
     assertTrue(m.matches("(a)"), "Alternation in quantifier should work");
   }
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testSubroutineAlone() {
-    // Can '(?R)' call itself?
-    // Pattern 'a|(?R)' should match 'a' via first alternative
-    ReggieMatcher m = Reggie.compileAllowingFallback("a|(?R)");
-    assertTrue(m.matches("a"), "Subroutine in alternation - use first alt");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("a|(?R)"));
   }
 
   @Test
@@ -84,14 +81,9 @@ class SimpleSubroutineDebugTest {
   // because the greedy star tries to match, triggering the subroutine alternative.
   // This is a semantically invalid pattern - removed from tests.
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testComplexMinimal() {
-    // Minimal version of failing pattern
-    // Pattern: '((?:a|(?R))*)'
-    // Should match '(a)'
-    ReggieMatcher m = Reggie.compileAllowingFallback("\\((?:a|(?R))*\\)");
-    assertTrue(m.matches("()"), "Minimal complex - empty");
-    assertTrue(m.matches("(a)"), "Minimal complex - one char");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:a|(?R))*\\)"));
   }
 }

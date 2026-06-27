@@ -18,8 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -86,13 +86,9 @@ class DebugComplexPatternTest {
     assertTrue(m.matches("(ax)"), "Should match '(ax)' (both alternatives)");
   }
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testFullComplexPattern() {
-    ReggieMatcher m = Reggie.compileAllowingFallback("\\((?:[^()]|(?R))*\\)");
-    assertTrue(m.matches("()"), "Should match '()' (empty)");
-    assertTrue(m.matches("(a)"), "Should match '(a)' (single char)");
-    assertTrue(m.matches("(ab)"), "Should match '(ab)' (two chars)");
-    assertTrue(m.matches("((a))"), "Should match '((a))' (nested)");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
   }
 }

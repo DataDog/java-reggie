@@ -18,8 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 /** Focused debug on the subroutine interaction. */
@@ -30,14 +30,10 @@ class DebugSubroutineTest {
     RuntimeCompiler.clearCache();
   }
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testSimpleSubroutineInAlternation() {
-    // Pattern: a|(?R)
-    ReggieMatcher m = Reggie.compileAllowingFallback("a|(?R)");
-    assertTrue(m.matches("a"), "Should match 'a' (first alternative)");
-    // (?R) recursively calls the whole pattern, so it should also match 'a'
-    // (infinite recursion, but with base case 'a')
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("a|(?R)"));
   }
 
   @Test
@@ -61,27 +57,21 @@ class DebugSubroutineTest {
     assertTrue(m.matches("xaxayy"), "Should match 'xaxayy' (one recursion)");
   }
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testComplexPatternEmpty() {
-    // Pattern: \((?:[^()]|(?R))*\)
-    ReggieMatcher m = Reggie.compileAllowingFallback("\\((?:[^()]|(?R))*\\)");
-    assertTrue(m.matches("()"), "Should match '()' (zero times) - BASE CASE");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
   }
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testComplexPatternSingleChar() {
-    // Pattern: \((?:[^()]|(?R))*\)
-    ReggieMatcher m = Reggie.compileAllowingFallback("\\((?:[^()]|(?R))*\\)");
-    assertTrue(m.matches("(a)"), "Should match '(a)' (first alt once)");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
   }
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testComplexPatternNested() {
-    // Pattern: \((?:[^()]|(?R))*\)
-    ReggieMatcher m = Reggie.compileAllowingFallback("\\((?:[^()]|(?R))*\\)");
-    assertTrue(m.matches("((a))"), "Should match '((a))' (second alt - recursion)");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
   }
 }
