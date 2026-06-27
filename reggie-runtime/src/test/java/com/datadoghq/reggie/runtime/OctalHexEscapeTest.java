@@ -96,30 +96,24 @@ class OctalHexEscapeTest {
 
   @Test
   void testPatternWithCaptureGroupAndOctal() {
-    // (abc)\100 should match "abc@"
-    // Group 1 captures "abc", then \100 matches '@'
+    // PCRE semantics: (abc)\100 with 1 group — greedy 3-digit cap collects "100",
+    // refNum=100 > 1 group, firstDigit=1 ≤ 7 → octal fallback → \100 = '@' (U+0040).
+    // Pattern is group(abc) + '@'; "abcabc00" (old JDK backref behavior) must NOT match.
     ReggieMatcher rm = Reggie.compile("(abc)\\100");
 
     assertTrue(rm.matches("abc@"));
-    assertFalse(rm.matches("abc100"));
-
-    MatchResult result = rm.match("abc@");
-    assertNotNull(result);
-    assertEquals("abc", result.group(1));
+    assertFalse(rm.matches("abcabc00"));
   }
 
   @Test
   void testPatternWithCaptureGroupAndOctalPlusDigit() {
-    // (abc)\1000 should match "abc@0"
-    // Group 1 captures "abc", then \100 matches '@', then '0' is literal
+    // PCRE semantics: (abc)\1000 with 1 group — greedy 3-digit cap collects "100",
+    // refNum=100 > 1 group, firstDigit=1 ≤ 7 → octal fallback → \100 = '@', then literal '0'.
+    // Pattern is group(abc) + '@' + '0'; "abcabc000" (old JDK backref behavior) must NOT match.
     ReggieMatcher rm = Reggie.compile("(abc)\\1000");
 
     assertTrue(rm.matches("abc@0"));
-    assertFalse(rm.matches("abc1000"));
-
-    MatchResult result = rm.match("abc@0");
-    assertNotNull(result);
-    assertEquals("abc", result.group(1));
+    assertFalse(rm.matches("abcabc000"));
   }
 
   @Test

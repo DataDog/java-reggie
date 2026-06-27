@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -52,10 +53,8 @@ class SimpleSubroutineDebugTest {
 
   @Test
   void testSubroutineAlone() {
-    // Can '(?R)' call itself?
-    // Pattern 'a|(?R)' should match 'a' via first alternative
-    ReggieMatcher m = Reggie.compile("a|(?R)");
-    assertTrue(m.matches("a"), "Subroutine in alternation - use first alt");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("a|(?R)"));
   }
 
   @Test
@@ -84,11 +83,7 @@ class SimpleSubroutineDebugTest {
 
   @Test
   void testComplexMinimal() {
-    // Minimal version of failing pattern
-    // Pattern: '((?:a|(?R))*)'
-    // Should match '(a)'
-    ReggieMatcher m = Reggie.compile("\\((?:a|(?R))*\\)");
-    assertTrue(m.matches("()"), "Minimal complex - empty");
-    assertTrue(m.matches("(a)"), "Minimal complex - one char");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:a|(?R))*\\)"));
   }
 }

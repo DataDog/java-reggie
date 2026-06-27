@@ -15,8 +15,10 @@
  */
 package com.datadoghq.reggie.integration;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.integration.testdata.*;
 import com.datadoghq.reggie.integration.validation.CaptureGroupValidator;
 import com.datadoghq.reggie.integration.validation.CorrectnessValidator;
@@ -149,5 +151,30 @@ public class CorrectnessTest {
         report.getPassRate() >= 0.80,
         "Should pass >=80% of PCRE replacement tests, got: "
             + String.format("%.1f%%", report.getPassRate() * 100));
+  }
+
+  @Test
+  void posixPropertyAliases() {
+    // alpha — Unicode letters
+    assertTrue(Reggie.compile("\\p{alpha}").matches("a"), "\\p{alpha} matches a");
+    assertTrue(Reggie.compile("\\p{alpha}").matches("Z"), "\\p{alpha} matches Z");
+    assertFalse(Reggie.compile("\\p{alpha}").matches("1"), "\\p{alpha} rejects 1");
+
+    // digit — ASCII digits
+    assertTrue(Reggie.compile("\\p{digit}").matches("5"), "\\p{digit} matches 5");
+    assertFalse(Reggie.compile("\\p{digit}").matches("a"), "\\p{digit} rejects a");
+
+    // space — includes VT
+    assertTrue(Reggie.compile("\\p{space}").matches(""), "\\p{space} matches VT");
+    assertTrue(Reggie.compile("\\p{space}").matches(" "), "\\p{space} matches space");
+    assertFalse(Reggie.compile("\\p{space}").matches("a"), "\\p{space} rejects a");
+
+    // word — ASCII [0-9A-Za-z_]
+    assertTrue(Reggie.compile("\\p{word}").matches("_"), "\\p{word} matches underscore");
+    assertFalse(Reggie.compile("\\p{word}+").matches("é"), "\\p{word} rejects é");
+
+    // inside char class
+    assertTrue(Reggie.compile("[\\p{digit}]+").matches("123"), "[\\p{digit}]+ matches 123");
+    assertTrue(Reggie.compile("[\\p{alpha}]+").matches("abc"), "[\\p{alpha}]+ matches abc");
   }
 }

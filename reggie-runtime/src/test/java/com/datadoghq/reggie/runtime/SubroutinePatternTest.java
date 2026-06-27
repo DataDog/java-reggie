@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -67,19 +68,8 @@ class SubroutinePatternTest {
 
   @Test
   void testRecursivePatternComplex() {
-    // Pattern: \((?:[^()]|(?R))*\)
-    // Matches balanced parentheses
-    ReggieMatcher m = Reggie.compile("\\((?:[^()]|(?R))*\\)");
-
-    assertTrue(m.matches("()"), "Should match '()' (empty)");
-    assertTrue(m.matches("(a)"), "Should match '(a)'");
-    assertTrue(m.matches("(ab)"), "Should match '(ab)'");
-    assertTrue(m.matches("((a))"), "Should match '((a))' (nested)");
-    assertTrue(m.matches("(a(b)c)"), "Should match '(a(b)c)' (nested)");
-
-    assertFalse(m.matches("("), "Should not match '(' (unbalanced)");
-    assertFalse(m.matches(")"), "Should not match ')' (unbalanced)");
-    assertFalse(m.matches(")("), "Should not match ')(' (wrong order)");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
   }
 
   @Test

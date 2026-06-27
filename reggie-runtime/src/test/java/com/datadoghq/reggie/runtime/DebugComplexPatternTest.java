@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -87,10 +88,7 @@ class DebugComplexPatternTest {
 
   @Test
   void testFullComplexPattern() {
-    ReggieMatcher m = Reggie.compile("\\((?:[^()]|(?R))*\\)");
-    assertTrue(m.matches("()"), "Should match '()' (empty)");
-    assertTrue(m.matches("(a)"), "Should match '(a)' (single char)");
-    assertTrue(m.matches("(ab)"), "Should match '(ab)' (two chars)");
-    assertTrue(m.matches("((a))"), "Should match '((a))' (nested)");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
   }
 }

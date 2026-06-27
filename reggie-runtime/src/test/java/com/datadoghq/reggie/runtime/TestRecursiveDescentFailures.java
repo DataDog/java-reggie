@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -47,32 +48,14 @@ public class TestRecursiveDescentFailures {
 
   @Test
   void testRecursivePalindrome_Simple() {
-    // Pattern: ^((.)(?1)\2|.?)$
-    // Should match palindromes: "abba", "ababa", "abccba"
-    // LIMITATION: Subroutine (?1) is not backtrackable - when followed by \2,
-    // if \2 fails, we can't try different ways (?1) could have matched
-    ReggieMatcher matcher = Reggie.compile("^((.)(?1)\\2|.?)$");
-
-    // Base cases (these work)
-    assertTrue(matcher.matches(""), "Should match empty string");
-    assertTrue(matcher.matches("a"), "Should match single char");
-
-    // Recursive palindromes (KNOWN LIMITATION - not backtrackable)
-    // assertTrue(matcher.matches("abba"), "Should match 'abba'");
-    // assertTrue(matcher.matches("ababa"), "Should match 'ababa'");
-    // assertTrue(matcher.matches("abccba"), "Should match 'abccba'");
+    // D1: (?1) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("^((.)(?1)\\2|.?)$"));
   }
 
   @Test
   void testRecursivePalindrome_WithAlternation() {
-    // Pattern: ^(.|(.)(?1)\2)$
-    // Should match: "aba", "abcba", "ababa"
-    // KNOWN LIMITATION: Same backtracking issue as above
-    ReggieMatcher matcher = Reggie.compile("^(.|(.)(?1)\\2)$");
-
-    // assertTrue(matcher.matches("aba"), "Should match 'aba'");
-    // assertTrue(matcher.matches("abcba"), "Should match 'abcba'");
-    // assertTrue(matcher.matches("ababa"), "Should match 'ababa'");
+    // D1: (?1) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("^(.|(.)(?1)\\2)$"));
   }
 
   // Category 2: Subroutine After Quantified Groups

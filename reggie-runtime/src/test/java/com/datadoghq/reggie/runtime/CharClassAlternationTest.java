@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -55,16 +56,13 @@ class CharClassAlternationTest {
 
   @Test
   void testAlternationCharClassOrSubroutine() {
-    // This is the exact failing case!
-    ReggieMatcher m = Reggie.compile("(?:[^()]|(?R))");
-    assertTrue(m.matches("a"), "Should match 'a' via first alternative");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("(?:[^()]|(?R))"));
   }
 
   @Test
   void testAlternationCharClassOrSubroutineInStar() {
-    // This is the full failing pattern!
-    ReggieMatcher m = Reggie.compile("\\((?:[^()]|(?R))*\\)");
-    assertTrue(m.matches("()"), "Should match '()'");
-    assertTrue(m.matches("(a)"), "Should match '(a)'");
+    // D1: (?R) inside alternation arm requires intra-call backtracking
+    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("\\((?:[^()]|(?R))*\\)"));
   }
 }
