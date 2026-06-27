@@ -17,11 +17,13 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -191,5 +193,35 @@ public class LookaroundEngineNativeTest {
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Issue #28: narrow B1 guard investigation — position-only lookaheads in quantifiers
+  // These tests document the expected end-state once B1 is fully resolved.
+  // Spike result (2026-06-26): disabling the broad B1 guard causes wrong results —
+  // DFA carries the assertion NFA state into the accepting loop state and re-evaluates
+  // the lookahead as an acceptance predicate instead of a next-iteration gate.
+  // (?:(?=\d)\d)+ on "1" returns false (wrong); on "123" returns false (wrong).
+  // The broad B1 guard is still needed; the narrow guard is additive for future use.
+  // ---------------------------------------------------------------------------
+
+  @Disabled(
+      "NEEDS-RND: broad B1 guard still required — DFA loop-state assertion re-evaluation bug;"
+          + " see LookaroundEngineNativeTest class Javadoc for root cause details")
+  @Test
+  void lookaheadInQuantifier_basic() {
+    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+");
+    assertTrue(m.find("123"), "(?:(?=\\d)\\d)+ must find match in '123'");
+    assertEquals("123", m.findMatch("123").group(0));
+    assertFalse(m.find("abc"), "(?:(?=\\d)\\d)+ must not match 'abc'");
+  }
+
+  @Disabled(
+      "NEEDS-RND: broad B1 guard still required — DFA loop-state assertion re-evaluation bug;"
+          + " see LookaroundEngineNativeTest class Javadoc for root cause details")
+  @Test
+  void lookaheadInQuantifier_onInput1() {
+    ReggieMatcher m = Reggie.compile("(?:(?=\\d)\\d)+");
+    assertTrue(m.find("1"), "(?:(?=\\d)\\d)+ on '1' must be true");
   }
 }

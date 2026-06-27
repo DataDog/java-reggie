@@ -590,17 +590,16 @@ public class RegexParser {
 
           // Greedily collect up to 3 digits total (PCRE limits backref/octal to 3 digits)
           int refNum = firstDigit;
-          for (int digitsConsumed = 1;
-              digitsConsumed < 3 && hasMore() && Character.isDigit(peek());
-              digitsConsumed++) {
+          int digitsConsumed = 1;
+          while (hasMore() && Character.isDigit(peek()) && digitsConsumed < 3) {
             refNum = refNum * 10 + (peek() - '0');
             consume();
+            digitsConsumed++;
           }
 
-          // PCRE: the full digit run is the only backreference candidate.
-          // refNum >= firstDigit >= 1 by construction (firstDigit is 1-9), so the
-          // "<= totalGroupCount" test is the only meaningful guard; no ">0" check needed.
-          if (refNum <= totalGroupCount) {
+          // All-or-nothing: if the full collected number is a valid backref, use it.
+          // pos is already correctly positioned past all greedily-consumed digits.
+          if (refNum <= totalGroupCount && refNum > 0) {
             return new BackreferenceNode(refNum);
           }
 
@@ -611,10 +610,10 @@ public class RegexParser {
             return parseOctalEscape();
           }
 
-          // First digit is 8 or 9: single-digit backreference (\8 or \9).
-          // Backtrack any extra digits consumed.
+          // First digit is 8 or 9 and no valid backref: treat as literal character '8' or '9'.
+          // Consume only the first digit; any extra digits already consumed are left in stream.
           pos = posBeforeFirst + 1; // restore to position just after the first digit
-          return new BackreferenceNode(firstDigit);
+          return new LiteralNode((char) ('0' + firstDigit));
         }
       case 'k':
         // Named backreference: \k<name> or \k'name'

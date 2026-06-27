@@ -437,18 +437,32 @@ public class DFASwitchBytecodeGenerator {
       Label rejectLabel,
       LocalVarAllocator allocator,
       boolean helperMode) {
-    // Check assertions BEFORE character transitions (critical for correctness)
-    // Note: posVar is AFTER pos++ (incremented in main loop before switch)
-    // generateAssertionCheck handles the position adjustment internally
-    if (!state.accepting && !state.assertionChecks.isEmpty()) {
+    // Lookbehind assertions are always transition guards: their outcome cannot change by consuming
+    // more input. Check them eagerly on all states (accepting and non-accepting).
+    // Lookahead assertions on accepting states are acceptance predicates deferred to the
+    // end-of-input or acceptance-check block; they must not gate outgoing transitions.
+    // For non-accepting states all assertions (both lookahead and lookbehind) gate transitions.
+    // Note: posVar is AFTER pos++ (incremented in main loop before switch);
+    // generateAssertionCheck adjusts internally (evaluates at posVar-1).
+    boolean hasLookbehindAssertions = false;
+    for (AssertionCheck a : state.assertionChecks) {
+      if (a.isLookbehind()) {
+        hasLookbehindAssertions = true;
+        break;
+      }
+    }
+    boolean hasNonAcceptingLookahead = !state.accepting && !state.assertionChecks.isEmpty();
+    if ((hasLookbehindAssertions || hasNonAcceptingLookahead) && !state.assertionChecks.isEmpty()) {
       Label assertionFailed = new Label();
       Label assertionsPassed = new Label();
 
       for (AssertionCheck assertion : state.assertionChecks) {
-        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+        if (assertion.isLookbehind() || !state.accepting) {
+          generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+        }
       }
 
-      // All assertions passed - continue to character transitions
+      // All applicable assertions passed - continue to character transitions
       mv.visitJumpInsn(GOTO, assertionsPassed);
 
       // Assertion failed - reject
@@ -788,7 +802,18 @@ public class DFASwitchBytecodeGenerator {
     }
   }
 
-  /** Generate code to check if current state is accepting, including per-state assertions. */
+  /**
+   * Generate code to check if current state is accepting, including per-state assertions.
+   *
+   * <p>This method is called after the main character-consuming loop exits (i.e. end-of-input). At
+   * that point the current state was set as the TARGET of the last character transition, which
+   * means its per-state case code in {@code generateStateCaseCode} has not yet run for the current
+   * position. All assertions — both lookbehind and lookahead — must therefore be evaluated here.
+   *
+   * <p>Lookbehind: check what is immediately before the acceptance position (posVar = length).
+   * Lookahead: check what follows the acceptance position (posVar = length = end-of-input, so a
+   * positive lookahead will generally fail unless the pattern uses an offset).
+   */
   private void generateAcceptCheckWithAssertions(
       MethodVisitor mv, int stateVar, int posVar, LocalVarAllocator allocator) {
     Label notAccepting = new Label();
@@ -798,6 +823,9 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
+      // Check all assertions (both lookbehind and lookahead): the accepting state was the
+      // transition target on the last character, so generateStateCaseCode never ran its case for
+      // this position. None of its assertions were checked as transition guards.
       for (AssertionCheck assertion : acceptState.assertionChecks) {
         generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, checkNext, allocator);
       }
@@ -1419,9 +1447,13 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Found accepting state — gate acceptance on per-state assertions/anchor conditions. If a
-      // lookahead assertion fails, keep consuming via outgoing transitions instead of rejecting the
-      // whole start position; a later, longer prefix may satisfy the assertion.
+      // Found accepting state — gate acceptance on per-state assertions/anchor conditions.
+      // If any assertion fails, go to continueMatching to try a longer match (the assertion may
+      // be satisfied at a later position, e.g. a lookahead that needs more context or a lookbehind
+      // whose required predecessor character may appear at the end of a longer match).
+      // The accepting state was set as the TARGET of the previous transition, so its
+      // generateStateCaseCode has not yet run — none of its assertions were checked as transition
+      // guards. Check all assertions (both lookbehind and lookahead) here.
       Label continueMatching = new Label();
       for (AssertionCheck assertion : acceptState.assertionChecks) {
         generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, continueMatching, allocator);

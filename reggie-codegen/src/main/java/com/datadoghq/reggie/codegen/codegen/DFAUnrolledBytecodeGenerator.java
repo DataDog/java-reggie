@@ -276,11 +276,16 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // Assertions on non-accepting states are transition guards. Assertions on accepting states gate
-    // only acceptance; if they fail before the end of input, outgoing transitions must still be
-    // tried so a longer match can satisfy the final assertion.
-    if (!state.accepting && !state.assertionChecks.isEmpty()) {
-      for (AssertionCheck assertion : state.assertionChecks) {
+    // Lookbehind assertions are always transition guards: they check what is already behind the
+    // current position, so the outcome cannot change by consuming more characters. Check them
+    // eagerly on both accepting and non-accepting states.
+    // Lookahead assertions on accepting states are acceptance predicates: they peek at what comes
+    // after the current position and may only be satisfiable at the true match-end. Defer them to
+    // the endOfInput block (alongside emitAcceptanceAnchorChecks) so that outgoing transitions are
+    // still tried when the lookahead fails mid-match.
+    boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
+    for (AssertionCheck assertion : state.assertionChecks) {
+      if (assertion.isLookbehind() || !state.accepting) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
@@ -324,11 +329,14 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // Handle end of input (with per-state assertion/acceptance condition gating)
+    // Handle end of input (with per-state assertion/acceptance condition gating).
+    // Lookahead assertions on accepting states are evaluated here as acceptance predicates.
     mv.visitLabel(endOfInput);
     if (state.accepting) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+        if (assertion.isLookahead()) {
+          generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+        }
       }
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
@@ -347,8 +355,8 @@ public class DFAUnrolledBytecodeGenerator {
     }
     mv.visitInsn(IRETURN);
 
-    // Assertion failed label (if assertions were present)
-    if (!state.assertionChecks.isEmpty()) {
+    // Assertion failed label (if any assertions were emitted as transition guards)
+    if (hasAnyAssertions) {
       mv.visitLabel(assertionFailed);
       mv.visitInsn(ICONST_0);
       mv.visitInsn(IRETURN);
@@ -1055,13 +1063,42 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // For accepting states, assertions gate acceptance only. If they fail, the DFA must still try
-    // outgoing transitions: e.g. (?<=\\[)[^\\]]+(?=\\]) should not reject after seeing just "v"
-    // in "[value]" because the trailing lookahead fails there; it should keep consuming until ']'.
+    // Lookbehind assertions are always transition guards: they check position-backward context that
+    // cannot be satisfied by consuming more characters. Reject immediately on failure.
+    // Lookahead assertions on accepting states are acceptance predicates: e.g.
+    // (?<=\\[)[^\\]]+(?=\\])
+    // should not reject after seeing just "v" in "[value]" because the trailing lookahead fails
+    // there; the DFA must keep consuming until ']'. Check lookahead only at the acceptance point.
+    boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
+    for (AssertionCheck assertion : state.assertionChecks) {
+      // Defer lookahead assertions only on non-start accepting states: those are the states where
+      // the lookahead may fail mid-match but become satisfiable later. For lookbehind,
+      // non-accepting
+      // states, or the start state, check eagerly as a transition guard.
+      boolean deferToAcceptance =
+          assertion.isLookahead() && state.accepting && state != dfa.getStartState();
+      if (!deferToAcceptance) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+      }
+    }
+
+    // For non-start accepting states: check lookahead assertions as acceptance predicates.
+    // If they pass, the DFA accepts here (return true). If they fail, continue consuming.
     if (state.accepting && state != dfa.getStartState()) {
+      boolean hasLookaheadAssertions = false;
+      for (AssertionCheck a : state.assertionChecks) {
+        if (a.isLookahead()) {
+          hasLookaheadAssertions = true;
+          break;
+        }
+      }
       Label continueMatching = new Label();
-      for (AssertionCheck assertion : state.assertionChecks) {
-        generateAssertionCheck(mv, assertion, posVar, continueMatching, allocator);
+      if (hasLookaheadAssertions) {
+        for (AssertionCheck assertion : state.assertionChecks) {
+          if (assertion.isLookahead()) {
+            generateAssertionCheck(mv, assertion, posVar, continueMatching, allocator);
+          }
+        }
       }
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
@@ -1072,10 +1109,6 @@ public class DFAUnrolledBytecodeGenerator {
         mv.visitInsn(IRETURN);
       }
       mv.visitLabel(continueMatching);
-    } else if (!state.assertionChecks.isEmpty()) {
-      for (AssertionCheck assertion : state.assertionChecks) {
-        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
-      }
     }
 
     // if (pos >= input.length()) goto endOfInput
@@ -1113,11 +1146,20 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // End of input - check if accepting (respecting per-state anchor conditions). Accepting states
-    // with assertions were already evaluated before the transition block; if those assertions
-    // failed and we got here, the match must fail rather than accepting at end-of-input.
+    // End of input for an accepting state: if there are lookahead assertions they were already
+    // evaluated in the acceptance block above (before trying transitions). If they passed, we
+    // returned true already. If they failed we went to continueMatching and will fail here because
+    // no more transitions can satisfy them. Accept only if there are no deferred lookahead
+    // assertions (lookbehind guards already passed to reach here).
+    boolean hasLookaheadAssertions = false;
+    for (AssertionCheck a : state.assertionChecks) {
+      if (a.isLookahead()) {
+        hasLookaheadAssertions = true;
+        break;
+      }
+    }
     mv.visitLabel(endOfInput);
-    if (state.accepting && state.assertionChecks.isEmpty()) {
+    if (state.accepting && !hasLookaheadAssertions) {
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
       } else {
@@ -1135,8 +1177,8 @@ public class DFAUnrolledBytecodeGenerator {
     }
     mv.visitInsn(IRETURN);
 
-    // Assertion failed - return false
-    if (!state.assertionChecks.isEmpty()) {
+    // Assertion failed - return false (signal to findFrom to increment start position)
+    if (hasAnyAssertions) {
       mv.visitLabel(assertionFailed);
       mv.visitInsn(ICONST_0);
       mv.visitInsn(IRETURN);
@@ -1825,6 +1867,10 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ASTORE, 6); // matchedSubstring
 
     // MatchResult groupResult = match(matchedSubstring);
+    // NOTE: For patterns with lookaround assertions, match(substring) may return null because the
+    // substring lacks the surrounding context needed to evaluate the assertions. When that happens
+    // we fall back to the known match bounds [matchStart, longestEnd] for group 0 and -1 for any
+    // inner groups (losing per-group positions, but correctly reporting the overall match).
     mv.visitVarInsn(ALOAD, 0); // this
     mv.visitVarInsn(ALOAD, 6); // matchedSubstring
     mv.visitMethodInsn(
@@ -1846,6 +1892,35 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitVarInsn(ASTORE, 9); // ends array
 
+    // If groupResult is null (e.g., assertion pattern where substring lacks context),
+    // use the known bounds: group 0 = [matchStart, longestEnd], inner groups = -1.
+    Label groupResultNotNull = new Label();
+    Label groupsPopulated = new Label();
+    mv.visitVarInsn(ALOAD, 7); // groupResult
+    mv.visitJumpInsn(IFNONNULL, groupResultNotNull);
+
+    // groupResult == null: group 0 = [matchStart, longestEnd], inner groups = -1
+    mv.visitVarInsn(ALOAD, 8); // starts
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 3); // matchStart
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, 9); // ends
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 4); // longestEnd
+    mv.visitInsn(IASTORE);
+    for (int i = 1; i <= groupCount; i++) {
+      mv.visitVarInsn(ALOAD, 8);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, 9);
+      pushInt(mv, i);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitJumpInsn(GOTO, groupsPopulated);
+
+    mv.visitLabel(groupResultNotNull);
     // Copy and adjust group positions
     for (int i = 0; i <= groupCount; i++) {
       // starts[i] = groupResult.start(i) + matchStart;
@@ -1890,6 +1965,7 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitLabel(doneEndAdjust);
       mv.visitInsn(IASTORE);
     }
+    mv.visitLabel(groupsPopulated);
 
     // Create MatchResultImpl with adjusted positions
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
@@ -2006,35 +2082,79 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // Generate assertion checks before recording accepting position so a failed
-    // assertion does not advance longestMatchEnd.
-    if (!state.assertionChecks.isEmpty()) {
-      for (AssertionCheck assertion : state.assertionChecks) {
+    // Lookbehind assertions are always transition guards: their result cannot change by consuming
+    // more input. Check them eagerly on all states. A failed lookbehind jumps to assertionFailed
+    // which returns longestMatchEnd (the best match seen so far).
+    // For non-accepting states, all assertions (both lookahead and lookbehind) are transition
+    // guards.
+    boolean hasLookaheadOnAccepting = false;
+    boolean needsAssertionFailedLabel = false;
+    for (AssertionCheck assertion : state.assertionChecks) {
+      if (assertion.isLookbehind() || !state.accepting) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+        needsAssertionFailedLabel = true;
+      } else {
+        hasLookaheadOnAccepting = true;
       }
     }
 
-    // If this is an accepting state, record current position (after assertions pass).
-    // Per-state acceptance conditions must be satisfied before recording the position.
-    // Priority-cut states return immediately after recording (accepting thread wins).
+    // Record longestMatchEnd for accepting states.
+    // For states with lookahead assertions: gate the recording on the lookahead — if the assertion
+    // fails, jump to skipRecord (skip the update) and still try outgoing transitions. A later,
+    // longer prefix may bring the lookahead into view (e.g. a+(?=b) on "aab": the lookahead fails
+    // at pos=1 but passes at pos=2 after consuming the second 'a').
+    // For states without lookahead: record unconditionally.
+    // Per-state acceptance anchor conditions gate the update independently.
+    // Priority-cut states return immediately on acceptance (DFA first-match wins).
     if (state.accepting) {
-      if (state.acceptanceAnchorConditions.isEmpty()) {
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-        if (state.acceptIsPriorityCut) {
-          mv.visitVarInsn(ILOAD, longestMatchEndVar);
-          mv.visitInsn(IRETURN);
-        }
-      } else {
+      if (hasLookaheadOnAccepting) {
         Label skipRecord = new Label();
-        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecord);
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-        if (state.acceptIsPriorityCut) {
-          mv.visitVarInsn(ILOAD, longestMatchEndVar);
-          mv.visitInsn(IRETURN);
+        for (AssertionCheck assertion : state.assertionChecks) {
+          if (assertion.isLookahead()) {
+            generateAssertionCheck(mv, assertion, posVar, skipRecord, allocator);
+          }
+        }
+        // Lookahead passed: record position (gated by anchor conditions if any).
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+        } else {
+          Label skipRecordAnchor = new Label();
+          emitAcceptanceAnchorChecks(
+              mv, state.acceptanceAnchorConditions, posVar, skipRecordAnchor);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+          mv.visitLabel(skipRecordAnchor);
         }
         mv.visitLabel(skipRecord);
+      } else {
+        // No lookahead: always record.
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+        } else {
+          Label skipRecord = new Label();
+          emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecord);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+          mv.visitLabel(skipRecord);
+        }
       }
     }
 
@@ -2162,19 +2282,24 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitLabel(nextCheck);
     }
 
-    // No transition matched - dead state, return longestMatchEnd
+    // No transition matched — return the best match seen so far. The lookahead (if any) was already
+    // checked eagerly at state entry and gated longestMatchEnd; no re-evaluation needed here.
     mv.visitVarInsn(ILOAD, longestMatchEndVar);
     mv.visitInsn(IRETURN);
 
-    // Handle end of input - return longestMatchEnd
+    // Handle end of input — return the best match. The lookahead was already checked at state
+    // entry each time this state was entered, so longestMatchEnd is already correct.
     mv.visitLabel(endOfInput);
     mv.visitVarInsn(ILOAD, longestMatchEndVar);
     mv.visitInsn(IRETURN);
 
-    // Handle assertion failure
-    mv.visitLabel(assertionFailed);
-    mv.visitVarInsn(ILOAD, longestMatchEndVar);
-    mv.visitInsn(IRETURN);
+    // Handle assertion failure: targeted by lookbehind guards and non-accepting-state assertion
+    // guards (both checked eagerly). Lookahead on accepting states uses skipRecord, not this label.
+    if (needsAssertionFailedLabel) {
+      mv.visitLabel(assertionFailed);
+      mv.visitVarInsn(ILOAD, longestMatchEndVar);
+      mv.visitInsn(IRETURN);
+    }
   }
 
   /**
@@ -3276,6 +3401,15 @@ public class DFAUnrolledBytecodeGenerator {
         if (assertion.hasGroups()) {
           return true;
         }
+      }
+    }
+    return false;
+  }
+
+  private boolean statesHaveAssertionChecks() {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.assertionChecks.isEmpty()) {
+        return true;
       }
     }
     return false;
