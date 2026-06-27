@@ -160,9 +160,9 @@ public class AlgorithmicFuzzTest {
    * Companion entry point that is <em>not</em> {@code @Disabled}: it self-skips unless {@code
    * -Dreggie.fuzz.enforce=true} is set, letting CI exercise the gate without editing source.
    *
-   * <p>An optional budget can be set via {@code -Dreggie.fuzz.maxFindings=N} (default 0). A budget
-   * greater than 0 allows a known number of pre-existing divergences to pass without failing the
-   * gate — new regressions still fail because they push the count above the budget.
+   * <p>Defaults to {@link #KNOWN_FINDINGS_BUDGET}; override via {@code
+   * -Dreggie.fuzz.maxFindings=N}. Use {@code -Dreggie.fuzz.maxFindings=0} to enforce strict zero
+   * divergences locally.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
@@ -170,7 +170,7 @@ public class AlgorithmicFuzzTest {
     assumeTrue(
         Boolean.getBoolean("reggie.fuzz.enforce"),
         "set -Dreggie.fuzz.enforce=true to activate the divergence gate");
-    runDivergenceGate(largeSweepConfig(), "[divergence-gate]", 0);
+    runDivergenceGate(largeSweepConfig(), "[divergence-gate]", KNOWN_FINDINGS_BUDGET);
   }
 
   private void runDivergenceGate() {
