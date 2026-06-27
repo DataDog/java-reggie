@@ -216,6 +216,25 @@ public final class FallbackPatternDetector {
           + "and exact quantifier prefix nodes";
     }
 
+    // B12-overlap: a greedy unbounded prefix whose charset overlaps with the backref capturing
+    // group's first charset cannot be split correctly without backtracking (e.g. a*(a+)\1: a*
+    // consumes all 'a's leaving none for (a+)). The generator makes a greedy non-backtracking
+    // choice, producing wrong results. Route to JDK.
+    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
+        && hasGreedyPrefixOverlappingBackrefGroup(ast)) {
+      return "variable-capture backref: greedy prefix charset overlaps capturing group — "
+          + "correct split requires backtracking";
+    }
+
+    // B12-nullable: an unbounded quantifier whose child is nullable (e.g. (?:a*)* or (?:a*)+)
+    // spins forever when used as a prefix before a backref group, because each iteration can match
+    // empty and the loop never advances. Route to JDK.
+    if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
+        && hasNullableChildInUnboundedPrefixQuantifier(ast)) {
+      return "variable-capture backref: nullable child in unbounded prefix quantifier causes "
+          + "infinite loop";
+    }
+
     // B13 [NEEDS-RND]: Outer quantifier wraps the entire capturing group: (X)+\N or (X){n,}\N.
     // The backref engine cannot determine the correct last-iteration capture without
     // iteration-state
@@ -1134,6 +1153,90 @@ public final class FallbackPatternDetector {
       return true; // unknown prefix node type
     }
     return false;
+  }
+
+  /**
+   * Returns true if the VARIABLE_CAPTURE_BACKREF pattern has a greedy unbounded prefix whose
+   * charset overlaps the charset of the first backref-group (e.g. {@code a*(a+)\1}). When the
+   * prefix and the group share characters, the generator's greedy non-backtracking split is wrong.
+   */
+  private static boolean hasGreedyPrefixOverlappingBackrefGroup(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    if (!(ast instanceof ConcatNode concat)) return false;
+    List<RegexNode> children = concat.children;
+    for (int i = 0; i < children.size(); i++) {
+      RegexNode child = children.get(i);
+      if (child instanceof AnchorNode) continue;
+      if (child instanceof GroupNode g && g.capturing && backrefNums.contains(g.groupNumber)) {
+        return false; // reached the backref group with no overlapping prefix found
+      }
+      if (child instanceof QuantifierNode q && q.greedy && q.max == -1) {
+        CharSet prefixChars = charSetOf(q.child);
+        if (prefixChars != null) {
+          // Look ahead to the backref group's charset
+          for (int j = i + 1; j < children.size(); j++) {
+            RegexNode sib = children.get(j);
+            if (sib instanceof AnchorNode) continue;
+            if (sib instanceof GroupNode g && g.capturing && backrefNums.contains(g.groupNumber)) {
+              CharSet groupChars = firstCharSetOf(g.child);
+              if (groupChars == null || prefixChars.intersects(groupChars)) return true;
+            }
+            break;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any prefix quantifier before the first backref group in a VARIABLE_CAPTURE_BACKREF
+   * pattern has a nullable child (e.g. {@code (?:a*)*} or {@code (?:a*)+}). Such patterns loop
+   * forever because each iteration can match empty and the position never advances.
+   */
+  private static boolean hasNullableChildInUnboundedPrefixQuantifier(RegexNode ast) {
+    Set<Integer> backrefNums = new HashSet<>();
+    collectBackrefsInSubtree(ast, backrefNums);
+    if (backrefNums.isEmpty()) return false;
+    if (!(ast instanceof ConcatNode concat)) return false;
+    for (RegexNode child : concat.children) {
+      if (child instanceof AnchorNode) continue;
+      if (child instanceof GroupNode g && g.capturing && backrefNums.contains(g.groupNumber))
+        return false;
+      if (child instanceof QuantifierNode q && q.max == -1 && isNullableNode(q.child)) return true;
+    }
+    return false;
+  }
+
+  private static boolean isNullableNode(RegexNode node) {
+    return Boolean.TRUE.equals(node.accept(NullableVisitor.INSTANCE));
+  }
+
+  private static final class NullableVisitor implements RegexVisitor<Boolean> {
+    static final NullableVisitor INSTANCE = new NullableVisitor();
+
+    @Override public Boolean visitGroup(GroupNode node) { return node.child.accept(this); }
+    @Override public Boolean visitQuantifier(QuantifierNode node) {
+      return node.min == 0 || node.child.accept(this);
+    }
+    @Override public Boolean visitConcat(ConcatNode node) {
+      for (RegexNode child : node.children) if (!child.accept(this)) return false;
+      return true;
+    }
+    @Override public Boolean visitAlternation(AlternationNode node) {
+      for (RegexNode alt : node.alternatives) if (alt.accept(this)) return true;
+      return false;
+    }
+    @Override public Boolean visitLiteral(LiteralNode node) { return false; }
+    @Override public Boolean visitCharClass(CharClassNode node) { return false; }
+    @Override public Boolean visitAnchor(AnchorNode node) { return false; }
+    @Override public Boolean visitBackreference(BackreferenceNode node) { return false; }
+    @Override public Boolean visitAssertion(AssertionNode node) { return false; }
+    @Override public Boolean visitSubroutine(SubroutineNode node) { return false; }
+    @Override public Boolean visitConditional(ConditionalNode node) { return false; }
+    @Override public Boolean visitBranchReset(BranchResetNode node) { return false; }
   }
 
   /** Returns the {@link CharSet} accepted by a simple node, or {@code null} if not determinable. */
