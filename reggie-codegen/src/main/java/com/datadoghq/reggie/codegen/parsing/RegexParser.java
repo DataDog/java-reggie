@@ -590,32 +590,18 @@ public class RegexParser {
 
           // Greedily collect up to 3 digits total (PCRE limits backref/octal to 3 digits)
           int refNum = firstDigit;
-          int digitsConsumed = 1;
-          while (hasMore() && Character.isDigit(peek()) && digitsConsumed < 3) {
+          for (int digitsConsumed = 1;
+              digitsConsumed < 3 && hasMore() && Character.isDigit(peek());
+              digitsConsumed++) {
             refNum = refNum * 10 + (peek() - '0');
             consume();
-            digitsConsumed++;
           }
 
-          // Descending prefix: try longest valid backref first (PCRE semantics).
-          // Reconstruct individual digits for prefix decomposition.
-          int[] digits = new int[digitsConsumed];
-          {
-            int tmp = refNum;
-            for (int i = digitsConsumed - 1; i >= 0; i--) {
-              digits[i] = tmp % 10;
-              tmp /= 10;
-            }
-          }
-          for (int len = digitsConsumed; len >= 1; len--) {
-            int partial = 0;
-            for (int i = 0; i < len; i++) {
-              partial = partial * 10 + digits[i];
-            }
-            if (partial <= totalGroupCount && partial > 0) {
-              pos = posBeforeFirst + len;
-              return new BackreferenceNode(partial);
-            }
+          // PCRE: the full digit run is the only backreference candidate.
+          // refNum >= firstDigit >= 1 by construction (firstDigit is 1-9), so the
+          // "<= totalGroupCount" test is the only meaningful guard; no ">0" check needed.
+          if (refNum <= totalGroupCount) {
+            return new BackreferenceNode(refNum);
           }
 
           // No valid backref found. Try octal if first digit is 1-7:
