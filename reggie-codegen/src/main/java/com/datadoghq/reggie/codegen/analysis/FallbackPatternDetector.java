@@ -77,7 +77,8 @@ public final class FallbackPatternDetector {
       // Even after B1 is resolved for position-only lookaheads, assertions that read a backref
       // (e.g. (?:(?=\1)\d)+) require per-iteration capture state that neither the DFA nor the NFA
       // engine currently tracks. This guard is additive: when the broad B1 guard above is
-      // eventually removed, this narrow guard ensures capture-referencing assertions still fall back.
+      // eventually removed, this narrow guard ensures capture-referencing assertions still fall
+      // back.
       if (hasAssertionReferencingCaptureInQuantifier(ast)) {
         return "assertion inside quantifier references captured group value";
       }
@@ -111,7 +112,6 @@ public final class FallbackPatternDetector {
         return "end-anchor before non-newline consumer: DFA does not model this path correctly";
       }
     }
-
 
     // B5 [PARTIALLY-FIXED]: RECURSIVE_DESCENT uses a greedy-first descent parser with limited
     // backtracking (quantifiers followed by fixed suffixes). It does NOT implement general
@@ -1192,9 +1192,10 @@ public final class FallbackPatternDetector {
   }
 
   /**
-   * Returns true if any prefix quantifier before the first backref group in a VARIABLE_CAPTURE_BACKREF
-   * pattern has a nullable child (e.g. {@code (?:a*)*} or {@code (?:a*)+}). Such patterns loop
-   * forever because each iteration can match empty and the position never advances.
+   * Returns true if any prefix quantifier before the first backref group in a
+   * VARIABLE_CAPTURE_BACKREF pattern has a nullable child (e.g. {@code (?:a*)*} or {@code
+   * (?:a*)+}). Such patterns loop forever because each iteration can match empty and the position
+   * never advances.
    */
   private static boolean hasNullableChildInUnboundedPrefixQuantifier(RegexNode ast) {
     Set<Integer> backrefNums = new HashSet<>();
@@ -1217,26 +1218,67 @@ public final class FallbackPatternDetector {
   private static final class NullableVisitor implements RegexVisitor<Boolean> {
     static final NullableVisitor INSTANCE = new NullableVisitor();
 
-    @Override public Boolean visitGroup(GroupNode node) { return node.child.accept(this); }
-    @Override public Boolean visitQuantifier(QuantifierNode node) {
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
       return node.min == 0 || node.child.accept(this);
     }
-    @Override public Boolean visitConcat(ConcatNode node) {
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
       for (RegexNode child : node.children) if (!child.accept(this)) return false;
       return true;
     }
-    @Override public Boolean visitAlternation(AlternationNode node) {
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
       for (RegexNode alt : node.alternatives) if (alt.accept(this)) return true;
       return false;
     }
-    @Override public Boolean visitLiteral(LiteralNode node) { return false; }
-    @Override public Boolean visitCharClass(CharClassNode node) { return false; }
-    @Override public Boolean visitAnchor(AnchorNode node) { return false; }
-    @Override public Boolean visitBackreference(BackreferenceNode node) { return false; }
-    @Override public Boolean visitAssertion(AssertionNode node) { return false; }
-    @Override public Boolean visitSubroutine(SubroutineNode node) { return false; }
-    @Override public Boolean visitConditional(ConditionalNode node) { return false; }
-    @Override public Boolean visitBranchReset(BranchResetNode node) { return false; }
+
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return false;
+    }
   }
 
   /** Returns the {@link CharSet} accepted by a simple node, or {@code null} if not determinable. */

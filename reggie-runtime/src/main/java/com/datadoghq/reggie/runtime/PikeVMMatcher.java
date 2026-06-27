@@ -128,7 +128,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private final LazyDFACache matchesDfa;
   private final NfaStep matchesStep;
 
-
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
     super(pattern);
