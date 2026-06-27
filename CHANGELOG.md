@@ -2,13 +2,6 @@
 
 ## [Unreleased]
 
-## [0.5.0-SNAPSHOT] - unreleased
-
-*In progress: pre-1.0.0 readiness items (correctness guarantee docs, thread-safety tests,
-fuzz gap disclosure, PCRE number reconciliation, release tooling fixes).*
-
-## [0.4.0] - 2026-06-20
-
 - feat: ReggieOption/@RegexPattern fallback substrate + PIKEVM routing groundwork
 - feat: split oversized DFA-switch bytecode to avoid method-too-large failures
 - feat: enable zero-divergence fuzz gate permanently (divergence budget 18→78→69 as capture oracle expanded then Class A nullable-alternation ratcheted back)
