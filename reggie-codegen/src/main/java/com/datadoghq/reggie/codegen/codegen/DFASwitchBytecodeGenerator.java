@@ -804,8 +804,15 @@ public class DFASwitchBytecodeGenerator {
 
   /**
    * Generate code to check if current state is accepting, including per-state assertions.
-   * Lookbehind assertions are transition guards already checked in generateStateCaseCode; only
-   * lookahead assertions need to be evaluated here as acceptance predicates.
+   *
+   * <p>This method is called after the main character-consuming loop exits (i.e. end-of-input). At
+   * that point the current state was set as the TARGET of the last character transition, which
+   * means its per-state case code in {@code generateStateCaseCode} has not yet run for the current
+   * position. All assertions — both lookbehind and lookahead — must therefore be evaluated here.
+   *
+   * <p>Lookbehind: check what is immediately before the acceptance position (posVar = length).
+   * Lookahead: check what follows the acceptance position (posVar = length = end-of-input, so a
+   * positive lookahead will generally fail unless the pattern uses an offset).
    */
   private void generateAcceptCheckWithAssertions(
       MethodVisitor mv, int stateVar, int posVar, LocalVarAllocator allocator) {
@@ -816,12 +823,11 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Only check lookahead assertions here; lookbehind assertions were already checked as
-      // transition guards in generateStateCaseCode when this state was entered.
+      // Check all assertions (both lookbehind and lookahead): the accepting state was the
+      // transition target on the last character, so generateStateCaseCode never ran its case for
+      // this position. None of its assertions were checked as transition guards.
       for (AssertionCheck assertion : acceptState.assertionChecks) {
-        if (assertion.isLookahead()) {
-          generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, checkNext, allocator);
-        }
+        generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, checkNext, allocator);
       }
       if (!acceptState.acceptanceAnchorConditions.isEmpty()) {
         emitAcceptanceAnchorChecks(mv, acceptState.acceptanceAnchorConditions, posVar, checkNext);
@@ -1441,17 +1447,16 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Found accepting state — gate acceptance on per-state assertions/anchor conditions. If a
-      // lookahead assertion fails, keep consuming via outgoing transitions instead of rejecting the
-      // whole start position; a later, longer prefix may satisfy the assertion.
-      // Lookbehind assertions are already checked as transition guards in generateStateCaseCode;
-      // only lookahead assertions are evaluated here as soft acceptance predicates.
+      // Found accepting state — gate acceptance on per-state assertions/anchor conditions.
+      // If any assertion fails, go to continueMatching to try a longer match (the assertion may
+      // be satisfied at a later position, e.g. a lookahead that needs more context or a lookbehind
+      // whose required predecessor character may appear at the end of a longer match).
+      // The accepting state was set as the TARGET of the previous transition, so its
+      // generateStateCaseCode has not yet run — none of its assertions were checked as transition
+      // guards. Check all assertions (both lookbehind and lookahead) here.
       Label continueMatching = new Label();
       for (AssertionCheck assertion : acceptState.assertionChecks) {
-        if (assertion.isLookahead()) {
-          generateAssertionCheckAtCurrentPosition(
-              mv, assertion, posVar, continueMatching, allocator);
-        }
+        generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, continueMatching, allocator);
       }
       if (acceptState.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);

@@ -2083,45 +2083,78 @@ public class DFAUnrolledBytecodeGenerator {
     Label assertionFailed = new Label();
 
     // Lookbehind assertions are always transition guards: their result cannot change by consuming
-    // more input. Check them eagerly on all states, including accepting ones.
-    // Lookahead assertions on accepting states are deferred to the "no transition" / end-of-input
-    // paths; checking them eagerly would reject valid positions mid-match (e.g., a lookahead that
-    // can only pass at the true match end like (?=\]) in (?<=\[)[^\]]+(?=\])).
+    // more input. Check them eagerly on all states. A failed lookbehind jumps to assertionFailed
+    // which returns longestMatchEnd (the best match seen so far).
     // For non-accepting states, all assertions (both lookahead and lookbehind) are transition
     // guards.
-    boolean hasLookaheadAssertionsOnAccepting = false;
+    boolean hasLookaheadOnAccepting = false;
+    boolean needsAssertionFailedLabel = false;
     for (AssertionCheck assertion : state.assertionChecks) {
       if (assertion.isLookbehind() || !state.accepting) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+        needsAssertionFailedLabel = true;
       } else {
-        hasLookaheadAssertionsOnAccepting = true;
+        hasLookaheadOnAccepting = true;
       }
     }
 
-    // If this is an accepting state without deferred lookahead assertions, record position now.
-    // Accepting states with deferred lookahead assertions defer recording to the "no transition" /
-    // end-of-input paths where the lookahead is evaluated at the correct final position.
-    // Lookbehind guards (already checked above) do not defer recording.
-    // Per-state acceptance conditions must be satisfied before recording the position.
-    // Priority-cut states return immediately after recording (accepting thread wins).
-    if (state.accepting && !hasLookaheadAssertionsOnAccepting) {
-      if (state.acceptanceAnchorConditions.isEmpty()) {
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-        if (state.acceptIsPriorityCut) {
-          mv.visitVarInsn(ILOAD, longestMatchEndVar);
-          mv.visitInsn(IRETURN);
-        }
-      } else {
+    // Record longestMatchEnd for accepting states.
+    // For states with lookahead assertions: gate the recording on the lookahead — if the assertion
+    // fails, jump to skipRecord (skip the update) and still try outgoing transitions. A later,
+    // longer prefix may bring the lookahead into view (e.g. a+(?=b) on "aab": the lookahead fails
+    // at pos=1 but passes at pos=2 after consuming the second 'a').
+    // For states without lookahead: record unconditionally.
+    // Per-state acceptance anchor conditions gate the update independently.
+    // Priority-cut states return immediately on acceptance (DFA first-match wins).
+    if (state.accepting) {
+      if (hasLookaheadOnAccepting) {
         Label skipRecord = new Label();
-        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecord);
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-        if (state.acceptIsPriorityCut) {
-          mv.visitVarInsn(ILOAD, longestMatchEndVar);
-          mv.visitInsn(IRETURN);
+        for (AssertionCheck assertion : state.assertionChecks) {
+          if (assertion.isLookahead()) {
+            generateAssertionCheck(mv, assertion, posVar, skipRecord, allocator);
+          }
+        }
+        // Lookahead passed: record position (gated by anchor conditions if any).
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+        } else {
+          Label skipRecordAnchor = new Label();
+          emitAcceptanceAnchorChecks(
+              mv, state.acceptanceAnchorConditions, posVar, skipRecordAnchor);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+          mv.visitLabel(skipRecordAnchor);
         }
         mv.visitLabel(skipRecord);
+      } else {
+        // No lookahead: always record.
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+        } else {
+          Label skipRecord = new Label();
+          emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecord);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ISTORE, longestMatchEndVar);
+          if (state.acceptIsPriorityCut) {
+            mv.visitVarInsn(ILOAD, longestMatchEndVar);
+            mv.visitInsn(IRETURN);
+          }
+          mv.visitLabel(skipRecord);
+        }
       }
     }
 
@@ -2249,60 +2282,20 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitLabel(nextCheck);
     }
 
-    // No transition matched — for accepting states with deferred lookahead assertions: undo the
-    // pos++ and evaluate the lookahead at the true accept position. Lookbehind guards were already
-    // checked at state entry, so only lookahead needs re-evaluation here.
-    if (state.accepting && hasLookaheadAssertionsOnAccepting) {
-      // pos was incremented before character reading; undo it to get the true accept position
-      mv.visitIincInsn(posVar, -1);
-      for (AssertionCheck assertion : state.assertionChecks) {
-        if (assertion.isLookahead()) {
-          generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
-        }
-      }
-      // Lookahead assertions passed: record accept position
-      if (state.acceptanceAnchorConditions.isEmpty()) {
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-      } else {
-        Label skipRecordNoTrans = new Label();
-        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecordNoTrans);
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-        mv.visitLabel(skipRecordNoTrans);
-      }
-    }
+    // No transition matched — return the best match seen so far. The lookahead (if any) was already
+    // checked eagerly at state entry and gated longestMatchEnd; no re-evaluation needed here.
     mv.visitVarInsn(ILOAD, longestMatchEndVar);
     mv.visitInsn(IRETURN);
 
-    // Handle end of input — for accepting states with deferred lookahead assertions, check them.
-    // Lookbehind guards were already checked at state entry (reached here means they passed).
+    // Handle end of input — return the best match. The lookahead was already checked at state
+    // entry each time this state was entered, so longestMatchEnd is already correct.
     mv.visitLabel(endOfInput);
-    if (state.accepting && hasLookaheadAssertionsOnAccepting) {
-      for (AssertionCheck assertion : state.assertionChecks) {
-        if (assertion.isLookahead()) {
-          generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
-        }
-      }
-      if (state.acceptanceAnchorConditions.isEmpty()) {
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-      } else {
-        Label skipRecordEnd = new Label();
-        emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, skipRecordEnd);
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, longestMatchEndVar);
-        mv.visitLabel(skipRecordEnd);
-      }
-    }
     mv.visitVarInsn(ILOAD, longestMatchEndVar);
     mv.visitInsn(IRETURN);
 
-    // Handle assertion failure: assertionFailed is targeted by lookbehind guards (always checked
-    // eagerly) and by deferred lookahead checks in the no-transition / end-of-input blocks.
-    // The label is live whenever any assertion was emitted — same guard as generateStateCode.
-    boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
-    if (hasAnyAssertions) {
+    // Handle assertion failure: targeted by lookbehind guards and non-accepting-state assertion
+    // guards (both checked eagerly). Lookahead on accepting states uses skipRecord, not this label.
+    if (needsAssertionFailedLabel) {
       mv.visitLabel(assertionFailed);
       mv.visitVarInsn(ILOAD, longestMatchEndVar);
       mv.visitInsn(IRETURN);
