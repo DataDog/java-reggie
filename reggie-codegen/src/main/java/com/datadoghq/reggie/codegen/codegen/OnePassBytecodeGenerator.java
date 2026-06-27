@@ -498,24 +498,92 @@ public class OnePassBytecodeGenerator {
 
       case END:
         {
-          // $ (non-multiline): same as \Z — matches at end OR before final '\n'.
+          // $ (non-multiline): same as \Z — all Java line terminators with CRLF guard.
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitVarInsn(ALOAD, inputVar);
           mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
           mv.visitJumpInsn(IF_ICMPEQ, passLabel);
-          Label endCheckNewline = new Label();
+
+          // pos == length-1?
+          Label endCheckMinus2E = new Label();
+          Label failZE = new Label();
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitVarInsn(ALOAD, inputVar);
           mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
           mv.visitInsn(ICONST_1);
           mv.visitInsn(ISUB);
-          mv.visitJumpInsn(IF_ICMPNE, endCheckNewline);
+          mv.visitJumpInsn(IF_ICMPNE, endCheckMinus2E);
+
+          // charAt(pos) == '\n'?
           mv.visitVarInsn(ALOAD, inputVar);
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
           pushInt(mv, '\n');
+          Label notNewlineZE = new Label();
+          mv.visitJumpInsn(IF_ICMPNE, notNewlineZE);
+          // '\n': CRLF guard — lone \n only; \r\n tail fails
+          Label loneNewlineZE = new Label();
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitJumpInsn(IFEQ, loneNewlineZE); // pos == 0 → lone \n
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\r');
+          mv.visitJumpInsn(IF_ICMPEQ, failZE); // CRLF tail
+          mv.visitLabel(loneNewlineZE);
+          mv.visitJumpInsn(GOTO, passLabel);
+          mv.visitLabel(notNewlineZE);
+          // '\r' at end-1?
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\r');
           mv.visitJumpInsn(IF_ICMPEQ, passLabel);
-          mv.visitLabel(endCheckNewline);
+          // NEL at end-1?
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\u0085');
+          mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+          // LS at end-1?
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\u2028');
+          mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+          // PS at end-1?
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\u2029');
+          mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+          mv.visitJumpInsn(GOTO, failZE);
+
+          // pos == end-2? '\r\n' pair
+          mv.visitLabel(endCheckMinus2E);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+          mv.visitInsn(ICONST_2);
+          mv.visitInsn(ISUB);
+          mv.visitJumpInsn(IF_ICMPNE, failZE);
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\r');
+          mv.visitJumpInsn(IF_ICMPNE, failZE);
+          mv.visitVarInsn(ALOAD, inputVar);
+          mv.visitVarInsn(ILOAD, posVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(IADD);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, failZE);
+          mv.visitJumpInsn(GOTO, passLabel);
+
+          mv.visitLabel(failZE);
           if (returnBoolean) {
             mv.visitInsn(ICONST_0);
             mv.visitInsn(IRETURN);
@@ -942,8 +1010,8 @@ public class OnePassBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 4); // len
       mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
     } else if (hasStringEndAnchor) {
-      // \Z: Valid if matchEnd == len OR (matchEnd == len-1 && input.charAt(len-1) == '\n')
-      // This matches at end or before final newline
+      // \Z: matchEnd==len, or matchEnd==len-1 (lone \n CRLF guard, \r, NEL, LS, PS),
+      // or matchEnd==len-2 (\r\n pair)
       Label validEndPosition = new Label();
 
       // if (matchEnd == len) goto validEndPosition;
@@ -951,17 +1019,77 @@ public class OnePassBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 4); // len
       mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
 
-      // if (matchEnd == len-1 && input.charAt(len-1) == '\n') goto validEndPosition;
+      // matchEnd == len-1?
+      Label zCheckMinus2V = new Label();
       mv.visitVarInsn(ILOAD, 5); // matchEnd
       mv.visitVarInsn(ILOAD, 4); // len
       mv.visitInsn(ICONST_1);
       mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength); // if matchEnd != len-1, not valid
+      mv.visitJumpInsn(IF_ICMPNE, zCheckMinus2V);
 
+      // charAt(matchEnd) == '\n'?
       mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 4); // len
+      mv.visitVarInsn(ILOAD, 5); // matchEnd (== len-1)
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\n');
+      Label zNotNewlineV = new Label();
+      mv.visitJumpInsn(IF_ICMPNE, zNotNewlineV);
+      // '\n': CRLF guard
+      Label zLoneNewlineV = new Label();
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
+      mv.visitJumpInsn(IFEQ, zLoneNewlineV); // matchEnd == 0 → lone \n
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
       mv.visitInsn(ICONST_1);
       mv.visitInsn(ISUB);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\r');
+      mv.visitJumpInsn(IF_ICMPEQ, noMatchThisLength); // CRLF tail
+      mv.visitLabel(zLoneNewlineV);
+      mv.visitJumpInsn(GOTO, validEndPosition);
+      mv.visitLabel(zNotNewlineV);
+      // '\r'?
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\r');
+      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
+      // NEL?
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\u0085');
+      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
+      // LS?
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\u2028');
+      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
+      // PS?
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\u2029');
+      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
+      mv.visitJumpInsn(GOTO, noMatchThisLength);
+
+      // matchEnd == len-2? '\r\n' pair
+      mv.visitLabel(zCheckMinus2V);
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
+      mv.visitVarInsn(ILOAD, 4); // len
+      mv.visitInsn(ICONST_2);
+      mv.visitInsn(ISUB);
+      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // matchEnd (== len-2)
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\r');
+      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // matchEnd
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
       pushInt(mv, '\n');
       mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);

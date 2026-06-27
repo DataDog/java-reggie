@@ -253,6 +253,14 @@ public class BoundedQuantifierBytecodeGenerator {
     mv.visitVarInsn(ASTORE, 6);
     mv.visitLabel(viewUsable);
 
+    // if (fromIndex < 0) fromIndex = 0;
+    Label fromIndexNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, fromIndexNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(fromIndexNotNeg);
+
     // Scanning loop: for (int start = fromIndex; start < len; start++)
     Label loopStart = new Label();
     Label loopEnd = new Label();
@@ -398,6 +406,14 @@ public class BoundedQuantifierBytecodeGenerator {
       mv.visitVarInsn(ASTORE, 7);
       mv.visitLabel(viewUsable);
     }
+
+    // if (fromIndex < 0) fromIndex = 0;
+    Label fromIndexNotNegBounds = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, fromIndexNotNegBounds);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(fromIndexNotNegBounds);
 
     // Scanning loop: for (int matchStart = fromIndex; matchStart < len; matchStart++)
     Label loopStart = new Label();
@@ -556,6 +572,14 @@ public class BoundedQuantifierBytecodeGenerator {
     mv.visitInsn(ACONST_NULL);
     mv.visitVarInsn(ASTORE, 6);
     mv.visitLabel(viewUsable);
+
+    // if (fromIndex < 0) fromIndex = 0;
+    Label fromIndexNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, fromIndexNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(fromIndexNotNeg);
 
     // Scanning loop
     Label loopStart = new Label();

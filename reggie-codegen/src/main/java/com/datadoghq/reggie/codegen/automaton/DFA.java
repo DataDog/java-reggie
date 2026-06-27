@@ -115,15 +115,29 @@ public final class DFA {
     public final ActionType type; // ENTER or EXIT
     public final int priority; // NFA state ID (for conflict resolution)
 
+    /**
+     * True for an ENTER action when the group is zero-width: the corresponding EXIT NFA state is
+     * epsilon-reachable from the ENTER NFA state within the same DFA state (no consuming transition
+     * separates them). Zero-width groups match the empty string at the current position, so their
+     * START tag must be set to the post-character position (posVar). False for consuming groups
+     * whose START is the pre-character position (already recorded by a transition tagOp).
+     */
+    public final boolean epsilonGroup;
+
     public enum ActionType {
       ENTER,
       EXIT
     }
 
     public GroupAction(int groupId, ActionType type, int priority) {
+      this(groupId, type, priority, false);
+    }
+
+    public GroupAction(int groupId, ActionType type, int priority, boolean epsilonGroup) {
       this.groupId = groupId;
       this.type = type;
       this.priority = priority;
+      this.epsilonGroup = epsilonGroup;
     }
 
     @Override

@@ -46,6 +46,9 @@ class AnchorAlternationPikeVMTest {
   // Patterns using $ (line-end) and \Z (string-end) leading anchors in an
   // alternation branch route to PIKEVM_CAPTURE: FallbackPatternDetector's
   // nullable-branch check skips pure-anchor (AnchorNode) branches such as \Z|abc.
+  // Patterns using $ (line-end anchor) already route to PIKEVM_CAPTURE.
+  // Patterns using \Z (string-end anchor) are still blocked by FallbackPatternDetector
+  // (hasStringEndAnchorInAltWithProblematicContext → OPTIMIZED_NFA → JDK fallback).
   // ---------------------------------------------------------------------------
 
   static Stream<Arguments> guard3DollarPatterns() {

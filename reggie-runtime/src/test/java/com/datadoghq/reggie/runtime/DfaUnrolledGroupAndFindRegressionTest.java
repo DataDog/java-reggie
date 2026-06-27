@@ -195,4 +195,36 @@ public class DfaUnrolledGroupAndFindRegressionTest {
   void c_control_leftmostUnaffected() {
     assertAgrees("(ab)+", "xababy");
   }
+
+  // ---- Fix 4: consuming group ENTER+EXIT in accepting state ----
+
+  private static void assertFindGroupsAgree(String pattern, String input) {
+    Pattern jdk = Pattern.compile(pattern);
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    Matcher jm = jdk.matcher(input);
+    boolean jdkFind = jm.find();
+    MatchResult rm = reggie.findMatch(input);
+    assertEquals(
+        jdkFind, rm != null, "findMatch() boolean for /" + pattern + "/ on \"" + input + "\"");
+    if (jdkFind) {
+      for (int g = 0; g <= jm.groupCount(); g++) {
+        assertEquals(
+            List.of(jm.start(g), jm.end(g)),
+            List.of(rm.start(g), rm.end(g)),
+            "group " + g + " span for findMatch() /" + pattern + "/ on \"" + input + "\"");
+      }
+    }
+  }
+
+  @Test
+  void d_consumingGroupInAcceptState_match() throws Exception {
+    assertRoute(".+(0)", PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS);
+    assertGroupsAgree(".+(0)", "_0");
+  }
+
+  @Test
+  void d_consumingGroupInAcceptState_findMatch() throws Exception {
+    assertRoute(".+(0)", PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS);
+    assertFindGroupsAgree(".+(0)", "_0");
+  }
 }

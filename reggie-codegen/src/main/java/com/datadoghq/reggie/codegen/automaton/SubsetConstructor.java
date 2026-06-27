@@ -710,10 +710,17 @@ public class SubsetConstructor {
         String key = nfaState.enterGroup + ":ENTER";
         Integer existingRank = dedupedRanks.get(key);
         if (existingRank == null || rank < existingRank) {
+          // A group is zero-width (epsilonGroup=true) when its EXIT NFA state is epsilon-reachable
+          // from the ENTER NFA state without consuming any character. Zero-width groups start and
+          // end at the same position (posVar), not at the pre-character position.
+          boolean epsilonGroup = isExitEpsilonReachable(nfaState, nfaState.enterGroup);
           deduped.put(
               key,
               new DFA.GroupAction(
-                  nfaState.enterGroup, DFA.GroupAction.ActionType.ENTER, nfaState.id));
+                  nfaState.enterGroup,
+                  DFA.GroupAction.ActionType.ENTER,
+                  nfaState.id,
+                  epsilonGroup));
           dedupedRanks.put(key, rank);
         }
       }
@@ -736,6 +743,30 @@ public class SubsetConstructor {
         Comparator.comparingInt(
             a -> dedupedRanks.getOrDefault(a.groupId + ":" + a.type.name(), Integer.MAX_VALUE)));
     return result;
+  }
+
+  /**
+   * Returns true when the EXIT NFA state for {@code groupId} is epsilon-reachable from {@code
+   * enterState} without consuming any character. Used to mark zero-width groups whose capture span
+   * is [posVar, posVar] rather than [preIncrementPos, posVar].
+   */
+  private static boolean isExitEpsilonReachable(NFA.NFAState enterState, int groupId) {
+    Queue<NFA.NFAState> queue = new ArrayDeque<>();
+    Set<NFA.NFAState> visited = new HashSet<>();
+    queue.add(enterState);
+    visited.add(enterState);
+    while (!queue.isEmpty()) {
+      NFA.NFAState current = queue.poll();
+      if (current.exitGroup != null && current.exitGroup == groupId) {
+        return true;
+      }
+      for (NFA.NFAState next : current.getEpsilonTransitions()) {
+        if (visited.add(next)) {
+          queue.add(next);
+        }
+      }
+    }
+    return false;
   }
 
   /**

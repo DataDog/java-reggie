@@ -58,61 +58,60 @@ public final class FallbackPatternDetector {
     Visitor v = new Visitor();
     ast.accept(v);
 
-    // B1 — Lookahead inside a quantified group (issue #28).
-    // Root cause: DFA subset construction carries the assertion NFA state into the accepting loop
-    // state, causing the lookahead to be re-evaluated as an acceptance predicate at the end of
-    // each quantifier iteration rather than as a gate at the start of the next iteration.
-    // Concretely: (?:(?=\d)\d)+ on "1" produces DFA state 1 (accepting) with the (?=\d) assertion;
-    // at pos=1 (end of "1") the deferred lookahead check fires, fails (no digit at EOS), and the
-    // DFA returns false instead of true. The guard is scope-correct: position-only assertions that
-    // do NOT reference captured groups are blocked here; those that reference captures are blocked
-    // additionally by hasAssertionReferencingCaptureInQuantifier below.
-    // Classification: NEEDS-RND — DFA construction must not carry assertion NFA states into
-    // loop-back DFA states, or the acceptance predicate logic must distinguish between "assertion
-    // for next-iteration gate" vs "acceptance predicate for current match end".
-    // Confirmed by LookaroundEngineNativeTest (disabling guard causes wrong results for
-    // (?:(?=\d)\d)+ on "1" and "123").
-    if (v.lookaheadInQuantifier) {
-      return "lookahead inside quantified group";
+    // B1-B4 below apply to DFA and non-capturing NFA strategies. PIKEVM_CAPTURE handles these
+    // patterns correctly (as confirmed by targeted spike tests), so skip them when the routing
+    // decision has already committed to PIKEVM_CAPTURE. Only B16 is a known PIKEVM_CAPTURE defect.
+    if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+      // B1 — Lookahead inside a quantified group (issue #28).
+      // Root cause (NEEDS-RND): Thompson/Pike NFA has no per-thread quantifier-iteration counter.
+      // Multiple threads at the same NFA state after different iteration counts are merged in the
+      // shared state set; when their per-position assertion results diverge, the merge produces
+      // wrong find() results (e.g. (?:(?=\d)\d)+ on "1" returns false instead of true).
+      // Classification: NEEDS-RND — safe-backtracking R&D required for per-thread iteration state.
+      // Confirmed by LookaroundEngineNativeTest (spike: disabling guard causes wrong results).
+      if (v.lookaheadInQuantifier) {
+        return "lookahead inside quantified group";
+      }
+
+      // B1-narrow — Assertion inside quantifier that references a captured group value.
+      // Even after B1 is resolved for position-only lookaheads, assertions that read a backref
+      // (e.g. (?:(?=\1)\d)+) require per-iteration capture state that neither the DFA nor the NFA
+      // engine currently tracks. This guard is additive: when the broad B1 guard above is
+      // eventually removed, this narrow guard ensures capture-referencing assertions still fall back.
+      if (hasAssertionReferencingCaptureInQuantifier(ast)) {
+        return "assertion inside quantifier references captured group value";
+      }
+
+      // B2 — KEEP-PERMANENT: anchor inside a quantifier that is itself inside a capturing group.
+      // Spike (AnchorInQuantifierNativeTest) showed PikeVM mis-positions the zero-width match:
+      // (${0,3}) on "abc" lands at [3,3] instead of JDK's [0,0], and (^{0,2}ab) on "xab" returns
+      // false instead of true. Root cause: PikeVM uses leftmost-longest NFA traversal which
+      // collapses the zero-width anchor to the end-of-input position rather than the first viable
+      // zero-width position, and the optional anchor quantifier changes the anchoring semantics
+      // in a way the current engine cannot model. No tractable fix in scope.
+      if (hasAnchorInQuantifierInCapturingGroup(ast)) {
+        return "anchor inside quantifier within capturing group: capture span tracking incorrect";
+      }
+
+      // B3 — KEEP-PERMANENT (conservative): any anchor inside a quantifier with range ≠ {1,1}.
+      // Spike showed that the tested patterns ((\b)+, (?:\Z)+) pass under PikeVM for the sample
+      // inputs tested. However, the predicate also covers exotic combinations (e.g. \A{2},
+      // (?:^){3}) that were not tested and may still misbehave. Retain the guard until a broader
+      // fuzz sweep with AnchorInQuantifierNativeTest confirms full correctness; at that point this
+      // predicate can be removed and these patterns routed to PIKEVM_CAPTURE.
+      if (hasAnchorInQuantifier(ast)) {
+        return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
+      }
+
+      // B4 — KEEP-PERMANENT (conservative): END/STRING_END anchor ($, \Z) immediately before a
+      // non-newline char consumer. Spike showed that \Z[^c] and $[^\n] pass under PikeVM for the
+      // tested inputs (all unconditionally false in JDK). Retaining the guard until a fuzz sweep
+      // confirms no strategy can mis-model this path; removing it is safe but deferred.
+      if (hasEndAnchorBeforeNonNewlineConsumer(ast)) {
+        return "end-anchor before non-newline consumer: DFA does not model this path correctly";
+      }
     }
 
-    // B1-narrow — Assertion inside quantifier that references a captured group value.
-    // Even after B1 is resolved for position-only lookaheads, assertions that read a backref
-    // (e.g. (?:(?=\1)\d)+) require per-iteration capture state that neither the DFA nor the NFA
-    // engine currently tracks. This guard is additive: when the broad B1 guard above is
-    // eventually removed, this narrow guard ensures capture-referencing assertions still fall back.
-    if (hasAssertionReferencingCaptureInQuantifier(ast)) {
-      return "assertion inside quantifier references captured group value";
-    }
-
-    // B2 — KEEP-PERMANENT: anchor inside a quantifier that is itself inside a capturing group.
-    // Spike (AnchorInQuantifierNativeTest) showed PikeVM mis-positions the zero-width match:
-    // (${0,3}) on "abc" lands at [3,3] instead of JDK's [0,0], and (^{0,2}ab) on "xab" returns
-    // false instead of true. Root cause: PikeVM uses leftmost-longest NFA traversal which
-    // collapses the zero-width anchor to the end-of-input position rather than the first viable
-    // zero-width position, and the optional anchor quantifier changes the anchoring semantics
-    // in a way the current engine cannot model. No tractable fix in scope.
-    if (hasAnchorInQuantifierInCapturingGroup(ast)) {
-      return "anchor inside quantifier within capturing group: capture span tracking incorrect";
-    }
-
-    // B3 — KEEP-PERMANENT (conservative): any anchor inside a quantifier with range ≠ {1,1}.
-    // Spike showed that the tested patterns ((\b)+, (?:\Z)+) pass under PikeVM for the sample
-    // inputs tested. However, the predicate also covers exotic combinations (e.g. \A{2},
-    // (?:^){3}) that were not tested and may still misbehave. Retain the guard until a broader
-    // fuzz sweep with AnchorInQuantifierNativeTest confirms full correctness; at that point this
-    // predicate can be removed and these patterns routed to PIKEVM_CAPTURE.
-    if (hasAnchorInQuantifier(ast)) {
-      return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
-    }
-
-    // B4 — KEEP-PERMANENT (conservative): END/STRING_END anchor ($, \Z) immediately before a
-    // non-newline char consumer. Spike showed that \Z[^c] and $[^\n] pass under PikeVM for the
-    // tested inputs (all unconditionally false in JDK). Retaining the guard until a fuzz sweep
-    // confirms no strategy can mis-model this path; removing it is safe but deferred.
-    if (hasEndAnchorBeforeNonNewlineConsumer(ast)) {
-      return "end-anchor before non-newline consumer: DFA does not model this path correctly";
-    }
 
     // B5 [PARTIALLY-FIXED]: RECURSIVE_DESCENT uses a greedy-first descent parser with limited
     // backtracking (quantifiers followed by fixed suffixes). It does NOT implement general
@@ -208,10 +207,8 @@ public final class FallbackPatternDetector {
     // quantifier, so this fallback condition is no longer needed.
 
     // B12 [PARTIALLY-FIXED]: emitPrefixMatch handles Literal, CharClass, Anchor, non-capturing
-    // GroupNode (via isPrefixNodeHandleable recursion), exact QuantifierNodes (e.g. x{3}), and
-    // unbounded quantifiers (*, +) whose character class is provably disjoint from the first char
-    // class of the following capture group (e.g. a*(b+)\1 is safe; a*(a+)\1 falls back).
-    // Bounded-range quantifiers {n,m} and overlapping unbounded prefixes still fall back.
+    // GroupNode (via isPrefixNodeHandleable recursion), and unbounded/exact QuantifierNodes (e.g.
+    // a*, a+, [0-9]*, x{3}). Bounded-range quantifiers {n,m} still fall back.
     if (strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF
         && hasNonAnchorPrefixBeforeBackrefGroup(ast)) {
       return "variable-capture backref with unsupported prefix node type: "
@@ -325,12 +322,7 @@ public final class FallbackPatternDetector {
           // Pure-anchor branches (\Z, $, ^) are always zero-width; their nullability is
           // definitional, not a structural problem — PikeVM handles them correctly.
           // Only non-anchor nullable branches cause OPTIMIZED_NFA span tracking to fail.
-          // Unwrap non-capturing groups so (?:\Z) is treated the same as bare \Z.
-          RegexNode unwrapped = branch;
-          while (unwrapped instanceof GroupNode ncg && !ncg.capturing) {
-            unwrapped = ncg.child;
-          }
-          if (unwrapped instanceof AnchorNode) continue;
+          if (branch instanceof AnchorNode) continue;
           if (isNullableOrEmptyBranch(branch) || startsWithZeroWidthQuantifier(branch)) {
             return true;
           }
@@ -1075,11 +1067,7 @@ public final class FallbackPatternDetector {
   /**
    * Returns true if the given prefix node can be handled by {@code emitPrefixNode} in the bytecode
    * generator. Handles AnchorNode (zero-width), LiteralNode, CharClassNode, non-capturing GroupNode
-   * (by recursing into its child), and ConcatNode (by checking all children). Unbounded quantifiers
-   * ({@code max == -1}) with a non-nullable child are accepted here; the caller ({@code
-   * hasNonAnchorPrefixBeforeBackrefGroup}) is responsible for the additional disjoint-charset
-   * safety check. Unbounded quantifiers with nullable children are rejected: emitting a greedy loop
-   * over a nullable child would produce a zero-progress infinite loop in the generated bytecode.
+   * (by recursing into its child), and ConcatNode (by checking all children).
    */
   private static boolean isPrefixNodeHandleable(RegexNode node) {
     if (node instanceof AnchorNode
@@ -1098,16 +1086,11 @@ public final class FallbackPatternDetector {
       return true;
     }
     if (node instanceof QuantifierNode q) {
-      if (q.max == -1) {
-        // Nullable-child guard: a greedy loop over epsilon would spin forever.
-        // Overlap safety (e.g. a*(a+)\1) is checked by hasNonAnchorPrefixBeforeBackrefGroup.
-        return !subtreeIsNullable(q.child) && isPrefixNodeHandleable(q.child);
-      }
-      // Exact quantifiers {n} are safe: fixed repetition, no backtracking needed.
-      if (q.min == q.max) {
+      // Handle unbounded (max == -1: *, +, {n,}) and exact ({n}) quantifiers.
+      // Bounded ranges {n,m} with m > n are not yet implemented in emitPrefixNode.
+      if (q.max == -1 || q.min == q.max) {
         return isPrefixNodeHandleable(q.child);
       }
-      // Bounded-range {n,m} not yet implemented in emitPrefixNode.
       return false;
     }
     return false;
@@ -1142,21 +1125,8 @@ public final class FallbackPatternDetector {
           GroupNode g = (GroupNode) q.child;
           if (g.capturing && backrefNums.contains(g.groupNumber)) return false;
         }
-        if (isPrefixNodeHandleable(child)) {
-          if (q.max == -1) {
-            // Unbounded prefixes commit greedily. Allow only when the prefix character
-            // class and the first character class of the next sibling are provably disjoint,
-            // so the loop cannot consume characters needed by the following capture group.
-            // Example: a*(b+)\1 is safe (disjoint); a*(a+)\1 must fall back (overlap).
-            CharSet prefixCs = charSetOf(q.child);
-            CharSet nextCs = firstCharSetOf(concat, i + 1);
-            if (prefixCs == null || nextCs == null || prefixCs.intersects(nextCs)) {
-              return true; // overlap or unknown — use fallback
-            }
-          }
-          continue; // handled by emitPrefixNode
-        }
-        return true; // not handleable (e.g. bounded-range {n,m})
+        if (isPrefixNodeHandleable(child)) continue; // handled by emitPrefixNode
+        return true; // bounded-range quantified prefix: not handled
       }
       if (child instanceof LiteralNode || child instanceof CharClassNode) {
         continue; // handled by emitPrefixMatch
@@ -1290,9 +1260,10 @@ public final class FallbackPatternDetector {
 
   /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
-   * the group's content is itself nullable. Example: {@code (0*-?){0,}} — group content {@code
-   * 0*-?} is nullable, outer quantifier {@code {0,}} is nullable. PIKEVM diverges for this
-   * sub-case; only non-nullable-content B16 patterns are safe to route to PIKEVM_CAPTURE.
+   * the group's content is itself nullable (can match the empty string). Example: {@code
+   * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is
+   * nullable. PIKEVM diverges for this sub-case; only non-nullable-content B16 patterns are safe to
+   * route to PIKEVM_CAPTURE.
    */
   public static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
     if (ast instanceof QuantifierNode) {

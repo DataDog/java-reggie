@@ -1063,42 +1063,13 @@ public class DFAUnrolledBytecodeGenerator {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
-    // Lookbehind assertions are always transition guards: they check position-backward context that
-    // cannot be satisfied by consuming more characters. Reject immediately on failure.
-    // Lookahead assertions on accepting states are acceptance predicates: e.g.
-    // (?<=\\[)[^\\]]+(?=\\])
-    // should not reject after seeing just "v" in "[value]" because the trailing lookahead fails
-    // there; the DFA must keep consuming until ']'. Check lookahead only at the acceptance point.
-    boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
-    for (AssertionCheck assertion : state.assertionChecks) {
-      // Defer lookahead assertions only on non-start accepting states: those are the states where
-      // the lookahead may fail mid-match but become satisfiable later. For lookbehind,
-      // non-accepting
-      // states, or the start state, check eagerly as a transition guard.
-      boolean deferToAcceptance =
-          assertion.isLookahead() && state.accepting && state != dfa.getStartState();
-      if (!deferToAcceptance) {
-        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
-      }
-    }
-
-    // For non-start accepting states: check lookahead assertions as acceptance predicates.
-    // If they pass, the DFA accepts here (return true). If they fail, continue consuming.
+    // For accepting states, assertions gate acceptance only. If they fail, the DFA must still try
+    // outgoing transitions: e.g. (?<=\\[)[^\\]]+(?=\\]) should not reject after seeing just "v"
+    // in "[value]" because the trailing lookahead fails there; it should keep consuming until ']'.
     if (state.accepting && state != dfa.getStartState()) {
-      boolean hasLookaheadAssertions = false;
-      for (AssertionCheck a : state.assertionChecks) {
-        if (a.isLookahead()) {
-          hasLookaheadAssertions = true;
-          break;
-        }
-      }
       Label continueMatching = new Label();
-      if (hasLookaheadAssertions) {
-        for (AssertionCheck assertion : state.assertionChecks) {
-          if (assertion.isLookahead()) {
-            generateAssertionCheck(mv, assertion, posVar, continueMatching, allocator);
-          }
-        }
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, continueMatching, allocator);
       }
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
@@ -1109,6 +1080,10 @@ public class DFAUnrolledBytecodeGenerator {
         mv.visitInsn(IRETURN);
       }
       mv.visitLabel(continueMatching);
+    } else if (!state.assertionChecks.isEmpty()) {
+      for (AssertionCheck assertion : state.assertionChecks) {
+        generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
+      }
     }
 
     // if (pos >= input.length()) goto endOfInput
@@ -1146,20 +1121,11 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
-    // End of input for an accepting state: if there are lookahead assertions they were already
-    // evaluated in the acceptance block above (before trying transitions). If they passed, we
-    // returned true already. If they failed we went to continueMatching and will fail here because
-    // no more transitions can satisfy them. Accept only if there are no deferred lookahead
-    // assertions (lookbehind guards already passed to reach here).
-    boolean hasLookaheadAssertions = false;
-    for (AssertionCheck a : state.assertionChecks) {
-      if (a.isLookahead()) {
-        hasLookaheadAssertions = true;
-        break;
-      }
-    }
+    // End of input - check if accepting (respecting per-state anchor conditions). Accepting states
+    // with assertions were already evaluated before the transition block; if those assertions
+    // failed and we got here, the match must fail rather than accepting at end-of-input.
     mv.visitLabel(endOfInput);
-    if (state.accepting && !hasLookaheadAssertions) {
+    if (state.accepting && state.assertionChecks.isEmpty()) {
       if (state.acceptanceAnchorConditions.isEmpty()) {
         mv.visitInsn(ICONST_1);
       } else {
@@ -1177,8 +1143,8 @@ public class DFAUnrolledBytecodeGenerator {
     }
     mv.visitInsn(IRETURN);
 
-    // Assertion failed - return false (signal to findFrom to increment start position)
-    if (hasAnyAssertions) {
+    // Assertion failed - return false
+    if (!state.assertionChecks.isEmpty()) {
       mv.visitLabel(assertionFailed);
       mv.visitInsn(ICONST_0);
       mv.visitInsn(IRETURN);
@@ -1728,26 +1694,37 @@ public class DFAUnrolledBytecodeGenerator {
   private void emitAcceptStateGroupActions(
       MethodVisitor mv, DFA.DFAState state, int posVar, int tagsVar) {
     if (state.groupActions.isEmpty()) return;
-    Set<Integer> enteredGroups = new HashSet<>();
+    // Collect which groups have both ENTER and EXIT in this accepting state, and whether the ENTER
+    // is zero-width (epsilonGroup=true). For zero-width groups both tags must be set to posVar. For
+    // consuming groups the START tag was already correctly set by the transition tagOp; only the
+    // END
+    // tag needs to be written here (it too was set by a tagOp, but we write it as a safety net).
+    Map<Integer, Boolean> completedGroups = new HashMap<>();
     Set<Integer> exitedGroups = new HashSet<>();
     for (DFA.GroupAction action : state.groupActions) {
-      if (action.type == DFA.GroupAction.ActionType.ENTER) enteredGroups.add(action.groupId);
-      else exitedGroups.add(action.groupId);
+      if (action.type == DFA.GroupAction.ActionType.ENTER) {
+        completedGroups.put(action.groupId, action.epsilonGroup);
+      } else {
+        exitedGroups.add(action.groupId);
+      }
     }
-    // Only fix up groups that complete their full enter+exit cycle here.
-    Set<Integer> zeroWidthGroups = new HashSet<>(enteredGroups);
-    zeroWidthGroups.retainAll(exitedGroups);
-    for (int g : zeroWidthGroups) {
-      // tags[2*g] = posVar  (START)
-      mv.visitVarInsn(ALOAD, tagsVar);
-      pushInt(mv, 2 * g);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(IASTORE);
-      // tags[2*g+1] = posVar  (END)
-      mv.visitVarInsn(ALOAD, tagsVar);
-      pushInt(mv, 2 * g + 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(IASTORE);
+    completedGroups.keySet().retainAll(exitedGroups);
+    for (Map.Entry<Integer, Boolean> entry : completedGroups.entrySet()) {
+      int g = entry.getKey();
+      boolean zeroWidth = entry.getValue();
+      if (zeroWidth) {
+        // Zero-width group: both START and END are at posVar (the group matches empty string here).
+        mv.visitVarInsn(ALOAD, tagsVar);
+        pushInt(mv, 2 * g);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(IASTORE);
+        mv.visitVarInsn(ALOAD, tagsVar);
+        pushInt(mv, 2 * g + 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(IASTORE);
+      }
+      // Consuming group: START was already set to the correct pre-character position by the
+      // transition tagOp; END was set to posVar by the tagOp. No override needed.
     }
   }
 

@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -274,5 +275,24 @@ public class MultilineAnchorAndStepClosureRegressionTest {
 
     assertEquals(4, all.get(1).start(), "second match start");
     assertEquals("abc", all.get(1).group(1), "second match group(1)");
+  }
+
+  // -------------------------------------------------------------------------
+  // T7 — Multiline ^ exact match count (compact regression guard)
+  // -------------------------------------------------------------------------
+
+  private static final ReggieOptions WITH_FALLBACK =
+      ReggieOptions.builder().allowJdkFallback().build();
+
+  @Test
+  void multilineCaret_twoMatches_exactCount() {
+    ReggieMatcher m = Reggie.compile("(?m)^", WITH_FALLBACK);
+    List<MatchResult> all = m.findAll("a\nb");
+    assertEquals(
+        2,
+        all.size(),
+        "(?m)^ on \"a\\nb\" must produce exactly 2 zero-length matches (positions 0 and 2)");
+    assertEquals(0, all.get(0).start(), "first match must be at position 0");
+    assertEquals(2, all.get(1).start(), "second match must be at position 2");
   }
 }

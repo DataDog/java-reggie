@@ -56,32 +56,54 @@ public final class StructuralHash {
    */
   public static long compute(
       PatternAnalyzer.MatchingStrategyResult result, NFA nfa, boolean caseInsensitive) {
-    long hash = 17L;
+    return compute(result, nfa, caseInsensitive, 17L, 31L, false);
+  }
 
-    hash = 31L * hash + result.strategy.ordinal();
-    hash = 31L * hash + nfa.getGroupCount();
-    hash = 31L * hash + (result.useTaggedDFA ? 1 : 0);
-    hash = 31L * hash + (result.usePosixLastMatch ? 1 : 0);
-    hash = 31L * hash + (caseInsensitive ? 1 : 0);
+  /**
+   * Second, independent structural hash (different seed + polynomial multiplier, and the alternate
+   * NFA content hash) used by the runtime structural-cache for <b>verify-on-hit</b>: when two
+   * structurally-distinct patterns collide on {@link #compute}, this value is overwhelmingly likely
+   * to differ, so the cache detects the false-hit and regenerates the correct class instead of
+   * returning a wrong matcher. Combined with {@link #compute} this gives a ~2⁻¹²⁸ residual.
+   */
+  public static long computeVerification(
+      PatternAnalyzer.MatchingStrategyResult result, NFA nfa, boolean caseInsensitive) {
+    return compute(result, nfa, caseInsensitive, 0xCBF29CE484222325L, 1099511628211L, true);
+  }
+
+  private static long compute(
+      PatternAnalyzer.MatchingStrategyResult result,
+      NFA nfa,
+      boolean caseInsensitive,
+      long seed,
+      long mult,
+      boolean alt) {
+    long hash = seed;
+
+    hash = mult * hash + result.strategy.ordinal();
+    hash = mult * hash + nfa.getGroupCount();
+    hash = mult * hash + (result.useTaggedDFA ? 1 : 0);
+    hash = mult * hash + (result.usePosixLastMatch ? 1 : 0);
+    hash = mult * hash + (caseInsensitive ? 1 : 0);
 
     // Each anchor type is a separate bit so that patterns differing only in which
     // anchor they use always produce different hashes.
-    hash = 31L * hash + (nfa.hasEndAnchor() ? 1 : 0); // $
-    hash = 31L * hash + (nfa.hasStartAnchor() ? 1 : 0); // ^
-    hash = 31L * hash + (nfa.hasStringEndAbsoluteAnchor() ? 1 : 0); // \z
-    hash = 31L * hash + (nfa.hasStringEndAnchor() ? 1 : 0); // \Z
-    hash = 31L * hash + (nfa.hasStringStartAnchor() ? 1 : 0); // \A
-    hash = 31L * hash + (nfa.hasMultilineStartAnchor() ? 1 : 0); // ^ in (?m)
-    hash = 31L * hash + (nfa.hasMultilineEndAnchor() ? 1 : 0); // $ in (?m)
+    hash = mult * hash + (nfa.hasEndAnchor() ? 1 : 0); // $
+    hash = mult * hash + (nfa.hasStartAnchor() ? 1 : 0); // ^
+    hash = mult * hash + (nfa.hasStringEndAbsoluteAnchor() ? 1 : 0); // \z
+    hash = mult * hash + (nfa.hasStringEndAnchor() ? 1 : 0); // \Z
+    hash = mult * hash + (nfa.hasStringStartAnchor() ? 1 : 0); // \A
+    hash = mult * hash + (nfa.hasMultilineStartAnchor() ? 1 : 0); // ^ in (?m)
+    hash = mult * hash + (nfa.hasMultilineEndAnchor() ? 1 : 0); // $ in (?m)
 
     if (result.dfa != null) {
-      hash = 31L * hash + computeDFATopologyHash(result.dfa);
+      hash = mult * hash + computeDFATopologyHash(result.dfa, mult);
     }
 
-    hash = 31L * hash + nfa.contentHashCode();
+    hash = mult * hash + (alt ? nfa.contentHashCodeAlt() : nfa.contentHashCode());
 
     if (result.patternInfo != null) {
-      hash = 31L * hash + result.patternInfo.structuralHashCode();
+      hash = mult * hash + result.patternInfo.structuralHashCode();
     }
 
     return hash;
@@ -94,17 +116,30 @@ public final class StructuralHash {
    * @return 64-bit hash representing the structural equivalence class
    */
   public static long computeWithoutGroupCount(PatternAnalyzer.MatchingStrategyResult result) {
-    long hash = 17L;
-    hash = 31L * hash + result.strategy.ordinal();
-    hash = 31L * hash + (result.useTaggedDFA ? 1 : 0);
-    hash = 31L * hash + (result.usePosixLastMatch ? 1 : 0);
+    return computeWithoutGroupCount(result, 17L, 31L);
+  }
+
+  /**
+   * Verify-on-hit companion to {@link #computeWithoutGroupCount}; see {@link #computeVerification}.
+   */
+  public static long computeVerificationWithoutGroupCount(
+      PatternAnalyzer.MatchingStrategyResult result) {
+    return computeWithoutGroupCount(result, 0xCBF29CE484222325L, 1099511628211L);
+  }
+
+  private static long computeWithoutGroupCount(
+      PatternAnalyzer.MatchingStrategyResult result, long seed, long mult) {
+    long hash = seed;
+    hash = mult * hash + result.strategy.ordinal();
+    hash = mult * hash + (result.useTaggedDFA ? 1 : 0);
+    hash = mult * hash + (result.usePosixLastMatch ? 1 : 0);
 
     if (result.dfa != null) {
-      hash = 31L * hash + computeDFATopologyHash(result.dfa);
+      hash = mult * hash + computeDFATopologyHash(result.dfa, mult);
     }
 
     if (result.patternInfo != null) {
-      hash = 31L * hash + result.patternInfo.structuralHashCode();
+      hash = mult * hash + result.patternInfo.structuralHashCode();
     }
 
     return hash;
@@ -120,51 +155,52 @@ public final class StructuralHash {
    *
    * <p>Excludes: state IDs (generated identifiers).
    */
-  private static long computeDFATopologyHash(DFA dfa) {
+  private static long computeDFATopologyHash(DFA dfa, long mult) {
     long hash = 1L;
 
-    hash = 31L * hash + dfa.getStateCount();
-    hash = 31L * hash + dfa.getAcceptStates().size();
-    hash = 31L * hash + dfa.getMaxOutDegree();
+    hash = mult * hash + dfa.getStateCount();
+    hash = mult * hash + dfa.getAcceptStates().size();
+    hash = mult * hash + dfa.getMaxOutDegree();
 
     for (DFA.DFAState state : dfa.getAllStates()) {
-      hash = 31L * hash + state.transitions.size();
-      hash = 31L * hash + (state.accepting ? 1 : 0);
-      hash = 31L * hash + (state.acceptIsPriorityCut ? 1 : 0);
+      hash = mult * hash + state.transitions.size();
+      hash = mult * hash + (state.accepting ? 1 : 0);
+      hash = mult * hash + (state.acceptIsPriorityCut ? 1 : 0);
 
       // Acceptance anchor conditions: use ordinal bitmask, not EnumSet.hashCode(), because
       // System.identityHashCode() can return 0, making {END} look the same as {}.
-      hash = 31L * hash + anchorBitmask(state.acceptanceAnchorConditions);
+      hash = mult * hash + anchorBitmask(state.acceptanceAnchorConditions);
 
       for (var ga : state.groupActions) {
-        hash = 31L * hash + ga.groupId;
-        hash = 31L * hash + ga.type.ordinal();
+        hash = mult * hash + ga.groupId;
+        hash = mult * hash + ga.type.ordinal();
+        hash = mult * hash + (ga.epsilonGroup ? 1 : 0);
       }
 
-      hash = 31L * hash + state.assertionChecks.size();
+      hash = mult * hash + state.assertionChecks.size();
       for (var ac : state.assertionChecks) {
-        hash = 31L * hash + ac.type.ordinal();
-        hash = 31L * hash + (ac.literal != null ? ac.literal.hashCode() : 0);
-        hash = 31L * hash + ac.offset;
-        hash = 31L * hash + ac.width;
+        hash = mult * hash + ac.type.ordinal();
+        hash = mult * hash + (ac.literal != null ? ac.literal.hashCode() : 0);
+        hash = mult * hash + ac.offset;
+        hash = mult * hash + ac.width;
         if (ac.charSets != null) {
           for (var cs : ac.charSets) {
-            hash = 31L * hash + cs.hashCode();
+            hash = mult * hash + cs.hashCode();
           }
         }
         for (var gc : ac.groups) {
-          hash = 31L * hash + gc.groupNumber;
-          hash = 31L * hash + gc.startOffset;
-          hash = 31L * hash + gc.length;
+          hash = mult * hash + gc.groupNumber;
+          hash = mult * hash + gc.startOffset;
+          hash = mult * hash + gc.length;
         }
       }
 
       for (var entry : state.transitions.entrySet()) {
-        hash = 31L * hash + entry.getKey().hashCode();
-        hash = 31L * hash + anchorBitmask(entry.getValue().entryGuard);
+        hash = mult * hash + entry.getKey().hashCode();
+        hash = mult * hash + anchorBitmask(entry.getValue().entryGuard);
         for (var tagOp : entry.getValue().tagOps) {
-          hash = 31L * hash + tagOp.tagId;
-          hash = 31L * hash + tagOp.type.ordinal();
+          hash = mult * hash + tagOp.tagId;
+          hash = mult * hash + tagOp.type.ordinal();
         }
       }
     }
