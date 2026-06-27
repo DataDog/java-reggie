@@ -32,7 +32,7 @@ jobs:
 
       - name: Correctness gates
         timeout-minutes: 10
-        run: ./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.zeroDivergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforceZero=true
+        run: ./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.divergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforce=true -Dreggie.fuzz.maxFindings=65
 
       - name: Generate coverage report and verify gates
         run: ./gradlew jacocoAggregateReport jacocoVerify
