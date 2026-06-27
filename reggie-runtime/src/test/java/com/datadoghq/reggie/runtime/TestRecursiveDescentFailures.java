@@ -81,7 +81,6 @@ public class TestRecursiveDescentFailures {
   // Category 2: Subroutine After Quantified Groups
   // KNOWN LIMITATION: These also require backtrackable subroutine calls
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testSubroutineAfterQuantifiedGroup() {
     // Pattern: ^(a?)+b(?1)a
@@ -89,20 +88,19 @@ public class TestRecursiveDescentFailures {
     // LIMITATION: (?1) expands to (a?)+, which matches greedily.
     // When followed by literal 'a', if the 'a' fails to match, we can't backtrack
     // into (?1) to try matching less.
-    ReggieMatcher matcher = Reggie.compileAllowingFallback("^(a?)+b(?1)a");
+    ReggieMatcher matcher = Reggie.compile("^(a?)+b(?1)a");
 
     // assertTrue(matcher.matches("aba"), "Should match 'aba'");
     // assertTrue(matcher.matches("ba"), "Should match 'ba'");
   }
 
-  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testSubroutineWithOptional() {
     // Pattern: ^(a?)b(?1)a
     // Should match: "aba"
     // LIMITATION: (?1) expands to a?, which matches 'a' greedily.
     // When followed by 'a', if it fails, can't backtrack to try empty match.
-    ReggieMatcher matcher = Reggie.compileAllowingFallback("^(a?)b(?1)a");
+    ReggieMatcher matcher = Reggie.compile("^(a?)b(?1)a");
 
     // assertTrue(matcher.matches("aba"), "Should match 'aba'");
   }
