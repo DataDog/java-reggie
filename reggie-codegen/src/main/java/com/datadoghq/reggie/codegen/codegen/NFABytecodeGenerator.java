@@ -337,9 +337,17 @@ public class NFABytecodeGenerator {
     return false;
   }
 
-  /** True when the per-config skeleton may handle this NFA (backref present, no assertions). */
+  /**
+   * True when the per-config skeleton may handle this NFA (backref present, no assertions, and NFA
+   * state count within the worklist cap).
+   *
+   * <p>NFAs with more states than {@link #PER_CONFIG_CAP} risk overflow for patterns that generate
+   * many simultaneous configurations (e.g. large alternations). Until Task 9 replaces the overflow
+   * drop with dynamic JDK delegation, such NFAs fall back to the lockstep path where at least no
+   * configuration is silently discarded.
+   */
   private boolean perConfigEligible() {
-    return nfaHasBackref() && !nfaHasAssertion();
+    return nfaHasBackref() && !nfaHasAssertion() && stateCount <= PER_CONFIG_CAP;
   }
 
   private enum PerConfigMode {
@@ -1555,20 +1563,49 @@ public class NFABytecodeGenerator {
         break;
       case END:
       case STRING_END:
-        // curPos == len || (curPos == len-1 && input.charAt(curPos) == '\n')
-        mv.visitVarInsn(ILOAD, curPosVar);
-        mv.visitVarInsn(ILOAD, lenVar);
-        mv.visitJumpInsn(IF_ICMPEQ, passed);
-        mv.visitVarInsn(ILOAD, lenVar);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(ISUB);
-        mv.visitVarInsn(ILOAD, curPosVar);
-        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, curPosVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        pushInt(mv, '\n');
-        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        // curPos == len
+        //   || (curPos == len-1 && charAt(curPos) == '\n')
+        //   || (curPos == len-2 && charAt(curPos) == '\r' && charAt(curPos+1) == '\n')
+        {
+          Label checkEndM2 = new Label();
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitVarInsn(ILOAD, lenVar);
+          mv.visitJumpInsn(IF_ICMPEQ, passed);
+          // curPos == len-1?
+          mv.visitVarInsn(ILOAD, lenVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitJumpInsn(IF_ICMPNE, checkEndM2);
+          // charAt(curPos) == '\n'?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+          mv.visitJumpInsn(GOTO, passed);
+          // curPos == len-2?
+          mv.visitLabel(checkEndM2);
+          mv.visitVarInsn(ILOAD, lenVar);
+          mv.visitInsn(ICONST_2);
+          mv.visitInsn(ISUB);
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+          // charAt(curPos) == '\r'?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\r');
+          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+          // charAt(curPos+1) == '\n'?
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, curPosVar);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(IADD);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        }
         break;
       case END_MULTILINE:
         // curPos == len || input.charAt(curPos) == '\n'

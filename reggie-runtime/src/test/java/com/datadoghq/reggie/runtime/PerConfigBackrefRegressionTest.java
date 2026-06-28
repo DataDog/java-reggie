@@ -68,6 +68,15 @@ public class PerConfigBackrefRegressionTest {
     }
   }
 
+  /** CRLF pair at end: per-config anchor must accept curPos==len-2 when charAt is '\r\n'. */
+  @Test
+  void crlfEndAnchorInPerConfigBackref_agreesWithJdk() {
+    assertAgrees("((?:a|b))\\1$", "aa\r\n");
+    assertAgrees("((?:a|b))\\1$", "aa");
+    assertAgrees("((?:a|b))\\1$", "ab\r\n");
+    assertAgrees("((?:a|b))\\1\\Z", "bb\r\n");
+  }
+
   /**
    * matches() boolean, find() boolean, and the full first-match span <em>including every group
    * span</em> must agree with java.util.regex. Group spans are essential: the P1 target diverges

@@ -58,9 +58,34 @@ public final class FallbackPatternDetector {
     Visitor v = new Visitor();
     ast.accept(v);
 
-    // B1-B4 below apply to DFA and non-capturing NFA strategies. PIKEVM_CAPTURE handles these
-    // patterns correctly (as confirmed by targeted spike tests), so skip them when the routing
-    // decision has already committed to PIKEVM_CAPTURE. Only B16 is a known PIKEVM_CAPTURE defect.
+    // B2 — KEEP-PERMANENT: anchor inside a quantifier that is itself inside a capturing group.
+    // Spike (AnchorInQuantifierNativeTest) showed PikeVM mis-positions the zero-width match:
+    // (${0,3}) on "abc" lands at [3,3] instead of JDK's [0,0], and (^{0,2}ab) on "xab" returns
+    // false instead of true. Root cause: PikeVM uses leftmost-longest NFA traversal which
+    // collapses the zero-width anchor to the end-of-input position rather than the first viable
+    // zero-width position, and the optional anchor quantifier changes the anchoring semantics
+    // in a way the current engine cannot model. No tractable fix in scope.
+    // Applies to ALL strategies including PIKEVM_CAPTURE (see b2_currentlyFallsBackToJdk
+    // @Disabled).
+    if (hasAnchorInQuantifierInCapturingGroup(ast)) {
+      return "anchor inside quantifier within capturing group: capture span tracking incorrect";
+    }
+
+    // B3 — KEEP-PERMANENT (conservative): any anchor inside a quantifier with range ≠ {1,1}.
+    // Spike showed that the tested patterns ((\b)+, (?:\Z)+) pass under PikeVM for the sample
+    // inputs tested. However, the predicate also covers exotic combinations (e.g. \A{2},
+    // (?:^){3}) that were not tested and may still misbehave. Retain the guard until a broader
+    // fuzz sweep with AnchorInQuantifierNativeTest confirms full correctness; at that point this
+    // predicate can be removed and these patterns routed to PIKEVM_CAPTURE.
+    // Applies to ALL strategies including PIKEVM_CAPTURE.
+    if (hasAnchorInQuantifier(ast)) {
+      return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
+    }
+
+    // B1, B1-narrow, B4 apply to DFA and non-capturing NFA strategies. PIKEVM_CAPTURE handles
+    // these patterns correctly (as confirmed by targeted spike tests), so skip them when the
+    // routing decision has already committed to PIKEVM_CAPTURE. Only B16 is a known PIKEVM_CAPTURE
+    // defect.
     if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
       // B1 — Lookahead inside a quantified group (issue #28).
       // Root cause (NEEDS-RND): Thompson/Pike NFA has no per-thread quantifier-iteration counter.
@@ -81,27 +106,6 @@ public final class FallbackPatternDetector {
       // back.
       if (hasAssertionReferencingCaptureInQuantifier(ast)) {
         return "assertion inside quantifier references captured group value";
-      }
-
-      // B2 — KEEP-PERMANENT: anchor inside a quantifier that is itself inside a capturing group.
-      // Spike (AnchorInQuantifierNativeTest) showed PikeVM mis-positions the zero-width match:
-      // (${0,3}) on "abc" lands at [3,3] instead of JDK's [0,0], and (^{0,2}ab) on "xab" returns
-      // false instead of true. Root cause: PikeVM uses leftmost-longest NFA traversal which
-      // collapses the zero-width anchor to the end-of-input position rather than the first viable
-      // zero-width position, and the optional anchor quantifier changes the anchoring semantics
-      // in a way the current engine cannot model. No tractable fix in scope.
-      if (hasAnchorInQuantifierInCapturingGroup(ast)) {
-        return "anchor inside quantifier within capturing group: capture span tracking incorrect";
-      }
-
-      // B3 — KEEP-PERMANENT (conservative): any anchor inside a quantifier with range ≠ {1,1}.
-      // Spike showed that the tested patterns ((\b)+, (?:\Z)+) pass under PikeVM for the sample
-      // inputs tested. However, the predicate also covers exotic combinations (e.g. \A{2},
-      // (?:^){3}) that were not tested and may still misbehave. Retain the guard until a broader
-      // fuzz sweep with AnchorInQuantifierNativeTest confirms full correctness; at that point this
-      // predicate can be removed and these patterns routed to PIKEVM_CAPTURE.
-      if (hasAnchorInQuantifier(ast)) {
-        return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
       }
 
       // B4 — KEEP-PERMANENT (conservative): END/STRING_END anchor ($, \Z) immediately before a
@@ -1182,8 +1186,9 @@ public final class FallbackPatternDetector {
             if (sib instanceof GroupNode g && g.capturing && backrefNums.contains(g.groupNumber)) {
               CharSet groupChars = firstCharSetOf(g.child);
               if (groupChars == null || prefixChars.intersects(groupChars)) return true;
+              break; // reached the target group; no need to scan further
             }
-            break;
+            // non-anchor, non-target sibling (e.g. another prefix quantifier) — keep scanning
           }
         }
       }
