@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
@@ -80,8 +81,17 @@ public class PikeVmCaptureRegressionTest {
 
   @Test
   void anchorInRepeatedGroup() throws Exception {
+    // PatternAnalyzer still routes to PIKEVM_CAPTURE, but FallbackPatternDetector B3 guard
+    // (anchor-in-quantifier, now active for all strategies) forces JDK fallback. Result agrees.
     assertRoute("1|(0|^a?){3}", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
-    assertAgrees("1|(0|^a?){3}", "a");
+    ReggieOptions opts = ReggieOptions.builder().allowJdkFallback().build();
+    ReggieMatcher m = Reggie.compile("1|(0|^a?){3}", opts);
+    assertTrue(
+        m instanceof JavaRegexFallbackMatcher,
+        "B3 anchor-in-quantifier guard applies to PIKEVM_CAPTURE — expected JDK fallback");
+    Pattern jdk = Pattern.compile("1|(0|^a?){3}");
+    assertEquals(jdk.matcher("a").matches(), m.matches("a"), "matches() agrees with JDK");
+    assertEquals(jdk.matcher("a").find(), m.find("a"), "find() agrees with JDK");
   }
 
   @Test
