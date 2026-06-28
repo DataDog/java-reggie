@@ -197,14 +197,14 @@ class PikeVMRoutingTest {
         "(0{0}[^_]{1,})- must route to PIKEVM_CAPTURE (A1: nullable first element 0{0})");
   }
 
-  // ── A1 regression: patterns that MUST stay on DFA_UNROLLED_WITH_GROUPS ────
+  // ── A1 regression: patterns that MUST NOT route to PIKEVM_CAPTURE ────
 
   @Test
   void nonNullableGroupBody_staysOnDfa() throws Exception {
     // Group body `abc` starts with literal `a` (non-nullable); A1 guard must NOT fire.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        PatternAnalyzer.MatchingStrategy.ONEPASS_NFA,
         StrategyCorrectnessMetaTest.routeOf("(abc)"),
-        "(abc) must stay on DFA_UNROLLED_WITH_GROUPS (non-nullable first element)");
+        "(abc) must not be routed to PIKEVM_CAPTURE by the A1 guard (non-nullable first element)");
   }
 }

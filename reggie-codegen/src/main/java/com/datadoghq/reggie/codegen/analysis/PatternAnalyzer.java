@@ -977,6 +977,19 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // A1: group body starts with a nullable first element — TDFA fires the group-start
+            // tag at an epsilon-reachable state, recording match-start instead of group-start.
+            if (FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // A2: capturing group absent from some alternation branch — TDFA binds the absent
             // group to a wrong span when the branch that lacks the group wins.
             if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
@@ -1050,6 +1063,32 @@ public class PatternAnalyzer {
         }
         if (FallbackPatternDetector.containsAlternation(ast)
             && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // A1: group body starts with a nullable first element — TDFA fires the group-start
+        // tag at an epsilon-reachable state, recording match-start instead of group-start.
+        if (FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // A2: capturing group absent from some alternation branch — TDFA binds the absent
+        // group to a wrong span when the branch that lacks the group wins.
+        if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,

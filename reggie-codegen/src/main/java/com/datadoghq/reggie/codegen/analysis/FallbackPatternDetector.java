@@ -1470,6 +1470,49 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any capturing {@link GroupNode} in {@code ast} has a body whose leading element
+   * is nullable (i.e. can match the empty string). This identifies patterns where the TDFA fires
+   * the group-start tag at a state that is epsilon-reachable from before the group, causing the
+   * recorded start to equal the overall match start rather than the group's actual start.
+   *
+   * <p>Examples: {@code -{1}(a?.*)} — group body starts with {@code a?} (min=0, nullable). {@code
+   * (0{0}[^_]{1,})-} — group body starts with {@code 0{0}} (max=0, nullable).
+   */
+  public static boolean hasCapturingGroupWithNullableFirstElement(RegexNode ast) {
+    if (ast instanceof GroupNode) {
+      GroupNode g = (GroupNode) ast;
+      if (g.capturing) {
+        RegexNode body = g.child;
+        boolean nullableFirst;
+        if (body instanceof ConcatNode) {
+          List<RegexNode> children = ((ConcatNode) body).children;
+          nullableFirst = !children.isEmpty() && isNullable(children.get(0));
+        } else {
+          nullableFirst = isNullable(body);
+        }
+        if (nullableFirst) return true;
+      }
+      return hasCapturingGroupWithNullableFirstElement(g.child);
+    }
+    if (ast instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) ast).alternatives) {
+        if (hasCapturingGroupWithNullableFirstElement(alt)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) ast).children) {
+        if (hasCapturingGroupWithNullableFirstElement(child)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasCapturingGroupWithNullableFirstElement(((QuantifierNode) ast).child);
+    }
+    return false;
+  }
+
+  /**
    * Returns the minimum number of characters that {@code node} must consume (ignoring zero-width
    * anchors and assertions). Used to distinguish single-character alternation alternatives from
    * multi-character ones.
