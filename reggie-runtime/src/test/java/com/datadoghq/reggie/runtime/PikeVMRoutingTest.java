@@ -132,4 +132,77 @@ class PikeVMRoutingTest {
     assertEquals("a", r.group(1), "group(1) must be 'a'");
     assertEquals("bcd", r.group(2), "group(2) must be 'bcd'");
   }
+
+  // ── A2: capturing group absent from some alternation branch ────────────────
+
+  @Test
+  void groupAbsentFromAlt_literalThenGroup_routesToPikevm() throws Exception {
+    // Group 1 `(.)` only in alt 2; DFA_UNROLLED_WITH_GROUPS binds group 1 when alt 1 wins.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("[a][1-b]|(.)"),
+        "[a][1-b]|(.) must route to PIKEVM_CAPTURE (A2: group absent from alt 1)");
+  }
+
+  @Test
+  void groupAbsentFromAlt_dotThenGroup_routesToPikevm() throws Exception {
+    // Group 1 `(_)` only in alt 2.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("_.|(_)"),
+        "_.|(_) must route to PIKEVM_CAPTURE (A2: group absent from alt 2)");
+  }
+
+  @Test
+  void groupAbsentFromAlt_groupFirstAlt_routesToPikevm() throws Exception {
+    // Group 1 `(1)` only in alt 1; DFA binds group 1 when alt 2 wins.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(1)c|10"),
+        "(1)c|10 must route to PIKEVM_CAPTURE (A2: group absent from alt 2)");
+  }
+
+  // ── A2 regression: patterns that MUST stay on DFA_UNROLLED_WITH_GROUPS ────
+
+  @Test
+  void singleGroupWrappingAlts_staysOnDfa() throws Exception {
+    // (fo|foo): group wraps the whole alternation; both inner branches have no capturing group.
+    // A2 guard must NOT fire — guard already tested by foOrFoo_routesToDfaWithGroups().
+    // This test guards the simple (ab)c case as a minimal sanity check.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("(ab)c"),
+        "(ab)c must stay on DFA_UNROLLED_WITH_GROUPS (no alternation, non-nullable body)");
+  }
+
+  // ── A1: capturing group body starts with nullable first element ────────────
+
+  @Test
+  void nullableFirstElem_optionalPrefix_routesToPikevm() throws Exception {
+    // Group body `a?.*` starts with `a?` (min=0); TDFA fires group-start too early.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("-{1}(a?.*)"),
+        "-{1}(a?.*) must route to PIKEVM_CAPTURE (A1: nullable first element a?)");
+  }
+
+  @Test
+  void nullableFirstElem_zeroQuantifier_routesToPikevm() throws Exception {
+    // Group body `0{0}[^_]{1,}` starts with `0{0}` (min=0,max=0); TDFA group-start fires too early.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(0{0}[^_]{1,})-"),
+        "(0{0}[^_]{1,})- must route to PIKEVM_CAPTURE (A1: nullable first element 0{0})");
+  }
+
+  // ── A1 regression: patterns that MUST stay on DFA_UNROLLED_WITH_GROUPS ────
+
+  @Test
+  void nonNullableGroupBody_staysOnDfa() throws Exception {
+    // Group body `abc` starts with literal `a` (non-nullable); A1 guard must NOT fire.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("(abc)"),
+        "(abc) must stay on DFA_UNROLLED_WITH_GROUPS (non-nullable first element)");
+  }
 }
