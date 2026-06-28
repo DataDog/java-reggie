@@ -977,6 +977,19 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // A2: capturing group absent from some alternation branch — TDFA binds the absent
+            // group to a wrong span when the branch that lacks the group wins.
+            if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
             if (stateCount < DFA_UNROLLED_STATE_LIMIT) {

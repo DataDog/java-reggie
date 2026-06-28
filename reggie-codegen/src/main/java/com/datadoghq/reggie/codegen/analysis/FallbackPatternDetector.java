@@ -1409,6 +1409,101 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any {@link AlternationNode} in {@code ast} contains an alternative that is
+   * missing a capturing group number present in another alternative of the same alternation, AND at
+   * least one of the alternatives in that alternation consumes more than one character (minimum
+   * match length &gt; 1). Single-character-per-alt patterns (e.g. {@code (a)|b}, {@code (b)|b}) are
+   * correctly handled by the TDFA 1B alternation-binding fix and do not require PIKEVM routing.
+   *
+   * <p>Examples that fire: {@code [a][1-b]|(.)}, {@code _.|(_)}, {@code (1)c|10} — at least one alt
+   * is a multi-char sequence. Examples that do NOT fire: {@code (a)|b}, {@code (b)|b}, {@code
+   * b|(b)}, {@code .|([^c])} — all single-char alts. {@code (a|b)} does NOT fire (alternation
+   * inside the group; inner branches add no separate group). Patterns with no alternation (e.g.
+   * {@code (ab)c}) do not fire.
+   */
+  public static boolean hasCapturingGroupAbsentFromSomeAlternative(RegexNode ast) {
+    if (ast instanceof AlternationNode) {
+      AlternationNode alt = (AlternationNode) ast;
+      List<RegexNode> alts = alt.alternatives;
+      @SuppressWarnings("unchecked")
+      Set<Integer>[] groups = new Set[alts.size()];
+      Set<Integer> union = new HashSet<>();
+      for (int i = 0; i < alts.size(); i++) {
+        groups[i] = new HashSet<>();
+        collectGroupsInSubtree(alts.get(i), groups[i]);
+        union.addAll(groups[i]);
+      }
+      if (!union.isEmpty()) {
+        boolean anyAbsent = false;
+        for (Set<Integer> altGroups : groups) {
+          if (!altGroups.containsAll(union)) {
+            anyAbsent = true;
+            break;
+          }
+        }
+        if (anyAbsent) {
+          // Only flag when at least one alternative consumes more than one character. Single-char
+          // alternations are handled correctly by the TDFA 1B fix.
+          for (RegexNode alternative : alts) {
+            if (altMinLength(alternative) > 1) return true;
+          }
+        }
+      }
+      for (RegexNode alternative : alts) {
+        if (hasCapturingGroupAbsentFromSomeAlternative(alternative)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) ast).children) {
+        if (hasCapturingGroupAbsentFromSomeAlternative(child)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof GroupNode) {
+      return hasCapturingGroupAbsentFromSomeAlternative(((GroupNode) ast).child);
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasCapturingGroupAbsentFromSomeAlternative(((QuantifierNode) ast).child);
+    }
+    return false;
+  }
+
+  /**
+   * Returns the minimum number of characters that {@code node} must consume (ignoring zero-width
+   * anchors and assertions). Used to distinguish single-character alternation alternatives from
+   * multi-character ones.
+   */
+  private static int altMinLength(RegexNode node) {
+    if (node instanceof LiteralNode) {
+      return ((LiteralNode) node).ch == 0 ? 0 : 1; // epsilon is 0; normal literal is 1
+    }
+    if (node instanceof CharClassNode) return 1;
+    if (node instanceof AnchorNode || node instanceof AssertionNode) return 0; // zero-width
+    if (node instanceof GroupNode) return altMinLength(((GroupNode) node).child);
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.min == 0) return 0;
+      return q.min * altMinLength(q.child);
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode c : ((ConcatNode) node).children) {
+        total += altMinLength(c);
+      }
+      return total;
+    }
+    if (node instanceof AlternationNode) {
+      int min = Integer.MAX_VALUE;
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        min = Math.min(min, altMinLength(a));
+      }
+      return min == Integer.MAX_VALUE ? 0 : min;
+    }
+    return 0;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
    * the group's content is itself nullable (can match the empty string). Example: {@code
    * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is

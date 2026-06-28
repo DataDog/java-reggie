@@ -169,10 +169,12 @@ class PikeVMRoutingTest {
     // (fo|foo): group wraps the whole alternation; both inner branches have no capturing group.
     // A2 guard must NOT fire — guard already tested by foOrFoo_routesToDfaWithGroups().
     // This test guards the simple (ab)c case as a minimal sanity check.
+    // (ab)c has no alternation so it routes to SPECIALIZED_FIXED_SEQUENCE, not
+    // DFA_UNROLLED_WITH_GROUPS.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        PatternAnalyzer.MatchingStrategy.SPECIALIZED_FIXED_SEQUENCE,
         StrategyCorrectnessMetaTest.routeOf("(ab)c"),
-        "(ab)c must stay on DFA_UNROLLED_WITH_GROUPS (no alternation, non-nullable body)");
+        "(ab)c must not be routed to PIKEVM_CAPTURE by the A2 guard (no alternation)");
   }
 
   // ── A1: capturing group body starts with nullable first element ────────────
