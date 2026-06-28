@@ -158,5 +158,13 @@
     "root_cause": "Early-exit optimizations that bypass validation logic produce incorrect results for edge-case inputs; every accept path must run all required guards, including those on the entry state.",
     "confidence": "medium",
     "source": "fix-mining"
+  },
+  {
+    "theme": "perconfig-worklist-overflow-silent-drop",
+    "anti_pattern": "When the per-config worklist overflows its bounded capacity, execution jumps to the full-match label and silently drops the overflowed configuration, returning a false negative instead of delegating to the JDK fallback.",
+    "fix_example": "On overflow, emit a JDK-delegation bytecode path (or throw a controlled signal) rather than jumping to `full`, so no matching configuration is silently discarded.",
+    "root_cause": "The overflow guard was written before the per-config path was ungated; once perConfigEligible() enables the path unconditionally, any pattern that generates more than PER_CONFIG_CAP branches can trigger the silent drop on inputs that require a branch beyond the cap.",
+    "confidence": "high",
+    "source": "teach"
   }
 ]
