@@ -58,10 +58,10 @@ public class AlgorithmicFuzzTest {
    * pre-existing find-path group-capture bugs in the codegen TDFA / PikeVM (untaken-branch group
    * not reset to −1; empty-iteration binding; greedy give-back inner-span). These are tracked as
    * the capture-correctness effort and ratchet this budget back toward 0 as each root-cause class
-   * is fixed. Ratcheted 78→69→65: Class A (nullable capturing group in an alternation branch, e.g.
-   * {@code 1|()b}) now routes to PIKEVM_CAPTURE for correct spans.
+   * is fixed. Ratcheted 78→69→65→13: A1+A2 PIKEVM_CAPTURE routing fixes resolved most capture-span
+   * divergences; remaining 13 findings are tracked known bugs.
    */
-  private static final int KNOWN_FINDINGS_BUDGET = 65;
+  private static final int KNOWN_FINDINGS_BUDGET = 13;
 
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)
