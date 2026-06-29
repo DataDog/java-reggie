@@ -164,6 +164,9 @@ public class AlgorithmicFuzzTest {
    *
    * <p>Self-skips unless {@code -Dreggie.fuzz.extended=true} is set — keeps CI fast while allowing
    * targeted discovery runs. Override the budget via {@code -Dreggie.fuzz.maxFindings=N}.
+   *
+   * <p>See {@code doc/fuzz/2026-06-29.md} for the clustered finding inventory and the exact
+   * parameters needed to continue the sweep from pattern 50 001 onward.
    */
   @Test
   @Timeout(value = 600, unit = TimeUnit.SECONDS)
