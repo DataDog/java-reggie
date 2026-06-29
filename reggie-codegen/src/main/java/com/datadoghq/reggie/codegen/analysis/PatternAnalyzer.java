@@ -717,7 +717,12 @@ public class PatternAnalyzer {
     }
 
     // Check for OnePass eligibility (highest priority for patterns with groups)
-    if (!ignoreGroupCount && nfa.getGroupCount() > 0 && isOnePassEligible()) {
+    // B3a: skip OnePass for anchor-only capturing group bodies — the OnePass NFA emits a wrong
+    // zero-width span for such groups; they are handled below via PIKEVM_CAPTURE.
+    if (!ignoreGroupCount
+        && nfa.getGroupCount() > 0
+        && isOnePassEligible()
+        && !FallbackPatternDetector.hasAnchorOnlyCapturingGroup(ast)) {
       return new MatchingStrategyResult(
           MatchingStrategy.ONEPASS_NFA, null, null, false, requiredLiterals);
     }
@@ -727,6 +732,18 @@ public class PatternAnalyzer {
     if (!ignoreGroupCount && nfa.getGroupCount() > 0) {
       // Check if pattern has groups inside repeating quantifiers (needs POSIX semantics)
       boolean needsPosixSemantics = hasGroupsInRepeatingQuantifiers(ast);
+
+      // B3a: anchor-only group body — OnePass NFA emits wrong zero-width span.
+      if (nfa.getGroupCount() > 0 && FallbackPatternDetector.hasAnchorOnlyCapturingGroup(ast)) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE,
+            null,
+            null,
+            false,
+            requiredLiterals,
+            null,
+            needsPosixSemantics);
+      }
 
       // Try specialized strategies for patterns with quantified groups
       // These provide correct POSIX last-match semantics for group capture
@@ -1666,7 +1683,8 @@ public class PatternAnalyzer {
    * fast path for this shape so it routes to a correct strategy.
    */
   private boolean hasStringEndAnchorInAlternation(RegexNode node) {
-    return containsAlternation(node) && nfa != null
+    return containsAlternation(node)
+        && nfa != null
         && (nfa.hasStringEndAnchor() || nfa.hasEndAnchor());
   }
 

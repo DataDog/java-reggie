@@ -1547,6 +1547,33 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any capturing {@link GroupNode} in {@code ast} has a body that consists solely
+   * of an anchor (e.g. {@code ($)}, {@code (^)}). The OnePass NFA emits a wrong zero-width span for
+   * such groups; routing to PIKEVM_CAPTURE gives correct results.
+   */
+  public static boolean hasAnchorOnlyCapturingGroup(RegexNode ast) {
+    if (ast instanceof GroupNode g && g.capturing) {
+      if (isAnchorOnlyBody(g.child)) return true;
+      return hasAnchorOnlyCapturingGroup(g.child);
+    }
+    if (ast instanceof ConcatNode c) {
+      for (RegexNode child : c.children) if (hasAnchorOnlyCapturingGroup(child)) return true;
+    }
+    if (ast instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) if (hasAnchorOnlyCapturingGroup(alt)) return true;
+    }
+    if (ast instanceof QuantifierNode q) return hasAnchorOnlyCapturingGroup(q.child);
+    return false;
+  }
+
+  private static boolean isAnchorOnlyBody(RegexNode node) {
+    if (node instanceof AnchorNode) return true;
+    if (node instanceof ConcatNode c)
+      return c.children.size() == 1 && c.children.get(0) instanceof AnchorNode;
+    return false;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
    * the group's content is itself nullable (can match the empty string). Example: {@code
    * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is

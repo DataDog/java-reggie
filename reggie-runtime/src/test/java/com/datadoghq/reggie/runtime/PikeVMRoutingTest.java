@@ -210,6 +210,19 @@ class PikeVMRoutingTest {
 
   // ── B3b: $ (end-of-line anchor) in alternation ─────────────────────────────
 
+  // ── B3a: anchor-only capturing group body ──────────────────────────────────
+
+  @Test
+  void anchorOnlyGroupBody_routesToPikevm() throws Exception {
+    // ($): capturing group whose body is a sole anchor — must route to PIKEVM_CAPTURE (B3a).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("($)"),
+        "($) must route to PIKEVM_CAPTURE (B3a: anchor-only capturing group body)");
+  }
+
+  // ── B3b: $ (end-of-line anchor) in alternation ─────────────────────────────
+
   @Test
   void dollarInAlternation_routesToPikevm() throws Exception {
     // $|[^c]{1}: $ anchor in alternation — must route to PIKEVM_CAPTURE (B3b).
