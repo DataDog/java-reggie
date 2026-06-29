@@ -296,12 +296,12 @@ public class RuntimeCompiler {
     try {
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
-      if (FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+      String pikeVmFallbackReason =
+          FallbackPatternDetector.needsFallback(
+              ast, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+      if (pikeVmFallbackReason != null) {
         throw new UnsupportedPatternException(
-            "capturing group with nullable content and nullable outer quantifier: "
-                + "PIKEVM_CAPTURE diverges in /"
-                + pattern
-                + "/");
+            "PIKEVM_CAPTURE pattern is unsafe: " + pikeVmFallbackReason + " in /" + pattern + "/");
       }
       Map<String, Integer> nameMap = decodeNameMap(encodedNames);
       int groupCount = countGroups(pattern);

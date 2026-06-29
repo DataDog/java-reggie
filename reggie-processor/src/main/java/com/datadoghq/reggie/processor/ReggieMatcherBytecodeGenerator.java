@@ -101,6 +101,21 @@ public class ReggieMatcherBytecodeGenerator {
     this.resolvedStrategy = result.strategy;
 
     if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+      String pikeVmFallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+      if (pikeVmFallbackReason != null) {
+        if (allowJdkFallback) {
+          return Realization.DELEGATE_FALLBACK;
+        }
+        throw new UnsupportedOperationException(
+            "Pattern '"
+                + pattern
+                + "' requires java.util.regex fallback (strategy "
+                + result.strategy
+                + "): "
+                + pikeVmFallbackReason
+                + ". Add options = ReggieOption.ALLOW_JDK_FALLBACK to @RegexPattern to permit a"
+                + " delegating stub, or use Reggie.compile() at runtime.");
+      }
       return Realization.DELEGATE_PIKEVM;
     }
     boolean needsJdk =
