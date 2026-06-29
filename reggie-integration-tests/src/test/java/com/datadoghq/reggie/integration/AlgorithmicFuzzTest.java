@@ -48,30 +48,22 @@ public class AlgorithmicFuzzTest {
 
   /**
    * Known pre-existing divergence budget for {@link #BASE_SEED} at the default sweep dimensions
-   * (25k patterns × 16 inputs × max-length 16). Every finding here is a known, tracked bug in a
-   * native strategy — not a regression. When this count changes, update the budget and document the
-   * new/fixed finding in {@code doc/temp/prod-readiness/fuzz-inventory.md}. Override via {@code
-   * -Dreggie.fuzz.maxFindings=N} for stricter local runs.
+   * (50k patterns × 16 inputs × max-length 16 × depth 3). Every finding here is a tracked bug in a
+   * native strategy — not a regression. When this count changes:
    *
-   * <p>Raised 18→78 when {@link RegexFuzzOracle} gained a {@code findAll()} differential that
-   * checks per-match group spans (≥1) on the FIND path — the first oracle to do so. It surfaced
-   * pre-existing find-path group-capture bugs in the codegen TDFA / PikeVM (untaken-branch group
-   * not reset to −1; empty-iteration binding; greedy give-back inner-span). These are tracked as
-   * the capture-correctness effort and ratchet this budget back toward 0 as each root-cause class
-   * is fixed. Ratcheted 78→69→65→13→0: B3a/B3b/B4/B5/B6 fixes eliminated all remaining known
-   * divergences.
+   * <ul>
+   *   <li>Decreases (bug fixed): ratchet down, note the fixed cluster in the latest {@code
+   *       doc/fuzz/*.md} inventory. When it reaches 0, run the next window via {@code
+   *       -Dreggie.fuzz.skip=50000 -Dreggie.fuzz.size=25000} to discover new findings, document
+   *       them in a new {@code doc/fuzz/YYYY-MM-DD.md}, and raise the budget + default size
+   *       accordingly.
+   *   <li>Increases (new window discovered): add the new findings doc and update this value.
+   * </ul>
+   *
+   * <p>History: 18→78 (findAll group-span oracle added) → 69→65→13→0 (B3a/B3b/B4/B5/B6 fixes,
+   * patterns 0–25k) → 43 (patterns 25k–50k surfaced E1–E6; see {@code doc/fuzz/2026-06-29.md}).
    */
-  private static final int KNOWN_FINDINGS_BUDGET = 0;
-
-  /**
-   * Known pre-existing divergence budget for the extended sweep: {@link #BASE_SEED}, patterns 25
-   * 001–50 000, skip=25 000, count=25 000, depth=3, 16 inputs × max-length 16. Covers a disjoint
-   * pattern range from {@link #KNOWN_FINDINGS_BUDGET}; findings here are pre-existing bugs surfaced
-   * by the wider sweep, not regressions. Clustered inventory and exact reproduction commands:
-   * {@code doc/fuzz/2026-06-29.md}. Ratchet this value toward 0 as each cluster is fixed; update
-   * the inventory doc when the count changes.
-   */
-  private static final int KNOWN_FINDINGS_BUDGET_EXTENDED = 43;
+  private static final int KNOWN_FINDINGS_BUDGET = 43;
 
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)
@@ -167,29 +159,6 @@ public class AlgorithmicFuzzTest {
   }
 
   /**
-   * Extended sweep: same seed and dimensions as {@link #divergenceGate} but starts at pattern 25
-   * 001, covering the range that the standard gate does not reach. Findings here are tracked bugs
-   * not yet fixed; see {@code doc/2026-06-29-fuzz-extended-findings.md} for the clustered
-   * inventory.
-   *
-   * <p>Self-skips unless {@code -Dreggie.fuzz.extended=true} is set — keeps CI fast while allowing
-   * targeted discovery runs. Override the budget via {@code -Dreggie.fuzz.maxFindings=N}.
-   *
-   * <p>See {@code doc/fuzz/2026-06-29.md} for the clustered finding inventory and the exact
-   * parameters needed to continue the sweep from pattern 50 001 onward.
-   */
-  @Test
-  @Timeout(value = 600, unit = TimeUnit.SECONDS)
-  public void divergenceGate_extended() {
-    assumeTrue(
-        Boolean.getBoolean("reggie.fuzz.extended"),
-        "set -Dreggie.fuzz.extended=true to run the extended discovery sweep (patterns 25k–50k)");
-    FuzzRunner.Config cfg = largeSweepConfig();
-    cfg.patternSkip = 25_000;
-    runDivergenceGate(cfg, "[divergence-gate-ext]", KNOWN_FINDINGS_BUDGET_EXTENDED);
-  }
-
-  /**
    * Companion entry point that is <em>not</em> {@code @Disabled}: it self-skips unless {@code
    * -Dreggie.fuzz.enforce=true} is set, letting CI exercise the gate without editing source.
    *
@@ -220,8 +189,8 @@ public class AlgorithmicFuzzTest {
 
     int totalChecks = cfg.patternCount * cfg.inputsPerPattern;
     assertTrue(
-        totalChecks >= 50_000,
-        "gate must sweep at least 50k checks; configured for " + totalChecks);
+        totalChecks >= 100_000,
+        "gate must sweep at least 100k checks; configured for " + totalChecks);
 
     List<Shrunk> repros = shrinkAndDedupe(report);
     for (Shrunk s : repros) {
@@ -263,7 +232,7 @@ public class AlgorithmicFuzzTest {
   static FuzzRunner.Config largeSweepConfig() {
     FuzzRunner.Config cfg = new FuzzRunner.Config();
     cfg.seed = BASE_SEED;
-    cfg.patternCount = sizedPatternCount(25_000);
+    cfg.patternCount = sizedPatternCount(50_000);
     cfg.patternSkip = intProp("reggie.fuzz.skip", 0);
     cfg.inputsPerPattern = intProp("reggie.fuzz.inputsPerPattern", 16);
     cfg.patternDepth = intProp("reggie.fuzz.patternDepth", 3);
