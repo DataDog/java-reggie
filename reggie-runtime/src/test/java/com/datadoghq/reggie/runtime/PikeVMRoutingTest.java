@@ -264,7 +264,8 @@ class PikeVMRoutingTest {
 
   @Test
   void greedyDotPlusWithSuffix_routesToPikevm() throws Exception {
-    // (.+)_ has a greedy .+ group with a suffix — TDFA extends group-end into suffix (B4).
+    // (.+)_ has a greedy .+ group with a literal suffix — GREEDY_BACKTRACK's indexOf scan
+    // overshoots on inputs ending with '\n' (B4: greedy .+ with non-group suffix).
     assertEquals(
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("(.+)_"),
@@ -273,7 +274,7 @@ class PikeVMRoutingTest {
 
   @Test
   void greedyDotStarWithSuffix_staysOnGreedyBacktrack() throws Exception {
-    // (.*)_ has a greedy .* group (min=0) — GREEDY_BACKTRACK handles min=0 correctly.
+    // (.*)_ has a greedy .* group (min=0): not affected by the B4 decline (min>=1 only).
     assertEquals(
         PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK,
         StrategyCorrectnessMetaTest.routeOf("(.*)_"),

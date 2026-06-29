@@ -1696,11 +1696,18 @@ public final class FallbackPatternDetector {
         if (alts.size() >= 2) {
           int firstMin = minLength(alts.get(0));
           int firstMax = maxLength(alts.get(0));
+          boolean hasVariableLength = false;
           for (int i = 1; i < alts.size(); i++) {
             int altMin = minLength(alts.get(i));
             int altMax = maxLength(alts.get(i));
-            if (altMin != firstMin || altMax != firstMax) return true;
+            if (altMin != firstMin || altMax != firstMax) {
+              hasVariableLength = true;
+              break;
+            }
           }
+          if (hasVariableLength
+              && alts.stream().anyMatch(FallbackPatternDetector::containsBroadCharClass))
+            return true;
         }
       }
       return hasGroupWithVariableLengthAlternationBody(g.child);

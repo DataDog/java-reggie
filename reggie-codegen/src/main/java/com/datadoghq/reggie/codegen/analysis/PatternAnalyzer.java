@@ -330,6 +330,17 @@ public class PatternAnalyzer {
     if (hasBackrefs && hasQuantifiedBackrefs) {
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
       if (fixedRepBackrefInfo != null) {
+        // B6: decline when a non-empty suffix exists — the bytecode generator places the
+        // group-end tag after the suffix is consumed, not after the initial group match.
+        // Fall through to OPTIMIZED_NFA_WITH_BACKREFS, which handles group spans correctly.
+        if (!fixedRepBackrefInfo.suffix.isEmpty()) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+              null,
+              null,
+              false,
+              java.util.Collections.emptySet());
+        }
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -688,7 +699,7 @@ public class PatternAnalyzer {
       // Try to detect fixed-repetition backreference patterns: (a)\1{8,}, (abc)\1{3}
       // These don't require backtracking - just verification loop
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
-      if (fixedRepBackrefInfo != null) {
+      if (fixedRepBackrefInfo != null && fixedRepBackrefInfo.suffix.isEmpty()) {
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -696,6 +707,7 @@ public class PatternAnalyzer {
             false,
             requiredLiterals);
       }
+      // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
       // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
 
       // Try to detect variable-capture backreference patterns: (.*)\d+\1, (.+)=\1
@@ -814,6 +826,25 @@ public class PatternAnalyzer {
         // POSIX last-match semantics (groups may contain first match instead of last)
       }
 
+      // B4: greedy .+ group followed by a non-group suffix — the GREEDY_BACKTRACK indexOf scan
+      // overshoots on inputs ending with '\n' because '.' (ANY_EXCEPT_NEWLINE) cannot consume '\n'
+      // but the literal-suffix scan stops there. Route to PIKEVM_CAPTURE which handles this
+      // correctly. Patterns with a capturing-group suffix are excluded (different scan path).
+      boolean b4Flag =
+          FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
+              && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+      addTrace("B4: hasGreedyDotPlusGroupWithSuffix", b4Flag);
+      if (b4Flag) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE,
+            null,
+            null,
+            false,
+            requiredLiterals,
+            null,
+            needsPosixSemantics);
+      }
+
       // Check if pattern requires backtracking for correct group capture
       // Pattern a([bc]*)(c+d) needs backtracking: ([bc]*) must give back chars to allow (c+d) to
       // match
@@ -847,15 +878,14 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         boolean b3bCapFlag =
-            hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa);
+            (hasStringEndAnchorInAlternation(ast) || hasEndAnchorLeadingInAlternationBranch(ast))
+                && !dfaHasAcceptingStateWithTransitions(dfa);
         addTrace("B3b: hasStringEndAnchorInAlternation", b3bCapFlag);
         if (b3bCapFlag) {
-          // \Z or $ in alternation with capturing groups: OPTIMIZED_NFA handles anchors as
-          // zero-width NFA assertions. The nfa.getGroupCount() == 0 branch that previously
-          // appeared here was unreachable (this block is guarded by nfa.getGroupCount() > 0).
-          // Zero-group patterns with \Z in alternation are handled outside this block.
+          // \Z in alternation with capturing groups: PIKEVM_CAPTURE handles anchors correctly.
+          // OPTIMIZED_NFA would be rejected by needsFallback for this combination.
           return new MatchingStrategyResult(
-              MatchingStrategy.OPTIMIZED_NFA,
+              MatchingStrategy.PIKEVM_CAPTURE,
               null,
               null,
               false,
@@ -1291,7 +1321,8 @@ public class PatternAnalyzer {
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
       boolean b3bFlag =
-          hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa);
+          (hasStringEndAnchorInAlternation(ast) || hasEndAnchorLeadingInAlternationBranch(ast))
+              && !dfaHasAcceptingStateWithTransitions(dfa);
       addTrace("B3b: hasStringEndAnchorInAlternation", b3bFlag);
       if (b3bFlag) {
         // \Z or $ in alternation: OPTIMIZED_NFA mishandles find() anchor semantics;
@@ -1788,9 +1819,7 @@ public class PatternAnalyzer {
    * fast path for this shape so it routes to a correct strategy.
    */
   private boolean hasStringEndAnchorInAlternation(RegexNode node) {
-    return containsAlternation(node)
-        && nfa != null
-        && (nfa.hasStringEndAnchor() || nfa.hasEndAnchor());
+    return containsAlternation(node) && nfa != null && nfa.hasStringEndAnchor();
   }
 
   /**
@@ -3166,12 +3195,6 @@ public class PatternAnalyzer {
     // Extract prefix (nodes before group) and suffix (nodes after backref)
     List<RegexNode> prefix = new ArrayList<>(children.subList(0, groupIndex));
     List<RegexNode> suffix = new ArrayList<>(children.subList(backrefIndex + 1, children.size()));
-
-    // Decline when a non-empty suffix exists — the bytecode generator places the
-    // group-end tag after the suffix is consumed, not after the initial group match.
-    if (!suffix.isEmpty()) {
-      return null;
-    }
 
     // Determine if group is single-char
     boolean isSingleCharGroup = isSingleCharOrCharClass(capturingGroup.child);
@@ -7231,18 +7254,25 @@ public class PatternAnalyzer {
       return null;
     }
 
-    // Decline .+ (min>=1) with broad charset. The backtrack engine cannot enforce the
-    // min=1 lower bound while surrendering chars to satisfy the suffix.
-    if (greedyMinCount > 0
+    // There must be something after the greedy group (the suffix)
+    if (greedyGroupIndex >= allNodes.size() - 1) {
+      return null; // No suffix
+    }
+
+    // Decline .+ (min>=1) with broad charset when the suffix is a literal (not a capturing group).
+    // The GREEDY_BACKTRACK indexOf scan cannot enforce the min=1 lower bound while surrendering
+    // chars to a non-group suffix: on inputs with a trailing newline the scan overshoots, matching
+    // the newline via the suffix delimiter check instead of stopping at the non-newline boundary of
+    // '.' (ANY_EXCEPT_NEWLINE). Capturing-group suffixes use a different scan path unaffected by
+    // this.
+    boolean suffixStartsWithCapturingGroup =
+        allNodes.get(greedyGroupIndex + 1) instanceof GroupNode sg && sg.capturing;
+    if (!suffixStartsWithCapturingGroup
+        && greedyMinCount > 0
         && greedyCharSet != null
         && (greedyCharSet.equals(CharSet.ANY)
             || greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE))) {
       return null;
-    }
-
-    // There must be something after the greedy group (the suffix)
-    if (greedyGroupIndex >= allNodes.size() - 1) {
-      return null; // No suffix
     }
 
     // Extract prefix (everything before the greedy group)

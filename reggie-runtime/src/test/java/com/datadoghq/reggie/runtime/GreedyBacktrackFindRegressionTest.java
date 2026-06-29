@@ -59,7 +59,9 @@ public class GreedyBacktrackFindRegressionTest {
 
   @Test
   void findWhenPriorCharsEqualDelimiter() throws Exception {
-    assertRoute("(.+)_", PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK);
+    // (.+)_ routes to PIKEVM_CAPTURE: GREEDY_BACKTRACK's indexOf scan overshoots on inputs
+    // ending with '\n' (e.g. "-_\n") because '.' excludes '\n' but the scan stops on it.
+    assertRoute("(.+)_", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
     assertAgrees("(.+)_", "__");
   }
 
