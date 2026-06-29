@@ -1666,7 +1666,8 @@ public class PatternAnalyzer {
    * fast path for this shape so it routes to a correct strategy.
    */
   private boolean hasStringEndAnchorInAlternation(RegexNode node) {
-    return containsAlternation(node) && nfa != null && nfa.hasStringEndAnchor();
+    return containsAlternation(node) && nfa != null
+        && (nfa.hasStringEndAnchor() || nfa.hasEndAnchor());
   }
 
   /**

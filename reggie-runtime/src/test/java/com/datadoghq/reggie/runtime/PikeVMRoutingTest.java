@@ -207,4 +207,24 @@ class PikeVMRoutingTest {
         StrategyCorrectnessMetaTest.routeOf("(abc)"),
         "(abc) must not be routed to PIKEVM_CAPTURE by the A1 guard (non-nullable first element)");
   }
+
+  // ── B3b: $ (end-of-line anchor) in alternation ─────────────────────────────
+
+  @Test
+  void dollarInAlternation_routesToPikevm() throws Exception {
+    // $|[^c]{1}: $ anchor in alternation — must route to PIKEVM_CAPTURE (B3b).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("$|[^c]{1}"),
+        "$|[^c]{1} must route to PIKEVM_CAPTURE (B3b: $ in alternation)");
+  }
+
+  @Test
+  void dollarInAlternationAlt_routesToPikevm() throws Exception {
+    // $|[^0]{1}: $ anchor in alternation — must route to PIKEVM_CAPTURE (B3b).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("$|[^0]{1}"),
+        "$|[^0]{1} must route to PIKEVM_CAPTURE (B3b: $ in alternation)");
+  }
 }
