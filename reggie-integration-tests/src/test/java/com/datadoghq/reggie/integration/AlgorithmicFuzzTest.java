@@ -63,6 +63,16 @@ public class AlgorithmicFuzzTest {
    */
   private static final int KNOWN_FINDINGS_BUDGET = 0;
 
+  /**
+   * Known pre-existing divergence budget for the extended sweep: {@link #BASE_SEED}, patterns 25
+   * 001–50 000, skip=25 000, count=25 000, depth=3, 16 inputs × max-length 16. Covers a disjoint
+   * pattern range from {@link #KNOWN_FINDINGS_BUDGET}; findings here are pre-existing bugs surfaced
+   * by the wider sweep, not regressions. Clustered inventory and exact reproduction commands:
+   * {@code doc/fuzz/2026-06-29.md}. Ratchet this value toward 0 as each cluster is fixed; update
+   * the inventory doc when the count changes.
+   */
+  private static final int KNOWN_FINDINGS_BUDGET_EXTENDED = 43;
+
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)
   public void smokeFuzz_smallDeterministicSweep() {
@@ -176,7 +186,7 @@ public class AlgorithmicFuzzTest {
         "set -Dreggie.fuzz.extended=true to run the extended discovery sweep (patterns 25k–50k)");
     FuzzRunner.Config cfg = largeSweepConfig();
     cfg.patternSkip = 25_000;
-    runDivergenceGate(cfg, "[divergence-gate-ext]", 43);
+    runDivergenceGate(cfg, "[divergence-gate-ext]", KNOWN_FINDINGS_BUDGET_EXTENDED);
   }
 
   /**
