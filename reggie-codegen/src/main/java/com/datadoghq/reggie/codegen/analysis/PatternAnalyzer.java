@@ -794,6 +794,21 @@ public class PatternAnalyzer {
         // POSIX last-match semantics (groups may contain first match instead of last)
       }
 
+      // B4: greedy .+ group followed by a suffix — TDFA extends group-end into the suffix and
+      // RECURSIVE_DESCENT cannot enforce the min=1 lower bound while surrendering chars.
+      // Route to PIKEVM_CAPTURE which handles this correctly.
+      if (FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
+          && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE,
+            null,
+            null,
+            false,
+            requiredLiterals,
+            null,
+            needsPosixSemantics);
+      }
+
       // Check if pattern requires backtracking for correct group capture
       // Pattern a([bc]*)(c+d) needs backtracking: ([bc]*) must give back chars to allow (c+d) to
       // match
@@ -1022,6 +1037,18 @@ public class PatternAnalyzer {
             // A2: capturing group absent from some alternation branch — TDFA binds the absent
             // group to a wrong span when the branch that lacks the group wins.
             if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // B4: greedy .+ group followed by a suffix — TDFA extends group-end into the suffix.
+            if (FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
                 && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
@@ -7126,6 +7153,15 @@ public class PatternAnalyzer {
     if (greedyCharSet != null
         && !greedyCharSet.equals(CharSet.ANY)
         && !greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE)) {
+      return null;
+    }
+
+    // Decline .+ (min>=1) with broad charset. The backtrack engine cannot enforce the
+    // min=1 lower bound while surrendering chars to satisfy the suffix.
+    if (greedyMinCount > 0
+        && greedyCharSet != null
+        && (greedyCharSet.equals(CharSet.ANY)
+            || greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE))) {
       return null;
     }
 

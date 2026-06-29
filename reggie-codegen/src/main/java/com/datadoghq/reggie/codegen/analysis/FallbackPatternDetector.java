@@ -1574,6 +1574,27 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if the top-level concat contains a capturing group whose body is a greedy
+   * quantifier with min&ge;1, infinite max, and a broad charset (.+ or .+[DOTALL]), followed by at
+   * least one more node (the suffix). The TDFA extends the group-end tag into the suffix for these
+   * patterns, producing wrong capture spans.
+   */
+  public static boolean hasGreedyDotPlusGroupWithSuffix(RegexNode ast) {
+    if (!(ast instanceof ConcatNode concat)) return false;
+    List<RegexNode> children = concat.children;
+    for (int i = 0; i < children.size() - 1; i++) {
+      RegexNode node = children.get(i);
+      if (!(node instanceof GroupNode g) || !g.capturing) continue;
+      if (!(g.child instanceof QuantifierNode q)) continue;
+      if (q.min < 1 || (q.max != Integer.MAX_VALUE && q.max != -1)) continue;
+      if (!(q.child instanceof CharClassNode cc)) continue;
+      CharSet cs = cc.chars;
+      if (cs.equals(CharSet.ANY) || cs.equals(CharSet.ANY_EXCEPT_NEWLINE)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
    * the group's content is itself nullable (can match the empty string). Example: {@code
    * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is

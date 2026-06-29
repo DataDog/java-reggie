@@ -261,4 +261,22 @@ class PikeVMRoutingTest {
         StrategyCorrectnessMetaTest.routeOf("(.)\\1{2}"),
         "(.)\\1{2} must stay on FIXED_REPETITION_BACKREF (B6: no suffix)");
   }
+
+  @Test
+  void greedyDotPlusWithSuffix_routesToPikevm() throws Exception {
+    // (.+)_ has a greedy .+ group with a suffix — TDFA extends group-end into suffix (B4).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(.+)_"),
+        "(.+)_ must route to PIKEVM_CAPTURE (B4: greedy .+ with suffix)");
+  }
+
+  @Test
+  void greedyDotStarWithSuffix_staysOnGreedyBacktrack() throws Exception {
+    // (.*)_ has a greedy .* group (min=0) — GREEDY_BACKTRACK handles min=0 correctly.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK,
+        StrategyCorrectnessMetaTest.routeOf("(.*)_"),
+        "(.*)_ must stay on GREEDY_BACKTRACK (B4: only declines min>=1)");
+  }
 }
