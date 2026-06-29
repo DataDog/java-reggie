@@ -330,17 +330,6 @@ public class PatternAnalyzer {
     if (hasBackrefs && hasQuantifiedBackrefs) {
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
       if (fixedRepBackrefInfo != null) {
-        // B6: decline when a non-empty suffix exists — the bytecode generator places the
-        // group-end tag after the suffix is consumed, not after the initial group match.
-        // Fall through to OPTIMIZED_NFA_WITH_BACKREFS, which handles group spans correctly.
-        if (!fixedRepBackrefInfo.suffix.isEmpty()) {
-          return new MatchingStrategyResult(
-              MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
-              null,
-              null,
-              false,
-              java.util.Collections.emptySet());
-        }
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -699,7 +688,7 @@ public class PatternAnalyzer {
       // Try to detect fixed-repetition backreference patterns: (a)\1{8,}, (abc)\1{3}
       // These don't require backtracking - just verification loop
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
-      if (fixedRepBackrefInfo != null && fixedRepBackrefInfo.suffix.isEmpty()) {
+      if (fixedRepBackrefInfo != null) {
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -3195,6 +3184,12 @@ public class PatternAnalyzer {
     // Extract prefix (nodes before group) and suffix (nodes after backref)
     List<RegexNode> prefix = new ArrayList<>(children.subList(0, groupIndex));
     List<RegexNode> suffix = new ArrayList<>(children.subList(backrefIndex + 1, children.size()));
+
+    // Decline when a non-empty suffix exists — the bytecode generator places the
+    // group-end tag after the suffix is consumed, not after the initial group match.
+    if (!suffix.isEmpty()) {
+      return null;
+    }
 
     // Determine if group is single-char
     boolean isSingleCharGroup = isSingleCharOrCharClass(capturingGroup.child);
