@@ -157,6 +157,26 @@ public class AlgorithmicFuzzTest {
   }
 
   /**
+   * Extended sweep: same seed and dimensions as {@link #divergenceGate} but starts at pattern 25
+   * 001, covering the range that the standard gate does not reach. Findings here are tracked bugs
+   * not yet fixed; see {@code doc/2026-06-29-fuzz-extended-findings.md} for the clustered
+   * inventory.
+   *
+   * <p>Self-skips unless {@code -Dreggie.fuzz.extended=true} is set — keeps CI fast while allowing
+   * targeted discovery runs. Override the budget via {@code -Dreggie.fuzz.maxFindings=N}.
+   */
+  @Test
+  @Timeout(value = 600, unit = TimeUnit.SECONDS)
+  public void divergenceGate_extended() {
+    assumeTrue(
+        Boolean.getBoolean("reggie.fuzz.extended"),
+        "set -Dreggie.fuzz.extended=true to run the extended discovery sweep (patterns 25k–50k)");
+    FuzzRunner.Config cfg = largeSweepConfig();
+    cfg.patternSkip = 25_000;
+    runDivergenceGate(cfg, "[divergence-gate-ext]", 43);
+  }
+
+  /**
    * Companion entry point that is <em>not</em> {@code @Disabled}: it self-skips unless {@code
    * -Dreggie.fuzz.enforce=true} is set, letting CI exercise the gate without editing source.
    *
@@ -221,6 +241,7 @@ public class AlgorithmicFuzzTest {
    *
    * <ul>
    *   <li>{@code -Dreggie.fuzz.size=N} — pattern count (default 25_000)
+   *   <li>{@code -Dreggie.fuzz.skip=N} — patterns to skip at the start of the sequence (default 0)
    *   <li>{@code -Dreggie.fuzz.inputsPerPattern=N} — inputs per pattern (default 16)
    *   <li>{@code -Dreggie.fuzz.inputMaxLength=N} — max input string length (default 16)
    *   <li>{@code -Dreggie.fuzz.patternDepth=N} — max regex AST depth (default 3)
@@ -230,6 +251,7 @@ public class AlgorithmicFuzzTest {
     FuzzRunner.Config cfg = new FuzzRunner.Config();
     cfg.seed = BASE_SEED;
     cfg.patternCount = sizedPatternCount(25_000);
+    cfg.patternSkip = intProp("reggie.fuzz.skip", 0);
     cfg.inputsPerPattern = intProp("reggie.fuzz.inputsPerPattern", 16);
     cfg.patternDepth = intProp("reggie.fuzz.patternDepth", 3);
     cfg.inputMaxLength = intProp("reggie.fuzz.inputMaxLength", 16);
