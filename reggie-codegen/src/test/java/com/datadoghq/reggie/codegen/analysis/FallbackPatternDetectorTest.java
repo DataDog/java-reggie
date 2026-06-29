@@ -33,6 +33,12 @@ class FallbackPatternDetectorTest {
     return FallbackPatternDetector.needsFallback(ast, STRATEGY);
   }
 
+  private String detect(String pattern, PatternAnalyzer.MatchingStrategy strategy)
+      throws Exception {
+    RegexNode ast = new RegexParser().parse(pattern);
+    return FallbackPatternDetector.needsFallback(ast, strategy);
+  }
+
   // ── Bug-3 removed: lookbehind + unbounded quantifier must NOT trigger fallback ────────────────
 
   @Test
@@ -84,5 +90,63 @@ class FallbackPatternDetectorTest {
       })
   void anchorInQuantifier_needsFallback(String pat) throws Exception {
     assertNotNull(detect(pat), "expected fallback for: " + pat);
+  }
+
+  // ── B1 / B4 are skipped for PIKEVM_CAPTURE ────────────────────────────────────────────────
+
+  @Test
+  void b1_lookaheadInQuantifier_noFallbackForPikeVmCapture() throws Exception {
+    // DFA strategy triggers B1; PIKEVM_CAPTURE correctly handles it and must not fall back.
+    assertNotNull(detect("(?:(?=a)b)+"));
+    assertNull(
+        detect("(?:(?=a)b)+", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE),
+        "PIKEVM_CAPTURE must skip B1");
+  }
+
+  @Test
+  void b4_endAnchorBeforeNonNewlineConsumer_noFallbackForPikeVmCapture() throws Exception {
+    // DFA strategy triggers B4; PIKEVM_CAPTURE must skip it.
+    assertNotNull(detect("\\Z[^c]"));
+    assertNull(
+        detect("\\Z[^c]", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE),
+        "PIKEVM_CAPTURE must skip B4");
+  }
+
+  // ── B12-overlap: greedy prefix charset overlaps backref group → fallback ──────────────────
+
+  @Test
+  void b12overlap_greedyPrefixOverlapsBackrefGroup_needsFallback() throws Exception {
+    // a* prefix and (a+) group share 'a': greedy non-backtracking split is wrong.
+    String reason = detect("a*(a+)\\1", PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF);
+    assertNotNull(reason, "expected fallback for overlapping greedy prefix");
+    assertTrue(reason.contains("overlaps"), "reason should mention charset overlap: " + reason);
+  }
+
+  @Test
+  void b12overlap_disjointPrefixNoFallback() throws Exception {
+    // b* prefix and (a+) group are disjoint: no overlap fallback.
+    assertNull(
+        detect("b*(a+)\\1", PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF),
+        "disjoint prefix must not trigger B12-overlap");
+  }
+
+  // ── B12-nullable: nullable child in unbounded prefix quantifier → fallback ─────────────────
+
+  @Test
+  void b12nullable_nullableChildInUnboundedPrefix_needsFallback() throws Exception {
+    // (?:a*)+ has nullable child a*: prefix loop spins forever on empty iterations.
+    String reason =
+        detect("(?:a*)+(a+)\\1", PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF);
+    assertNotNull(reason, "expected fallback for nullable child in unbounded prefix");
+    assertTrue(
+        reason.contains("nullable child"), "reason should mention nullable child: " + reason);
+  }
+
+  @Test
+  void b12nullable_nonNullableChildNoFallback() throws Exception {
+    // (?:a)+ has a non-nullable child: no infinite-loop risk.
+    assertNull(
+        detect("(?:a)+(b+)\\1", PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF),
+        "non-nullable child must not trigger B12-nullable");
   }
 }

@@ -600,10 +600,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * has higher priority and survives the accept-time priority cut, overriding a later seed that
    * happens to accept first.
    *
-   * <p>The greedy/zero-length finalization is identical to the former {@code tryFindMatchAt}: on
-   * the highest-priority accept, record it as {@code best} and cut strictly-lower-priority threads;
-   * higher-priority non-accept threads keep running and may overwrite {@code best} with a longer
-   * end (greedy give-back). Finalize when the in-progress match's threads are all gone.
+   * <p>On the highest-priority accept, {@code best} is recorded and strictly-lower-priority threads
+   * are cut; higher-priority non-accept threads keep running and may overwrite {@code best} with a
+   * longer end (greedy give-back). Finalize when the in-progress match's threads are all gone.
    *
    * <p>The anchor origin is PINNED to absolute 0 (not {@code fromPos}), so {@code ^}/{@code \A}
    * match only at input start exactly like {@code java.util.regex.Matcher.find(start)} — this is
@@ -680,50 +679,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       swapLists();
       // Finalize only once a match is in progress: when its threads are all gone `best` is final.
       // With best == null we must keep scanning (and re-seeding) for a start further right.
-      if (best != null && clistSize == 0) break;
-    }
-    return best;
-  }
-
-  private MatchResult tryFindMatchAt(String input, int tryPos, int regionStart, int regionEnd) {
-    initClist(input, tryPos, regionStart, regionEnd);
-
-    // Greedy PikeVM rule: when a thread at index t accepts, threads at indices > t (lower priority)
-    // cannot produce a better match. Truncate the clist to [0..t-1] so only higher-priority
-    // non-accept threads continue. This lets a higher-priority thread that hasn't accepted yet
-    // (but will at a later position) override the current accept — giving greedy longest-match from
-    // the highest-priority thread (e.g. (_)? prefers consuming _ over the empty match, while
-    // (fo|foo) prefers "fo" over "foo" since "fo" is the higher-priority first alternative).
-    //
-    // Exception — zero-length match at tryPos: JDK semantics prevent anchor-derived consuming
-    // threads from overriding a zero-length accept. When the first accept fires at tryPos,
-    // retain only non-anchor-derived higher-priority threads so that legitimate greedy consuming
-    // paths (e.g. `a` in `(a)*`) can still extend the match while anchor-driven empty-iteration
-    // consuming paths (e.g. `a` copy3 in `(^a?){3}`) cannot.
-    MatchResult best = null;
-
-    for (int pos = tryPos; pos <= regionEnd; pos++) {
-      for (int t = 0; t < clistSize; t++) {
-        if (isAccept[clistIds[t]]) {
-          int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
-          caps[1] = pos;
-          best = buildResult(input, caps);
-          if (pos == tryPos) {
-            // Zero-length match at start: prune anchor-derived high-priority threads; discard
-            // lower-priority threads (keepLowerPriority=false) per Perl priority rules.
-            pruneAnchorDerivedAtStart(t, false);
-          } else {
-            clistSize = t;
-          }
-          break;
-        }
-      }
-      if (pos == regionEnd) break;
-
-      char ch = input.charAt(pos);
-      resetNlist();
-      stepChar(ch, pos + 1, input, 0, regionEnd);
-      swapLists();
       if (best != null && clistSize == 0) break;
     }
     return best;
