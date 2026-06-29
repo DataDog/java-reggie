@@ -273,6 +273,26 @@ class PikeVMRoutingTest {
   }
 
   @Test
+  void greedyDotPlusWrappedInNonCapturing_routesToPikevm() throws Exception {
+    // (?:(.+))_ — the capturing group is wrapped inside a non-capturing group at the concat level.
+    // B4 detection must unwrap the non-capturing outer group to find the (.+) capture.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(?:(.+))_"),
+        "(?:(.+))_ must route to PIKEVM_CAPTURE (B4: non-capturing wrapper around capture)");
+  }
+
+  @Test
+  void greedyDotPlusBodyWrappedInNonCapturing_routesToPikevm() throws Exception {
+    // ((?:.+))_ — the .+ quantifier is wrapped inside a non-capturing group inside the capture.
+    // B4 detection must also unwrap the non-capturing inner group to find the quantifier.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("((?:.+))_"),
+        "((?:.+))_ must route to PIKEVM_CAPTURE (B4: non-capturing wrapper around quantifier body)");
+  }
+
+  @Test
   void greedyDotStarWithSuffix_staysOnGreedyBacktrack() throws Exception {
     // (.*)_ has a greedy .* group (min=0): not affected by the B4 decline (min>=1 only).
     assertEquals(
@@ -290,6 +310,16 @@ class PikeVMRoutingTest {
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("([1]|1.)[b]_"),
         "([1]|1.)[b]_ must route to PIKEVM_CAPTURE (B5: variable-length alt in group)");
+  }
+
+  @Test
+  void variableLengthAltWrappedInNonCapturing_routesToPikevm() throws Exception {
+    // ((?:[1]|1.))[b]_ — the alternation is wrapped in a non-capturing group inside the capture.
+    // B5 detection must unwrap the non-capturing wrapper before checking for AlternationNode.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("((?:[1]|1.))[b]_"),
+        "((?:[1]|1.))[b]_ must route to PIKEVM_CAPTURE (B5: non-capturing wrapper around alt)");
   }
 
   @Test

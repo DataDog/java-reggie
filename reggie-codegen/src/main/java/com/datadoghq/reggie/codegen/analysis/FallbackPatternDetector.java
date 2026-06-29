@@ -1574,18 +1574,35 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Peels any number of non-capturing {@link GroupNode} wrappers from {@code node} and returns the
+   * innermost node that is not a non-capturing group. Capturing groups and all other node types are
+   * returned as-is.
+   */
+  private static RegexNode unwrapNonCapturing(RegexNode node) {
+    while (node instanceof GroupNode g && !g.capturing) {
+      node = g.child;
+    }
+    return node;
+  }
+
+  /**
    * Returns true if the top-level concat contains a capturing group whose body is a greedy
    * quantifier with min&ge;1, infinite max, and a broad charset (.+ or .+[DOTALL]), followed by at
    * least one more node (the suffix). The TDFA extends the group-end tag into the suffix for these
    * patterns, producing wrong capture spans.
+   *
+   * <p>Non-capturing wrappers around the capturing group (e.g. {@code (?:(.+))_}) or around the
+   * quantifier body inside the capturing group (e.g. {@code ((?:.+))_}) are transparently unwrapped
+   * before the check, so both forms are correctly detected.
    */
   public static boolean hasGreedyDotPlusGroupWithSuffix(RegexNode ast) {
     if (!(ast instanceof ConcatNode concat)) return false;
     List<RegexNode> children = concat.children;
     for (int i = 0; i < children.size() - 1; i++) {
-      RegexNode node = children.get(i);
+      RegexNode node = unwrapNonCapturing(children.get(i));
       if (!(node instanceof GroupNode g) || !g.capturing) continue;
-      if (!(g.child instanceof QuantifierNode q)) continue;
+      RegexNode body = unwrapNonCapturing(g.child);
+      if (!(body instanceof QuantifierNode q)) continue;
       if (q.min < 1 || (q.max != Integer.MAX_VALUE && q.max != -1)) continue;
       if (!(q.child instanceof CharClassNode cc)) continue;
       CharSet cs = cc.chars;
@@ -1677,21 +1694,25 @@ public final class FallbackPatternDetector {
   }
 
   /**
-   * Returns true if any capturing {@link GroupNode} in {@code ast} has a child that is an {@link
-   * AlternationNode} whose branches differ in minimum or maximum length AND at least one branch
-   * contains a broad charset (a {@link CharClassNode} matching more than one character). Pure-
-   * literal variable-length alternations like {@code (aa|a)} are handled correctly by the TDFA
-   * priority-cut and do not require PIKEVM routing. The broad-charset condition ensures only
-   * patterns where the TDFA cannot deterministically assign the group-end tag are routed to
-   * PIKEVM_CAPTURE. PikeVM gives correct spans for all cases.
+   * Returns true if any capturing {@link GroupNode} in {@code ast} has a body that, after
+   * unwrapping transparent non-capturing wrappers, is an {@link AlternationNode} whose branches
+   * differ in minimum or maximum length AND at least one branch contains a broad charset (a {@link
+   * CharClassNode} matching more than one character). Pure-literal variable-length alternations
+   * like {@code (aa|a)} are handled correctly by the TDFA priority-cut and do not require PIKEVM
+   * routing. The broad-charset condition ensures only patterns where the TDFA cannot
+   * deterministically assign the group-end tag are routed to PIKEVM_CAPTURE. PikeVM gives correct
+   * spans for all cases.
    *
    * <p>Example: {@code ([1]|1.)} — branch {@code [1]} has length 1, branch {@code 1.} has length 2,
    * and {@code 1.} contains {@code .} (broad charset) → variable-length with broad charset → route
    * to PIKEVM_CAPTURE.
+   *
+   * <p>Non-capturing wrappers around the alternation body (e.g. {@code ((?:[1]|1.))}) are
+   * transparently unwrapped before the alternation check so that wrapped forms are also detected.
    */
   public static boolean hasGroupWithVariableLengthAlternationBody(RegexNode ast) {
     if (ast instanceof GroupNode g && g.groupNumber > 0) {
-      if (g.child instanceof AlternationNode a) {
+      if (unwrapNonCapturing(g.child) instanceof AlternationNode a) {
         List<RegexNode> alts = a.alternatives;
         if (alts.size() >= 2) {
           int firstMin = minLength(alts.get(0));
