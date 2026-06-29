@@ -286,41 +286,69 @@ public final class NFA {
    * Compute a content-based hash code that includes character sets. Critical for distinguishing
    * patterns with different case-sensitivity (e.g., "(ab)c" vs "(a(?i)b)c").
    */
-  public int contentHashCode() {
-    int hash = 1;
-    hash = 31 * hash + states.size();
+  public long contentHashCode() {
+    // 64-bit: this is the sole structural discriminator for NFA-only strategies (e.g.
+    // OPTIMIZED_NFA_WITH_BACKREFS, where StructuralHash has no DFA topology to mix in). A 32-bit
+    // value gave a ~7% birthday-collision rate at ~25k patterns, producing structural-cache
+    // false-hits (one pattern reusing another's generated class) — i.e. wrong match results.
+    return contentHashCode(31L);
+  }
+
+  /**
+   * Second, independent content hash (different polynomial multiplier) used by {@code
+   * StructuralHash.computeVerification} for verify-on-hit: two structurally-distinct NFAs that
+   * collide under {@link #contentHashCode()} are extremely unlikely to also collide here, so the
+   * cache can detect a false-hit and regenerate rather than return a wrong matcher.
+   */
+  public long contentHashCodeAlt() {
+    return contentHashCode(1099511628211L); // FNV-1a 64-bit prime
+  }
+
+  private long contentHashCode(long mult) {
+    long hash = 1L;
+    hash = mult * hash + states.size();
 
     for (NFAState state : states) {
-      // Include transition count
-      hash = 31 * hash + state.getTransitions().size();
+      // Anchor each state's local features to its own (deterministic, construction-order) id, and
+      // include transition/epsilon TARGET ids below, so the hash captures graph TOPOLOGY (who
+      // connects to whom) — not just a per-state feature multiset. Without target connectivity two
+      // differently-wired NFAs with identical local features collided to the same hash.
+      hash = mult * hash + state.id;
 
-      // Include character set content for each transition
+      // Include transition count
+      hash = mult * hash + state.getTransitions().size();
+
+      // Include character set content AND target for each transition
       for (Transition t : state.getTransitions()) {
-        hash = 31 * hash + t.chars.hashCode();
+        hash = mult * hash + t.chars.hashCode();
+        hash = mult * hash + t.target.id;
       }
 
-      // Include epsilon transitions count
-      hash = 31 * hash + state.getEpsilonTransitions().size();
+      // Include epsilon transition targets in order (count is implied)
+      hash = mult * hash + state.getEpsilonTransitions().size();
+      for (NFAState eps : state.getEpsilonTransitions()) {
+        hash = mult * hash + eps.id;
+      }
 
       // Include group markers
-      hash = 31 * hash + (state.enterGroup != null ? state.enterGroup + 1 : 0);
-      hash = 31 * hash + (state.exitGroup != null ? state.exitGroup + 1 : 0);
+      hash = mult * hash + (state.enterGroup != null ? state.enterGroup + 1 : 0);
+      hash = mult * hash + (state.exitGroup != null ? state.exitGroup + 1 : 0);
 
       // Assertion type: use ordinal() — hashCode() uses System.identityHashCode() which can be 0.
-      hash = 31 * hash + (state.assertionType != null ? state.assertionType.ordinal() + 1 : 0);
+      hash = mult * hash + (state.assertionType != null ? state.assertionType.ordinal() + 1 : 0);
 
       // Anchor type: states with different anchors (END vs STRING_END_ABSOLUTE vs null)
       // generate different bytecode; omitting this caused structural-cache collisions.
-      hash = 31 * hash + (state.anchor != null ? state.anchor.ordinal() + 1 : 0);
+      hash = mult * hash + (state.anchor != null ? state.anchor.ordinal() + 1 : 0);
 
       // Backref group: patterns differing only in referenced group number must not share
       // a structural-cache entry (e.g. (a)(b)\1 vs (a)(b)\2).
-      hash = 31 * hash + (state.backrefCheck != null ? state.backrefCheck + 1 : 0);
+      hash = mult * hash + (state.backrefCheck != null ? state.backrefCheck + 1 : 0);
 
       // Lookbehind width: patterns with different fixed-width lookbehind windows generate
       // different bytecode (the width is pushed as a literal constant in the assertion check).
       // assertionWidth == -1 for non-lookbehind states, so add 1 to distinguish from unset.
-      hash = 31 * hash + (state.assertionWidth + 1);
+      hash = mult * hash + (state.assertionWidth + 1);
     }
 
     return hash;

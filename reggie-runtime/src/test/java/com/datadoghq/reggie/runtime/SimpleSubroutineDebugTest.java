@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.datadoghq.reggie.Reggie;
 import java.util.regex.PatternSyntaxException;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.opentest4j.TestAbortedException;
 
@@ -52,6 +53,7 @@ class SimpleSubroutineDebugTest {
     assertTrue(m.matches("(a)"), "Alternation in quantifier should work");
   }
 
+  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testSubroutineAlone() {
     // D1: recursive-subroutine-in-alternation routes to JDK fallback
@@ -90,6 +92,7 @@ class SimpleSubroutineDebugTest {
   // because the greedy star tries to match, triggering the subroutine alternative.
   // This is a semantically invalid pattern - removed from tests.
 
+  @Disabled("PCRE recursive subroutines (?R) not supported by JDK regex")
   @Test
   void testComplexMinimal() {
     // D1: recursive-subroutine-in-alternation routes to JDK fallback

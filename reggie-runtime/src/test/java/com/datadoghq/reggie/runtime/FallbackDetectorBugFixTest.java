@@ -355,6 +355,31 @@ public class FallbackDetectorBugFixTest {
         "Expected PikeVMMatcher for: " + pat + " but got: " + m.getClass().getSimpleName());
   }
 
+  static Stream<Arguments> greedyPrefixNullableSiblingBackref() {
+    return Stream.of(
+        // a*b*(a+)\1: a* overlaps (a+) but b* sits between them.
+        // Before fix: break-on-first-non-anchor stopped at b*, missing the a*/(a+) overlap →
+        // pattern routed to VARIABLE_CAPTURE_BACKREF without fallback → wrong results.
+        // After fix: scan continues past b* to detect the overlap → JDK fallback applied.
+        Arguments.of("a*b*(a+)\\1", "aaaa"),
+        Arguments.of("a*b*(a+)\\1", "aabaa"),
+        Arguments.of("a*b*(a+)\\1", "abc"),
+        Arguments.of("a*b*(a+)\\1", "bbbb"),
+        // Three nullable siblings before the capture group.
+        Arguments.of("a*b*c*(a+)\\1", "aacaa"),
+        Arguments.of("a*b*c*(a+)\\1", "aaaa"));
+  }
+
+  @ParameterizedTest(name = "[{index}] pat={0} in={1}")
+  @MethodSource("greedyPrefixNullableSiblingBackref")
+  void greedyPrefixNullableSiblingBackref_agreesWithJdk(String pat, String in) throws Exception {
+    Pattern jdk = Pattern.compile(pat);
+    ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
+    String ctx = "pat=" + pat + " in=" + in;
+    assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
+    assertEquals(jdk.matcher(in).find(), reggie.find(in), "find() " + ctx);
+  }
+
   static Stream<Arguments> remainingDivergences() {
     return Stream.of(Arguments.of("()?\\1{1}", ""), Arguments.of("(){2}]{3}|a", "a"));
   }
@@ -448,6 +473,16 @@ public class FallbackDetectorBugFixTest {
     assertFalse(
         Reggie.compile(pat) instanceof JavaRegexFallbackMatcher,
         "Expected native matcher for: " + pat);
+  }
+
+  /** B2 guard must remain active for PIKEVM_CAPTURE patterns; PikeVM mis-positions these. */
+  @ParameterizedTest
+  @ValueSource(strings = {"(${0,3})", "(^{0,2}ab)"})
+  void b2AnchorInQuantifierCapturing_usesJdkFallback(String pat) throws Exception {
+    ReggieMatcher m = Reggie.compile(pat, WITH_FALLBACK);
+    assertTrue(
+        m instanceof JavaRegexFallbackMatcher,
+        "B2 anchor-in-quantifier-capturing should fall back to JDK: " + pat);
   }
 
   static Stream<Arguments> anchorDilutedResidual() {

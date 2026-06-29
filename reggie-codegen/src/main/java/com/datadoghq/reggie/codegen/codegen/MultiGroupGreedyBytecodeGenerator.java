@@ -1625,6 +1625,7 @@ public class MultiGroupGreedyBytecodeGenerator {
       mv.visitInsn(ACONST_NULL);
       mv.visitInsn(ARETURN);
       mv.visitLabel(isEnd);
+      // S: []
     } else if (seg.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
       // \z: require pos == len
       Label isEnd = new Label();

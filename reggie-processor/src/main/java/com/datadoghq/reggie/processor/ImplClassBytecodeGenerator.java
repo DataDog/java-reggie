@@ -91,8 +91,10 @@ public class ImplClassBytecodeGenerator {
         superClassName,
         new String[] {"com/datadoghq/reggie/ReggiePatterns"});
 
-    // Generate fields for each matcher (volatile)
+    // Generate fields for each matcher (volatile) — PIKEVM methods call compilePikeVm() directly
+    // on every invocation, so no cached field is needed for them.
     for (MethodInfo method : methods) {
+      if (method.kind == MethodInfo.Kind.PIKEVM) continue;
       String fieldDescriptor =
           method.kind == MethodInfo.Kind.NATIVE
               ? "L" + packageName + "/" + method.matcherClassName + ";"
@@ -130,18 +132,11 @@ public class ImplClassBytecodeGenerator {
   }
 
   /**
-   * Generate method with lazy initialization and double-check locking. Pattern: public
-   * ReggieMatcher methodName() { if (field == null) { synchronized(this) { if (field == null) {
-   * field = new MatcherClass(); } } } return field; }
+   * Generate method with lazy initialization and double-check locking for NATIVE and FALLBACK
+   * kinds, or a direct compilePikeVm() call for PIKEVM (PikeVMMatcher has mutable per-call buffers
+   * and must not be cached/shared across invocations).
    */
   private void generateLazyInitMethod(ClassWriter cw, MethodInfo method) {
-    String matcherClassFullName =
-        method.kind == MethodInfo.Kind.NATIVE ? packageName + "/" + method.matcherClassName : null;
-    String fieldDescriptor =
-        method.kind == MethodInfo.Kind.NATIVE
-            ? "L" + matcherClassFullName + ";"
-            : "Lcom/datadoghq/reggie/runtime/ReggieMatcher;";
-
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -150,6 +145,29 @@ public class ImplClassBytecodeGenerator {
             null,
             null);
     mv.visitCode();
+
+    if (method.kind == MethodInfo.Kind.PIKEVM) {
+      // PikeVM: call compilePikeVm() on every invocation — no caching.
+      mv.visitLdcInsn(method.pattern);
+      mv.visitLdcInsn(method.encodedNames != null ? method.encodedNames : "");
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "com/datadoghq/reggie/runtime/RuntimeCompiler",
+          "compilePikeVm",
+          "(Ljava/lang/String;Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/ReggieMatcher;",
+          false);
+      mv.visitInsn(ARETURN);
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+      return;
+    }
+
+    String matcherClassFullName =
+        method.kind == MethodInfo.Kind.NATIVE ? packageName + "/" + method.matcherClassName : null;
+    String fieldDescriptor =
+        method.kind == MethodInfo.Kind.NATIVE
+            ? "L" + matcherClassFullName + ";"
+            : "Lcom/datadoghq/reggie/runtime/ReggieMatcher;";
 
     Label alreadyInitialized = new Label();
     Label syncStart = new Label();
@@ -182,16 +200,6 @@ public class ImplClassBytecodeGenerator {
         mv.visitInsn(DUP);
         mv.visitMethodInsn(INVOKESPECIAL, matcherClassFullName, "<init>", "()V", false);
         break;
-      case PIKEVM:
-        mv.visitLdcInsn(method.pattern);
-        mv.visitLdcInsn(method.encodedNames != null ? method.encodedNames : "");
-        mv.visitMethodInsn(
-            INVOKESTATIC,
-            "com/datadoghq/reggie/runtime/RuntimeCompiler",
-            "compilePikeVm",
-            "(Ljava/lang/String;Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/ReggieMatcher;",
-            false);
-        break;
       case FALLBACK:
         mv.visitLdcInsn(method.pattern);
         mv.visitMethodInsn(
@@ -201,6 +209,8 @@ public class ImplClassBytecodeGenerator {
             "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/ReggieMatcher;",
             false);
         break;
+      default:
+        throw new IllegalStateException("Unexpected kind: " + method.kind);
     }
     mv.visitFieldInsn(PUTFIELD, implClassName, method.methodName, fieldDescriptor);
 

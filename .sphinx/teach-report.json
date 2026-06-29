@@ -1,0 +1,41 @@
+{
+  "generated_at": "2026-06-28T00:00",
+  "source": "pr:89",
+  "improvements": [
+    {
+      "id": "3487413781",
+      "source_comment": "**P1** Avoid silently dropping per-config backref branches\n\nFor assertion-free backref NFAs this path is now enabled unconditionally by `perConfigEligible()`, but overflow still jumps to `full` and drops the configuration. Patterns with more than 256 live branches, such as a large alternation backref like `(a|aa|...|a{300})\\1` on an input requiring the long branch, can therefore miss the only successful configuration and return a silent false negative instead of falling back or growing the worklist.",
+      "source_file": "reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/NFABytecodeGenerator.java",
+      "source_line": 419,
+      "classification": "project_lens",
+      "rationale": "The pattern requires knowledge of this project's per-config worklist cap (256), `perConfigEligible()` predicate, and the JDK fallback delegation contract — none of which are expressible without project-specific types.",
+      "proposed": {
+        "theme": "perconfig-worklist-overflow-silent-drop",
+        "anti_pattern": "When the per-config worklist overflows its bounded capacity, execution jumps to the full-match label and silently drops the overflowed configuration, returning a false negative instead of delegating to the JDK fallback.",
+        "fix_example": "On overflow, emit a JDK-delegation bytecode path (or throw a controlled signal) rather than jumping to `full`, so no matching configuration is silently discarded.",
+        "root_cause": "The overflow guard was written before the per-config path was ungated; once `perConfigEligible()` enables the path unconditionally, any pattern that generates more than PER_CONFIG_CAP branches can trigger the silent drop on inputs that require a branch beyond the cap.",
+        "confidence": "high",
+        "source": "teach"
+      },
+      "status": "accepted"
+    },
+    {
+      "id": "3487413783",
+      "source_comment": "**P1** Continue scanning nullable prefixes for overlap\n\nThis `break` only checks the immediate next non-anchor sibling, so an overlapping greedy prefix is missed when another nullable prefix sits before the capture. For example `a*b*(a+)\\1` now routes to `VARIABLE_CAPTURE_BACKREF` with no fallback; the generated prefix matcher greedily consumes all `a`s in `a*` and never backtracks across `b*`, so `matches(\"aaaa\")` fails even though JDK can leave `aa` for the capture/backref. Keep scanning through nullable/disjoint prefix nodes, or compute the first charset of the whole suffix before allowing this strategy.",
+      "source_file": "reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetector.java",
+      "source_line": 1186,
+      "classification": "generic_lens",
+      "rationale": "A break that exits a scan loop on the first non-target sibling instead of continuing until the target is found is a language-agnostic algorithmic error expressible without any project-specific types.",
+      "proposed": {
+        "theme": "scan-loop-break-on-non-target-sibling",
+        "anti_pattern": "A loop that searches a sequence for a target element uses `break` (or `return`) on the first element that is not an explicit skip condition, exiting before reaching the actual target and producing a false 'not found' result.",
+        "fix_example": "Replace `break` with `continue` (or remove it) so the loop advances past intermediate non-target elements and tests every element in the sequence before concluding the target is absent.",
+        "root_cause": "Confusing 'this element is not the target' with 'the target cannot exist later in the sequence' causes the scan to terminate prematurely, missing elements that follow unrelated intermediate nodes.",
+        "confidence": "high",
+        "languages": ["java"],
+        "frameworks": []
+      },
+      "status": "accepted"
+    }
+  ]
+}

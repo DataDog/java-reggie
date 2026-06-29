@@ -2149,6 +2149,9 @@ public class PatternAnalyzer {
       }
       return result;
     }
+    if (node instanceof AnchorNode) {
+      return CharSet.empty(); // zero-width assertion, consumes no characters
+    }
     return null; // Unknown node type - be conservative
   }
 
@@ -2186,7 +2189,7 @@ public class PatternAnalyzer {
         break;
       }
     }
-    return result.isEmpty() ? null : result;
+    return result;
   }
 
   /** Check if node contains a capturing group with a greedy quantifier. */
