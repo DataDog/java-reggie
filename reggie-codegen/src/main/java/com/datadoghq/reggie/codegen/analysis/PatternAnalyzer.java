@@ -312,6 +312,17 @@ public class PatternAnalyzer {
     if (hasBackrefs && hasQuantifiedBackrefs) {
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
       if (fixedRepBackrefInfo != null) {
+        // B6: decline when a non-empty suffix exists — the bytecode generator places the
+        // group-end tag after the suffix is consumed, not after the initial group match.
+        // Fall through to OPTIMIZED_NFA_WITH_BACKREFS, which handles group spans correctly.
+        if (!fixedRepBackrefInfo.suffix.isEmpty()) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+              null,
+              null,
+              false,
+              java.util.Collections.emptySet());
+        }
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -665,7 +676,7 @@ public class PatternAnalyzer {
       // Try to detect fixed-repetition backreference patterns: (a)\1{8,}, (abc)\1{3}
       // These don't require backtracking - just verification loop
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
-      if (fixedRepBackrefInfo != null) {
+      if (fixedRepBackrefInfo != null && fixedRepBackrefInfo.suffix.isEmpty()) {
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -673,6 +684,7 @@ public class PatternAnalyzer {
             false,
             requiredLiterals);
       }
+      // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
 
       // Try to detect variable-capture backreference patterns: (.*)\d+\1, (.+)=\1
       // These require backtracking from longest to shortest capture

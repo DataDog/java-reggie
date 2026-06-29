@@ -240,4 +240,25 @@ class PikeVMRoutingTest {
         StrategyCorrectnessMetaTest.routeOf("$|[^0]{1}"),
         "$|[^0]{1} must route to PIKEVM_CAPTURE (B3b: $ in alternation)");
   }
+
+  // ── B6: FIXED_REPETITION_BACKREF declined when suffix is non-empty ──────────
+
+  @Test
+  void fixedRepetitionBackrefWithSuffix_routesToOptimizedNfaWithBackrefs() throws Exception {
+    // (.)\\1{2}. has a non-empty suffix (the trailing dot) — bytecode places the
+    // group-end tag after the suffix is consumed, producing wrong spans.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+        StrategyCorrectnessMetaTest.routeOf("(.)\\1{2}."),
+        "(.)\\1{2}. must route to OPTIMIZED_NFA_WITH_BACKREFS (B6: non-empty suffix)");
+  }
+
+  @Test
+  void fixedRepetitionBackrefNoSuffix_staysOnFixedRepetitionBackref() throws Exception {
+    // (.)\\1{2} has no suffix — FIXED_REPETITION_BACKREF is correct.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.FIXED_REPETITION_BACKREF,
+        StrategyCorrectnessMetaTest.routeOf("(.)\\1{2}"),
+        "(.)\\1{2} must stay on FIXED_REPETITION_BACKREF (B6: no suffix)");
+  }
 }
