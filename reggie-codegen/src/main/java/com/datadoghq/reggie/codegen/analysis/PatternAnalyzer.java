@@ -814,24 +814,6 @@ public class PatternAnalyzer {
         // POSIX last-match semantics (groups may contain first match instead of last)
       }
 
-      // B4: greedy .+ group followed by a suffix — TDFA extends group-end into the suffix and
-      // RECURSIVE_DESCENT cannot enforce the min=1 lower bound while surrendering chars.
-      // Route to PIKEVM_CAPTURE which handles this correctly.
-      boolean b4Flag =
-          FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
-              && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
-      addTrace("B4: hasGreedyDotPlusGroupWithSuffix", b4Flag);
-      if (b4Flag) {
-        return new MatchingStrategyResult(
-            MatchingStrategy.PIKEVM_CAPTURE,
-            null,
-            null,
-            false,
-            requiredLiterals,
-            null,
-            needsPosixSemantics);
-      }
-
       // Check if pattern requires backtracking for correct group capture
       // Pattern a([bc]*)(c+d) needs backtracking: ([bc]*) must give back chars to allow (c+d) to
       // match
