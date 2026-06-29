@@ -219,7 +219,8 @@ public class AlgorithmicFuzzTest {
    *
    * <ul>
    *   <li>{@code -Dreggie.fuzz.size=N} — pattern count (default 25_000)
-   *   <li>{@code -Dreggie.fuzz.skip=N} — patterns to skip at the start of the sequence (default 0)
+   *   <li>{@code -Dreggie.fuzz.skip=N} — patterns to skip at the start of the sequence (default
+   *       25_000; use 0 to rerun from the beginning of the sequence)
    *   <li>{@code -Dreggie.fuzz.inputsPerPattern=N} — inputs per pattern (default 16)
    *   <li>{@code -Dreggie.fuzz.inputMaxLength=N} — max input string length (default 16)
    *   <li>{@code -Dreggie.fuzz.patternDepth=N} — max regex AST depth (default 3)
@@ -229,7 +230,7 @@ public class AlgorithmicFuzzTest {
     FuzzRunner.Config cfg = new FuzzRunner.Config();
     cfg.seed = BASE_SEED;
     cfg.patternCount = sizedPatternCount(25_000);
-    cfg.patternSkip = intProp("reggie.fuzz.skip", 25_000);
+    cfg.patternSkip = intPropNonNeg("reggie.fuzz.skip", 25_000);
     cfg.inputsPerPattern = intProp("reggie.fuzz.inputsPerPattern", 16);
     cfg.patternDepth = intProp("reggie.fuzz.patternDepth", 3);
     cfg.inputMaxLength = intProp("reggie.fuzz.inputMaxLength", 16);
@@ -243,6 +244,22 @@ public class AlgorithmicFuzzTest {
     try {
       int parsed = Integer.parseInt(v);
       return parsed > 0 ? parsed : dflt;
+    } catch (NumberFormatException e) {
+      return dflt;
+    }
+  }
+
+  /**
+   * Read an int system property, returning {@code dflt} when absent or unparseable. Unlike {@link
+   * #intProp}, this helper accepts zero as a valid value; only negative values fall back to the
+   * default.
+   */
+  private static int intPropNonNeg(String name, int dflt) {
+    String v = System.getProperty(name);
+    if (v == null || v.isEmpty()) return dflt;
+    try {
+      int parsed = Integer.parseInt(v);
+      return parsed >= 0 ? parsed : dflt;
     } catch (NumberFormatException e) {
       return dflt;
     }
