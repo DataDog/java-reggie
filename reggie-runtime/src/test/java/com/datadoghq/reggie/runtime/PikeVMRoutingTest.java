@@ -279,4 +279,24 @@ class PikeVMRoutingTest {
         StrategyCorrectnessMetaTest.routeOf("(.*)_"),
         "(.*)_ must stay on GREEDY_BACKTRACK (B4: only declines min>=1)");
   }
+
+  // ── B5: variable-length alternation group body ──────────────────────────────
+
+  @Test
+  void variableLengthAltInGroup_routesToPikevm() throws Exception {
+    // ([1]|1.)[b]_: group 1 has alternation with branch lengths 1 and 2 — variable-length (B5).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("([1]|1.)[b]_"),
+        "([1]|1.)[b]_ must route to PIKEVM_CAPTURE (B5: variable-length alt in group)");
+  }
+
+  @Test
+  void fixedLengthAltInGroup_staysOnDfa() throws Exception {
+    // ([a]|[b])c: both alternatives have length 1 — fixed-length, should NOT trigger B5.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("([a]|[b])c"),
+        "([a]|[b])c must stay on DFA_UNROLLED_WITH_GROUPS (B5: same-length alts not triggered)");
+  }
 }

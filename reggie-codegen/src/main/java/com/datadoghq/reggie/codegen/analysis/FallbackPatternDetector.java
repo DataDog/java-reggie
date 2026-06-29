@@ -1595,6 +1595,132 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns the minimum number of characters that {@code node} must consume. AnchorNodes are
+   * zero-width and contribute 0. Returns 0 for unknown node types (conservative).
+   */
+  private static int minLength(RegexNode node) {
+    if (node instanceof LiteralNode) return 1;
+    if (node instanceof CharClassNode) return 1;
+    if (node instanceof AnchorNode) return 0;
+    if (node instanceof QuantifierNode q) return q.min * minLength(q.child);
+    if (node instanceof ConcatNode c) {
+      int total = 0;
+      for (RegexNode child : c.children) total += minLength(child);
+      return total;
+    }
+    if (node instanceof AlternationNode a) {
+      int min = Integer.MAX_VALUE;
+      for (RegexNode alt : a.alternatives) min = Math.min(min, minLength(alt));
+      return min == Integer.MAX_VALUE ? 0 : min;
+    }
+    if (node instanceof GroupNode g) return minLength(g.child);
+    return 0;
+  }
+
+  /**
+   * Returns the maximum number of characters that {@code node} can consume, or {@link
+   * Integer#MAX_VALUE} for unbounded. Returns {@link Integer#MAX_VALUE} for unknown node types
+   * (conservative).
+   */
+  private static int maxLength(RegexNode node) {
+    if (node instanceof LiteralNode) return 1;
+    if (node instanceof CharClassNode) return 1;
+    if (node instanceof AnchorNode) return 0;
+    if (node instanceof QuantifierNode q) {
+      if (q.max == Integer.MAX_VALUE || q.max == -1) return Integer.MAX_VALUE;
+      int childMax = maxLength(q.child);
+      if (childMax == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+      return q.max * childMax;
+    }
+    if (node instanceof ConcatNode c) {
+      int total = 0;
+      for (RegexNode child : c.children) {
+        int cm = maxLength(child);
+        if (cm == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        total += cm;
+        if (total < 0) return Integer.MAX_VALUE; // overflow guard
+      }
+      return total;
+    }
+    if (node instanceof AlternationNode a) {
+      int max = 0;
+      for (RegexNode alt : a.alternatives) {
+        int am = maxLength(alt);
+        if (am == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        if (am > max) max = am;
+      }
+      return max;
+    }
+    if (node instanceof GroupNode g) return maxLength(g.child);
+    return Integer.MAX_VALUE;
+  }
+
+  /**
+   * Returns true if {@code node} or any of its descendants is a {@link CharClassNode} whose charset
+   * matches more than one character (e.g. {@code .}, {@code [a-z]}, or any negated class).
+   * Single-character classes like {@code [1]} or {@code [a]} are not considered broad.
+   */
+  private static boolean containsBroadCharClass(RegexNode node) {
+    if (node instanceof CharClassNode cc) return cc.negated || !cc.chars.isSingleChar();
+    if (node instanceof LiteralNode || node instanceof AnchorNode) return false;
+    if (node instanceof GroupNode g) return containsBroadCharClass(g.child);
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) if (containsBroadCharClass(child)) return true;
+      return false;
+    }
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) if (containsBroadCharClass(alt)) return true;
+      return false;
+    }
+    if (node instanceof QuantifierNode q) return containsBroadCharClass(q.child);
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing {@link GroupNode} in {@code ast} has a child that is an {@link
+   * AlternationNode} whose branches differ in minimum or maximum length AND at least one branch
+   * contains a broad charset (a {@link CharClassNode} matching more than one character). Pure-
+   * literal variable-length alternations like {@code (aa|a)} are handled correctly by the TDFA
+   * priority-cut and do not require PIKEVM routing. The broad-charset condition ensures only
+   * patterns where the TDFA cannot deterministically assign the group-end tag are routed to
+   * PIKEVM_CAPTURE. PikeVM gives correct spans for all cases.
+   *
+   * <p>Example: {@code ([1]|1.)} — branch {@code [1]} has length 1, branch {@code 1.} has length 2,
+   * and {@code 1.} contains {@code .} (broad charset) → variable-length with broad charset → route
+   * to PIKEVM_CAPTURE.
+   */
+  public static boolean hasGroupWithVariableLengthAlternationBody(RegexNode ast) {
+    if (ast instanceof GroupNode g && g.groupNumber > 0) {
+      if (g.child instanceof AlternationNode a) {
+        List<RegexNode> alts = a.alternatives;
+        if (alts.size() >= 2) {
+          int firstMin = minLength(alts.get(0));
+          int firstMax = maxLength(alts.get(0));
+          boolean hasBroadAlt = containsBroadCharClass(alts.get(0));
+          for (int i = 1; i < alts.size(); i++) {
+            int altMin = minLength(alts.get(i));
+            int altMax = maxLength(alts.get(i));
+            hasBroadAlt = hasBroadAlt || containsBroadCharClass(alts.get(i));
+            if ((altMin != firstMin || altMax != firstMax) && hasBroadAlt) return true;
+          }
+        }
+      }
+      return hasGroupWithVariableLengthAlternationBody(g.child);
+    }
+    if (ast instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives)
+        if (hasGroupWithVariableLengthAlternationBody(alt)) return true;
+    }
+    if (ast instanceof ConcatNode c) {
+      for (RegexNode child : c.children)
+        if (hasGroupWithVariableLengthAlternationBody(child)) return true;
+    }
+    if (ast instanceof QuantifierNode q) return hasGroupWithVariableLengthAlternationBody(q.child);
+    if (ast instanceof GroupNode g) return hasGroupWithVariableLengthAlternationBody(g.child);
+    return false;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
    * the group's content is itself nullable (can match the empty string). Example: {@code
    * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is

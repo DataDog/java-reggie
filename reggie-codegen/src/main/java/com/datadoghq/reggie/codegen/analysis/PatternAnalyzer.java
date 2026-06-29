@@ -1059,6 +1059,18 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // B5: group body is an alternation whose branches have different min- or max-lengths.
+            if (FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
             if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
@@ -1144,6 +1156,20 @@ public class PatternAnalyzer {
         // A2: capturing group absent from some alternation branch — TDFA binds the absent
         // group to a wrong span when the branch that lacks the group wins.
         if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // B5: group body is an alternation whose branches have different min- or max-lengths
+        // and at least one branch contains a broad charset — TDFA cannot deterministically assign
+        // the group-end tag when a broad-charset alternative competes with the suffix.
+        if (FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast)
             && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
