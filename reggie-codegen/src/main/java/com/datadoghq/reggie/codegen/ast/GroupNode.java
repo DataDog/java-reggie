@@ -50,6 +50,7 @@ public final class GroupNode implements RegexNode {
 
   @Override
   public String toString() {
+    if (atomic) return "AtomicGroup(" + child + ")";
     if (name != null) {
       return "Group(" + groupNumber + " '" + name + "', " + child + ")";
     }
