@@ -349,9 +349,22 @@ public final class NFA {
       // different bytecode (the width is pushed as a literal constant in the assertion check).
       // assertionWidth == -1 for non-lookbehind states, so add 1 to distinguish from unset.
       hash = mult * hash + (state.assertionWidth + 1);
+
+      hash = mult * hash + state.atomicEntry + 1; // +1 distinguishes id=0 from absent (-1)
+      hash = mult * hash + state.atomicExit  + 1;
     }
 
     return hash;
+  }
+
+  /** Number of distinct atomic group ids in this NFA (max id + 1, or 0 if none). */
+  public int getAtomicGroupCount() {
+    int max = -1;
+    for (NFAState state : states) {
+      if (state.atomicEntry >= 0) max = Math.max(max, state.atomicEntry);
+      if (state.atomicExit  >= 0) max = Math.max(max, state.atomicExit);
+    }
+    return max + 1;
   }
 
   /** NFA state with character transitions and epsilon transitions. */
@@ -380,6 +393,9 @@ public final class NFA {
     public Integer conditionalGroup = null; // Group number to check
     public NFAState thenBranch = null; // Entry if group matched
     public NFAState elseBranch = null; // Entry if group didn't match (may be null)
+
+    public int atomicEntry = -1; // >= 0: entering atomic group with this id
+    public int atomicExit  = -1; // >= 0: exiting atomic group with this id
 
     public NFAState(int id) {
       this.id = id;
