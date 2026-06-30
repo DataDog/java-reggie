@@ -37,7 +37,8 @@ public class AtomicGroupPikeVMTest {
   void testAtomicGroupPreventsBacktrack_starThenLiteral() {
     // (?>a*)a: atomic group greedily consumes all 'a's; cannot backtrack to let trailing 'a' match.
     assertFalse(Reggie.compile("(?>a*)a").matches("a"));
-    assertFalse(Reggie.compile("(?>a*)a").matches("aaa"));
+    assertFalse(Reggie.compile("(?>a*)a").matches("aa"));
+    assertFalse(Reggie.compile("(?>a*)a").matches(""));
   }
 
   @Test
