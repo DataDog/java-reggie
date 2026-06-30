@@ -109,6 +109,13 @@ public class RegexParser {
     return ch == '|' || ch == ')';
   }
 
+  /** Quantifier greediness mode. */
+  private enum QuantifierMode {
+    GREEDY,
+    LAZY,
+    POSSESSIVE
+  }
+
   private RegexNode parseQuantified() throws ParseException {
     skipExtendedWhitespace(); // Skip whitespace before atom in extended mode
     RegexNode base = parseAtom();
@@ -122,18 +129,18 @@ public class RegexParser {
     switch (ch) {
       case '*':
         consume();
-        return new QuantifierNode(base, 0, -1, !checkNonGreedy());
+        return wrapQuantifier(base, 0, -1, checkQuantifierMode());
       case '+':
         consume();
-        return new QuantifierNode(base, 1, -1, !checkNonGreedy());
+        return wrapQuantifier(base, 1, -1, checkQuantifierMode());
       case '?':
         consume();
         // Check if this is a quantifier or non-greedy marker
         if (base instanceof QuantifierNode) {
           // Already a quantifier, so this ? makes it non-greedy
-          return base; // Handled in checkNonGreedy
+          return base; // Handled in checkQuantifierMode
         }
-        return new QuantifierNode(base, 0, 1, !checkNonGreedy());
+        return wrapQuantifier(base, 0, 1, checkQuantifierMode());
       case '{':
         return parseCountedQuantifier(base);
       default:
@@ -141,17 +148,33 @@ public class RegexParser {
     }
   }
 
-  private boolean checkNonGreedy() throws ParseException {
+  /**
+   * Reads the optional modifier after a quantifier symbol and returns the greediness mode.
+   * '?' → LAZY, '+' → POSSESSIVE, anything else → GREEDY (no character consumed).
+   */
+  private QuantifierMode checkQuantifierMode() throws ParseException {
     skipExtendedWhitespace();
     if (hasMore() && peek() == '?') {
       consume();
-      return true;
+      return QuantifierMode.LAZY;
     }
     if (hasMore() && peek() == '+') {
-      int pos = this.pos;
-      throw new UnsupportedPatternException("Possessive quantifier '+' not supported at position " + pos + "; use Reggie.compileAllowingFallback() to delegate to java.util.regex");
+      consume();
+      return QuantifierMode.POSSESSIVE;
     }
-    return false;
+    return QuantifierMode.GREEDY;
+  }
+
+  /**
+   * Builds the quantifier AST node for the given base, bounds, and mode. Possessive quantifiers are
+   * desugared into an atomic group wrapping a greedy quantifier: {@code X*+} → {@code (?>X*)}.
+   */
+  private RegexNode wrapQuantifier(RegexNode base, int min, int max, QuantifierMode mode) {
+    if (mode == QuantifierMode.POSSESSIVE) {
+      RegexNode inner = new QuantifierNode(base, min, max, true);
+      return new GroupNode(inner, 0, false, null, true);
+    }
+    return new QuantifierNode(base, min, max, mode == QuantifierMode.GREEDY);
   }
 
   private RegexNode parseCountedQuantifier(RegexNode base) throws ParseException {
@@ -180,7 +203,7 @@ public class RegexParser {
       throw new ParseException("Invalid quantifier: min (" + min + ") > max (" + max + ")");
     }
 
-    return new QuantifierNode(base, min, max, !checkNonGreedy());
+    return wrapQuantifier(base, min, max, checkQuantifierMode());
   }
 
   private int parseNumber() throws ParseException {
