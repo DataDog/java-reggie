@@ -321,10 +321,14 @@ public class RegexParser {
         // Branch reset: (?|alt1|alt2)
         return parseBranchReset();
       } else if (peek() == '>') {
-        throw new UnsupportedPatternException(
-            "Atomic group (?>...) not supported at position "
-                + pos
-                + "; use Reggie.compileAllowingFallback() to delegate to java.util.regex");
+        // Atomic group: (?>X). Parsed as a non-capturing group flagged atomic=true so that
+        // downstream passes can apply possessive-quantifier semantics where needed.
+        consume();
+        RegexModifiers savedAtomicModifiers = currentModifiers;
+        RegexNode atomicChild = parseAlternation();
+        currentModifiers = savedAtomicModifiers;
+        consume(')');
+        return new GroupNode(atomicChild, 0, false, null, true);
       } else {
         throw new UnsupportedPatternException(
             "Unsupported special group construct at position " + pos);
