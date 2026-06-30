@@ -147,10 +147,9 @@ public class RegexParser {
       consume();
       return true;
     }
-    // Possessive quantifier (+): consume and treat as greedy — DFA has no backtracking,
-    // so possessive and greedy are semantically equivalent.
     if (hasMore() && peek() == '+') {
-      consume();
+      int pos = this.pos;
+      throw new UnsupportedPatternException("Possessive quantifier '+' not supported at position " + pos + "; use Reggie.compileAllowingFallback() to delegate to java.util.regex");
     }
     return false;
   }
@@ -299,10 +298,10 @@ public class RegexParser {
         // Branch reset: (?|alt1|alt2)
         return parseBranchReset();
       } else if (peek() == '>') {
-        // Atomic group: (?>X). Reggie has no backtracking in its DFA/NFA engines, so the
-        // backtracking-prevention hint has the same language semantics as a non-capturing group.
-        consume();
-        capturing = false;
+        throw new UnsupportedPatternException(
+            "Atomic group (?>...) not supported at position "
+                + pos
+                + "; use Reggie.compileAllowingFallback() to delegate to java.util.regex");
       } else {
         throw new UnsupportedPatternException(
             "Unsupported special group construct at position " + pos);
