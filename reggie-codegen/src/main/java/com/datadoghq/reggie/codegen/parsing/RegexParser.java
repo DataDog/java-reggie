@@ -112,7 +112,7 @@ public class RegexParser {
   /** Quantifier greediness mode. */
   private enum QuantifierMode {
     GREEDY,
-    LAZY,
+    NON_GREEDY,
     POSSESSIVE
   }
 
@@ -150,13 +150,13 @@ public class RegexParser {
 
   /**
    * Reads the optional modifier after a quantifier symbol and returns the greediness mode.
-   * '?' → LAZY, '+' → POSSESSIVE, anything else → GREEDY (no character consumed).
+   * '?' → NON_GREEDY, '+' → POSSESSIVE, anything else → GREEDY (no character consumed).
    */
   private QuantifierMode checkQuantifierMode() throws ParseException {
     skipExtendedWhitespace();
     if (hasMore() && peek() == '?') {
       consume();
-      return QuantifierMode.LAZY;
+      return QuantifierMode.NON_GREEDY;
     }
     if (hasMore() && peek() == '+') {
       consume();
