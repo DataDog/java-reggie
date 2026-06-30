@@ -155,4 +155,31 @@ public class GlushkovAutomatonTest {
     assertNotNull(build("a{63}"));
     assertNull(build("a{64}"));
   }
+
+  @Test
+  void findLastRequiredChar_singleChar() {
+    GlushkovAutomaton g1 = build(".*a");
+    assertNotNull(g1);
+    assertEquals('a', g1.findLastRequiredChar());
+
+    GlushkovAutomaton g2 = build(".*z");
+    assertNotNull(g2);
+    assertEquals('z', g2.findLastRequiredChar());
+  }
+
+  @Test
+  void findLastRequiredChar_multipleAccept_returnsMinusOne() {
+    // .{9} at end means 9 positions are accepting → more than one accept position
+    GlushkovAutomaton g = build(".*a.{9}");
+    assertNotNull(g);
+    assertEquals(-1, g.findLastRequiredChar());
+  }
+
+  @Test
+  void findLastRequiredChar_wideCharClass_returnsMinusOne() {
+    // [abc] activates the single accept position via 3 distinct ASCII chars
+    GlushkovAutomaton g = build(".*[abc]");
+    assertNotNull(g);
+    assertEquals(-1, g.findLastRequiredChar());
+  }
 }
