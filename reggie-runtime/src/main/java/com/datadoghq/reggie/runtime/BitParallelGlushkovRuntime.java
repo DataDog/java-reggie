@@ -254,6 +254,77 @@ public final class BitParallelGlushkovRuntime {
   }
 
   /**
+   * Leftmost match start position {@code >= from}, or {@code -1} if no match exists. Uses {@link
+   * String#indexOf(int, int)} on {@code lastRequired} to skip regions that cannot contain a match
+   * before delegating to the reverse automaton scan.
+   *
+   * @param lastRequired a character that must appear in every match; used to jump over stretches of
+   *     the input that cannot contain any match candidate
+   */
+  public static int findFromWithSkip(
+      CharSequence input,
+      int from,
+      long initial,
+      long accept,
+      boolean nullable,
+      boolean startsAnywhere,
+      long[] follow,
+      long[] followReverse,
+      int[] asciiClasses,
+      char[] rangeStarts,
+      char[] rangeEnds,
+      int[] rangeClasses,
+      long[] entry,
+      int lastRequired) {
+    if (input == null) {
+      return -1;
+    }
+    int len = input.length();
+    int start = Math.max(0, from);
+    if (start > len) {
+      return -1;
+    }
+    if (nullable || startsAnywhere) {
+      if (startsAnywhere && !nullable) {
+        int end =
+            longestEndFrom(
+                input,
+                start,
+                len,
+                initial,
+                accept,
+                false,
+                follow,
+                asciiClasses,
+                rangeStarts,
+                rangeEnds,
+                rangeClasses,
+                entry);
+        return end < 0 ? -1 : start;
+      }
+      return start;
+    }
+    // Fast-path: if the required character does not appear at or after `start`, there is no match.
+    if (input instanceof String) {
+      int reqPos = ((String) input).indexOf(lastRequired, start);
+      if (reqPos < 0) {
+        return -1;
+      }
+    }
+    return leftmostStart(
+        input,
+        start,
+        initial,
+        accept,
+        followReverse,
+        asciiClasses,
+        rangeStarts,
+        rangeEnds,
+        rangeClasses,
+        entry);
+  }
+
+  /**
    * Leftmost-longest match bounds {@code >= from}. On success writes {@code [start, end)} into
    * {@code bounds} and returns {@code true}; otherwise returns {@code false}.
    *
