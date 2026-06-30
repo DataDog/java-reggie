@@ -45,7 +45,7 @@ public final class BitParallelGlushkovBytecodeGenerator {
 
   public BitParallelGlushkovBytecodeGenerator(GlushkovAutomaton g) {
     this.g = g;
-    this.lastRequiredChar = g.findLastRequiredChar();
+    this.lastRequiredChar = g.startsAnywhere ? g.findLastRequiredChar() : -1;
   }
 
   // -------------------------------------------------------------------------
