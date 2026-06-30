@@ -955,20 +955,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
       if (entryPos >= 0) {
         // Record the commit: group G's greedy match entered at entryPos commits at pos.
         atomicCommitPos[G] = entryPos;
-        // Kill earlier nlist slots that exited the same group at the same entry pos but earlier
-        // (i.e. shorter match). A slot "exited earlier" means its atomicExitPos[G] is in
-        // [0, pos-1] AND it entered the same group (atomicPos or entryPos signal).
+        // Kill nlist slots that entered the same atomic group at the same entry position:
+        // those are lower-priority threads that lost to the current greedy commit.
         for (int j = 0; j < nlistSize; j++) {
-          if (nlistAlive[j]) {
-            int jExitPos = nlistAtomicExitPos[j][G];
-            int jEntryPos = nlistAtomicPos[j][G]; // -1 means "entry pos was lost at exit"
-            // We need to identify slots that exited via a SHORTER match from the same entry.
-            // A slot that has already exited (jExitPos >= 0) at the same entry pos (or at an
-            // entry pos that we can't distinguish, use -1 sentinel for "exited already") and
-            // exited BEFORE the current commit pos is a loser.
-            if (jExitPos >= 0 && jExitPos < pos) {
-              nlistAlive[j] = false;
-            }
+          if (nlistAlive[j] && nlistAtomicPos[j][G] == entryPos) {
+            nlistAlive[j] = false;
           }
         }
       }
