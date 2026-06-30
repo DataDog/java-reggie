@@ -1409,6 +1409,344 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true if any {@link AlternationNode} in {@code ast} contains an alternative that is
+   * missing a capturing group number present in another alternative of the same alternation, AND at
+   * least one of the alternatives in that alternation consumes more than one character (minimum
+   * match length &gt; 1). Single-character-per-alt patterns (e.g. {@code (a)|b}, {@code (b)|b}) are
+   * correctly handled by the TDFA 1B alternation-binding fix and do not require PIKEVM routing.
+   *
+   * <p>Examples that fire: {@code [a][1-b]|(.)}, {@code _.|(_)}, {@code (1)c|10} — at least one alt
+   * is a multi-char sequence. Examples that do NOT fire: {@code (a)|b}, {@code (b)|b}, {@code
+   * b|(b)}, {@code .|([^c])} — all single-char alts. {@code (a|b)} does NOT fire (alternation
+   * inside the group; inner branches add no separate group). Patterns with no alternation (e.g.
+   * {@code (ab)c}) do not fire.
+   */
+  public static boolean hasCapturingGroupAbsentFromSomeAlternative(RegexNode ast) {
+    if (ast instanceof AlternationNode) {
+      AlternationNode alt = (AlternationNode) ast;
+      List<RegexNode> alts = alt.alternatives;
+      @SuppressWarnings("unchecked")
+      Set<Integer>[] groups = new Set[alts.size()];
+      Set<Integer> union = new HashSet<>();
+      for (int i = 0; i < alts.size(); i++) {
+        groups[i] = new HashSet<>();
+        collectGroupsInSubtree(alts.get(i), groups[i]);
+        union.addAll(groups[i]);
+      }
+      if (!union.isEmpty()) {
+        boolean anyAbsent = false;
+        for (Set<Integer> altGroups : groups) {
+          if (!altGroups.containsAll(union)) {
+            anyAbsent = true;
+            break;
+          }
+        }
+        if (anyAbsent) {
+          // Only flag when at least one alternative consumes more than one character. Single-char
+          // alternations are handled correctly by the TDFA 1B fix.
+          for (RegexNode alternative : alts) {
+            if (altMinLength(alternative) > 1) return true;
+          }
+        }
+      }
+      for (RegexNode alternative : alts) {
+        if (hasCapturingGroupAbsentFromSomeAlternative(alternative)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) ast).children) {
+        if (hasCapturingGroupAbsentFromSomeAlternative(child)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof GroupNode) {
+      return hasCapturingGroupAbsentFromSomeAlternative(((GroupNode) ast).child);
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasCapturingGroupAbsentFromSomeAlternative(((QuantifierNode) ast).child);
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing {@link GroupNode} in {@code ast} has a body whose leading element
+   * is nullable (i.e. can match the empty string). This identifies patterns where the TDFA fires
+   * the group-start tag at a state that is epsilon-reachable from before the group, causing the
+   * recorded start to equal the overall match start rather than the group's actual start.
+   *
+   * <p>Examples: {@code -{1}(a?.*)} — group body starts with {@code a?} (min=0, nullable). {@code
+   * (0{0}[^_]{1,})-} — group body starts with {@code 0{0}} (max=0, nullable).
+   */
+  public static boolean hasCapturingGroupWithNullableFirstElement(RegexNode ast) {
+    if (ast instanceof GroupNode) {
+      GroupNode g = (GroupNode) ast;
+      if (g.capturing) {
+        RegexNode body = g.child;
+        boolean nullableFirst;
+        if (body instanceof ConcatNode) {
+          List<RegexNode> children = ((ConcatNode) body).children;
+          nullableFirst = !children.isEmpty() && isNullable(children.get(0));
+        } else {
+          nullableFirst = isNullable(body);
+        }
+        if (nullableFirst) return true;
+      }
+      return hasCapturingGroupWithNullableFirstElement(g.child);
+    }
+    if (ast instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) ast).alternatives) {
+        if (hasCapturingGroupWithNullableFirstElement(alt)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) ast).children) {
+        if (hasCapturingGroupWithNullableFirstElement(child)) return true;
+      }
+      return false;
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasCapturingGroupWithNullableFirstElement(((QuantifierNode) ast).child);
+    }
+    return false;
+  }
+
+  /**
+   * Returns the minimum number of characters that {@code node} must consume (ignoring zero-width
+   * anchors and assertions). Used to distinguish single-character alternation alternatives from
+   * multi-character ones.
+   */
+  private static int altMinLength(RegexNode node) {
+    if (node instanceof LiteralNode) {
+      return ((LiteralNode) node).ch == 0 ? 0 : 1; // epsilon is 0; normal literal is 1
+    }
+    if (node instanceof CharClassNode) return 1;
+    if (node instanceof AnchorNode || node instanceof AssertionNode) return 0; // zero-width
+    if (node instanceof GroupNode) return altMinLength(((GroupNode) node).child);
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.min == 0) return 0;
+      return q.min * altMinLength(q.child);
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode c : ((ConcatNode) node).children) {
+        total += altMinLength(c);
+      }
+      return total;
+    }
+    if (node instanceof AlternationNode) {
+      int min = Integer.MAX_VALUE;
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        min = Math.min(min, altMinLength(a));
+      }
+      return min == Integer.MAX_VALUE ? 0 : min;
+    }
+    return 0;
+  }
+
+  /**
+   * Returns true if any capturing {@link GroupNode} in {@code ast} has a body that consists solely
+   * of an anchor (e.g. {@code ($)}, {@code (^)}). The OnePass NFA emits a wrong zero-width span for
+   * such groups; routing to PIKEVM_CAPTURE gives correct results.
+   */
+  public static boolean hasAnchorOnlyCapturingGroup(RegexNode ast) {
+    if (ast instanceof GroupNode g && g.capturing) {
+      if (isAnchorOnlyBody(g.child)) return true;
+      return hasAnchorOnlyCapturingGroup(g.child);
+    }
+    if (ast instanceof ConcatNode c) {
+      for (RegexNode child : c.children) if (hasAnchorOnlyCapturingGroup(child)) return true;
+    }
+    if (ast instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) if (hasAnchorOnlyCapturingGroup(alt)) return true;
+    }
+    if (ast instanceof QuantifierNode q) return hasAnchorOnlyCapturingGroup(q.child);
+    return false;
+  }
+
+  private static boolean isAnchorOnlyBody(RegexNode node) {
+    if (node instanceof AnchorNode) return true;
+    if (node instanceof ConcatNode c)
+      return c.children.size() == 1 && c.children.get(0) instanceof AnchorNode;
+    return false;
+  }
+
+  /**
+   * Peels any number of non-capturing {@link GroupNode} wrappers from {@code node} and returns the
+   * innermost node that is not a non-capturing group. Capturing groups and all other node types are
+   * returned as-is.
+   */
+  private static RegexNode unwrapNonCapturing(RegexNode node) {
+    while (node instanceof GroupNode g && !g.capturing) {
+      node = g.child;
+    }
+    return node;
+  }
+
+  /**
+   * Returns true if the top-level concat contains a capturing group whose body is a greedy
+   * quantifier with min&ge;1, infinite max, and a broad charset (.+ or .+[DOTALL]), followed by at
+   * least one more node (the suffix). The TDFA extends the group-end tag into the suffix for these
+   * patterns, producing wrong capture spans.
+   *
+   * <p>Non-capturing wrappers around the capturing group (e.g. {@code (?:(.+))_}) or around the
+   * quantifier body inside the capturing group (e.g. {@code ((?:.+))_}) are transparently unwrapped
+   * before the check, so both forms are correctly detected.
+   */
+  public static boolean hasGreedyDotPlusGroupWithSuffix(RegexNode ast) {
+    if (!(ast instanceof ConcatNode concat)) return false;
+    List<RegexNode> children = concat.children;
+    for (int i = 0; i < children.size() - 1; i++) {
+      RegexNode node = unwrapNonCapturing(children.get(i));
+      if (!(node instanceof GroupNode g) || !g.capturing) continue;
+      RegexNode body = unwrapNonCapturing(g.child);
+      if (!(body instanceof QuantifierNode q)) continue;
+      if (q.min < 1 || (q.max != Integer.MAX_VALUE && q.max != -1)) continue;
+      if (!(q.child instanceof CharClassNode cc)) continue;
+      CharSet cs = cc.chars;
+      if (cs.equals(CharSet.ANY) || cs.equals(CharSet.ANY_EXCEPT_NEWLINE)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns the minimum number of characters that {@code node} must consume. AnchorNodes are
+   * zero-width and contribute 0. Returns 0 for unknown node types (conservative).
+   */
+  private static int minLength(RegexNode node) {
+    if (node instanceof LiteralNode) return 1;
+    if (node instanceof CharClassNode) return 1;
+    if (node instanceof AnchorNode) return 0;
+    if (node instanceof QuantifierNode q) return q.min * minLength(q.child);
+    if (node instanceof ConcatNode c) {
+      int total = 0;
+      for (RegexNode child : c.children) total += minLength(child);
+      return total;
+    }
+    if (node instanceof AlternationNode a) {
+      int min = Integer.MAX_VALUE;
+      for (RegexNode alt : a.alternatives) min = Math.min(min, minLength(alt));
+      return min == Integer.MAX_VALUE ? 0 : min;
+    }
+    if (node instanceof GroupNode g) return minLength(g.child);
+    return 0;
+  }
+
+  /**
+   * Returns the maximum number of characters that {@code node} can consume, or {@link
+   * Integer#MAX_VALUE} for unbounded. Returns {@link Integer#MAX_VALUE} for unknown node types
+   * (conservative).
+   */
+  private static int maxLength(RegexNode node) {
+    if (node instanceof LiteralNode) return 1;
+    if (node instanceof CharClassNode) return 1;
+    if (node instanceof AnchorNode) return 0;
+    if (node instanceof QuantifierNode q) {
+      if (q.max == Integer.MAX_VALUE || q.max == -1) return Integer.MAX_VALUE;
+      int childMax = maxLength(q.child);
+      if (childMax == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+      return q.max * childMax;
+    }
+    if (node instanceof ConcatNode c) {
+      int total = 0;
+      for (RegexNode child : c.children) {
+        int cm = maxLength(child);
+        if (cm == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        total += cm;
+        if (total < 0) return Integer.MAX_VALUE; // overflow guard
+      }
+      return total;
+    }
+    if (node instanceof AlternationNode a) {
+      int max = 0;
+      for (RegexNode alt : a.alternatives) {
+        int am = maxLength(alt);
+        if (am == Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        if (am > max) max = am;
+      }
+      return max;
+    }
+    if (node instanceof GroupNode g) return maxLength(g.child);
+    return Integer.MAX_VALUE;
+  }
+
+  /**
+   * Returns true if {@code node} or any of its descendants is a {@link CharClassNode} whose charset
+   * matches more than one character (e.g. {@code .}, {@code [a-z]}, or any negated class).
+   * Single-character classes like {@code [1]} or {@code [a]} are not considered broad.
+   */
+  private static boolean containsBroadCharClass(RegexNode node) {
+    if (node instanceof CharClassNode cc) return cc.negated || !cc.chars.isSingleChar();
+    if (node instanceof LiteralNode || node instanceof AnchorNode) return false;
+    if (node instanceof GroupNode g) return containsBroadCharClass(g.child);
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) if (containsBroadCharClass(child)) return true;
+      return false;
+    }
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) if (containsBroadCharClass(alt)) return true;
+      return false;
+    }
+    if (node instanceof QuantifierNode q) return containsBroadCharClass(q.child);
+    return false;
+  }
+
+  /**
+   * Returns true if any capturing {@link GroupNode} in {@code ast} has a body that, after
+   * unwrapping transparent non-capturing wrappers, is an {@link AlternationNode} whose branches
+   * differ in minimum or maximum length AND at least one branch contains a broad charset (a {@link
+   * CharClassNode} matching more than one character). Pure-literal variable-length alternations
+   * like {@code (aa|a)} are handled correctly by the TDFA priority-cut and do not require PIKEVM
+   * routing. The broad-charset condition ensures only patterns where the TDFA cannot
+   * deterministically assign the group-end tag are routed to PIKEVM_CAPTURE. PikeVM gives correct
+   * spans for all cases.
+   *
+   * <p>Example: {@code ([1]|1.)} — branch {@code [1]} has length 1, branch {@code 1.} has length 2,
+   * and {@code 1.} contains {@code .} (broad charset) → variable-length with broad charset → route
+   * to PIKEVM_CAPTURE.
+   *
+   * <p>Non-capturing wrappers around the alternation body (e.g. {@code ((?:[1]|1.))}) are
+   * transparently unwrapped before the alternation check so that wrapped forms are also detected.
+   */
+  public static boolean hasGroupWithVariableLengthAlternationBody(RegexNode ast) {
+    if (ast instanceof GroupNode g && g.groupNumber > 0) {
+      if (unwrapNonCapturing(g.child) instanceof AlternationNode a) {
+        List<RegexNode> alts = a.alternatives;
+        if (alts.size() >= 2) {
+          int firstMin = minLength(alts.get(0));
+          int firstMax = maxLength(alts.get(0));
+          boolean hasVariableLength = false;
+          for (int i = 1; i < alts.size(); i++) {
+            int altMin = minLength(alts.get(i));
+            int altMax = maxLength(alts.get(i));
+            if (altMin != firstMin || altMax != firstMax) {
+              hasVariableLength = true;
+              break;
+            }
+          }
+          if (hasVariableLength
+              && alts.stream().anyMatch(FallbackPatternDetector::containsBroadCharClass))
+            return true;
+        }
+      }
+      return hasGroupWithVariableLengthAlternationBody(g.child);
+    }
+    if (ast instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives)
+        if (hasGroupWithVariableLengthAlternationBody(alt)) return true;
+    }
+    if (ast instanceof ConcatNode c) {
+      for (RegexNode child : c.children)
+        if (hasGroupWithVariableLengthAlternationBody(child)) return true;
+    }
+    if (ast instanceof QuantifierNode q) return hasGroupWithVariableLengthAlternationBody(q.child);
+    if (ast instanceof GroupNode g) return hasGroupWithVariableLengthAlternationBody(g.child);
+    return false;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
    * the group's content is itself nullable (can match the empty string). Example: {@code
    * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is

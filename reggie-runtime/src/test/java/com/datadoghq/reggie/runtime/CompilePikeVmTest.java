@@ -18,9 +18,11 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -57,6 +59,29 @@ class CompilePikeVmTest {
       assertEquals(rr.end(), sr.end());
     }
     assertFalse(staged instanceof JavaRegexFallbackMatcher);
+  }
+
+  // --- Tests for Fix 2: compilePikeVm() must honour full needsFallback() guard ---
+
+  @Test
+  void compilePikeVm_quantifiedAnchorGroup_throws() {
+    // ($){2} triggers B3 (hasAnchorInQuantifier) — compilePikeVm must reject it
+    assertThrows(
+        UnsupportedPatternException.class, () -> RuntimeCompiler.compilePikeVm("($){2}", ""));
+  }
+
+  @Test
+  void compilePikeVm_optionalAnchorGroup_throws() {
+    // (^)? triggers B3 (hasAnchorInQuantifier)
+    assertThrows(
+        UnsupportedPatternException.class, () -> RuntimeCompiler.compilePikeVm("(^)?", ""));
+  }
+
+  @Test
+  void compilePikeVm_nonQuantifiedAnchorGroup_succeeds() {
+    // ($) is safe for PikeVM: hasAnchorInQuantifier = false
+    String encoded = RuntimeCompiler.encodeNameMap(Map.of());
+    assertNotNull(RuntimeCompiler.compilePikeVm("($)", encoded));
   }
 
   @Test

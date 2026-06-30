@@ -41,9 +41,20 @@ public class PatternAnalyzer {
   private final RegexNode ast;
   private final NFA nfa;
 
+  /** Accumulated guard trace entries for the most recent {@link #analyzeAndRecommend} call. */
+  private final List<String> guardTrace = new ArrayList<>();
+
   public PatternAnalyzer(RegexNode ast, NFA nfa) {
     this.ast = ast;
     this.nfa = nfa;
+  }
+
+  /**
+   * Records one guard evaluation entry. A checkmark prefix marks guards that fired (caused a
+   * routing decision); a space prefix marks guards that were evaluated but did not fire.
+   */
+  private void addTrace(String guardName, boolean fired) {
+    guardTrace.add((fired ? "✓ " : "  ") + guardName);
   }
 
   /**
@@ -279,6 +290,13 @@ public class PatternAnalyzer {
    *     RuntimeCompiler for hybrid DFA+NFA approach)
    */
   public MatchingStrategyResult analyzeAndRecommend(boolean ignoreGroupCount) {
+    guardTrace.clear();
+    MatchingStrategyResult result = doAnalyze(ignoreGroupCount);
+    result.guardTrace.addAll(guardTrace);
+    return result;
+  }
+
+  private MatchingStrategyResult doAnalyze(boolean ignoreGroupCount) {
     // Extract required literals for indexOf optimization (applicable to all strategies)
     java.util.Set<Character> requiredLiterals = extractRequiredLiterals(ast);
 
@@ -312,6 +330,17 @@ public class PatternAnalyzer {
     if (hasBackrefs && hasQuantifiedBackrefs) {
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
       if (fixedRepBackrefInfo != null) {
+        // B6: decline when a non-empty suffix exists — the bytecode generator places the
+        // group-end tag after the suffix is consumed, not after the initial group match.
+        // Fall through to OPTIMIZED_NFA_WITH_BACKREFS, which handles group spans correctly.
+        if (!fixedRepBackrefInfo.suffix.isEmpty()) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+              null,
+              null,
+              false,
+              java.util.Collections.emptySet());
+        }
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -321,11 +350,14 @@ public class PatternAnalyzer {
       }
     }
 
-    if (hasSubroutines(ast)
-        || hasConditionals(ast)
-        || hasBranchReset(ast)
-        || (hasNonGreedyQuantifiers(ast) && !hasBackrefs)
-        || hasQuantifiedBackrefs) {
+    boolean requiresRecursiveDescentFlag =
+        hasSubroutines(ast)
+            || hasConditionals(ast)
+            || hasBranchReset(ast)
+            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs)
+            || hasQuantifiedBackrefs;
+    addTrace("requiresRecursiveDescent", requiresRecursiveDescentFlag);
+    if (requiresRecursiveDescentFlag) {
       return new MatchingStrategyResult(
           MatchingStrategy.RECURSIVE_DESCENT,
           null, // no DFA
@@ -415,7 +447,9 @@ public class PatternAnalyzer {
     // Check for lookaround assertions
     // Try DFA first for simple literal assertions (e.g., (?<=ab)c, a(?=bc))
     // Fall back to NFA for complex assertions (e.g., (?=.*[A-Z]))
-    if (hasLookaround(ast)) {
+    boolean hasLookaroundFlag = hasLookaround(ast);
+    addTrace("hasLookaround", hasLookaroundFlag);
+    if (hasLookaroundFlag) {
       // CRITICAL: Check if backrefs reference groups inside lookaheads
       // DFA-based strategies can't track capturing groups, so we must use NFA
       if (hasBackrefToLookaheadCapture(ast)) {
@@ -665,7 +699,7 @@ public class PatternAnalyzer {
       // Try to detect fixed-repetition backreference patterns: (a)\1{8,}, (abc)\1{3}
       // These don't require backtracking - just verification loop
       FixedRepetitionBackrefInfo fixedRepBackrefInfo = detectFixedRepetitionBackref(ast);
-      if (fixedRepBackrefInfo != null) {
+      if (fixedRepBackrefInfo != null && fixedRepBackrefInfo.suffix.isEmpty()) {
         return new MatchingStrategyResult(
             MatchingStrategy.FIXED_REPETITION_BACKREF,
             null,
@@ -673,6 +707,7 @@ public class PatternAnalyzer {
             false,
             requiredLiterals);
       }
+      // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
 
       // Try to detect variable-capture backreference patterns: (.*)\d+\1, (.+)=\1
       // These require backtracking from longest to shortest capture
@@ -717,7 +752,20 @@ public class PatternAnalyzer {
     }
 
     // Check for OnePass eligibility (highest priority for patterns with groups)
-    if (!ignoreGroupCount && nfa.getGroupCount() > 0 && isOnePassEligible()) {
+    // B3a: skip OnePass for anchor-only capturing group bodies — the OnePass NFA emits a wrong
+    // zero-width span for such groups; they are handled below via PIKEVM_CAPTURE.
+    boolean hasAnchorOnlyCapturingGroupFlag =
+        nfa != null
+            && nfa.getGroupCount() > 0
+            && FallbackPatternDetector.hasAnchorOnlyCapturingGroup(ast);
+    addTrace("B3a: hasAnchorOnlyCapturingGroup", hasAnchorOnlyCapturingGroupFlag);
+    boolean isOnePassEligibleFlag =
+        !ignoreGroupCount && nfa.getGroupCount() > 0 && isOnePassEligible();
+    addTrace("isOnePassEligible", isOnePassEligibleFlag && !hasAnchorOnlyCapturingGroupFlag);
+    if (!ignoreGroupCount
+        && nfa.getGroupCount() > 0
+        && isOnePassEligibleFlag
+        && !hasAnchorOnlyCapturingGroupFlag) {
       return new MatchingStrategyResult(
           MatchingStrategy.ONEPASS_NFA, null, null, false, requiredLiterals);
     }
@@ -727,6 +775,18 @@ public class PatternAnalyzer {
     if (!ignoreGroupCount && nfa.getGroupCount() > 0) {
       // Check if pattern has groups inside repeating quantifiers (needs POSIX semantics)
       boolean needsPosixSemantics = hasGroupsInRepeatingQuantifiers(ast);
+
+      // B3a: anchor-only group body — OnePass NFA emits wrong zero-width span.
+      if (hasAnchorOnlyCapturingGroupFlag) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE,
+            null,
+            null,
+            false,
+            requiredLiterals,
+            null,
+            needsPosixSemantics);
+      }
 
       // Try specialized strategies for patterns with quantified groups
       // These provide correct POSIX last-match semantics for group capture
@@ -765,6 +825,25 @@ public class PatternAnalyzer {
         // POSIX last-match semantics (groups may contain first match instead of last)
       }
 
+      // B4: greedy .+ group followed by a non-group suffix — the GREEDY_BACKTRACK indexOf scan
+      // overshoots on inputs ending with '\n' because '.' (ANY_EXCEPT_NEWLINE) cannot consume '\n'
+      // but the literal-suffix scan stops there. Route to PIKEVM_CAPTURE which handles this
+      // correctly. Patterns with a capturing-group suffix are excluded (different scan path).
+      boolean b4Flag =
+          FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
+              && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+      addTrace("B4: hasGreedyDotPlusGroupWithSuffix", b4Flag);
+      if (b4Flag) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE,
+            null,
+            null,
+            false,
+            requiredLiterals,
+            null,
+            needsPosixSemantics);
+      }
+
       // Check if pattern requires backtracking for correct group capture
       // Pattern a([bc]*)(c+d) needs backtracking: ([bc]*) must give back chars to allow (c+d) to
       // match
@@ -797,13 +876,15 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
-        if (hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
-          // \Z or $ in alternation with capturing groups: OPTIMIZED_NFA handles anchors as
-          // zero-width NFA assertions. The nfa.getGroupCount() == 0 branch that previously
-          // appeared here was unreachable (this block is guarded by nfa.getGroupCount() > 0).
-          // Zero-group patterns with \Z in alternation are handled outside this block.
+        boolean b3bCapFlag =
+            (hasStringEndAnchorInAlternation(ast) || hasEndAnchorLeadingInAlternationBranch(ast))
+                && !dfaHasAcceptingStateWithTransitions(dfa);
+        addTrace("B3b: hasStringEndAnchorInAlternation", b3bCapFlag);
+        if (b3bCapFlag) {
+          // \Z in alternation with capturing groups: PIKEVM_CAPTURE handles anchors correctly.
+          // OPTIMIZED_NFA would be rejected by needsFallback for this combination.
           return new MatchingStrategyResult(
-              MatchingStrategy.OPTIMIZED_NFA,
+              MatchingStrategy.PIKEVM_CAPTURE,
               null,
               null,
               false,
@@ -817,6 +898,7 @@ public class PatternAnalyzer {
         // the DFA to lose the anchor guard. PikeVMMatcher.checkAnchor evaluates all anchor types
         // correctly against the actual search position, so PIKEVM is safe for all diluted shapes —
         // not just alternation patterns. The alternation+accepting-transitions guard is removed.
+        addTrace("isAnchorConditionDiluted", dfa.isAnchorConditionDiluted());
         if (dfa.isAnchorConditionDiluted()) {
           // Anchor condition diluted in DFA: capture-ambiguous patterns are safe for PikeVM
           // because PikeVM evaluates anchors natively per position (via checkAnchor) and tracks
@@ -909,6 +991,7 @@ public class PatternAnalyzer {
           return r;
         }
 
+        addTrace("isCaptureAmbiguous → DFA_UNROLLED_WITH_GROUPS", dfa.isCaptureAmbiguous());
         if (dfa.isCaptureAmbiguous()) {
           // For pure-regular, anchor-free patterns the C2 priority-ordered TDFA gives correct
           // spans and can use an inline DFA strategy when the state count is small enough.
@@ -977,8 +1060,75 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // A1: group body starts with a nullable first element — TDFA fires the group-start
+            // tag at an epsilon-reachable state, recording match-start instead of group-start.
+            boolean a1Flag =
+                FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast)
+                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            addTrace("A1: hasCapturingGroupWithNullableFirstElement", a1Flag);
+            if (a1Flag) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // A2: capturing group absent from some alternation branch — TDFA binds the absent
+            // group to a wrong span when the branch that lacks the group wins.
+            boolean a2Flag =
+                FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
+                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            addTrace("A2: hasCapturingGroupAbsentFromSomeAlternative", a2Flag);
+            if (a2Flag) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // B4: greedy .+ group followed by a suffix — TDFA extends group-end into the suffix.
+            boolean b4CaFlag =
+                FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
+                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            addTrace("B4: hasGreedyDotPlusGroupWithSuffix (captureAmbiguous)", b4CaFlag);
+            if (b4CaFlag) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // B5: group body is an alternation whose branches have different min- or max-lengths.
+            boolean b5CaFlag =
+                FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast)
+                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            addTrace("B5: hasGroupWithVariableLengthAlternationBody (captureAmbiguous)", b5CaFlag);
+            if (b5CaFlag) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
+            addTrace(
+                "DFA state count → DFA_UNROLLED / DFA_SWITCH / OPTIMIZED_NFA (stateCount="
+                    + stateCount
+                    + ")",
+                true);
             if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
               return new MatchingStrategyResult(
                   MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
@@ -1037,6 +1187,46 @@ public class PatternAnalyzer {
         }
         if (FallbackPatternDetector.containsAlternation(ast)
             && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // A1: group body starts with a nullable first element — TDFA fires the group-start
+        // tag at an epsilon-reachable state, recording match-start instead of group-start.
+        if (FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // A2: capturing group absent from some alternation branch — TDFA binds the absent
+        // group to a wrong span when the branch that lacks the group wins.
+        if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // B5: group body is an alternation whose branches have different min- or max-lengths
+        // and at least one branch contains a broad charset — TDFA cannot deterministically assign
+        // the group-end tag when a broad-charset alternative competes with the suffix.
+        if (FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1129,7 +1319,11 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
-      if (hasStringEndAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
+      boolean b3bFlag =
+          (hasStringEndAnchorInAlternation(ast) || hasEndAnchorLeadingInAlternationBranch(ast))
+              && !dfaHasAcceptingStateWithTransitions(dfa);
+      addTrace("B3b: hasStringEndAnchorInAlternation", b3bFlag);
+      if (b3bFlag) {
         // \Z or $ in alternation: OPTIMIZED_NFA mishandles find() anchor semantics;
         // route to PIKEVM_CAPTURE which handles \Z/$ correctly.
         return new MatchingStrategyResult(
@@ -1146,7 +1340,11 @@ public class PatternAnalyzer {
       // This block runs BEFORE the isAnchorConditionDiluted guard below: a diluted-anchor
       // pattern (e.g. ^c|[^1][b]) is handled correctly by PIKEVM, whereas OPTIMIZED_NFA
       // (the dilution fallback target) shares the old find() anchor bug.
-      if (containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa)) {
+      boolean altWithAcceptingTransFlag =
+          containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa);
+      addTrace(
+          "containsAlternation && dfaHasAcceptingStateWithTransitions", altWithAcceptingTransFlag);
+      if (altWithAcceptingTransFlag) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
@@ -1154,6 +1352,7 @@ public class PatternAnalyzer {
       // correctly at each search position, whereas OPTIMIZED_NFA mishandles diluted conditions.
       // anchorConditionDiluted=true on the result signals RuntimeCompiler's hybrid pre-check to
       // skip the hybrid DFA path (a diluted DFA is not safe for the fast-matching pass).
+      addTrace("isAnchorConditionDiluted (no-group path)", dfa.isAnchorConditionDiluted());
       if (dfa.isAnchorConditionDiluted()) {
         MatchingStrategyResult r =
             new MatchingStrategyResult(
@@ -1169,6 +1368,11 @@ public class PatternAnalyzer {
       }
       // Choose DFA strategy based on state count
       int stateCount = dfa.getStateCount();
+      addTrace(
+          "DFA state count → DFA_UNROLLED / DFA_SWITCH / OPTIMIZED_NFA (stateCount="
+              + stateCount
+              + ")",
+          true);
       if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_UNROLLED, dfa, null, false, requiredLiterals);
@@ -2862,6 +3066,9 @@ public class PatternAnalyzer {
      * {@code JavaRegexFallbackMatcher}) rather than using the generated NFA bytecode.
      */
     public boolean anchorConditionDiluted;
+
+    /** Per-guard routing trace populated by {@link PatternAnalyzer#analyzeAndRecommend}. */
+    public final List<String> guardTrace = new ArrayList<>();
 
     public MatchingStrategyResult(MatchingStrategy strategy, DFA dfa) {
       this(strategy, dfa, null, false, java.util.Collections.emptySet(), null, false);
@@ -7049,6 +7256,22 @@ public class PatternAnalyzer {
     // There must be something after the greedy group (the suffix)
     if (greedyGroupIndex >= allNodes.size() - 1) {
       return null; // No suffix
+    }
+
+    // Decline .+ (min>=1) with broad charset when the suffix is a literal (not a capturing group).
+    // The GREEDY_BACKTRACK indexOf scan cannot enforce the min=1 lower bound while surrendering
+    // chars to a non-group suffix: on inputs with a trailing newline the scan overshoots, matching
+    // the newline via the suffix delimiter check instead of stopping at the non-newline boundary of
+    // '.' (ANY_EXCEPT_NEWLINE). Capturing-group suffixes use a different scan path unaffected by
+    // this.
+    boolean suffixStartsWithCapturingGroup =
+        allNodes.get(greedyGroupIndex + 1) instanceof GroupNode sg && sg.capturing;
+    if (!suffixStartsWithCapturingGroup
+        && greedyMinCount > 0
+        && greedyCharSet != null
+        && (greedyCharSet.equals(CharSet.ANY)
+            || greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE))) {
+      return null;
     }
 
     // Extract prefix (everything before the greedy group)

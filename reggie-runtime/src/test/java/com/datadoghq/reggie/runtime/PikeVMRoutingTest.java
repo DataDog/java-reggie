@@ -132,4 +132,202 @@ class PikeVMRoutingTest {
     assertEquals("a", r.group(1), "group(1) must be 'a'");
     assertEquals("bcd", r.group(2), "group(2) must be 'bcd'");
   }
+
+  // ── A2: capturing group absent from some alternation branch ────────────────
+
+  @Test
+  void groupAbsentFromAlt_literalThenGroup_routesToPikevm() throws Exception {
+    // Group 1 `(.)` only in alt 2; DFA_UNROLLED_WITH_GROUPS binds group 1 when alt 1 wins.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("[a][1-b]|(.)"),
+        "[a][1-b]|(.) must route to PIKEVM_CAPTURE (A2: group absent from alt 1)");
+  }
+
+  @Test
+  void groupAbsentFromAlt_dotThenGroup_routesToPikevm() throws Exception {
+    // Group 1 `(_)` only in alt 2.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("_.|(_)"),
+        "_.|(_) must route to PIKEVM_CAPTURE (A2: group absent from alt 2)");
+  }
+
+  @Test
+  void groupAbsentFromAlt_groupFirstAlt_routesToPikevm() throws Exception {
+    // Group 1 `(1)` only in alt 1; DFA binds group 1 when alt 2 wins.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(1)c|10"),
+        "(1)c|10 must route to PIKEVM_CAPTURE (A2: group absent from alt 2)");
+  }
+
+  // ── A2 regression: patterns that MUST stay on DFA_UNROLLED_WITH_GROUPS ────
+
+  @Test
+  void singleGroupWrappingAlts_staysOnDfa() throws Exception {
+    // (fo|foo): group wraps the whole alternation; both inner branches have no capturing group.
+    // A2 guard must NOT fire — guard already tested by foOrFoo_routesToDfaWithGroups().
+    // This test guards the simple (ab)c case as a minimal sanity check.
+    // (ab)c has no alternation so it routes to SPECIALIZED_FIXED_SEQUENCE, not
+    // DFA_UNROLLED_WITH_GROUPS.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.SPECIALIZED_FIXED_SEQUENCE,
+        StrategyCorrectnessMetaTest.routeOf("(ab)c"),
+        "(ab)c must not be routed to PIKEVM_CAPTURE by the A2 guard (no alternation)");
+  }
+
+  // ── A1: capturing group body starts with nullable first element ────────────
+
+  @Test
+  void nullableFirstElem_optionalPrefix_routesToPikevm() throws Exception {
+    // Group body `a?.*` starts with `a?` (min=0); TDFA fires group-start too early.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("-{1}(a?.*)"),
+        "-{1}(a?.*) must route to PIKEVM_CAPTURE (A1: nullable first element a?)");
+  }
+
+  @Test
+  void nullableFirstElem_zeroQuantifier_routesToPikevm() throws Exception {
+    // Group body `0{0}[^_]{1,}` starts with `0{0}` (min=0,max=0); TDFA group-start fires too early.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(0{0}[^_]{1,})-"),
+        "(0{0}[^_]{1,})- must route to PIKEVM_CAPTURE (A1: nullable first element 0{0})");
+  }
+
+  // ── A1 regression: patterns that MUST NOT route to PIKEVM_CAPTURE ────
+
+  @Test
+  void nonNullableGroupBody_staysOnDfa() throws Exception {
+    // Group body `abc` starts with literal `a` (non-nullable); A1 guard must NOT fire.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.ONEPASS_NFA,
+        StrategyCorrectnessMetaTest.routeOf("(abc)"),
+        "(abc) must not be routed to PIKEVM_CAPTURE by the A1 guard (non-nullable first element)");
+  }
+
+  // ── B3b: $ (end-of-line anchor) in alternation ─────────────────────────────
+
+  // ── B3a: anchor-only capturing group body ──────────────────────────────────
+
+  @Test
+  void anchorOnlyGroupBody_routesToPikevm() throws Exception {
+    // ($): capturing group whose body is a sole anchor — must route to PIKEVM_CAPTURE (B3a).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("($)"),
+        "($) must route to PIKEVM_CAPTURE (B3a: anchor-only capturing group body)");
+  }
+
+  // ── B3b: $ (end-of-line anchor) in alternation ─────────────────────────────
+
+  @Test
+  void dollarInAlternation_routesToPikevm() throws Exception {
+    // $|[^c]{1}: $ anchor in alternation — must route to PIKEVM_CAPTURE (B3b).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("$|[^c]{1}"),
+        "$|[^c]{1} must route to PIKEVM_CAPTURE (B3b: $ in alternation)");
+  }
+
+  @Test
+  void dollarInAlternationAlt_routesToPikevm() throws Exception {
+    // $|[^0]{1}: $ anchor in alternation — must route to PIKEVM_CAPTURE (B3b).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("$|[^0]{1}"),
+        "$|[^0]{1} must route to PIKEVM_CAPTURE (B3b: $ in alternation)");
+  }
+
+  // ── B6: FIXED_REPETITION_BACKREF declined when suffix is non-empty ──────────
+
+  @Test
+  void fixedRepetitionBackrefWithSuffix_routesToOptimizedNfaWithBackrefs() throws Exception {
+    // (.)\\1{2}. has a non-empty suffix (the trailing dot) — bytecode places the
+    // group-end tag after the suffix is consumed, producing wrong spans.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+        StrategyCorrectnessMetaTest.routeOf("(.)\\1{2}."),
+        "(.)\\1{2}. must route to OPTIMIZED_NFA_WITH_BACKREFS (B6: non-empty suffix)");
+  }
+
+  @Test
+  void fixedRepetitionBackrefNoSuffix_staysOnFixedRepetitionBackref() throws Exception {
+    // (.)\\1{2} has no suffix — FIXED_REPETITION_BACKREF is correct.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.FIXED_REPETITION_BACKREF,
+        StrategyCorrectnessMetaTest.routeOf("(.)\\1{2}"),
+        "(.)\\1{2} must stay on FIXED_REPETITION_BACKREF (B6: no suffix)");
+  }
+
+  @Test
+  void greedyDotPlusWithSuffix_routesToPikevm() throws Exception {
+    // (.+)_ has a greedy .+ group with a literal suffix — GREEDY_BACKTRACK's indexOf scan
+    // overshoots on inputs ending with '\n' (B4: greedy .+ with non-group suffix).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(.+)_"),
+        "(.+)_ must route to PIKEVM_CAPTURE (B4: greedy .+ with suffix)");
+  }
+
+  @Test
+  void greedyDotPlusWrappedInNonCapturing_routesToPikevm() throws Exception {
+    // (?:(.+))_ — the capturing group is wrapped inside a non-capturing group at the concat level.
+    // B4 detection must unwrap the non-capturing outer group to find the (.+) capture.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("(?:(.+))_"),
+        "(?:(.+))_ must route to PIKEVM_CAPTURE (B4: non-capturing wrapper around capture)");
+  }
+
+  @Test
+  void greedyDotPlusBodyWrappedInNonCapturing_routesToPikevm() throws Exception {
+    // ((?:.+))_ — the .+ quantifier is wrapped inside a non-capturing group inside the capture.
+    // B4 detection must also unwrap the non-capturing inner group to find the quantifier.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("((?:.+))_"),
+        "((?:.+))_ must route to PIKEVM_CAPTURE (B4: non-capturing wrapper around quantifier body)");
+  }
+
+  @Test
+  void greedyDotStarWithSuffix_staysOnGreedyBacktrack() throws Exception {
+    // (.*)_ has a greedy .* group (min=0): not affected by the B4 decline (min>=1 only).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK,
+        StrategyCorrectnessMetaTest.routeOf("(.*)_"),
+        "(.*)_ must stay on GREEDY_BACKTRACK (B4: only declines min>=1)");
+  }
+
+  // ── B5: variable-length alternation group body ──────────────────────────────
+
+  @Test
+  void variableLengthAltInGroup_routesToPikevm() throws Exception {
+    // ([1]|1.)[b]_: group 1 has alternation with branch lengths 1 and 2 — variable-length (B5).
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("([1]|1.)[b]_"),
+        "([1]|1.)[b]_ must route to PIKEVM_CAPTURE (B5: variable-length alt in group)");
+  }
+
+  @Test
+  void variableLengthAltWrappedInNonCapturing_routesToPikevm() throws Exception {
+    // ((?:[1]|1.))[b]_ — the alternation is wrapped in a non-capturing group inside the capture.
+    // B5 detection must unwrap the non-capturing wrapper before checking for AlternationNode.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        StrategyCorrectnessMetaTest.routeOf("((?:[1]|1.))[b]_"),
+        "((?:[1]|1.))[b]_ must route to PIKEVM_CAPTURE (B5: non-capturing wrapper around alt)");
+  }
+
+  @Test
+  void fixedLengthAltInGroup_staysOnDfa() throws Exception {
+    // ([a]|[b])c: both alternatives have length 1 — fixed-length, should NOT trigger B5.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("([a]|[b])c"),
+        "([a]|[b])c must stay on DFA_UNROLLED_WITH_GROUPS (B5: same-length alts not triggered)");
+  }
 }

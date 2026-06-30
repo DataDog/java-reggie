@@ -56,6 +56,15 @@ public final class FuzzRunner {
     public int patternDepth = 3;
     public int inputMaxLength = 12;
 
+    /**
+     * Number of (pattern, input) batches to skip at the start of the sequence. Both the pattern RNG
+     * and input RNG are advanced by {@code patternSkip * inputsPerPattern} steps so the remaining
+     * run covers fresh territory not exercised by a sweep of the same seed with a lower pattern
+     * count. Reproducible: given identical (seed, patternSkip, patternCount) the findings are
+     * always the same.
+     */
+    public int patternSkip = 0;
+
     /** Cap the number of findings retained per pattern to avoid quadratic-style log explosions. */
     public int findingsPerPatternCap = 3;
   }
@@ -67,6 +76,17 @@ public final class FuzzRunner {
     RandomRegexGenerator regexGen = new RandomRegexGenerator(patternRng, cfg.patternDepth);
     RandomInputGenerator inputGen = new RandomInputGenerator(inputRng, cfg.inputMaxLength);
     RegexFuzzOracle oracle = new RegexFuzzOracle();
+
+    // Advance both RNGs past the skip window so the active range starts at a fresh position.
+    // inputsPerPattern steps per skipped pattern is conservative (ignores compile-time rejects
+    // that would consume fewer inputs in a real run) but keeps the skip deterministic without
+    // running the oracle.
+    for (int p = 0; p < cfg.patternSkip; p++) {
+      regexGen.generate();
+      for (int i = 0; i < cfg.inputsPerPattern; i++) {
+        inputGen.generate();
+      }
+    }
 
     int skipped = 0;
     int inputs = 0;

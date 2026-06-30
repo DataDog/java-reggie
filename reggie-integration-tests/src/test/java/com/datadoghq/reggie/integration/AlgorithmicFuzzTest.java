@@ -47,21 +47,19 @@ public class AlgorithmicFuzzTest {
   private static final long BASE_SEED = 0xC0DEFEED_DEADBEEFL;
 
   /**
-   * Known pre-existing divergence budget for {@link #BASE_SEED} at the default sweep dimensions
-   * (25k patterns × 16 inputs × max-length 16). Every finding here is a known, tracked bug in a
-   * native strategy — not a regression. When this count changes, update the budget and document the
-   * new/fixed finding in {@code doc/temp/prod-readiness/fuzz-inventory.md}. Override via {@code
-   * -Dreggie.fuzz.maxFindings=N} for stricter local runs.
+   * Known pre-existing divergence budget for the active fuzz window: {@link #BASE_SEED}, patterns
+   * 25 001–50 000 (skip=25 000, count=25 000, depth=3, 16 inputs × max-length 16). The window
+   * starts after the range already cleared to zero by the B3a/B3b/B4/B5/B6 fixes. Every finding is
+   * a tracked bug — not a regression. Clustered inventory: {@code doc/fuzz/2026-06-29.md}.
    *
-   * <p>Raised 18→78 when {@link RegexFuzzOracle} gained a {@code findAll()} differential that
-   * checks per-match group spans (≥1) on the FIND path — the first oracle to do so. It surfaced
-   * pre-existing find-path group-capture bugs in the codegen TDFA / PikeVM (untaken-branch group
-   * not reset to −1; empty-iteration binding; greedy give-back inner-span). These are tracked as
-   * the capture-correctness effort and ratchet this budget back toward 0 as each root-cause class
-   * is fixed. Ratcheted 78→69→65: Class A (nullable capturing group in an alternation branch, e.g.
-   * {@code 1|()b}) now routes to PIKEVM_CAPTURE for correct spans.
+   * <p>When this reaches 0: advance the window — run {@code -Dreggie.fuzz.skip=50000
+   * -Dreggie.fuzz.size=25000 -Dreggie.fuzz.maxFindings=9999}, document new findings in {@code
+   * doc/fuzz/YYYY-MM-DD.md}, then update skip and this budget to match.
+   *
+   * <p>History: 18→78 (findAll group-span oracle) → 69→65→13→0 (B3a/B3b/B4/B5/B6, window 0–25k) →
+   * window advanced to 25k–50k → 34 (E1–E6 found; see {@code doc/fuzz/2026-06-29.md}).
    */
-  private static final int KNOWN_FINDINGS_BUDGET = 65;
+  private static final int KNOWN_FINDINGS_BUDGET = 34;
 
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)
@@ -221,6 +219,8 @@ public class AlgorithmicFuzzTest {
    *
    * <ul>
    *   <li>{@code -Dreggie.fuzz.size=N} — pattern count (default 25_000)
+   *   <li>{@code -Dreggie.fuzz.skip=N} — patterns to skip at the start of the sequence (default
+   *       25_000; use 0 to rerun from the beginning of the sequence)
    *   <li>{@code -Dreggie.fuzz.inputsPerPattern=N} — inputs per pattern (default 16)
    *   <li>{@code -Dreggie.fuzz.inputMaxLength=N} — max input string length (default 16)
    *   <li>{@code -Dreggie.fuzz.patternDepth=N} — max regex AST depth (default 3)
@@ -230,6 +230,7 @@ public class AlgorithmicFuzzTest {
     FuzzRunner.Config cfg = new FuzzRunner.Config();
     cfg.seed = BASE_SEED;
     cfg.patternCount = sizedPatternCount(25_000);
+    cfg.patternSkip = intPropNonNeg("reggie.fuzz.skip", 25_000);
     cfg.inputsPerPattern = intProp("reggie.fuzz.inputsPerPattern", 16);
     cfg.patternDepth = intProp("reggie.fuzz.patternDepth", 3);
     cfg.inputMaxLength = intProp("reggie.fuzz.inputMaxLength", 16);
@@ -243,6 +244,22 @@ public class AlgorithmicFuzzTest {
     try {
       int parsed = Integer.parseInt(v);
       return parsed > 0 ? parsed : dflt;
+    } catch (NumberFormatException e) {
+      return dflt;
+    }
+  }
+
+  /**
+   * Read an int system property, returning {@code dflt} when absent or unparseable. Unlike {@link
+   * #intProp}, this helper accepts zero as a valid value; only negative values fall back to the
+   * default.
+   */
+  private static int intPropNonNeg(String name, int dflt) {
+    String v = System.getProperty(name);
+    if (v == null || v.isEmpty()) return dflt;
+    try {
+      int parsed = Integer.parseInt(v);
+      return parsed >= 0 ? parsed : dflt;
     } catch (NumberFormatException e) {
       return dflt;
     }

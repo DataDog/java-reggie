@@ -102,6 +102,12 @@ public class BytecodeDebugger {
       PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
       System.out.println("   Strategy: " + result.strategy);
+      if (result.guardTrace != null && !result.guardTrace.isEmpty()) {
+        System.out.println("   Guard trace:");
+        for (String entry : result.guardTrace) {
+          System.out.println("     " + entry);
+        }
+      }
       if (result.dfa != null) {
         System.out.println("   DFA States: " + result.dfa.getStateCount());
       }
