@@ -127,6 +127,33 @@ public final class GlushkovAutomaton {
   }
 
   /**
+   * Returns the single ASCII character (0–127) that must appear at the accepting position of
+   * every match, or {@code -1} if none can be identified.
+   *
+   * <p>When the Last (accept) set has exactly one position {@code p} and exactly one ASCII
+   * character activates {@code p} through {@code entry[asciiClasses[c]] >> p & 1 != 0}, that
+   * character is required at every match end. The caller can use {@link String#indexOf(int, int)}
+   * to skip non-candidate regions in {@code find()}.
+   *
+   * <p>Returns {@code -1} when: the Last set has more than one position; more than one ASCII
+   * character activates the sole accepting position (class too wide); or the position is
+   * activated only by non-ASCII characters.
+   */
+  public int findLastRequiredChar() {
+    if (Long.bitCount(accept) != 1) return -1;
+    int p = Long.numberOfTrailingZeros(accept);
+    int found = -1;
+    for (int c = 0; c < 128; c++) {
+      int cls = asciiClasses[c];
+      if (((entry[cls] >> p) & 1L) != 0L) {
+        if (found != -1) return -1; // more than one ASCII char activates p
+        found = c;
+      }
+    }
+    return found;
+  }
+
+  /**
    * Builds the Glushkov automaton for {@code nfa}, or returns {@code null} if the pattern is
    * ineligible (capturing groups, anchors, assertions, backreferences, conditionals, no positions,
    * or more than {@link #MAX_POSITIONS} positions).
