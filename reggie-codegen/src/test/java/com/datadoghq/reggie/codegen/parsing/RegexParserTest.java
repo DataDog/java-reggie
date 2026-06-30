@@ -17,6 +17,8 @@ package com.datadoghq.reggie.codegen.parsing;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.datadoghq.reggie.codegen.ast.ConcatNode;
+import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import org.junit.jupiter.api.Test;
@@ -117,5 +119,47 @@ class RegexParserTest {
         RegexParser.ParseException.class,
         () -> parse("\\x{}"),
         "\\x{} with no hex digits must throw ParseException");
+  }
+
+  /** Possessive quantifier a*+ must parse as an atomic GroupNode. */
+  @Test
+  void possessiveQuantifier_parsesAsAtomicGroup() throws RegexParser.ParseException {
+    RegexNode n = parse("a*+");
+    assertInstanceOf(GroupNode.class, n);
+    assertTrue(((GroupNode) n).atomic);
+  }
+
+  /** Possessive quantifier \d++ must parse as an atomic GroupNode. */
+  @Test
+  void possessiveQuantifier_plusPlus_parsesAsAtomicGroup() throws RegexParser.ParseException {
+    RegexNode n = parse("\\d++");
+    assertInstanceOf(GroupNode.class, n);
+    assertTrue(((GroupNode) n).atomic);
+  }
+
+  /** Possessive quantifier [a-z]?+ must parse as an atomic GroupNode. */
+  @Test
+  void possessiveQuantifier_questionPlus_parsesAsAtomicGroup() throws RegexParser.ParseException {
+    RegexNode n = parse("[a-z]?+");
+    assertInstanceOf(GroupNode.class, n);
+    assertTrue(((GroupNode) n).atomic);
+  }
+
+  /** Possessive quantifier a{2,4}+ must parse as an atomic GroupNode. */
+  @Test
+  void possessiveQuantifier_boundedPlus_parsesAsAtomicGroup() throws RegexParser.ParseException {
+    RegexNode n = parse("a{2,4}+");
+    assertInstanceOf(GroupNode.class, n);
+    assertTrue(((GroupNode) n).atomic);
+  }
+
+  /** Atomic group (?>a+)b must parse as a ConcatNode whose first child is an atomic GroupNode. */
+  @Test
+  void atomicGroup_parsesAsAtomicGroupInConcat() throws RegexParser.ParseException {
+    RegexNode n = parse("(?>a+)b");
+    assertInstanceOf(ConcatNode.class, n);
+    ConcatNode concat = (ConcatNode) n;
+    assertInstanceOf(GroupNode.class, concat.children.get(0));
+    assertTrue(((GroupNode) concat.children.get(0)).atomic);
   }
 }
