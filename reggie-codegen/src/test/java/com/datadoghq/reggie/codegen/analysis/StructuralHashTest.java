@@ -162,6 +162,18 @@ class StructuralHashTest {
             + "this test fails when the acceptIsPriorityCut hash line is removed");
   }
 
+  // ── Atomic group distinctness ─────────────────────────────────────────────────
+
+  @Test
+  void atomicGroupVsPlainQuantifier_produceDifferentHashes() throws Exception {
+    // a* and (?>a*) have the same DFA topology but differ in hasAtomicGroups.
+    // If hasAtomicGroups is not included in the hash, both patterns would produce the same
+    // structural hash, causing the cache to return the wrong compiled class.
+    long h1 = hashFor("a*");
+    long h2 = hashFor("(?>a*)");
+    assertNotEquals(h1, h2, "a* and (?>a*) must have distinct structural hashes");
+  }
+
   // ── Strategy / topology distinctness ─────────────────────────────────────────
 
   @Test
