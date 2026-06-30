@@ -25,6 +25,7 @@ import java.util.*;
 public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment> {
 
   private int nextStateId = 0;
+  private int atomicGroupCounter = 0;
   private final List<NFA.NFAState> allStates = new ArrayList<>();
 
   /**
@@ -253,6 +254,24 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   @Override
   public NFAFragment visitGroup(GroupNode node) {
     NFAFragment child = node.child.accept(this);
+
+    if (node.atomic) {
+      int atomicId = atomicGroupCounter++;
+
+      NFA.NFAState entryState = createState();
+      entryState.atomicEntry = atomicId;
+      entryState.addEpsilonTransition(child.entry);
+
+      Set<NFA.NFAState> atomicExits = new HashSet<>();
+      for (NFA.NFAState childExit : child.exits) {
+        NFA.NFAState exitState = createState();
+        exitState.atomicExit = atomicId;
+        childExit.addEpsilonTransition(exitState);
+        atomicExits.add(exitState);
+      }
+
+      return new NFAFragment(entryState, atomicExits);
+    }
 
     if (node.capturing) {
       // Create intermediate epsilon states to avoid overwriting nested group markers
