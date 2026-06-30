@@ -708,7 +708,6 @@ public class PatternAnalyzer {
             requiredLiterals);
       }
       // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
-      // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
 
       // Try to detect variable-capture backreference patterns: (.*)\d+\1, (.+)=\1
       // These require backtracking from longest to shortest capture
