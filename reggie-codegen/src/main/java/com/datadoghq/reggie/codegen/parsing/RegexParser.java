@@ -329,9 +329,7 @@ public class RegexParser {
         // Atomic group: (?>X). Parsed as a non-capturing group flagged atomic=true so that
         // downstream passes can apply possessive-quantifier semantics where needed.
         consume();
-        RegexModifiers savedAtomicModifiers = currentModifiers;
         RegexNode atomicChild = parseAlternation();
-        currentModifiers = savedAtomicModifiers;
         consume(')');
         return new GroupNode(atomicChild, 0, false, null, true);
       } else {
