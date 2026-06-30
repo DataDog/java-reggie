@@ -162,4 +162,21 @@ class RegexParserTest {
     assertInstanceOf(GroupNode.class, concat.children.get(0));
     assertTrue(((GroupNode) concat.children.get(0)).atomic);
   }
+
+  /** Atomic group (?>a*) must parse as an atomic GroupNode. */
+  @Test
+  void atomicGroup_starQuantifier_parsesAsAtomicGroup() throws RegexParser.ParseException {
+    RegexNode n = parse("(?>a*)");
+    assertInstanceOf(GroupNode.class, n);
+    assertTrue(((GroupNode) n).atomic);
+  }
+
+  /** Atomic group (?>\\d+) followed by a literal suffix must parse successfully. */
+  @Test
+  void atomicGroup_digitPlusWithSuffix_parsesSuccessfully() throws RegexParser.ParseException {
+    RegexNode n = parse("(?>\\d+)abc");
+    assertInstanceOf(ConcatNode.class, n);
+    assertInstanceOf(GroupNode.class, ((ConcatNode) n).children.get(0));
+    assertTrue(((GroupNode) ((ConcatNode) n).children.get(0)).atomic);
+  }
 }
