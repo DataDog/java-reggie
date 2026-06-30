@@ -284,44 +284,38 @@ public final class BitParallelGlushkovRuntime {
     if (start > len) {
       return -1;
     }
-    if (nullable || startsAnywhere) {
-      if (startsAnywhere && !nullable) {
-        int end =
-            longestEndFrom(
-                input,
-                start,
-                len,
-                initial,
-                accept,
-                false,
-                follow,
-                asciiClasses,
-                rangeStarts,
-                rangeEnds,
-                rangeClasses,
-                entry);
-        return end < 0 ? -1 : start;
-      }
-      return start;
+    if (!startsAnywhere || lastRequired < 0 || !(input instanceof String)) {
+      return findFrom(
+          input,
+          from,
+          initial,
+          accept,
+          nullable,
+          startsAnywhere,
+          follow,
+          followReverse,
+          asciiClasses,
+          rangeStarts,
+          rangeEnds,
+          rangeClasses,
+          entry);
     }
-    // Fast-path: if the required character does not appear at or after `start`, there is no match.
-    if (input instanceof String) {
-      int reqPos = ((String) input).indexOf(lastRequired, start);
-      if (reqPos < 0) {
-        return -1;
-      }
-    }
-    return leftmostStart(
-        input,
-        start,
-        initial,
-        accept,
-        followReverse,
-        asciiClasses,
-        rangeStarts,
-        rangeEnds,
-        rangeClasses,
-        entry);
+    String s = (String) input;
+    int reqPos = s.indexOf(lastRequired, start);
+    if (reqPos < 0) return nullable ? start : -1;
+    // Scan from at most MAX_POSITIONS (63) chars before reqPos; the Glushkov automaton
+    // supports at most 63 positions, so no match can span more than 63 input characters.
+    int scanFrom =
+        Math.max(
+            start,
+            reqPos
+                - com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton.MAX_POSITIONS);
+    int matchEnd =
+        longestEndFrom(
+            s, scanFrom, len, initial, accept, nullable, follow, asciiClasses, rangeStarts,
+            rangeEnds, rangeClasses, entry);
+    // startsAnywhere: start position is always `from`; only the existence of a match matters
+    return matchEnd < 0 ? -1 : from;
   }
 
   /**
