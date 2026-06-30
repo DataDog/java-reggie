@@ -28,4 +28,16 @@ public interface PatternInfo {
    * @return hash code representing structural equivalence
    */
   int structuralHashCode();
+
+  /**
+   * True when the pattern contains at least one atomic group ({@code (?>...)}) or possessive
+   * quantifier ({@code X*+}, {@code X++}, {@code X?+}, {@code X{n,m}+}). Implementations that
+   * represent such patterns must override this method to return {@code true} so that the structural
+   * hash correctly distinguishes them from otherwise-equivalent non-atomic patterns.
+   *
+   * @return {@code false} by default; override to return {@code true} when atomic groups are present
+   */
+  default boolean hasAtomicGroups() {
+    return false;
+  }
 }
