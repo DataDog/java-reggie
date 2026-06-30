@@ -129,18 +129,21 @@ public class RegexParser {
     switch (ch) {
       case '*':
         consume();
-        return wrapQuantifier(base, 0, -1, checkQuantifierMode());
+        return wrapQuantifier(base, 0, -1);
       case '+':
         consume();
-        return wrapQuantifier(base, 1, -1, checkQuantifierMode());
+        return wrapQuantifier(base, 1, -1);
       case '?':
         consume();
         // Check if this is a quantifier or non-greedy marker
         if (base instanceof QuantifierNode) {
-          // Already a quantifier, so this ? makes it non-greedy
-          return base; // Handled in checkQuantifierMode
+          if (hasMore() && peek() == '+') {
+            consume();
+            throw new UnsupportedPatternException("Possessive quantifier on already-quantified expression is not supported");
+          }
+          return base;
         }
-        return wrapQuantifier(base, 0, 1, checkQuantifierMode());
+        return wrapQuantifier(base, 0, 1);
       case '{':
         return parseCountedQuantifier(base);
       default:
@@ -169,12 +172,14 @@ public class RegexParser {
    * Builds the quantifier AST node for the given base, bounds, and mode. Possessive quantifiers are
    * desugared into an atomic group wrapping a greedy quantifier: {@code X*+} → {@code (?>X*)}.
    */
-  private RegexNode wrapQuantifier(RegexNode base, int min, int max, QuantifierMode mode) {
+  private RegexNode wrapQuantifier(RegexNode base, int min, int max) throws ParseException {
+    QuantifierMode mode = checkQuantifierMode();
     if (mode == QuantifierMode.POSSESSIVE) {
-      RegexNode inner = new QuantifierNode(base, min, max, true);
+      RegexNode inner = new QuantifierNode(base, min, max, true, true);
       return new GroupNode(inner, 0, false, null, true);
     }
-    return new QuantifierNode(base, min, max, mode == QuantifierMode.GREEDY);
+    boolean greedy = mode == QuantifierMode.GREEDY;
+    return new QuantifierNode(base, min, max, greedy, false);
   }
 
   private RegexNode parseCountedQuantifier(RegexNode base) throws ParseException {
@@ -203,7 +208,7 @@ public class RegexParser {
       throw new ParseException("Invalid quantifier: min (" + min + ") > max (" + max + ")");
     }
 
-    return wrapQuantifier(base, min, max, checkQuantifierMode());
+    return wrapQuantifier(base, min, max);
   }
 
   private int parseNumber() throws ParseException {
