@@ -79,9 +79,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // One per DFS depth level; bounded by stateCount.
   private final int[][] scratchCaptures;
 
-  // Scratch atomic position arrays for DFS atomic-group entry recording during addThread.
-  // One per DFS depth level; bounded by stateCount. null when atomicGroupCount == 0.
-  private final int[][] scratchAtomicPos;
+  // Scratch atomic position array for DFS atomic-group entry recording during addThread.
+  // Single array of size atomicGroupCount, passed through DFS calls analogously to how
+  // capture arrays are passed. null when atomicGroupCount == 0.
+  private final int[] scratchAtomicPos;
 
   // Per-clist-slot marker: true when the slot was added via a path that passed through TWO OR
   // MORE distinct anchor states at pos=regionStart. This identifies unrolled-quantifier consuming
@@ -185,8 +186,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
       for (int[] row : clistAtomicPos) Arrays.fill(row, -1);
       for (int[] row : nlistAtomicPos) Arrays.fill(row, -1);
       this.nlistAlive = new boolean[stateCount];
-      this.scratchAtomicPos = new int[stateCount + 1][atomicGroupCount];
-      for (int[] row : scratchAtomicPos) Arrays.fill(row, -1);
+      this.scratchAtomicPos = new int[atomicGroupCount];
+      Arrays.fill(scratchAtomicPos, -1);
     } else {
       this.clistAtomicPos = null;
       this.nlistAtomicPos = null;
@@ -828,7 +829,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     int[] ownCaptures = updateCaptures(state, captures, pos, depth);
-    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos, depth);
+    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos);
 
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
@@ -931,7 +932,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     int[] ownCaptures = updateCaptures(state, captures, pos, depth);
-    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos, depth);
+    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos);
 
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
@@ -1003,8 +1004,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int[] updateAtomicTracking(
       NFA.NFAState state,
       int[] atomicPos,
-      int pos,
-      int depth) {
+      int pos) {
     if (atomicGroupCount == 0) {
       return null; // fast path for non-atomic patterns
     }
@@ -1013,8 +1013,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     if (!hasEntry && !hasExit) {
       return atomicPos;
     }
-    int scratchIdx = Math.min(depth + 1, scratchAtomicPos.length - 1);
-    int[] copyPos = scratchAtomicPos[scratchIdx];
+    int[] copyPos = scratchAtomicPos;
     if (atomicPos != null) {
       System.arraycopy(atomicPos, 0, copyPos, 0, atomicGroupCount);
     } else {
