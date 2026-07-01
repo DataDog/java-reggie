@@ -5974,11 +5974,8 @@ public class PatternAnalyzer {
     }
 
     @Override
-    public Boolean visitQuantifier(QuantifierNode node) {
-      if (node.possessive) {
-        return true;
-      }
-      return node.child.accept(this);
+    public Boolean visitQuantifier(QuantifierNode n) {
+      return n.child.accept(this);
     }
 
     @Override
