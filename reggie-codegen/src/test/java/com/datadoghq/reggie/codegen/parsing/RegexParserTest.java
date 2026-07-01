@@ -17,8 +17,6 @@ package com.datadoghq.reggie.codegen.parsing;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.datadoghq.reggie.codegen.ast.ConcatNode;
-import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import org.junit.jupiter.api.Test;
@@ -121,62 +119,70 @@ class RegexParserTest {
         "\\x{} with no hex digits must throw ParseException");
   }
 
-  /** Possessive quantifier a*+ must parse as an atomic GroupNode. */
+  // ==================== Wave 1: possessive quantifiers throw UnsupportedPatternException ====================
+
+  /** Possessive quantifier a*+ must throw UnsupportedPatternException. */
   @Test
-  void possessiveQuantifier_parsesAsAtomicGroup() throws RegexParser.ParseException {
-    RegexNode n = parse("a*+");
-    assertInstanceOf(GroupNode.class, n);
-    assertTrue(((GroupNode) n).atomic);
+  void possessiveQuantifier_starPlus_throwsUnsupported() {
+    assertThrows(
+        RegexParser.UnsupportedPatternException.class,
+        () -> parse("a*+"),
+        "a*+ must throw UnsupportedPatternException");
   }
 
-  /** Possessive quantifier \d++ must parse as an atomic GroupNode. */
+  /** Possessive quantifier \\d++ must throw UnsupportedPatternException. */
   @Test
-  void possessiveQuantifier_plusPlus_parsesAsAtomicGroup() throws RegexParser.ParseException {
-    RegexNode n = parse("\\d++");
-    assertInstanceOf(GroupNode.class, n);
-    assertTrue(((GroupNode) n).atomic);
+  void possessiveQuantifier_plusPlus_throwsUnsupported() {
+    assertThrows(
+        RegexParser.UnsupportedPatternException.class,
+        () -> parse("\\d++"),
+        "\\d++ must throw UnsupportedPatternException");
   }
 
-  /** Possessive quantifier [a-z]?+ must parse as an atomic GroupNode. */
+  /** Possessive quantifier [a-z]?+ must throw UnsupportedPatternException. */
   @Test
-  void possessiveQuantifier_questionPlus_parsesAsAtomicGroup() throws RegexParser.ParseException {
-    RegexNode n = parse("[a-z]?+");
-    assertInstanceOf(GroupNode.class, n);
-    assertTrue(((GroupNode) n).atomic);
+  void possessiveQuantifier_questionPlus_throwsUnsupported() {
+    assertThrows(
+        RegexParser.UnsupportedPatternException.class,
+        () -> parse("[a-z]?+"),
+        "[a-z]?+ must throw UnsupportedPatternException");
   }
 
-  /** Possessive quantifier a{2,4}+ must parse as an atomic GroupNode. */
+  /** Possessive quantifier a{2,4}+ must throw UnsupportedPatternException. */
   @Test
-  void possessiveQuantifier_boundedPlus_parsesAsAtomicGroup() throws RegexParser.ParseException {
-    RegexNode n = parse("a{2,4}+");
-    assertInstanceOf(GroupNode.class, n);
-    assertTrue(((GroupNode) n).atomic);
+  void possessiveQuantifier_boundedPlus_throwsUnsupported() {
+    assertThrows(
+        RegexParser.UnsupportedPatternException.class,
+        () -> parse("a{2,4}+"),
+        "a{2,4}+ must throw UnsupportedPatternException");
   }
 
-  /** Atomic group (?>a+)b must parse as a ConcatNode whose first child is an atomic GroupNode. */
+  // ==================== Wave 1: atomic groups throw UnsupportedPatternException ====================
+
+  /** Atomic group (?>a*) must throw UnsupportedPatternException. */
   @Test
-  void atomicGroup_parsesAsAtomicGroupInConcat() throws RegexParser.ParseException {
-    RegexNode n = parse("(?>a+)b");
-    assertInstanceOf(ConcatNode.class, n);
-    ConcatNode concat = (ConcatNode) n;
-    assertInstanceOf(GroupNode.class, concat.children.get(0));
-    assertTrue(((GroupNode) concat.children.get(0)).atomic);
+  void atomicGroup_starQuantifier_throwsUnsupported() {
+    assertThrows(
+        RegexParser.UnsupportedPatternException.class,
+        () -> parse("(?>a*)"),
+        "(?>a*) must throw UnsupportedPatternException");
   }
 
-  /** Atomic group (?>a*) must parse as an atomic GroupNode. */
+  /** Atomic group (?>a+)b must throw UnsupportedPatternException. */
   @Test
-  void atomicGroup_starQuantifier_parsesAsAtomicGroup() throws RegexParser.ParseException {
-    RegexNode n = parse("(?>a*)");
-    assertInstanceOf(GroupNode.class, n);
-    assertTrue(((GroupNode) n).atomic);
+  void atomicGroup_withSuffix_throwsUnsupported() {
+    assertThrows(
+        RegexParser.UnsupportedPatternException.class,
+        () -> parse("(?>a+)b"),
+        "(?>a+)b must throw UnsupportedPatternException");
   }
 
-  /** Atomic group (?>\\d+) followed by a literal suffix must parse successfully. */
+  /** Atomic group (?>\\d+) followed by a literal suffix must throw UnsupportedPatternException. */
   @Test
-  void atomicGroup_digitPlusWithSuffix_parsesSuccessfully() throws RegexParser.ParseException {
-    RegexNode n = parse("(?>\\d+)abc");
-    assertInstanceOf(ConcatNode.class, n);
-    assertInstanceOf(GroupNode.class, ((ConcatNode) n).children.get(0));
-    assertTrue(((GroupNode) ((ConcatNode) n).children.get(0)).atomic);
+  void atomicGroup_digitPlusWithSuffix_throwsUnsupported() {
+    assertThrows(
+        RegexParser.UnsupportedPatternException.class,
+        () -> parse("(?>\\d+)abc"),
+        "(?>\\d+)abc must throw UnsupportedPatternException");
   }
 }

@@ -169,14 +169,13 @@ public class RegexParser {
   }
 
   /**
-   * Builds the quantifier AST node for the given base, bounds, and mode. Possessive quantifiers are
-   * desugared into an atomic group wrapping a greedy quantifier: {@code X*+} → {@code (?>X*)}.
+   * Builds the quantifier AST node for the given base, bounds, and mode. Possessive quantifiers
+   * throw {@link UnsupportedPatternException} as they are not yet supported.
    */
   private RegexNode wrapQuantifier(RegexNode base, int min, int max) throws ParseException {
     QuantifierMode mode = checkQuantifierMode();
     if (mode == QuantifierMode.POSSESSIVE) {
-      RegexNode inner = new QuantifierNode(base, min, max, true, true);
-      return new GroupNode(inner, 0, false, null, true);
+      throw new UnsupportedPatternException("Possessive quantifiers are not supported");
     }
     boolean greedy = mode == QuantifierMode.GREEDY;
     return new QuantifierNode(base, min, max, greedy, false);
@@ -326,12 +325,7 @@ public class RegexParser {
         // Branch reset: (?|alt1|alt2)
         return parseBranchReset();
       } else if (peek() == '>') {
-        // Atomic group: (?>X). Parsed as a non-capturing group flagged atomic=true so that
-        // downstream passes can apply possessive-quantifier semantics where needed.
-        consume();
-        RegexNode atomicChild = parseAlternation();
-        consume(')');
-        return new GroupNode(atomicChild, 0, false, null, true);
+        throw new UnsupportedPatternException("Atomic groups (?>...) are not supported");
       } else {
         throw new UnsupportedPatternException(
             "Unsupported special group construct at position " + pos);
