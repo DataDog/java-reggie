@@ -36,8 +36,16 @@ public final class BitParallelGlushkovBytecodeGenerator {
 
   private final GlushkovAutomaton g;
 
+  /**
+   * The single ASCII character that must appear at every match end, or {@code -1} if none. When
+   * non-negative, {@code generateFindFromMethod} emits a call to {@code findFromWithSkip} instead
+   * of {@code findFrom}, and {@code generateStaticData} emits a {@code LAST_REQ_CHAR} field.
+   */
+  private final int lastRequiredChar;
+
   public BitParallelGlushkovBytecodeGenerator(GlushkovAutomaton g) {
     this.g = g;
+    this.lastRequiredChar = g.findLastRequiredChar();
   }
 
   // -------------------------------------------------------------------------
@@ -56,6 +64,11 @@ public final class BitParallelGlushkovBytecodeGenerator {
     cw.visitField(ACC_PRIVATE | ACC_STATIC | ACC_FINAL, "RANGE_ENDS", "[C", null, null).visitEnd();
     cw.visitField(ACC_PRIVATE | ACC_STATIC | ACC_FINAL, "RANGE_CLASSES", "[I", null, null)
         .visitEnd();
+    if (lastRequiredChar >= 0) {
+      cw.visitField(
+              ACC_PRIVATE | ACC_STATIC | ACC_FINAL, "LAST_REQ_CHAR", "I", null, lastRequiredChar)
+          .visitEnd();
+    }
 
     MethodVisitor mv = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null);
     mv.visitCode();
@@ -161,7 +174,13 @@ public final class BitParallelGlushkovBytecodeGenerator {
     mv.visitVarInsn(ILOAD, 2);
     pushScalarArgsFind(mv);
     pushArrayArgs(mv, className, true);
-    mv.visitMethodInsn(INVOKESTATIC, RUNTIME, "findFrom", findFromDescriptor(), false);
+    if (lastRequiredChar >= 0) {
+      mv.visitFieldInsn(GETSTATIC, className, "LAST_REQ_CHAR", "I");
+      mv.visitMethodInsn(
+          INVOKESTATIC, RUNTIME, "findFromWithSkip", findFromWithSkipDescriptor(), false);
+    } else {
+      mv.visitMethodInsn(INVOKESTATIC, RUNTIME, "findFrom", findFromDescriptor(), false);
+    }
     mv.visitInsn(IRETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -461,6 +480,14 @@ public final class BitParallelGlushkovBytecodeGenerator {
    */
   private static String findFromDescriptor() {
     return "(Ljava/lang/CharSequence;IJJZZ[J[J[I[C[C[I[J)I";
+  }
+
+  /**
+   * findFromWithSkip(CharSequence, int, long, long, boolean, boolean, long[], long[], int[],
+   * char[], char[], int[], long[], int)I — same as findFrom but with an extra I for lastRequired
+   */
+  private static String findFromWithSkipDescriptor() {
+    return "(Ljava/lang/CharSequence;IJJZZ[J[J[I[C[C[I[JI)I";
   }
 
   /**

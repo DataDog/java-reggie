@@ -84,6 +84,7 @@ public final class StructuralHash {
     hash = mult * hash + nfa.getGroupCount();
     hash = mult * hash + (result.useTaggedDFA ? 1 : 0);
     hash = mult * hash + (result.usePosixLastMatch ? 1 : 0);
+    hash = mult * hash + (result.hasAtomicGroups ? 1 : 0);
     hash = mult * hash + (caseInsensitive ? 1 : 0);
 
     // Each anchor type is a separate bit so that patterns differing only in which
@@ -133,6 +134,7 @@ public final class StructuralHash {
     hash = mult * hash + result.strategy.ordinal();
     hash = mult * hash + (result.useTaggedDFA ? 1 : 0);
     hash = mult * hash + (result.usePosixLastMatch ? 1 : 0);
+    hash = mult * hash + (result.hasAtomicGroups ? 1 : 0);
 
     if (result.dfa != null) {
       hash = mult * hash + computeDFATopologyHash(result.dfa, mult);

@@ -69,6 +69,24 @@ public class BitParallelGlushkovRuntimeTest {
           a.entry);
     }
 
+    int findFromWithSkip(CharSequence in, int from, int lastRequired) {
+      return BitParallelGlushkovRuntime.findFromWithSkip(
+          in,
+          from,
+          a.initial,
+          a.accept,
+          a.nullable,
+          a.startsAnywhere,
+          a.follow,
+          a.followReverse,
+          a.asciiClasses,
+          a.rangeStarts,
+          a.rangeEnds,
+          a.rangeClasses,
+          a.entry,
+          lastRequired);
+    }
+
     int[] findBounds(CharSequence in, int from) {
       int[] bounds = new int[2];
       boolean found =
@@ -193,6 +211,31 @@ public class BitParallelGlushkovRuntimeTest {
             fails.append(
                 String.format("findFrom /%s/ on %-12s jdk=-1 reggie=%d%n", pat, q(in), rStart));
           }
+        }
+      }
+    }
+    assertEquals("", fails.toString(), "\n" + fails);
+  }
+
+  @Test
+  void findFromWithSkip_agreesWithFindFrom_acrossInputs() {
+    // For patterns with a fixed last required character, findFromWithSkip must return the same
+    // start position as findFrom on identical inputs.
+    String[] patterns = {"ab", "abc", "hello", "world", "a"};
+    String[] inputs = {"hello", "world", "abc", "xyz", "a", ""};
+    StringBuilder fails = new StringBuilder();
+    for (String pat : patterns) {
+      G g = g(pat);
+      // Derive lastRequired from the last char of the literal pattern (no special chars here).
+      int lastRequired = pat.charAt(pat.length() - 1);
+      for (String in : inputs) {
+        int expected = g.findFrom(in, 0);
+        int actual = g.findFromWithSkip(in, 0, lastRequired);
+        if (expected != actual) {
+          fails.append(
+              String.format(
+                  "findFromWithSkip /%s/ on %-12s findFrom=%d findFromWithSkip=%d%n",
+                  pat, q(in), expected, actual));
         }
       }
     }

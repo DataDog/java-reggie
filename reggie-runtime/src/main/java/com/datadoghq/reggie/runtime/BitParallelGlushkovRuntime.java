@@ -254,6 +254,79 @@ public final class BitParallelGlushkovRuntime {
   }
 
   /**
+   * Leftmost match start position {@code >= from}, or {@code -1} if no match exists. Uses {@link
+   * String#indexOf(int, int)} on {@code lastRequired} to skip regions that cannot contain a match
+   * before delegating to the reverse automaton scan.
+   *
+   * @param lastRequired a character that must appear in every match; used to jump over stretches of
+   *     the input that cannot contain any match candidate
+   */
+  public static int findFromWithSkip(
+      CharSequence input,
+      int from,
+      long initial,
+      long accept,
+      boolean nullable,
+      boolean startsAnywhere,
+      long[] follow,
+      long[] followReverse,
+      int[] asciiClasses,
+      char[] rangeStarts,
+      char[] rangeEnds,
+      int[] rangeClasses,
+      long[] entry,
+      int lastRequired) {
+    if (input == null) {
+      return -1;
+    }
+    int len = input.length();
+    int start = Math.max(0, from);
+    if (start > len) {
+      return -1;
+    }
+    if (!startsAnywhere || lastRequired < 0 || !(input instanceof String)) {
+      return findFrom(
+          input,
+          from,
+          initial,
+          accept,
+          nullable,
+          startsAnywhere,
+          follow,
+          followReverse,
+          asciiClasses,
+          rangeStarts,
+          rangeEnds,
+          rangeClasses,
+          entry);
+    }
+    String s = (String) input;
+    int reqPos = s.indexOf(lastRequired, start);
+    if (reqPos < 0) return nullable ? start : -1;
+    // Scan from at most MAX_POSITIONS (63) chars before reqPos; the Glushkov automaton
+    // supports at most 63 positions, so no match can span more than 63 input characters.
+    int scanFrom =
+        Math.max(
+            start, reqPos - com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton.MAX_POSITIONS);
+    int matchEnd =
+        longestEndFrom(
+            s,
+            scanFrom,
+            len,
+            initial,
+            accept,
+            nullable,
+            follow,
+            asciiClasses,
+            rangeStarts,
+            rangeEnds,
+            rangeClasses,
+            entry);
+    // startsAnywhere: start position is always `from`; only the existence of a match matters
+    return matchEnd < 0 ? -1 : from;
+  }
+
+  /**
    * Leftmost-longest match bounds {@code >= from}. On success writes {@code [start, end)} into
    * {@code bounds} and returns {@code true}; otherwise returns {@code false}.
    *

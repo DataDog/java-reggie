@@ -109,6 +109,13 @@ public class RegexParser {
     return ch == '|' || ch == ')';
   }
 
+  /** Quantifier greediness mode. */
+  private enum QuantifierMode {
+    GREEDY,
+    NON_GREEDY,
+    POSSESSIVE
+  }
+
   private RegexNode parseQuantified() throws ParseException {
     skipExtendedWhitespace(); // Skip whitespace before atom in extended mode
     RegexNode base = parseAtom();
@@ -122,18 +129,22 @@ public class RegexParser {
     switch (ch) {
       case '*':
         consume();
-        return new QuantifierNode(base, 0, -1, !checkNonGreedy());
+        return wrapQuantifier(base, 0, -1);
       case '+':
         consume();
-        return new QuantifierNode(base, 1, -1, !checkNonGreedy());
+        return wrapQuantifier(base, 1, -1);
       case '?':
         consume();
         // Check if this is a quantifier or non-greedy marker
         if (base instanceof QuantifierNode) {
-          // Already a quantifier, so this ? makes it non-greedy
-          return base; // Handled in checkNonGreedy
+          if (hasMore() && peek() == '+') {
+            consume();
+            throw new UnsupportedPatternException(
+                "Possessive quantifier on already-quantified expression is not supported");
+          }
+          return base;
         }
-        return new QuantifierNode(base, 0, 1, !checkNonGreedy());
+        return wrapQuantifier(base, 0, 1);
       case '{':
         return parseCountedQuantifier(base);
       default:
@@ -141,18 +152,33 @@ public class RegexParser {
     }
   }
 
-  private boolean checkNonGreedy() throws ParseException {
+  /**
+   * Reads the optional modifier after a quantifier symbol and returns the greediness mode. '?' →
+   * NON_GREEDY, '+' → POSSESSIVE, anything else → GREEDY (no character consumed).
+   */
+  private QuantifierMode checkQuantifierMode() throws ParseException {
     skipExtendedWhitespace();
     if (hasMore() && peek() == '?') {
       consume();
-      return true;
+      return QuantifierMode.NON_GREEDY;
     }
-    // Possessive quantifier (+): consume and treat as greedy — DFA has no backtracking,
-    // so possessive and greedy are semantically equivalent.
     if (hasMore() && peek() == '+') {
       consume();
+      return QuantifierMode.POSSESSIVE;
     }
-    return false;
+    return QuantifierMode.GREEDY;
+  }
+
+  /** Builds the quantifier AST node for the given base, bounds, and mode. */
+  private RegexNode wrapQuantifier(RegexNode base, int min, int max) throws ParseException {
+    QuantifierMode mode = checkQuantifierMode();
+    if (mode == QuantifierMode.POSSESSIVE) {
+      // Desugar X*+ → (?> X*), X++ → (?> X+), etc.
+      RegexNode inner = new QuantifierNode(base, min, max, true, false);
+      return new GroupNode(inner, 0, false, null, true);
+    }
+    boolean greedy = mode == QuantifierMode.GREEDY;
+    return new QuantifierNode(base, min, max, greedy, false);
   }
 
   private RegexNode parseCountedQuantifier(RegexNode base) throws ParseException {
@@ -181,7 +207,7 @@ public class RegexParser {
       throw new ParseException("Invalid quantifier: min (" + min + ") > max (" + max + ")");
     }
 
-    return new QuantifierNode(base, min, max, !checkNonGreedy());
+    return wrapQuantifier(base, min, max);
   }
 
   private int parseNumber() throws ParseException {
@@ -299,10 +325,10 @@ public class RegexParser {
         // Branch reset: (?|alt1|alt2)
         return parseBranchReset();
       } else if (peek() == '>') {
-        // Atomic group: (?>X). Reggie has no backtracking in its DFA/NFA engines, so the
-        // backtracking-prevention hint has the same language semantics as a non-capturing group.
-        consume();
-        capturing = false;
+        consume(); // consume '>'
+        RegexNode child = parseAlternation();
+        consume(')');
+        return new GroupNode(child, 0, false, null, true);
       } else {
         throw new UnsupportedPatternException(
             "Unsupported special group construct at position " + pos);

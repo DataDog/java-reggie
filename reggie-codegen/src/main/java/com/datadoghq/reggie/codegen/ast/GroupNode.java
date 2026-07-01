@@ -25,16 +25,23 @@ public final class GroupNode implements RegexNode {
   public final int groupNumber; // 0 for non-capturing
   public final boolean capturing;
   public final String name; // null for unnamed groups
+  public final boolean atomic;
 
   public GroupNode(RegexNode child, int groupNumber, boolean capturing) {
     this(child, groupNumber, capturing, null);
   }
 
   public GroupNode(RegexNode child, int groupNumber, boolean capturing, String name) {
+    this(child, groupNumber, capturing, name, false);
+  }
+
+  public GroupNode(
+      RegexNode child, int groupNumber, boolean capturing, String name, boolean atomic) {
     this.child = child;
     this.groupNumber = groupNumber;
     this.capturing = capturing;
     this.name = name;
+    this.atomic = atomic;
   }
 
   @Override
@@ -44,6 +51,7 @@ public final class GroupNode implements RegexNode {
 
   @Override
   public String toString() {
+    if (atomic) return "AtomicGroup(" + child + ")";
     if (name != null) {
       return "Group(" + groupNumber + " '" + name + "', " + child + ")";
     }

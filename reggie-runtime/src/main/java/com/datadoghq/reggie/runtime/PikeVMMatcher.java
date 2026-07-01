@@ -50,6 +50,25 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int clistSize;
   private int nlistSize;
 
+  // Atomic group thread pruning support.
+  //
+  // atomicPos[G] encodes group G membership for a thread:
+  //   >= 0  — inside G, entered at position atomicPos[G]
+  //   == -1 — never entered G
+  //   <= -2 — exited G; original entry position = -(atomicPos[G] + 2)
+  //
+  // Pruning rule: after each stepChar, for each (G, entryPos E):
+  //   if an inside thread (atomicPos[G] == E) can consume the next input character,
+  //   all exit threads (atomicPos[G] == -(E+2)) are killed (nlistAlive[k] = false).
+  // Same rule is applied to the initial clist after initClist.
+  // This enforces greedy-commit: the extending inside path dominates a premature exit
+  // only when the greedy path can actually advance — not when it will fail next step.
+  private final int atomicGroupCount;
+  private final int[][] clistAtomicPos;
+  private final int[][] nlistAtomicPos;
+  // true = slot is active, false = pruned by atomic commit.
+  private boolean[] nlistAlive;
+
   // T1.5: index of the first (highest-priority) accepting thread currently in clist, or -1.
   // Maintained incrementally as clist is populated (resetClist / addThread leaf / swapLists) so the
   // per-position accept check is O(1) instead of an O(clistSize) scan over isAccept[] every step.
@@ -65,6 +84,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Scratch capture arrays for DFS capture recording during addThread.
   // One per DFS depth level; bounded by stateCount.
   private final int[][] scratchCaptures;
+
+  // Scratch atomic position array for DFS atomic-group entry recording during addThread.
+  // Single array of size atomicGroupCount, passed through DFS calls analogously to how
+  // capture arrays are passed. null when atomicGroupCount == 0.
+  private final int[] scratchAtomicPos;
 
   // Per-clist-slot marker: true when the slot was added via a path that passed through TWO OR
   // MORE distinct anchor states at pos=regionStart. This identifies unrolled-quantifier consuming
@@ -144,6 +168,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     inNlist = new boolean[stateCount];
     winCaptures = new int[slotCount];
     scratchCaptures = new int[stateCount + 1][slotCount];
+    // scratchAtomicPos is initialized after atomicGroupCount is known (below).
     clistViaMultipleAnchors = new boolean[stateCount];
 
     statesById = new NFA.NFAState[stateCount];
@@ -158,6 +183,22 @@ public final class PikeVMMatcher extends ReggieMatcher {
     isAccept = new boolean[stateCount];
     for (NFA.NFAState s : nfa.getAcceptStates()) {
       isAccept[s.id] = true;
+    }
+
+    this.atomicGroupCount = nfa.getAtomicGroupCount();
+    if (atomicGroupCount > 0) {
+      this.clistAtomicPos = new int[stateCount][atomicGroupCount];
+      this.nlistAtomicPos = new int[stateCount][atomicGroupCount];
+      for (int[] row : clistAtomicPos) Arrays.fill(row, -1);
+      for (int[] row : nlistAtomicPos) Arrays.fill(row, -1);
+      this.nlistAlive = new boolean[stateCount];
+      this.scratchAtomicPos = new int[atomicGroupCount];
+      Arrays.fill(scratchAtomicPos, -1);
+    } else {
+      this.clistAtomicPos = null;
+      this.nlistAtomicPos = null;
+      this.nlistAlive = null;
+      this.scratchAtomicPos = null;
     }
 
     // T1.2: precompute the required-first-char prefilter from the start-state epsilon closure.
@@ -230,11 +271,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
     markNativeRichApi();
   }
 
-  /** Eligible for the boolean find() fast path: no anchors, assertions, or backreferences. */
+  /**
+   * Eligible for the boolean find() fast path: no anchors, assertions, backreferences, or atomic
+   * groups. Atomic groups require per-thread priority-based commit tracking that the position-
+   * independent lazy DFA cannot model.
+   */
   private static boolean findDfaEligible(NFA nfa) {
     boolean hasStartAnchor = false;
     for (NFA.NFAState s : nfa.getStates()) {
       if (s.assertionType != null || s.backrefCheck != null) return false;
+      if (s.atomicEntry >= 0 || s.atomicExit >= 0) return false; // atomic groups not DFA-safe
       // Only START (^) / STRING_START (\A) anchors are handleable (pos-0-only, via the
       // initial-vs-reinject closure split). \b, $, multiline ^, end-class need char/end context
       // the position-independent step can't supply → ineligible.
@@ -482,6 +528,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private boolean runMatches(String input, int regionStart, int regionEnd) {
     initClist(input, regionStart, regionStart, regionEnd);
+    pruneAtomicClistInitial(input, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       // First (highest-priority) accept thread in the current list, or -1 (O(1), see
@@ -503,6 +550,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, regionStart, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
     }
     return false;
@@ -510,6 +558,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private MatchResult runMatchResult(String input, int regionStart, int regionEnd) {
     initClist(input, regionStart, regionStart, regionEnd);
+    pruneAtomicClistInitial(input, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       int t = clistFirstAccept;
@@ -529,6 +578,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, regionStart, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
     }
     return null;
@@ -580,6 +630,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, 0, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
       if (bestStart >= 0 && clistSize == 0) break;
     }
@@ -676,6 +727,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, 0, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
       // Finalize only once a match is in progress: when its threads are all gone `best` is final.
       // With best == null we must keep scanning (and re-seeding) for a start further right.
@@ -714,11 +766,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
     for (int t = 0; t < clistSize; t++) {
       NFA.NFAState state = statesById[clistIds[t]];
       int[] caps = clistCaptures[t];
+      int[] apos = (atomicGroupCount > 0) ? clistAtomicPos[t] : null;
       for (NFA.Transition tr : state.getTransitions()) {
         if (tr.chars.contains(ch)) {
           int[] nc = scratchCaptures[0];
           System.arraycopy(caps, 0, nc, 0, nc.length);
-          addThreadToNlist(tr.target, nc, nextPos, 0, input, regionStart, regionEnd);
+          addThreadToNlist(tr.target, nc, apos, nextPos, 0, input, regionStart, regionEnd);
         }
       }
     }
@@ -752,6 +805,34 @@ public final class PikeVMMatcher extends ReggieMatcher {
       String input,
       int regionStart,
       int regionEnd) {
+    addThread(
+        state,
+        captures,
+        null,
+        pos,
+        depth,
+        anchorCount,
+        anchorFollowedBySkip,
+        input,
+        regionStart,
+        regionEnd);
+  }
+
+  /**
+   * Core addThread with atomic group tracking. {@code atomicPos[G]} holds the input position at
+   * which atomic group G was entered (-1 if not inside G).
+   */
+  private void addThread(
+      NFA.NFAState state,
+      int[] captures,
+      int[] atomicPos,
+      int pos,
+      int depth,
+      int anchorCount,
+      boolean anchorFollowedBySkip,
+      String input,
+      int regionStart,
+      int regionEnd) {
     if (inClist[state.id]) return;
 
     if (state.anchor != null) {
@@ -762,6 +843,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
         addThread(
             next,
             captures,
+            atomicPos,
             pos,
             depth,
             anchorCount + 1,
@@ -774,11 +856,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     int[] ownCaptures = updateCaptures(state, captures, pos, depth);
+    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos);
 
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
       inClist[state.id] = true;
       int[] passedCaptures = ownCaptures;
+      int[] passedAtomicPos = ownAtomicPos;
       // Determine the "skip-after-anchor" flag for each epsilon child: set to true when
       // taking a non-first epsilon of a non-anchor, non-group state while anchors have fired.
       // This identifies quantifier-skip paths (e.g. a? skip to next copy) as distinct from
@@ -809,6 +893,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
         addThread(
             next,
             passedCaptures,
+            passedAtomicPos,
             pos,
             depth + 1,
             anchorCount,
@@ -828,6 +913,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
     inClist[state.id] = true;
     clistIds[clistSize] = state.id;
     System.arraycopy(ownCaptures, 0, clistCaptures[clistSize], 0, ownCaptures.length);
+    if (atomicGroupCount > 0) {
+      if (ownAtomicPos != null) {
+        System.arraycopy(ownAtomicPos, 0, clistAtomicPos[clistSize], 0, atomicGroupCount);
+      } else {
+        Arrays.fill(clistAtomicPos[clistSize], -1);
+      }
+    }
     // Mark as "via skip-after-anchor with 2+ anchor fires": signals unrolled-quantifier
     // consuming threads that must not override a zero-length match (e.g. `a copy3` in
     // `(^a?){3}` but NOT `a` in `\A{3}a` where anchorFollowedBySkip remains false).
@@ -840,6 +932,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private void addThreadToNlist(
       NFA.NFAState state,
       int[] captures,
+      int[] atomicPos,
       int pos,
       int depth,
       String input,
@@ -851,17 +944,19 @@ public final class PikeVMMatcher extends ReggieMatcher {
       if (!checkAnchor(state.anchor, input, pos, regionStart, regionEnd)) return;
       inNlist[state.id] = true;
       for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThreadToNlist(next, captures, pos, depth, input, regionStart, regionEnd);
+        addThreadToNlist(next, captures, atomicPos, pos, depth, input, regionStart, regionEnd);
       }
       return;
     }
 
     int[] ownCaptures = updateCaptures(state, captures, pos, depth);
+    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos);
 
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
       inNlist[state.id] = true;
       int[] passedCaptures = ownCaptures;
+      int[] passedAtomicPos = ownAtomicPos;
       for (NFA.NFAState next : epsilons) {
         // Trailing-empty-iteration rebind: mirror the scoped logic from addThread above.
         // Only propagate when the current state is a group EXIT (loop-back context) AND
@@ -873,7 +968,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
                 && groupBodyNullable[state.id]
                 && next.enterGroup != null
                 && !inNlist[next.id];
-        addThreadToNlist(next, passedCaptures, pos, depth + 1, input, regionStart, regionEnd);
+        addThreadToNlist(
+            next, passedCaptures, passedAtomicPos, pos, depth + 1, input, regionStart, regionEnd);
         if (willUpdateGroupEntry) {
           int scratchIdx = Math.min(depth + 2, scratchCaptures.length - 1);
           passedCaptures = scratchCaptures[scratchIdx];
@@ -883,8 +979,17 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     inNlist[state.id] = true;
-    nlistIds[nlistSize] = state.id;
-    System.arraycopy(ownCaptures, 0, nlistCaptures[nlistSize], 0, ownCaptures.length);
+    int k = nlistSize;
+    nlistIds[k] = state.id;
+    System.arraycopy(ownCaptures, 0, nlistCaptures[k], 0, ownCaptures.length);
+    if (atomicGroupCount > 0) {
+      if (ownAtomicPos != null) {
+        System.arraycopy(ownAtomicPos, 0, nlistAtomicPos[k], 0, atomicGroupCount);
+      } else {
+        Arrays.fill(nlistAtomicPos[k], -1);
+      }
+      nlistAlive[k] = true;
+    }
     nlistSize++;
   }
 
@@ -906,6 +1011,39 @@ public final class PikeVMMatcher extends ReggieMatcher {
       copy[2 * state.exitGroup + 1] = pos;
     }
     return copy;
+  }
+
+  /**
+   * Update atomic-group entry tracking for the current state. Returns the updated atomicPos array
+   * (entry positions for each atomic group, -1 if not inside). Returns the original array unchanged
+   * when the state has no atomic entry or exit annotation.
+   */
+  private int[] updateAtomicTracking(NFA.NFAState state, int[] atomicPos, int pos) {
+    if (atomicGroupCount == 0) {
+      return null; // fast path for non-atomic patterns
+    }
+    boolean hasEntry = state.atomicEntry >= 0;
+    boolean hasExit = state.atomicExit >= 0;
+    if (!hasEntry && !hasExit) {
+      return atomicPos;
+    }
+    int[] copyPos = scratchAtomicPos;
+    if (atomicPos != null) {
+      System.arraycopy(atomicPos, 0, copyPos, 0, atomicGroupCount);
+    } else {
+      Arrays.fill(copyPos, -1);
+    }
+    if (hasEntry) {
+      copyPos[state.atomicEntry] = pos;
+    }
+    if (hasExit) {
+      // Encode the exit: -(entryPos + 2) preserves the original entry position in a range
+      // (<= -2) distinct from -1 (never entered) and >= 0 (still inside), so post-step
+      // pruning can match exit threads back to their (group, entryPos) inside counterpart.
+      int ep = copyPos[state.atomicExit];
+      copyPos[state.atomicExit] = -(ep + 2);
+    }
+    return copyPos;
   }
 
   // -------------------------------------------------------------------------
@@ -954,6 +1092,97 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   // -------------------------------------------------------------------------
+  // Atomic group pruning helpers
+  // -------------------------------------------------------------------------
+
+  /** Returns true when the state has a character transition whose char set includes {@code ch}. */
+  private boolean stateCanConsume(int stateId, char ch) {
+    for (NFA.Transition tr : statesById[stateId].getTransitions()) {
+      if (tr.chars.contains(ch)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Prune premature exit threads from the initial clist after {@link #initClist}.
+   *
+   * <p>For each atomic group G and each inside thread j ({@code clistAtomicPos[j][G] >= 0}): if
+   * thread j can consume {@code input[pos]} (the first character to be processed), then all exit
+   * threads k with {@code clistAtomicPos[k][G] == -(E+2)} are dead — the greedy path will extend,
+   * so zero-length exits are premature.
+   *
+   * <p>Borrows {@link #nlistAlive} as a dead-flag scratch array; safe because nlistSize == 0
+   * immediately after {@code initClist}.
+   */
+  private void pruneAtomicClistInitial(String input, int pos, int regionEnd) {
+    if (atomicGroupCount == 0 || pos >= regionEnd) return;
+    char firstCh = input.charAt(pos);
+    boolean[] dead = nlistAlive; // borrow as scratch; nlistSize == 0 here
+    Arrays.fill(dead, 0, clistSize, false);
+    boolean anyDead = false;
+    for (int G = 0; G < atomicGroupCount; G++) {
+      for (int j = 0; j < clistSize; j++) {
+        if (dead[j]) continue;
+        int ap = clistAtomicPos[j][G];
+        if (ap >= 0 && stateCanConsume(clistIds[j], firstCh)) {
+          int encoded = -(ap + 2);
+          for (int k = 0; k < clistSize; k++) {
+            if (!dead[k] && clistAtomicPos[k][G] == encoded) {
+              dead[k] = true;
+              anyDead = true;
+            }
+          }
+        }
+      }
+    }
+    if (!anyDead) return;
+    int write = 0;
+    clistFirstAccept = -1;
+    for (int i = 0; i < clistSize; i++) {
+      if (dead[i]) {
+        inClist[clistIds[i]] = false;
+        continue;
+      }
+      if (write != i) {
+        clistIds[write] = clistIds[i];
+        System.arraycopy(clistCaptures[i], 0, clistCaptures[write], 0, clistCaptures[i].length);
+        System.arraycopy(clistAtomicPos[i], 0, clistAtomicPos[write], 0, atomicGroupCount);
+        clistViaMultipleAnchors[write] = clistViaMultipleAnchors[i];
+      }
+      if (clistFirstAccept < 0 && isAccept[clistIds[write]]) clistFirstAccept = write;
+      write++;
+    }
+    clistSize = write;
+  }
+
+  /**
+   * Prune premature exit threads from nlist after {@link #stepChar}.
+   *
+   * <p>For each atomic group G and each alive inside thread j ({@code nlistAtomicPos[j][G] >= 0}):
+   * if thread j can consume {@code input[nextPos]}, all alive exit threads k with {@code
+   * nlistAtomicPos[k][G] == -(E+2)} are killed ({@code nlistAlive[k] = false}) — the greedy path
+   * will extend at the next step, so exits at the current position are premature.
+   */
+  private void pruneAtomicNlist(int nextPos, String input, int regionEnd) {
+    if (atomicGroupCount == 0 || nextPos >= regionEnd) return;
+    char nextCh = input.charAt(nextPos);
+    for (int G = 0; G < atomicGroupCount; G++) {
+      for (int j = 0; j < nlistSize; j++) {
+        if (!nlistAlive[j]) continue;
+        int ap = nlistAtomicPos[j][G];
+        if (ap >= 0 && stateCanConsume(nlistIds[j], nextCh)) {
+          int encoded = -(ap + 2);
+          for (int k = 0; k < nlistSize; k++) {
+            if (nlistAlive[k] && nlistAtomicPos[k][G] == encoded) {
+              nlistAlive[k] = false;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // List management
   // -------------------------------------------------------------------------
 
@@ -989,6 +1218,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
         if (write != t) {
           clistIds[write] = clistIds[t];
           System.arraycopy(clistCaptures[t], 0, clistCaptures[write], 0, clistCaptures[t].length);
+          if (atomicGroupCount > 0) {
+            System.arraycopy(clistAtomicPos[t], 0, clistAtomicPos[write], 0, atomicGroupCount);
+          }
           clistViaMultipleAnchors[write] = false;
         }
         write++;
@@ -1004,6 +1236,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
         if (write != t) {
           clistIds[write] = clistIds[t];
           System.arraycopy(clistCaptures[t], 0, clistCaptures[write], 0, clistCaptures[t].length);
+          if (atomicGroupCount > 0) {
+            System.arraycopy(clistAtomicPos[t], 0, clistAtomicPos[write], 0, atomicGroupCount);
+          }
           clistViaMultipleAnchors[write] = clistViaMultipleAnchors[t];
         }
         write++;
@@ -1017,30 +1252,38 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // inside addThreadToNlist but whose id was never appended to nlistIds.
     Arrays.fill(inNlist, false);
     nlistSize = 0;
+    // nlistAlive slots are reset to true as each new slot is committed in addThreadToNlist;
+    // no explicit reset of all slots is needed since we only read slots 0..nlistSize-1.
   }
 
   private void swapLists() {
     int len = winCaptures.length;
-    // Move nlist into clist.
-    for (int i = 0; i < nlistSize; i++) {
-      inClist[clistIds[i < clistSize ? i : 0]] = false; // clear old clist guards lazily below
-    }
-    // Full reset of clist guards then re-set from nlist.
+    // Full reset of clist guards then re-set from nlist (skipping dead atomic-pruned slots).
     Arrays.fill(inClist, false);
     clistFirstAccept = -1;
+    int write = 0;
     for (int i = 0; i < nlistSize; i++) {
-      clistIds[i] = nlistIds[i];
-      System.arraycopy(nlistCaptures[i], 0, clistCaptures[i], 0, len);
+      if (atomicGroupCount > 0 && !nlistAlive[i]) {
+        // Slot was pruned by an atomic group exit — skip it.
+        inNlist[nlistIds[i]] = false;
+        continue;
+      }
+      clistIds[write] = nlistIds[i];
+      System.arraycopy(nlistCaptures[i], 0, clistCaptures[write], 0, len);
+      if (atomicGroupCount > 0) {
+        System.arraycopy(nlistAtomicPos[i], 0, clistAtomicPos[write], 0, atomicGroupCount);
+      }
       // Threads from nlist have advanced past their seed position: anchor-derived pruning no longer
       // applies, so reset the flag rather than letting a stale value from the previous clist
       // survive.
-      clistViaMultipleAnchors[i] = false;
+      clistViaMultipleAnchors[write] = false;
       inClist[nlistIds[i]] = true;
       inNlist[nlistIds[i]] = false;
       // nlist is built in priority order, so the first accepting entry is the highest priority.
-      if (clistFirstAccept < 0 && isAccept[nlistIds[i]]) clistFirstAccept = i;
+      if (clistFirstAccept < 0 && isAccept[nlistIds[i]]) clistFirstAccept = write;
+      write++;
     }
-    clistSize = nlistSize;
+    clistSize = write;
     nlistSize = 0;
   }
 

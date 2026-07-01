@@ -22,12 +22,18 @@ public final class QuantifierNode implements RegexNode {
   public final int min;
   public final int max; // -1 for unlimited
   public final boolean greedy;
+  public final boolean possessive;
 
-  public QuantifierNode(RegexNode child, int min, int max, boolean greedy) {
+  public QuantifierNode(RegexNode child, int min, int max, boolean greedy, boolean possessive) {
     this.child = child;
     this.min = min;
     this.max = max;
     this.greedy = greedy;
+    this.possessive = possessive;
+  }
+
+  public QuantifierNode(RegexNode child, int min, int max, boolean greedy) {
+    this(child, min, max, greedy, false);
   }
 
   @Override
@@ -45,6 +51,6 @@ public final class QuantifierNode implements RegexNode {
     else if (min == max) quant = "{" + min + "}";
     else quant = "{" + min + "," + max + "}";
 
-    return "Quantifier(" + child + quant + (greedy ? "" : "?") + ")";
+    return "Quantifier(" + child + quant + (possessive ? "+" : greedy ? "" : "?") + ")";
   }
 }

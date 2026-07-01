@@ -118,4 +118,50 @@ class RegexParserTest {
         () -> parse("\\x{}"),
         "\\x{} with no hex digits must throw ParseException");
   }
+
+  // ==================== Wave 2: possessive quantifiers parse successfully ====================
+
+  /** Possessive quantifier a*+ must parse without error. */
+  @Test
+  void possessiveQuantifier_starPlus_throwsUnsupported() {
+    assertDoesNotThrow(() -> parse("a*+"), "a*+ must parse successfully");
+  }
+
+  /** Possessive quantifier \\d++ must parse without error. */
+  @Test
+  void possessiveQuantifier_plusPlus_throwsUnsupported() {
+    assertDoesNotThrow(() -> parse("\\d++"), "\\d++ must parse successfully");
+  }
+
+  /** Possessive quantifier [a-z]?+ must parse without error. */
+  @Test
+  void possessiveQuantifier_questionPlus_throwsUnsupported() {
+    assertDoesNotThrow(() -> parse("[a-z]?+"), "[a-z]?+ must parse successfully");
+  }
+
+  /** Possessive quantifier a{2,4}+ must parse without error. */
+  @Test
+  void possessiveQuantifier_boundedPlus_throwsUnsupported() {
+    assertDoesNotThrow(() -> parse("a{2,4}+"), "a{2,4}+ must parse successfully");
+  }
+
+  // ==================== Wave 2: atomic groups parse successfully ====================
+
+  /** Atomic group (?>a*) must parse without error. */
+  @Test
+  void atomicGroup_starQuantifier_throwsUnsupported() {
+    assertDoesNotThrow(() -> parse("(?>a*)"), "(?>a*) must parse successfully");
+  }
+
+  /** Atomic group (?>a+)b must parse without error. */
+  @Test
+  void atomicGroup_withSuffix_throwsUnsupported() {
+    assertDoesNotThrow(() -> parse("(?>a+)b"), "(?>a+)b must parse successfully");
+  }
+
+  /** Atomic group (?>\\d+) followed by a literal suffix must parse without error. */
+  @Test
+  void atomicGroup_digitPlusWithSuffix_throwsUnsupported() {
+    assertDoesNotThrow(() -> parse("(?>\\d+)abc"), "(?>\\d+)abc must parse successfully");
+  }
 }
