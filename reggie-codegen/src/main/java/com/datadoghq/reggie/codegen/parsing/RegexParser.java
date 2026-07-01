@@ -169,14 +169,13 @@ public class RegexParser {
     return QuantifierMode.GREEDY;
   }
 
-  /**
-   * Builds the quantifier AST node for the given base, bounds, and mode. Possessive quantifiers
-   * throw {@link UnsupportedPatternException} as they are not yet supported.
-   */
+  /** Builds the quantifier AST node for the given base, bounds, and mode. */
   private RegexNode wrapQuantifier(RegexNode base, int min, int max) throws ParseException {
     QuantifierMode mode = checkQuantifierMode();
     if (mode == QuantifierMode.POSSESSIVE) {
-      throw new UnsupportedPatternException("Possessive quantifiers are not supported");
+      // Desugar X*+ → (?> X*), X++ → (?> X+), etc.
+      RegexNode inner = new QuantifierNode(base, min, max, true, false);
+      return new GroupNode(inner, 0, false, null, true);
     }
     boolean greedy = mode == QuantifierMode.GREEDY;
     return new QuantifierNode(base, min, max, greedy, false);
@@ -326,7 +325,10 @@ public class RegexParser {
         // Branch reset: (?|alt1|alt2)
         return parseBranchReset();
       } else if (peek() == '>') {
-        throw new UnsupportedPatternException("Atomic groups (?>...) are not supported");
+        consume(); // consume '>'
+        RegexNode child = parseAlternation();
+        consume(')');
+        return new GroupNode(child, 0, false, null, true);
       } else {
         throw new UnsupportedPatternException(
             "Unsupported special group construct at position " + pos);

@@ -119,72 +119,49 @@ class RegexParserTest {
         "\\x{} with no hex digits must throw ParseException");
   }
 
-  // ==================== Wave 1: possessive quantifiers throw UnsupportedPatternException
-  // ====================
+  // ==================== Wave 2: possessive quantifiers parse successfully ====================
 
-  /** Possessive quantifier a*+ must throw UnsupportedPatternException. */
+  /** Possessive quantifier a*+ must parse without error. */
   @Test
   void possessiveQuantifier_starPlus_throwsUnsupported() {
-    assertThrows(
-        RegexParser.UnsupportedPatternException.class,
-        () -> parse("a*+"),
-        "a*+ must throw UnsupportedPatternException");
+    assertDoesNotThrow(() -> parse("a*+"), "a*+ must parse successfully");
   }
 
-  /** Possessive quantifier \\d++ must throw UnsupportedPatternException. */
+  /** Possessive quantifier \\d++ must parse without error. */
   @Test
   void possessiveQuantifier_plusPlus_throwsUnsupported() {
-    assertThrows(
-        RegexParser.UnsupportedPatternException.class,
-        () -> parse("\\d++"),
-        "\\d++ must throw UnsupportedPatternException");
+    assertDoesNotThrow(() -> parse("\\d++"), "\\d++ must parse successfully");
   }
 
-  /** Possessive quantifier [a-z]?+ must throw UnsupportedPatternException. */
+  /** Possessive quantifier [a-z]?+ must parse without error. */
   @Test
   void possessiveQuantifier_questionPlus_throwsUnsupported() {
-    assertThrows(
-        RegexParser.UnsupportedPatternException.class,
-        () -> parse("[a-z]?+"),
-        "[a-z]?+ must throw UnsupportedPatternException");
+    assertDoesNotThrow(() -> parse("[a-z]?+"), "[a-z]?+ must parse successfully");
   }
 
-  /** Possessive quantifier a{2,4}+ must throw UnsupportedPatternException. */
+  /** Possessive quantifier a{2,4}+ must parse without error. */
   @Test
   void possessiveQuantifier_boundedPlus_throwsUnsupported() {
-    assertThrows(
-        RegexParser.UnsupportedPatternException.class,
-        () -> parse("a{2,4}+"),
-        "a{2,4}+ must throw UnsupportedPatternException");
+    assertDoesNotThrow(() -> parse("a{2,4}+"), "a{2,4}+ must parse successfully");
   }
 
-  // ==================== Wave 1: atomic groups throw UnsupportedPatternException
-  // ====================
+  // ==================== Wave 2: atomic groups parse successfully ====================
 
-  /** Atomic group (?>a*) must throw UnsupportedPatternException. */
+  /** Atomic group (?>a*) must parse without error. */
   @Test
   void atomicGroup_starQuantifier_throwsUnsupported() {
-    assertThrows(
-        RegexParser.UnsupportedPatternException.class,
-        () -> parse("(?>a*)"),
-        "(?>a*) must throw UnsupportedPatternException");
+    assertDoesNotThrow(() -> parse("(?>a*)"), "(?>a*) must parse successfully");
   }
 
-  /** Atomic group (?>a+)b must throw UnsupportedPatternException. */
+  /** Atomic group (?>a+)b must parse without error. */
   @Test
   void atomicGroup_withSuffix_throwsUnsupported() {
-    assertThrows(
-        RegexParser.UnsupportedPatternException.class,
-        () -> parse("(?>a+)b"),
-        "(?>a+)b must throw UnsupportedPatternException");
+    assertDoesNotThrow(() -> parse("(?>a+)b"), "(?>a+)b must parse successfully");
   }
 
-  /** Atomic group (?>\\d+) followed by a literal suffix must throw UnsupportedPatternException. */
+  /** Atomic group (?>\\d+) followed by a literal suffix must parse without error. */
   @Test
   void atomicGroup_digitPlusWithSuffix_throwsUnsupported() {
-    assertThrows(
-        RegexParser.UnsupportedPatternException.class,
-        () -> parse("(?>\\d+)abc"),
-        "(?>\\d+)abc must throw UnsupportedPatternException");
+    assertDoesNotThrow(() -> parse("(?>\\d+)abc"), "(?>\\d+)abc must parse successfully");
   }
 }

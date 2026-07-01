@@ -52,11 +52,17 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   // Atomic group thread pruning support.
   //
-  // atomicPos[G]: entry position of atomic group G for this thread; -1 if not inside the group.
+  // atomicPos[G] encodes group G membership for a thread:
+  //   >= 0  — inside G, entered at position atomicPos[G]
+  //   == -1 — never entered G
+  //   <= -2 — exited G; original entry position = -(atomicPos[G] + 2)
   //
-  // Pruning rule (nlist): when a thread's DFS traverses atomicExit(G), lower-priority nlist
-  // threads that entered G at the same position are killed (nlistAlive[j] = false), enforcing
-  // the greedy-commit semantics: the first (highest-priority) exit survives; all others are pruned.
+  // Pruning rule: after each stepChar, for each (G, entryPos E):
+  //   if an inside thread (atomicPos[G] == E) can consume the next input character,
+  //   all exit threads (atomicPos[G] == -(E+2)) are killed (nlistAlive[k] = false).
+  // Same rule is applied to the initial clist after initClist.
+  // This enforces greedy-commit: the extending inside path dominates a premature exit
+  // only when the greedy path can actually advance — not when it will fail next step.
   private final int atomicGroupCount;
   private final int[][] clistAtomicPos;
   private final int[][] nlistAtomicPos;
@@ -522,6 +528,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private boolean runMatches(String input, int regionStart, int regionEnd) {
     initClist(input, regionStart, regionStart, regionEnd);
+    pruneAtomicClistInitial(input, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       // First (highest-priority) accept thread in the current list, or -1 (O(1), see
@@ -543,6 +550,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, regionStart, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
     }
     return false;
@@ -550,6 +558,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private MatchResult runMatchResult(String input, int regionStart, int regionEnd) {
     initClist(input, regionStart, regionStart, regionEnd);
+    pruneAtomicClistInitial(input, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       int t = clistFirstAccept;
@@ -569,6 +578,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, regionStart, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
     }
     return null;
@@ -620,6 +630,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, 0, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
       if (bestStart >= 0 && clistSize == 0) break;
     }
@@ -716,6 +727,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, 0, regionEnd);
+      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
       // Finalize only once a match is in progress: when its threads are all gone `best` is final.
       // With best == null we must keep scanning (and re-seeding) for a start further right.
@@ -928,22 +940,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       int regionEnd) {
     if (inNlist[state.id]) return;
 
-    // Atomic-exit nlist pruning: when this DFS path traverses atomicExit(G), kill lower-priority
-    // nlist threads that entered the same atomic group at the same position.
-    if (atomicGroupCount > 0 && state.atomicExit >= 0) {
-      int G = state.atomicExit;
-      int entryPos = (atomicPos != null) ? atomicPos[G] : -1;
-      if (entryPos >= 0) {
-        // Kill nlist slots that entered the same atomic group at the same entry position:
-        // those are lower-priority threads that lost to the current greedy commit.
-        for (int j = 0; j < nlistSize; j++) {
-          if (nlistAlive[j] && nlistAtomicPos[j][G] == entryPos) {
-            nlistAlive[j] = false;
-          }
-        }
-      }
-    }
-
     if (state.anchor != null) {
       if (!checkAnchor(state.anchor, input, pos, regionStart, regionEnd)) return;
       inNlist[state.id] = true;
@@ -1041,8 +1037,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
       copyPos[state.atomicEntry] = pos;
     }
     if (hasExit) {
-      // Clear the entry sentinel; the thread is now outside the group.
-      copyPos[state.atomicExit] = -1;
+      // Encode the exit: -(entryPos + 2) preserves the original entry position in a range
+      // (<= -2) distinct from -1 (never entered) and >= 0 (still inside), so post-step
+      // pruning can match exit threads back to their (group, entryPos) inside counterpart.
+      int ep = copyPos[state.atomicExit];
+      copyPos[state.atomicExit] = -(ep + 2);
     }
     return copyPos;
   }
@@ -1089,6 +1088,97 @@ public final class PikeVMMatcher extends ReggieMatcher {
         return true;
       default:
         return false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Atomic group pruning helpers
+  // -------------------------------------------------------------------------
+
+  /** Returns true when the state has a character transition whose char set includes {@code ch}. */
+  private boolean stateCanConsume(int stateId, char ch) {
+    for (NFA.Transition tr : statesById[stateId].getTransitions()) {
+      if (tr.chars.contains(ch)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Prune premature exit threads from the initial clist after {@link #initClist}.
+   *
+   * <p>For each atomic group G and each inside thread j ({@code clistAtomicPos[j][G] >= 0}): if
+   * thread j can consume {@code input[pos]} (the first character to be processed), then all exit
+   * threads k with {@code clistAtomicPos[k][G] == -(E+2)} are dead — the greedy path will extend,
+   * so zero-length exits are premature.
+   *
+   * <p>Borrows {@link #nlistAlive} as a dead-flag scratch array; safe because nlistSize == 0
+   * immediately after {@code initClist}.
+   */
+  private void pruneAtomicClistInitial(String input, int pos, int regionEnd) {
+    if (atomicGroupCount == 0 || pos >= regionEnd) return;
+    char firstCh = input.charAt(pos);
+    boolean[] dead = nlistAlive; // borrow as scratch; nlistSize == 0 here
+    Arrays.fill(dead, 0, clistSize, false);
+    boolean anyDead = false;
+    for (int G = 0; G < atomicGroupCount; G++) {
+      for (int j = 0; j < clistSize; j++) {
+        if (dead[j]) continue;
+        int ap = clistAtomicPos[j][G];
+        if (ap >= 0 && stateCanConsume(clistIds[j], firstCh)) {
+          int encoded = -(ap + 2);
+          for (int k = 0; k < clistSize; k++) {
+            if (!dead[k] && clistAtomicPos[k][G] == encoded) {
+              dead[k] = true;
+              anyDead = true;
+            }
+          }
+        }
+      }
+    }
+    if (!anyDead) return;
+    int write = 0;
+    clistFirstAccept = -1;
+    for (int i = 0; i < clistSize; i++) {
+      if (dead[i]) {
+        inClist[clistIds[i]] = false;
+        continue;
+      }
+      if (write != i) {
+        clistIds[write] = clistIds[i];
+        System.arraycopy(clistCaptures[i], 0, clistCaptures[write], 0, clistCaptures[i].length);
+        System.arraycopy(clistAtomicPos[i], 0, clistAtomicPos[write], 0, atomicGroupCount);
+        clistViaMultipleAnchors[write] = clistViaMultipleAnchors[i];
+      }
+      if (clistFirstAccept < 0 && isAccept[clistIds[write]]) clistFirstAccept = write;
+      write++;
+    }
+    clistSize = write;
+  }
+
+  /**
+   * Prune premature exit threads from nlist after {@link #stepChar}.
+   *
+   * <p>For each atomic group G and each alive inside thread j ({@code nlistAtomicPos[j][G] >= 0}):
+   * if thread j can consume {@code input[nextPos]}, all alive exit threads k with {@code
+   * nlistAtomicPos[k][G] == -(E+2)} are killed ({@code nlistAlive[k] = false}) — the greedy path
+   * will extend at the next step, so exits at the current position are premature.
+   */
+  private void pruneAtomicNlist(int nextPos, String input, int regionEnd) {
+    if (atomicGroupCount == 0 || nextPos >= regionEnd) return;
+    char nextCh = input.charAt(nextPos);
+    for (int G = 0; G < atomicGroupCount; G++) {
+      for (int j = 0; j < nlistSize; j++) {
+        if (!nlistAlive[j]) continue;
+        int ap = nlistAtomicPos[j][G];
+        if (ap >= 0 && stateCanConsume(nlistIds[j], nextCh)) {
+          int encoded = -(ap + 2);
+          for (int k = 0; k < nlistSize; k++) {
+            if (nlistAlive[k] && nlistAtomicPos[k][G] == encoded) {
+              nlistAlive[k] = false;
+            }
+          }
+        }
+      }
     }
   }
 
