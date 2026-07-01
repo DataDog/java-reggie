@@ -119,7 +119,8 @@ class RegexParserTest {
         "\\x{} with no hex digits must throw ParseException");
   }
 
-  // ==================== Wave 1: possessive quantifiers throw UnsupportedPatternException ====================
+  // ==================== Wave 1: possessive quantifiers throw UnsupportedPatternException
+  // ====================
 
   /** Possessive quantifier a*+ must throw UnsupportedPatternException. */
   @Test
@@ -157,7 +158,8 @@ class RegexParserTest {
         "a{2,4}+ must throw UnsupportedPatternException");
   }
 
-  // ==================== Wave 1: atomic groups throw UnsupportedPatternException ====================
+  // ==================== Wave 1: atomic groups throw UnsupportedPatternException
+  // ====================
 
   /** Atomic group (?>a*) must throw UnsupportedPatternException. */
   @Test

@@ -19,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.objectweb.asm.Opcodes.ACC_PUBLIC;
-import static org.objectweb.asm.Opcodes.ACC_STATIC;
 import static org.objectweb.asm.Opcodes.V21;
 
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -64,8 +63,8 @@ class BitParallelGlushkovBytecodeGeneratorTest {
 
   /**
    * Generates the full class bytecode (static data + findFrom method) for the given generator and
-   * returns the names of all INVOKESTATIC targets (method names only) found inside the
-   * {@code findFrom} method that target {@code BitParallelGlushkovRuntime}.
+   * returns the names of all INVOKESTATIC targets (method names only) found inside the {@code
+   * findFrom} method that target {@code BitParallelGlushkovRuntime}.
    */
   private static List<String> runtimeCallsInFindFrom(BitParallelGlushkovBytecodeGenerator gen)
       throws Exception {
@@ -135,8 +134,7 @@ class BitParallelGlushkovBytecodeGeneratorTest {
 
     List<String> calls = runtimeCallsInFindFrom(gen);
 
-    assertTrue(
-        calls.contains("findFrom"), "Expected findFrom call for .*[abc], got: " + calls);
+    assertTrue(calls.contains("findFrom"), "Expected findFrom call for .*[abc], got: " + calls);
     assertFalse(
         calls.contains("findFromWithSkip"),
         "Should not emit findFromWithSkip for .*[abc], got: " + calls);

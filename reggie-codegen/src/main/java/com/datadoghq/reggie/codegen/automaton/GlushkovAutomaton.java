@@ -127,8 +127,8 @@ public final class GlushkovAutomaton {
   }
 
   /**
-   * Returns the single ASCII character (0–127) that must appear at the accepting position of
-   * every match, or {@code -1} if none can be identified.
+   * Returns the single ASCII character (0–127) that must appear at the accepting position of every
+   * match, or {@code -1} if none can be identified.
    *
    * <p>When the Last (accept) set has exactly one position {@code p} and exactly one ASCII
    * character activates {@code p} through {@code entry[asciiClasses[c]] >> p & 1 != 0}, that
@@ -136,8 +136,8 @@ public final class GlushkovAutomaton {
    * to skip non-candidate regions in {@code find()}.
    *
    * <p>Returns {@code -1} when: the Last set has more than one position; more than one ASCII
-   * character activates the sole accepting position (class too wide); or the position is
-   * activated only by non-ASCII characters.
+   * character activates the sole accepting position (class too wide); or the position is activated
+   * only by non-ASCII characters.
    */
   public int findLastRequiredChar() {
     if (Long.bitCount(accept) != 1) return -1;

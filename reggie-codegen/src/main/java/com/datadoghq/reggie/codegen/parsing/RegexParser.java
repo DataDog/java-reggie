@@ -139,7 +139,8 @@ public class RegexParser {
         if (base instanceof QuantifierNode) {
           if (hasMore() && peek() == '+') {
             consume();
-            throw new UnsupportedPatternException("Possessive quantifier on already-quantified expression is not supported");
+            throw new UnsupportedPatternException(
+                "Possessive quantifier on already-quantified expression is not supported");
           }
           return base;
         }
@@ -152,8 +153,8 @@ public class RegexParser {
   }
 
   /**
-   * Reads the optional modifier after a quantifier symbol and returns the greediness mode.
-   * '?' → NON_GREEDY, '+' → POSSESSIVE, anything else → GREEDY (no character consumed).
+   * Reads the optional modifier after a quantifier symbol and returns the greediness mode. '?' →
+   * NON_GREEDY, '+' → POSSESSIVE, anything else → GREEDY (no character consumed).
    */
   private QuantifierMode checkQuantifierMode() throws ParseException {
     skipExtendedWhitespace();

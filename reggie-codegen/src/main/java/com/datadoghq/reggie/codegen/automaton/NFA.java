@@ -351,7 +351,7 @@ public final class NFA {
       hash = mult * hash + (state.assertionWidth + 1);
 
       hash = mult * hash + state.atomicEntry + 1; // +1 distinguishes id=0 from absent (-1)
-      hash = mult * hash + state.atomicExit  + 1;
+      hash = mult * hash + state.atomicExit + 1;
     }
 
     return hash;
@@ -362,7 +362,7 @@ public final class NFA {
     int max = -1;
     for (NFAState state : states) {
       if (state.atomicEntry >= 0) max = Math.max(max, state.atomicEntry);
-      if (state.atomicExit  >= 0) max = Math.max(max, state.atomicExit);
+      if (state.atomicExit >= 0) max = Math.max(max, state.atomicExit);
     }
     return max + 1;
   }
@@ -395,7 +395,7 @@ public final class NFA {
     public NFAState elseBranch = null; // Entry if group didn't match (may be null)
 
     public int atomicEntry = -1; // >= 0: entering atomic group with this id
-    public int atomicExit  = -1; // >= 0: exiting atomic group with this id
+    public int atomicExit = -1; // >= 0: exiting atomic group with this id
 
     public NFAState(int id) {
       this.id = id;

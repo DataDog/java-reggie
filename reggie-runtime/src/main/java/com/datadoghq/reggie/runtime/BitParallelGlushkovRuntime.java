@@ -307,13 +307,21 @@ public final class BitParallelGlushkovRuntime {
     // supports at most 63 positions, so no match can span more than 63 input characters.
     int scanFrom =
         Math.max(
-            start,
-            reqPos
-                - com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton.MAX_POSITIONS);
+            start, reqPos - com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton.MAX_POSITIONS);
     int matchEnd =
         longestEndFrom(
-            s, scanFrom, len, initial, accept, nullable, follow, asciiClasses, rangeStarts,
-            rangeEnds, rangeClasses, entry);
+            s,
+            scanFrom,
+            len,
+            initial,
+            accept,
+            nullable,
+            follow,
+            asciiClasses,
+            rangeStarts,
+            rangeEnds,
+            rangeClasses,
+            entry);
     // startsAnywhere: start position is always `from`; only the existence of a match matters
     return matchEnd < 0 ? -1 : from;
   }

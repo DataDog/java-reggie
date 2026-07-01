@@ -81,8 +81,7 @@ class ThompsonBuilderTest {
     }
     assertTrue(foundId0, "first atomic group must use id 0");
     assertTrue(foundId1, "second atomic group must use id 1");
-    assertEquals(
-        2, nfa.getAtomicGroupCount(), "two atomic groups must yield atomicGroupCount=2");
+    assertEquals(2, nfa.getAtomicGroupCount(), "two atomic groups must yield atomicGroupCount=2");
   }
 
   @Test

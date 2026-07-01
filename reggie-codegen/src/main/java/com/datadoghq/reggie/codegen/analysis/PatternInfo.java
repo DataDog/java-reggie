@@ -28,5 +28,4 @@ public interface PatternInfo {
    * @return hash code representing structural equivalence
    */
   int structuralHashCode();
-
 }

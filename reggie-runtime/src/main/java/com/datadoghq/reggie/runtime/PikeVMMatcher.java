@@ -759,8 +759,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
         if (tr.chars.contains(ch)) {
           int[] nc = scratchCaptures[0];
           System.arraycopy(caps, 0, nc, 0, nc.length);
-          addThreadToNlist(
-              tr.target, nc, apos, nextPos, 0, input, regionStart, regionEnd);
+          addThreadToNlist(tr.target, nc, apos, nextPos, 0, input, regionStart, regionEnd);
         }
       }
     }
@@ -795,8 +794,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
       int regionStart,
       int regionEnd) {
     addThread(
-        state, captures, null, pos, depth, anchorCount, anchorFollowedBySkip,
-        input, regionStart, regionEnd);
+        state,
+        captures,
+        null,
+        pos,
+        depth,
+        anchorCount,
+        anchorFollowedBySkip,
+        input,
+        regionStart,
+        regionEnd);
   }
 
   /**
@@ -822,8 +829,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
       // Increment the anchor count; anchorFollowedBySkip is not reset by anchor firing.
       for (NFA.NFAState next : state.getEpsilonTransitions()) {
         addThread(
-            next, captures, atomicPos, pos, depth,
-            anchorCount + 1, anchorFollowedBySkip, input, regionStart, regionEnd);
+            next,
+            captures,
+            atomicPos,
+            pos,
+            depth,
+            anchorCount + 1,
+            anchorFollowedBySkip,
+            input,
+            regionStart,
+            regionEnd);
       }
       return;
     }
@@ -864,8 +879,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
                 && next.enterGroup != null
                 && !inClist[next.id];
         addThread(
-            next, passedCaptures, passedAtomicPos, pos, depth + 1,
-            anchorCount, childAnchorFollowedBySkip, input, regionStart, regionEnd);
+            next,
+            passedCaptures,
+            passedAtomicPos,
+            pos,
+            depth + 1,
+            anchorCount,
+            childAnchorFollowedBySkip,
+            input,
+            regionStart,
+            regionEnd);
         if (willUpdateGroupEntry) {
           int scratchIdx = Math.min(depth + 2, scratchCaptures.length - 1);
           passedCaptures = scratchCaptures[scratchIdx];
@@ -925,8 +948,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       if (!checkAnchor(state.anchor, input, pos, regionStart, regionEnd)) return;
       inNlist[state.id] = true;
       for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThreadToNlist(
-            next, captures, atomicPos, pos, depth, input, regionStart, regionEnd);
+        addThreadToNlist(next, captures, atomicPos, pos, depth, input, regionStart, regionEnd);
       }
       return;
     }
@@ -951,8 +973,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
                 && next.enterGroup != null
                 && !inNlist[next.id];
         addThreadToNlist(
-            next, passedCaptures, passedAtomicPos, pos, depth + 1,
-            input, regionStart, regionEnd);
+            next, passedCaptures, passedAtomicPos, pos, depth + 1, input, regionStart, regionEnd);
         if (willUpdateGroupEntry) {
           int scratchIdx = Math.min(depth + 2, scratchCaptures.length - 1);
           passedCaptures = scratchCaptures[scratchIdx];
@@ -1001,10 +1022,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * (entry positions for each atomic group, -1 if not inside). Returns the original array unchanged
    * when the state has no atomic entry or exit annotation.
    */
-  private int[] updateAtomicTracking(
-      NFA.NFAState state,
-      int[] atomicPos,
-      int pos) {
+  private int[] updateAtomicTracking(NFA.NFAState state, int[] atomicPos, int pos) {
     if (atomicGroupCount == 0) {
       return null; // fast path for non-atomic patterns
     }

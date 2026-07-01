@@ -35,7 +35,8 @@ public final class GroupNode implements RegexNode {
     this(child, groupNumber, capturing, name, false);
   }
 
-  public GroupNode(RegexNode child, int groupNumber, boolean capturing, String name, boolean atomic) {
+  public GroupNode(
+      RegexNode child, int groupNumber, boolean capturing, String name, boolean atomic) {
     this.child = child;
     this.groupNumber = groupNumber;
     this.capturing = capturing;
