@@ -5238,72 +5238,6 @@ public class PatternAnalyzer {
     }
   }
 
-  /** Visitor to detect atomic groups ({@code (?>...)}) anywhere in the AST. */
-  private static class AtomicGroupDetector implements RegexVisitor<Boolean> {
-    @Override
-    public Boolean visitLiteral(LiteralNode node) {
-      return false;
-    }
-
-    @Override
-    public Boolean visitCharClass(CharClassNode node) {
-      return false;
-    }
-
-    @Override
-    public Boolean visitConcat(ConcatNode node) {
-      return node.children.stream().anyMatch(child -> child.accept(this));
-    }
-
-    @Override
-    public Boolean visitAlternation(AlternationNode node) {
-      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
-    }
-
-    @Override
-    public Boolean visitQuantifier(QuantifierNode node) {
-      return node.child.accept(this);
-    }
-
-    @Override
-    public Boolean visitGroup(GroupNode node) {
-      if (node.atomic) return true;
-      return node.child.accept(this);
-    }
-
-    @Override
-    public Boolean visitAnchor(AnchorNode node) {
-      return false;
-    }
-
-    @Override
-    public Boolean visitBackreference(BackreferenceNode node) {
-      return false;
-    }
-
-    @Override
-    public Boolean visitAssertion(AssertionNode node) {
-      return node.subPattern != null && node.subPattern.accept(this);
-    }
-
-    @Override
-    public Boolean visitSubroutine(SubroutineNode node) {
-      return false;
-    }
-
-    @Override
-    public Boolean visitConditional(ConditionalNode node) {
-      boolean hasThen = node.thenBranch.accept(this);
-      boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
-      return hasThen || hasElse;
-    }
-
-    @Override
-    public Boolean visitBranchReset(BranchResetNode node) {
-      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
-    }
-  }
-
   /**
    * Visitor to detect start/end anchors (^, $) in AST. Word boundaries (\b) are not considered
    * anchors for this check.
@@ -6105,11 +6039,6 @@ public class PatternAnalyzer {
     public Boolean visitBranchReset(BranchResetNode node) {
       return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
     }
-  }
-
-  /** Returns {@code true} when the AST contains an atomic group or possessive quantifier. */
-  private static boolean hasAtomicGroups(RegexNode node) {
-    return node.accept(new AtomicGroupDetector());
   }
 
   /** Information about a greedy char class pattern like (\d+) or ([a-z]*). */

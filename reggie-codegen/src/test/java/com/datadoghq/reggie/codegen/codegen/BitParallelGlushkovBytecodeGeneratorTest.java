@@ -146,8 +146,7 @@ class BitParallelGlushkovBytecodeGeneratorTest {
   }
 
   /**
-   * For {@code .*[abc]}, the accept position matches 'a', 'b', 'c', so lastRequiredChar must be
-   * -1.
+   * For {@code .*[abc]}, the accept position matches 'a', 'b', 'c', so lastRequiredChar must be -1.
    */
   @Test
   void lastRequiredChar_multipleChars() throws Exception {
