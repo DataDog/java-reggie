@@ -32,8 +32,10 @@ class DFAStateBudgetFallbackTest {
 
   @Test
   void largePureDFAUsesTableBackend() {
-    ReggieMatcher matcher = Reggie.compile("(?:[a-z][0-9]){150}");
-    String input = "a1".repeat(150);
+    // x(?:[a-z][0-9]){150}: the leading literal 'x' prevents COUNTING_GLUSHKOV interception
+    // (extractSingleQuantifier returns null for concat), so this routes to DFA_TABLE (302 states).
+    ReggieMatcher matcher = Reggie.compile("x(?:[a-z][0-9]){150}");
+    String input = "x" + "a1".repeat(150);
 
     assertDoesNotThrow(() -> matcher.getClass().getDeclaredField("DFA_TRANSITIONS"));
     assertTrue(matcher.matches(input));
@@ -42,7 +44,7 @@ class DFAStateBudgetFallbackTest {
 
     int[] bounds = new int[2];
     assertTrue(matcher.findBoundsFrom("xx" + input + "yy", 0, bounds));
-    assertTrue(bounds[0] == 2 && bounds[1] == 302);
+    assertTrue(bounds[0] == 2 && bounds[1] == 303);
   }
 
   // C5.1.b: explosion fallback for pure-regular capturing patterns (PatternAnalyzer.java:859-872,

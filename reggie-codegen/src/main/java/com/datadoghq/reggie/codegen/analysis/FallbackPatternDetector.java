@@ -30,6 +30,7 @@ import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
+import com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -315,6 +316,43 @@ public final class FallbackPatternDetector {
         && hasNullableAlternationBranchAnywhere(ast)) {
       return "nullable alternation branch: "
           + "find() first-alternative semantics incorrect for empty/nullable branch";
+    }
+
+    if (strategy == PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV) {
+      return null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Returns a human-readable reason if the pattern needs fallback, or {@code null} if reggie can
+   * handle it correctly. This overload also validates the strategy-specific carrier in {@code
+   * result}.
+   *
+   * @param ast the parsed pattern AST
+   * @param result the full strategy result from {@link PatternAnalyzer}
+   */
+  public static String needsFallback(RegexNode ast, PatternAnalyzer.MatchingStrategyResult result) {
+    String base = needsFallback(ast, result.strategy);
+    if (base != null) return base;
+
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV) {
+      if (!(result.patternInfo instanceof PatternAnalyzer.CountingGlushkovInfo)) {
+        return "COUNTING_GLUSHKOV selected but no CountingGlushkovInfo carrier";
+      }
+      PatternAnalyzer.CountingGlushkovInfo info =
+          (PatternAnalyzer.CountingGlushkovInfo) result.patternInfo;
+      if (info.base == null) {
+        return "B-CGA-1: null base automaton";
+      }
+      if (info.base.positionCount > GlushkovAutomaton.MAX_POSITIONS) {
+        return "B-CGA-4: base positions " + info.base.positionCount + " > 63";
+      }
+      if (info.base.positionCount > 1 && (info.base.accept & info.base.initial) != 0) {
+        return "B-CGA-2: non-synchronizing (Last ∩ First ≠ ∅)";
+      }
+      return null;
     }
 
     return null;

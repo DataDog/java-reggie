@@ -51,7 +51,9 @@ class StrategySelectionTest {
 
   @Test
   void largePureDFAUsesTableStrategy() throws Exception {
-    PatternAnalyzer.MatchingStrategyResult result = analyze("(?:[a-z][0-9]){150}");
+    // The leading literal 'x' prevents COUNTING_GLUSHKOV interception (extractSingleQuantifier
+    // returns null for a concat node with two children), so this routes to DFA_TABLE (302 states).
+    PatternAnalyzer.MatchingStrategyResult result = analyze("x(?:[a-z][0-9]){150}");
 
     assertEquals(
         PatternAnalyzer.MatchingStrategy.DFA_TABLE,

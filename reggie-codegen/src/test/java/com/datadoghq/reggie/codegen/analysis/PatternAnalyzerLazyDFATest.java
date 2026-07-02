@@ -35,10 +35,11 @@ class PatternAnalyzerLazyDFATest {
 
   @Test
   void testRouteToLazyDFAWhenNFALarge() throws Exception {
-    // (?:a+b+|b+a+){75} has ~685 NFA states, no groups/anchors.
-    // DFA state explosion via interleaved a+/b+ alternation → StateExplosionException
+    // x(?:a+b+|b+a+){75}: the leading literal 'x' prevents COUNTING_GLUSHKOV interception
+    // (extractSingleQuantifier returns null for a concat node with two children).
+    // Pattern has ~687 NFA states; DFA state explosion → StateExplosionException
     // → OPTIMIZED_NFA → isLazyDFAEligible (NFA ≥300, no groups/anchors) → LAZY_DFA.
-    PatternAnalyzer.MatchingStrategyResult r = analyze("(?:a+b+|b+a+){75}");
+    PatternAnalyzer.MatchingStrategyResult r = analyze("x(?:a+b+|b+a+){75}");
     assertEquals(PatternAnalyzer.MatchingStrategy.LAZY_DFA, r.strategy);
   }
 

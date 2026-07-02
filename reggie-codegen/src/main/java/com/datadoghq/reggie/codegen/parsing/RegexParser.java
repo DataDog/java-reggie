@@ -109,13 +109,6 @@ public class RegexParser {
     return ch == '|' || ch == ')';
   }
 
-  /** Quantifier greediness mode. */
-  private enum QuantifierMode {
-    GREEDY,
-    NON_GREEDY,
-    POSSESSIVE
-  }
-
   private RegexNode parseQuantified() throws ParseException {
     skipExtendedWhitespace(); // Skip whitespace before atom in extended mode
     RegexNode base = parseAtom();
@@ -128,11 +121,19 @@ public class RegexParser {
     char ch = peek();
     switch (ch) {
       case '*':
-        consume();
-        return wrapQuantifier(base, 0, -1);
+        {
+          consume();
+          int suffix = checkQuantifierSuffix();
+          QuantifierNode q = new QuantifierNode(base, 0, -1, suffix != 1);
+          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+        }
       case '+':
-        consume();
-        return wrapQuantifier(base, 1, -1);
+        {
+          consume();
+          int suffix = checkQuantifierSuffix();
+          QuantifierNode q = new QuantifierNode(base, 1, -1, suffix != 1);
+          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+        }
       case '?':
         consume();
         // Check if this is a quantifier or non-greedy marker
@@ -144,7 +145,11 @@ public class RegexParser {
           }
           return base;
         }
-        return wrapQuantifier(base, 0, 1);
+        {
+          int suffix = checkQuantifierSuffix();
+          QuantifierNode q = new QuantifierNode(base, 0, 1, suffix != 1);
+          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+        }
       case '{':
         return parseCountedQuantifier(base);
       default:
@@ -153,32 +158,24 @@ public class RegexParser {
   }
 
   /**
-   * Reads the optional modifier after a quantifier symbol and returns the greediness mode. '?' →
-   * NON_GREEDY, '+' → POSSESSIVE, anything else → GREEDY (no character consumed).
+   * Checks the suffix after a quantifier character. Returns {@code 1} for non-greedy ({@code ?}),
+   * {@code 2} for possessive ({@code +}), or {@code 0} for greedy (no suffix).
    */
-  private QuantifierMode checkQuantifierMode() throws ParseException {
+  private int checkQuantifierSuffix() throws ParseException {
     skipExtendedWhitespace();
     if (hasMore() && peek() == '?') {
       consume();
-      return QuantifierMode.NON_GREEDY;
+      return 1; // non-greedy
     }
     if (hasMore() && peek() == '+') {
       consume();
-      return QuantifierMode.POSSESSIVE;
+      return 2; // possessive
     }
-    return QuantifierMode.GREEDY;
+    return 0; // greedy
   }
 
-  /** Builds the quantifier AST node for the given base, bounds, and mode. */
-  private RegexNode wrapQuantifier(RegexNode base, int min, int max) throws ParseException {
-    QuantifierMode mode = checkQuantifierMode();
-    if (mode == QuantifierMode.POSSESSIVE) {
-      // Desugar X*+ → (?> X*), X++ → (?> X+), etc.
-      RegexNode inner = new QuantifierNode(base, min, max, true, false);
-      return new GroupNode(inner, 0, false, null, true);
-    }
-    boolean greedy = mode == QuantifierMode.GREEDY;
-    return new QuantifierNode(base, min, max, greedy, false);
+  private boolean checkNonGreedy() throws ParseException {
+    return checkQuantifierSuffix() == 1;
   }
 
   private RegexNode parseCountedQuantifier(RegexNode base) throws ParseException {
@@ -207,7 +204,9 @@ public class RegexParser {
       throw new ParseException("Invalid quantifier: min (" + min + ") > max (" + max + ")");
     }
 
-    return wrapQuantifier(base, min, max);
+    int suffix = checkQuantifierSuffix();
+    QuantifierNode q = new QuantifierNode(base, min, max, suffix != 1);
+    return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
   }
 
   private int parseNumber() throws ParseException {
@@ -273,6 +272,7 @@ public class RegexParser {
     boolean capturing = true;
     int groupNum = 0;
     String groupName = null;
+    boolean isAtomic = false;
 
     // Check for special constructs (?:...), (?=...), (?!...), (?<=...), (?<!...), (?i), (?i:...)
     if (peek() == '?') {
@@ -325,10 +325,11 @@ public class RegexParser {
         // Branch reset: (?|alt1|alt2)
         return parseBranchReset();
       } else if (peek() == '>') {
-        consume(); // consume '>'
-        RegexNode child = parseAlternation();
-        consume(')');
-        return new GroupNode(child, 0, false, null, true);
+        // Atomic group: (?>X). Mark as atomic so that engines that implement backtracking
+        // (e.g. PikeVM) can honour the backtracking-prevention semantics.
+        consume();
+        capturing = false;
+        isAtomic = true;
       } else {
         throw new UnsupportedPatternException(
             "Unsupported special group construct at position " + pos);
@@ -357,7 +358,7 @@ public class RegexParser {
 
     consume(')');
 
-    return new GroupNode(child, groupNum, capturing, groupName);
+    return new GroupNode(child, groupNum, capturing, groupName, isAtomic);
   }
 
   /**

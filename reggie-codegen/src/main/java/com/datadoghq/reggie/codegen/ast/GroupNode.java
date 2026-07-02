@@ -17,7 +17,7 @@ package com.datadoghq.reggie.codegen.ast;
 
 /**
  * Represents a capturing or non-capturing group. Named groups like (?<name>...) or (?'name'...)
- * have both a name and a number.
+ * have both a name and a number. Atomic groups ({@code (?>...)}) have {@code atomic=true}.
  */
 public final class GroupNode implements RegexNode {
 
@@ -25,10 +25,10 @@ public final class GroupNode implements RegexNode {
   public final int groupNumber; // 0 for non-capturing
   public final boolean capturing;
   public final String name; // null for unnamed groups
-  public final boolean atomic;
+  public final boolean atomic; // true for atomic groups (?>...)
 
   public GroupNode(RegexNode child, int groupNumber, boolean capturing) {
-    this(child, groupNumber, capturing, null);
+    this(child, groupNumber, capturing, null, false);
   }
 
   public GroupNode(RegexNode child, int groupNumber, boolean capturing, String name) {

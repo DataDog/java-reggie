@@ -27,6 +27,7 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private int nextStateId = 0;
   private int atomicGroupCounter = 0;
   private final List<NFA.NFAState> allStates = new ArrayList<>();
+  private int nextAtomicId = 0;
 
   /**
    * Temporary structure during NFA construction. Represents a partial NFA with entry state and
@@ -253,6 +254,27 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   @Override
   public NFAFragment visitGroup(GroupNode node) {
+    if (node.atomic) {
+      // Atomic group (?>X): wrap the child fragment in entry/exit epsilon states that carry
+      // atomicEntry/atomicExit markers so that PikeVM can enforce backtracking prevention.
+      int atomicId = nextAtomicId++;
+      NFAFragment child = node.child.accept(this);
+
+      NFA.NFAState atomicEntryState = createState();
+      atomicEntryState.atomicEntry = atomicId;
+      atomicEntryState.addEpsilonTransition(child.entry);
+
+      Set<NFA.NFAState> atomicExits = new HashSet<>();
+      for (NFA.NFAState childExit : child.exits) {
+        NFA.NFAState atomicExitState = createState();
+        atomicExitState.atomicExit = atomicId;
+        childExit.addEpsilonTransition(atomicExitState);
+        atomicExits.add(atomicExitState);
+      }
+
+      return new NFAFragment(atomicEntryState, atomicExits);
+    }
+
     NFAFragment child = node.child.accept(this);
 
     if (node.atomic) {

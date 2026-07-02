@@ -367,7 +367,10 @@ public class PatternAnalyzer {
           requiredLiterals);
     }
 
+    // Patterns containing atomic groups (?>...) require a backtracking-aware engine (PikeVM)
+    // to enforce the no-backtracking-into-the-group constraint.
     if (hasAtomicGroups(ast)) {
+      addTrace("hasAtomicGroups", true);
       return new MatchingStrategyResult(
           MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
     }
@@ -378,6 +381,19 @@ public class PatternAnalyzer {
     lookaheadGreedyInfo = detectFastPathEligibility(lookaheadGreedyInfo);
 
     // Check for pattern-specific optimizations first (highest priority)
+
+    // COUNTING_GLUSHKOV: bounded repetition with large bound, group-free body.
+    // Checked before STATELESS_LOOP and SPECIALIZED_FIXED_SEQUENCE so that patterns like \d{11}
+    // and (?:ab){20} use the O(n) counter-based engine rather than the simpler but less general
+    // stateless or fixed-sequence fast paths.
+    {
+      CountingGlushkovInfo cgInfo = detectCountingGlushkov();
+      if (cgInfo != null) {
+        addTrace("COUNTING_GLUSHKOV", true);
+        return new MatchingStrategyResult(
+            MatchingStrategy.COUNTING_GLUSHKOV, null, cgInfo, false, requiredLiterals);
+      }
+    }
 
     // Check for stateless patterns (absolute highest priority - eliminates state tracking overhead)
     StatelessPatternInfo statelessInfo = detectStatelessPattern(ast);
@@ -2107,6 +2123,11 @@ public class PatternAnalyzer {
     return node.accept(detector);
   }
 
+  private boolean hasAtomicGroups(RegexNode node) {
+    AtomicGroupDetector detector = new AtomicGroupDetector();
+    return node.accept(detector);
+  }
+
   private boolean hasNonGreedyQuantifiers(RegexNode node) {
     NonGreedyQuantifierDetector detector = new NonGreedyQuantifierDetector();
     return node.accept(detector);
@@ -3021,6 +3042,7 @@ public class PatternAnalyzer {
     DFA_SWITCH_WITH_GROUPS, // 20-300 states - switch with inline group tracking
     DFA_TABLE, // >300 states - table-driven
     BITPARALLEL_GLUSHKOV, // >300 states, <=63 positions - single-word bit-parallel NFA simulation
+    COUNTING_GLUSHKOV, // Counting Glushkov automaton: O(n) bound-independent matching for X{n,m}.
     OPTIMIZED_NFA, // DFA state explosion - optimized NFA
     LAZY_DFA, // Large anchor-free group-free NFA - on-the-fly DFA construction
     OPTIMIZED_NFA_WITH_BACKREFS, // Has backreferences
@@ -5216,6 +5238,72 @@ public class PatternAnalyzer {
     }
   }
 
+  /** Visitor to detect atomic groups ({@code (?>...)}) anywhere in the AST. */
+  private static class AtomicGroupDetector implements RegexVisitor<Boolean> {
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      return node.children.stream().anyMatch(child -> child.accept(this));
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      if (node.atomic) return true;
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return node.subPattern != null && node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      boolean hasThen = node.thenBranch.accept(this);
+      boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
+      return hasThen || hasElse;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+  }
+
   /**
    * Visitor to detect start/end anchors (^, $) in AST. Word boundaries (\b) are not considered
    * anchors for this check.
@@ -7260,6 +7348,103 @@ public class PatternAnalyzer {
    * <p>This strategy uses suffix-first matching: find where suffix matches, then group is
    * everything before.
    */
+  private QuantifierNode extractSingleQuantifier(RegexNode node) {
+    if (node instanceof QuantifierNode) return (QuantifierNode) node;
+    if (node instanceof ConcatNode c
+        && c.children.size() == 1
+        && c.children.get(0) instanceof QuantifierNode) return (QuantifierNode) c.children.get(0);
+    return null;
+  }
+
+  private boolean hasLargeBoundQuantifier(RegexNode node) {
+    return Boolean.TRUE.equals(node.accept(new LargeBoundQuantifierDetector()));
+  }
+
+  private static class LargeBoundQuantifierDetector implements RegexVisitor<Boolean> {
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      return node.children.stream().anyMatch(child -> child.accept(this));
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      // max == -1 means unlimited (*, +, {n,}); treat as large to block COUNTING_GLUSHKOV.
+      if (node.max == -1 || node.max > 10) return true;
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return node.subPattern != null && node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      boolean hasThen = node.thenBranch.accept(this);
+      boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
+      return hasThen || hasElse;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+  }
+
+  private CountingGlushkovInfo detectCountingGlushkov() {
+    QuantifierNode q = extractSingleQuantifier(ast);
+    if (q == null || q.max <= 10) return null;
+
+    RegexNode body = q.child;
+    if (hasAnchors(body) || hasLookaround(body)) return null;
+    if (hasCapturingGroups(body)) return null;
+    if (hasBackreferences(body)) return null;
+    if (hasLargeBoundQuantifier(body)) return null;
+
+    NFA bodyNfa = new ThompsonBuilder().build(body, 0);
+    GlushkovAutomaton base = GlushkovAutomaton.from(bodyNfa);
+    if (base == null) return null;
+
+    if (base.positionCount > 1 && (base.accept & base.initial) != 0) return null;
+
+    return new CountingGlushkovInfo(base, q.min, q.max);
+  }
+
   private GreedyBacktrackInfo detectGreedyBacktrackPattern(RegexNode ast) {
     // Reject unsupported features
     if (hasBackreferences(ast) || hasLookaround(ast)) {
@@ -8174,6 +8359,28 @@ public class PatternAnalyzer {
     public int structuralHashCode() {
       int hash = getClass().getName().hashCode();
       hash = 31 * hash + (canUseFastPath ? 1 : 0);
+      return hash;
+    }
+  }
+
+  /** Carrier for COUNTING_GLUSHKOV strategy — group-free phase. */
+  public static final class CountingGlushkovInfo implements PatternInfo {
+    public final GlushkovAutomaton base; // Glushkov for the un-repeated body
+    public final int counterMin;
+    public final int counterMax;
+
+    public CountingGlushkovInfo(GlushkovAutomaton base, int counterMin, int counterMax) {
+      this.base = base;
+      this.counterMin = counterMin;
+      this.counterMax = counterMax;
+    }
+
+    @Override
+    public int structuralHashCode() {
+      int hash = getClass().getName().hashCode();
+      hash = 31 * hash + (base != null ? base.positionCount : 0);
+      hash = 31 * hash + counterMin;
+      hash = 31 * hash + counterMax;
       return hash;
     }
   }

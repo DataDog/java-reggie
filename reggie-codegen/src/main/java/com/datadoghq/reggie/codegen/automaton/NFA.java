@@ -53,6 +53,17 @@ public final class NFA {
   }
 
   /**
+   * Returns the number of atomic groups in this NFA (i.e. the count of distinct atomicEntry ids).
+   */
+  public int getAtomicGroupCount() {
+    int max = -1;
+    for (NFAState s : states) {
+      if (s.atomicEntry > max) max = s.atomicEntry;
+    }
+    return max + 1;
+  }
+
+  /**
    * Check if this NFA contains a multiline start anchor (^ in multiline mode).
    *
    * @return true if any state has START_MULTILINE anchor
@@ -376,6 +387,11 @@ public final class NFA {
     // For capturing groups
     public Integer enterGroup = null; // entering group N
     public Integer exitGroup = null; // exiting group N
+
+    // For atomic groups: atomicEntry >= 0 on the entry state of atomic group N;
+    // atomicExit >= 0 on the exit state of atomic group N (same N pairs entry/exit).
+    public int atomicEntry = -1;
+    public int atomicExit = -1;
 
     // For backreferences
     public Integer backrefCheck = null; // check backreference N

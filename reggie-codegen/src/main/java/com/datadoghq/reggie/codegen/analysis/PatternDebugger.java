@@ -99,6 +99,19 @@ public class PatternDebugger {
       case OPTIMIZED_NFA:
         System.out.println("Fallback to NFA simulation");
         break;
+
+      case COUNTING_GLUSHKOV:
+        if (result.patternInfo instanceof PatternAnalyzer.CountingGlushkovInfo cgInfo) {
+          System.out.println(
+              "Counting Glushkov — positions: "
+                  + cgInfo.base.positionCount
+                  + ", bounds=["
+                  + cgInfo.counterMin
+                  + ","
+                  + cgInfo.counterMax
+                  + "]");
+        }
+        break;
     }
   }
 }

@@ -169,10 +169,22 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(a|b|c|d|e|f|g)(h|i|j|k|l|m)(n|o|p|q|r)(s|t|u|v)",
             List.of("ahns", "x bios y", "aaaa", "", "ahnsé")));
-    // (?:abc){100} now routes to SPECIALIZED_FIXED_SEQUENCE (literal repeat expansion).
-    // Use a char-class repeat to keep a genuine DFA_TABLE representative.
+    // (?:[a-z][0-9]){150} is now intercepted by COUNTING_GLUSHKOV before DFA construction.
+    // Use a leading literal to prevent extractSingleQuantifier from matching, so the pattern
+    // falls through to DFA construction (302 states → DFA_TABLE).
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_TABLE,
+        new Spec(
+            "x(?:[a-z][0-9]){150}",
+            List.of(
+                "x" + "a0".repeat(150),
+                "xx" + "a0".repeat(150) + "y",
+                "x" + "a0".repeat(149),
+                "",
+                "xa0é")));
+    // (?:[a-z][0-9]){150}: top-level bounded repeat with group-free body → COUNTING_GLUSHKOV.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
         new Spec(
             "(?:[a-z][0-9]){150}",
             List.of("a0".repeat(150), "x" + "a0".repeat(150) + "y", "a0".repeat(149), "", "a0é")));
@@ -190,11 +202,18 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
         new Spec("(a+|b)+c", List.of("abc", "xabcy", "xyz", "", "abcé")));
+    // The leading literal 'x' prevents COUNTING_GLUSHKOV interception so this routes to LAZY_DFA.
+    // The embedded input uses "y" prefix so findFrom's DEAD-restart doesn't skip the match start.
     m.put(
         PatternAnalyzer.MatchingStrategy.LAZY_DFA,
         new Spec(
-            "(?:a+b+|b+a+){75}",
-            List.of("ab".repeat(75), "x" + "ab".repeat(75) + "y", "ab", "", "abé")));
+            "x(?:a+b+|b+a+){75}",
+            List.of(
+                "x" + "ab".repeat(75),
+                "y" + "x" + "ab".repeat(75) + "z",
+                "x" + "ab".repeat(74),
+                "",
+                "xabé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
         new Spec("(a|b)c\\1", List.of("aca", "x bcb y", "acb", "", "acaé")));

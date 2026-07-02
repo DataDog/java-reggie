@@ -15,14 +15,21 @@
  */
 package com.datadoghq.reggie.codegen.ast;
 
-/** Represents quantifiers like *, +, ?, {n}, {n,m}. */
+/**
+ * Represents quantifiers like *, +, ?, {n}, {n,m}. Possessive quantifiers ({@code X*+}, {@code
+ * X++}, etc.) have {@code possessive=true}.
+ */
 public final class QuantifierNode implements RegexNode {
 
   public final RegexNode child;
   public final int min;
   public final int max; // -1 for unlimited
   public final boolean greedy;
-  public final boolean possessive;
+  public final boolean possessive; // true for possessive quantifiers (X*+, X++, etc.)
+
+  public QuantifierNode(RegexNode child, int min, int max, boolean greedy) {
+    this(child, min, max, greedy, false);
+  }
 
   public QuantifierNode(RegexNode child, int min, int max, boolean greedy, boolean possessive) {
     this.child = child;
@@ -30,10 +37,6 @@ public final class QuantifierNode implements RegexNode {
     this.max = max;
     this.greedy = greedy;
     this.possessive = possessive;
-  }
-
-  public QuantifierNode(RegexNode child, int min, int max, boolean greedy) {
-    this(child, min, max, greedy, false);
   }
 
   @Override

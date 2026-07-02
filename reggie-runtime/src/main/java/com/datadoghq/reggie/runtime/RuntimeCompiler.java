@@ -46,6 +46,7 @@ import com.datadoghq.reggie.codegen.codegen.BitParallelGlushkovBytecodeGenerator
 import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatGreedyGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatQuantifiedGroupsBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.CountingGlushkovBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
@@ -1084,6 +1085,25 @@ public class RuntimeCompiler {
         glushkovGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         glushkovGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         glushkovGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case COUNTING_GLUSHKOV:
+        PatternAnalyzer.CountingGlushkovInfo cgInfo =
+            (PatternAnalyzer.CountingGlushkovInfo) result.patternInfo;
+        CountingGlushkovBytecodeGenerator cgGen =
+            new CountingGlushkovBytecodeGenerator(
+                cgInfo.base, cgInfo.counterMin, cgInfo.counterMax);
+        cgGen.generateStaticData(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        cgGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case FIXED_REPETITION_BACKREF:
