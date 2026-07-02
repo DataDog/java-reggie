@@ -103,23 +103,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Accept-state mask for O(1) accept check.
   private final boolean[] isAccept;
 
-  // Atomic group tracking: for each atomic group id N,
-  //  atomicEnteredInClosure[N] = true when atomicEntry(N) was processed in the current epsilon
-  //    closure — used to distinguish "zero-char skip" exits from "post-char" exits.
-  //  atomicHasGreedyChar[N] = true when a char-consuming state (inside group N) has a transition
-  //    that matches the current input character — used to block zero-char skip atomicExit paths.
-  //  atomicGroupStates[N] = array of state ids inside atomic group N (reachable from atomicEntry(N)
-  //    without crossing any atomicExit(N)) — used to detect whether the group is still running
-  //    (i.e., any inside state is in nlist) when an atomicExit_consume is encountered in nlist.
-  // Parallel arrays for nlist (addThreadToNlist):
-  //  atomicEnteredInNlistClosure[N] and atomicHasGreedyCharNlist[N].
-  private final int atomicGroupCount;
-  private final boolean[] atomicEnteredInClosure;
-  private final boolean[] atomicHasGreedyChar;
-  private final boolean[] atomicEnteredInNlistClosure;
-  private final boolean[] atomicHasGreedyCharNlist;
-  private final int[][] atomicGroupStates; // atomicGroupStates[N] = inside-state ids for group N
-
   // For each GroupExit state (indexed by state id): true when the group body can produce an
   // empty match (i.e. there is an epsilon-only path from the corresponding GroupEntry to this
   // GroupExit). Used by the trailing-empty-iteration rebind to avoid propagating captures when
@@ -193,14 +176,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       statesById[s.id] = s;
     }
     mergeScratch = new int[stateCount];
-
-    // Initialize atomic group tracking arrays.
-    atomicGroupCount = nfa.getAtomicGroupCount();
-    atomicEnteredInClosure = new boolean[Math.max(1, atomicGroupCount)];
-    atomicHasGreedyChar = new boolean[Math.max(1, atomicGroupCount)];
-    atomicEnteredInNlistClosure = new boolean[Math.max(1, atomicGroupCount)];
-    atomicHasGreedyCharNlist = new boolean[Math.max(1, atomicGroupCount)];
-    atomicGroupStates = computeAtomicGroupStates(nfa, atomicGroupCount);
 
     // Precompute groupBodyNullable: for each GroupExit state, determine whether there is
     // an epsilon-only path from its matching GroupEntry to that GroupExit.
@@ -302,9 +277,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * independent lazy DFA cannot model.
    */
   private static boolean findDfaEligible(NFA nfa) {
-    // Atomic groups require the full PikeVM simulation (the DFA cannot enforce the
-    // no-backtracking commitment). Decline the DFA fast path for any NFA with atomic groups.
-    if (nfa.getAtomicGroupCount() > 0) return false;
     boolean hasStartAnchor = false;
     for (NFA.NFAState s : nfa.getStates()) {
       if (s.assertionType != null || s.backrefCheck != null) return false;
@@ -822,11 +794,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * unrolled-quantifier consuming threads (e.g. {@code a copy3} in {@code (^a?){3}}) that arrived
    * via anchor firings interleaved with quantifier skips, distinguishing them from direct-sequence
    * anchored paths (e.g. {@code \A{3}a} where anchorFollowedBySkip remains false).
-   *
-   * <p>{@code currentAtomicId} is {@code -1} when outside any atomic group; it is set to {@code N}
-   * when the DFS path passed through an {@code atomicEntry(N)} state and has not yet exited the
-   * group. Used to set {@link #atomicHasGreedyChar}{@code [N]} when a char-consuming leaf is added
-   * inside the group, enabling the zero-char-skip-path blocking at {@code atomicExit(N)}.
    */
   private void addThread(
       NFA.NFAState state,
@@ -848,14 +815,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
         anchorFollowedBySkip,
         input,
         regionStart,
-        regionEnd,
-        -1);
+        regionEnd);
   }
 
   /**
    * Core addThread with atomic group tracking. {@code atomicPos[G]} holds the input position at
-   * which atomic group G was entered (-1 if not inside G). {@code currentAtomicId} is -1 when
-   * outside any atomic group, or the id N when the DFS path is inside atomic group N.
+   * which atomic group G was entered (-1 if not inside G).
    */
   private void addThread(
       NFA.NFAState state,
@@ -867,58 +832,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
       boolean anchorFollowedBySkip,
       String input,
       int regionStart,
-      int regionEnd,
-      int currentAtomicId) {
+      int regionEnd) {
     if (inClist[state.id]) return;
-
-    // Atomic group entry: mark this group as entered in the current closure and descend with
-    // currentAtomicId set to N so that char-consuming leaves inside the group set
-    // atomicHasGreedyChar.
-    if (atomicGroupCount > 0 && state.atomicEntry >= 0) {
-      int N = state.atomicEntry;
-      atomicEnteredInClosure[N] = true;
-      inClist[state.id] = true;
-      for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThread(
-            next,
-            captures,
-            atomicPos,
-            pos,
-            depth,
-            anchorCount,
-            anchorFollowedBySkip,
-            input,
-            regionStart,
-            regionEnd,
-            N);
-      }
-      return;
-    }
-
-    // Atomic group exit: block zero-char skip path if the group entered in this closure has a
-    // greedy char path; otherwise allow and continue with currentAtomicId cleared.
-    if (atomicGroupCount > 0 && state.atomicExit >= 0) {
-      int N = state.atomicExit;
-      if (atomicEnteredInClosure[N] && atomicHasGreedyChar[N]) {
-        return; // block zero-char skip path through atomic group
-      }
-      inClist[state.id] = true;
-      for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThread(
-            next,
-            captures,
-            atomicPos,
-            pos,
-            depth,
-            anchorCount,
-            anchorFollowedBySkip,
-            input,
-            regionStart,
-            regionEnd,
-            -1);
-      }
-      return;
-    }
 
     if (state.anchor != null) {
       if (!checkAnchor(state.anchor, input, pos, regionStart, regionEnd)) return;
@@ -935,8 +850,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
             anchorFollowedBySkip,
             input,
             regionStart,
-            regionEnd,
-            currentAtomicId);
+            regionEnd);
       }
       return;
     }
@@ -986,8 +900,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
             childAnchorFollowedBySkip,
             input,
             regionStart,
-            regionEnd,
-            currentAtomicId);
+            regionEnd);
         if (willUpdateGroupEntry) {
           int scratchIdx = Math.min(depth + 2, scratchCaptures.length - 1);
           passedCaptures = scratchCaptures[scratchIdx];
@@ -998,20 +911,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
     // Leaf: has character transitions or is an accept state.
     inClist[state.id] = true;
-    // If inside an atomic group, check whether this leaf can actually consume a character at
-    // the current position. Setting atomicHasGreedyChar[N] means "a greedy char path CAN fire
-    // here" — only true when at least one of the leaf's char-transitions matches input[pos].
-    // This distinction is necessary for bodies like `a*` at a position where no 'a' follows:
-    // in that case the greedy path cannot fire, so the zero-char skip exit must NOT be blocked.
-    if (currentAtomicId >= 0 && pos < input.length()) {
-      char curChar = input.charAt(pos);
-      for (NFA.Transition tr : state.getTransitions()) {
-        if (tr.chars.contains(curChar)) {
-          atomicHasGreedyChar[currentAtomicId] = true;
-          break;
-        }
-      }
-    }
     clistIds[clistSize] = state.id;
     System.arraycopy(ownCaptures, 0, clistCaptures[clistSize], 0, ownCaptures.length);
     if (atomicGroupCount > 0) {
@@ -1039,69 +938,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
       String input,
       int regionStart,
       int regionEnd) {
-    addThreadToNlist(state, captures, pos, depth, input, regionStart, regionEnd, -1);
-  }
-
-  private void addThreadToNlist(
-      NFA.NFAState state,
-      int[] captures,
-      int pos,
-      int depth,
-      String input,
-      int regionStart,
-      int regionEnd,
-      int currentAtomicId) {
     if (inNlist[state.id]) return;
-
-    // Atomic group entry: mark and descend with currentAtomicId = N.
-    if (atomicGroupCount > 0 && state.atomicEntry >= 0) {
-      int N = state.atomicEntry;
-      atomicEnteredInNlistClosure[N] = true;
-      inNlist[state.id] = true;
-      for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThreadToNlist(next, captures, pos, depth, input, regionStart, regionEnd, N);
-      }
-      return;
-    }
-
-    // Atomic group exit: two blocking conditions:
-    // (a) zero-char skip: atomicEntry(N) was processed in this nlist closure AND the body can
-    //     match the current char — block the skip path so the body commits to chars.
-    // (b) premature consume exit: a state inside group N is in nlist AND can actually match
-    //     input[pos] (i.e., the loop path is alive and will consume more chars). Block this
-    //     shorter-match exit; when the loop dies (no matching char), the exit is allowed.
-    if (atomicGroupCount > 0 && state.atomicExit >= 0) {
-      int N = state.atomicExit;
-      if (atomicEnteredInNlistClosure[N] && atomicHasGreedyCharNlist[N]) {
-        return; // (a) zero-char skip blocked
-      }
-      // (b) block if any inside-group state is in nlist AND can still match at pos.
-      if (atomicGroupStates.length > N && pos < input.length()) {
-        char curChar = input.charAt(pos);
-        for (int insideId : atomicGroupStates[N]) {
-          if (inNlist[insideId]) {
-            // Check if this inside-state can consume curChar (i.e., loop path is viable).
-            for (NFA.Transition tr : statesById[insideId].getTransitions()) {
-              if (tr.chars.contains(curChar)) {
-                return; // premature exit: loop path can still consume
-              }
-            }
-          }
-        }
-      }
-      inNlist[state.id] = true;
-      for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThreadToNlist(next, captures, pos, depth, input, regionStart, regionEnd, -1);
-      }
-      return;
-    }
 
     if (state.anchor != null) {
       if (!checkAnchor(state.anchor, input, pos, regionStart, regionEnd)) return;
       inNlist[state.id] = true;
       for (NFA.NFAState next : state.getEpsilonTransitions()) {
-        addThreadToNlist(
-            next, captures, pos, depth, input, regionStart, regionEnd, currentAtomicId);
+        addThreadToNlist(next, captures, atomicPos, pos, depth, input, regionStart, regionEnd);
       }
       return;
     }
@@ -1126,7 +969,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
                 && next.enterGroup != null
                 && !inNlist[next.id];
         addThreadToNlist(
-            next, passedCaptures, pos, depth + 1, input, regionStart, regionEnd, currentAtomicId);
+            next, passedCaptures, passedAtomicPos, pos, depth + 1, input, regionStart, regionEnd);
         if (willUpdateGroupEntry) {
           int scratchIdx = Math.min(depth + 2, scratchCaptures.length - 1);
           passedCaptures = scratchCaptures[scratchIdx];
@@ -1136,16 +979,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     inNlist[state.id] = true;
-    // If inside an atomic group, check whether this leaf can actually consume at pos.
-    if (currentAtomicId >= 0 && pos < input.length()) {
-      char curChar = input.charAt(pos);
-      for (NFA.Transition tr : state.getTransitions()) {
-        if (tr.chars.contains(curChar)) {
-          atomicHasGreedyCharNlist[currentAtomicId] = true;
-          break;
-        }
-      }
-    }
     int k = nlistSize;
     nlistIds[k] = state.id;
     System.arraycopy(ownCaptures, 0, nlistCaptures[k], 0, ownCaptures.length);
@@ -1360,10 +1193,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
     Arrays.fill(clistViaMultipleAnchors, false);
     clistSize = 0;
     clistFirstAccept = -1;
-    if (atomicGroupCount > 0) {
-      Arrays.fill(atomicEnteredInClosure, false);
-      Arrays.fill(atomicHasGreedyChar, false);
-    }
   }
 
   /**
@@ -1425,10 +1254,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
     nlistSize = 0;
     // nlistAlive slots are reset to true as each new slot is committed in addThreadToNlist;
     // no explicit reset of all slots is needed since we only read slots 0..nlistSize-1.
-    if (atomicGroupCount > 0) {
-      Arrays.fill(atomicEnteredInNlistClosure, false);
-      Arrays.fill(atomicHasGreedyCharNlist, false);
-    }
   }
 
   private void swapLists() {
@@ -1436,10 +1261,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // Full reset of clist guards then re-set from nlist (skipping dead atomic-pruned slots).
     Arrays.fill(inClist, false);
     clistFirstAccept = -1;
-    if (atomicGroupCount > 0) {
-      Arrays.fill(atomicEnteredInClosure, false);
-      Arrays.fill(atomicHasGreedyChar, false);
-    }
     int write = 0;
     for (int i = 0; i < nlistSize; i++) {
       if (atomicGroupCount > 0 && !nlistAlive[i]) {
@@ -1488,76 +1309,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * requires character consumption (e.g. {@code (.)+} has a non-nullable body; propagation must not
    * fire there even though the GroupExit → GroupEntry loop-back epsilon exists).
    */
-  /**
-   * For each atomic group N, compute the set of NFA state ids that lie strictly INSIDE the group
-   * (reachable from the atomicEntry(N) state via epsilon/character transitions without crossing any
-   * atomicExit(N) state). These are the states whose presence in nlist signals that the group is
-   * still "running" — used to block premature exits via atomicExit_consume when the group body has
-   * not yet committed to its maximal match.
-   */
-  private static int[][] computeAtomicGroupStates(NFA nfa, int atomicGroupCount) {
-    if (atomicGroupCount == 0) return new int[0][];
-    List<NFA.NFAState> states = nfa.getStates();
-    int n = states.size();
-    NFA.NFAState[] byId = new NFA.NFAState[n];
-    for (NFA.NFAState s : states) byId[s.id] = s;
-
-    int[][] result = new int[atomicGroupCount][];
-    boolean[] visited = new boolean[n];
-    int[] stack = new int[n];
-    int[] buf = new int[n];
-
-    for (int gid = 0; gid < atomicGroupCount; gid++) {
-      // Find the atomicEntry state for group gid.
-      NFA.NFAState entryState = null;
-      for (NFA.NFAState s : states) {
-        if (s.atomicEntry == gid) {
-          entryState = s;
-          break;
-        }
-      }
-      if (entryState == null) {
-        result[gid] = new int[0];
-        continue;
-      }
-
-      // BFS/DFS: collect states reachable from entryState via any (epsilon or char) transition,
-      // stopping at and excluding any atomicExit(gid) state. The entryState itself is excluded
-      // (it is the boundary, not "inside").
-      Arrays.fill(visited, false);
-      int top = 0;
-      int bufSize = 0;
-      // Seed: follow entryState's epsilon transitions (the entry state itself is the boundary).
-      visited[entryState.id] = true;
-      for (NFA.NFAState next : entryState.getEpsilonTransitions()) {
-        if (!visited[next.id]) {
-          visited[next.id] = true;
-          stack[top++] = next.id;
-        }
-      }
-      while (top > 0) {
-        NFA.NFAState cur = byId[stack[--top]];
-        if (cur.atomicExit == gid) continue; // boundary: do not include, do not traverse further
-        buf[bufSize++] = cur.id;
-        for (NFA.NFAState next : cur.getEpsilonTransitions()) {
-          if (!visited[next.id]) {
-            visited[next.id] = true;
-            stack[top++] = next.id;
-          }
-        }
-        for (NFA.Transition tr : cur.getTransitions()) {
-          NFA.NFAState next = tr.target;
-          if (!visited[next.id]) {
-            visited[next.id] = true;
-            stack[top++] = next.id;
-          }
-        }
-      }
-      result[gid] = Arrays.copyOf(buf, bufSize);
-    }
-    return result;
-  }
-
   private static boolean[] computeGroupBodyNullable(NFA nfa) {
     List<NFA.NFAState> states = nfa.getStates();
     int n = states.size();
