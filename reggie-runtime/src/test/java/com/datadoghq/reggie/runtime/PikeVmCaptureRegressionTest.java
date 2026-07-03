@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -143,5 +144,204 @@ public class PikeVmCaptureRegressionTest {
   void control_anchorAtStart() throws Exception {
     assertAgrees("^a", "a");
     assertAgrees("^a", "ba");
+  }
+
+  // ---- Lazy quantifier PIKEVM_CAPTURE correctness ----
+
+  @Test
+  void lazyShortestMatch_star() throws Exception {
+    // a.*?b must stop at the first 'b', not consume the whole string
+    assertRoute("a.*?b", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    String pattern = "a.*?b";
+    String input = "axxbxxb";
+    Pattern jdk = Pattern.compile(pattern);
+    Matcher jm = jdk.matcher(input);
+    assertTrue(jm.find(), "JDK must find a match");
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    MatchResult r = reggie.findMatch(input);
+    assertNotEquals(null, r, "Reggie must find a match in \"" + input + "\"");
+    assertEquals(
+        List.of(jm.start(), jm.end()),
+        List.of(r.start(), r.end()),
+        "lazy a.*?b on \"" + input + "\" must stop at first b");
+  }
+
+  @Test
+  void lazyShortestMatch_plus() throws Exception {
+    // <.+?> must stop at the first '>'
+    assertRoute("<.+?>", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    String pattern = "<.+?>";
+    String input = "<a><b>";
+    Pattern jdk = Pattern.compile(pattern);
+    Matcher jm = jdk.matcher(input);
+    assertTrue(jm.find(), "JDK must find a match");
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    MatchResult r = reggie.findMatch(input);
+    assertNotEquals(null, r, "Reggie must find a match in \"" + input + "\"");
+    assertEquals(
+        List.of(jm.start(), jm.end()),
+        List.of(r.start(), r.end()),
+        "lazy <.+?> on \"" + input + "\" must stop at first >");
+  }
+
+  @Test
+  void lazyCountedQuantifier() throws Exception {
+    // a{2,5}? on "aaaaa" — find() must return a match of length 2 (minimum)
+    assertRoute("a{2,5}?", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    String pattern = "a{2,5}?";
+    Pattern jdk = Pattern.compile(pattern);
+
+    assertTrue(Reggie.compile(pattern).matches("aa"), "a{2,5}? matches \"aa\"");
+    assertTrue(Reggie.compile(pattern).matches("aaa"), "a{2,5}? matches \"aaa\"");
+
+    String input = "aaaaa";
+    Matcher jm = jdk.matcher(input);
+    assertTrue(jm.find());
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    MatchResult r = reggie.findMatch(input);
+    assertNotEquals(null, r, "Reggie must find a match");
+    assertEquals(
+        List.of(jm.start(), jm.end()),
+        List.of(r.start(), r.end()),
+        "a{2,5}? on \"aaaaa\" must match minimum (2 chars)");
+  }
+
+  @Test
+  void lazyGreedyOverlapGiveBack() throws Exception {
+    assertRoute("(a*?)(\\d+)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertGroupsAgree("(a*?)(\\d+)", "aaa123");
+    assertGroupsAgree("(a+?)(a+)", "aaa");
+  }
+
+  @Test
+  void lazyShortestMatch_star_onSelf() throws Exception {
+    // a*?a on "baaa": lazy star must prefer the shortest match (at position 1, matching one 'a'),
+    // not consume all 'a's greedily.  This would fail if ThompsonBuilder emits greedy epsilon
+    // order.
+    assertRoute("a*?a", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    String pattern = "a*?a";
+    String input = "baaa";
+    Pattern jdk = Pattern.compile(pattern);
+    Matcher jm = jdk.matcher(input);
+    assertTrue(jm.find(), "JDK must find a match");
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    MatchResult r = reggie.findMatch(input);
+    assertNotEquals(null, r, "Reggie must find a match in \"" + input + "\"");
+    assertEquals(
+        List.of(jm.start(), jm.end()),
+        List.of(r.start(), r.end()),
+        "lazy a*?a on \"" + input + "\" must match shortest (1 char) against JDK");
+  }
+
+  @Test
+  void lazyGroupSpan_minimalFirstGroup() throws Exception {
+    // (\\w*?)(\\w+) on "abc": lazy first group must be minimal (empty), second captures all.
+    // This would fail if ThompsonBuilder emits greedy epsilon order for the lazy quantifier.
+    assertRoute("(\\w*?)(\\w+)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertGroupsAgree("(\\w*?)(\\w+)", "abc");
+  }
+
+  @Test
+  void lazyAlternationInteraction() throws Exception {
+    assertGroupsAgree("(a*?|b)", "b");
+    assertGroupsAgree("(a+?|b)", "b");
+    assertGroupsAgree("(a*?|a+)", "aaa");
+    // find() variant: verify lazy star does not over-consume in alternation with find() semantics.
+    // On "bbb", (a*?|b) lazy must prefer the zero-width 'a*?' at positions where both branches
+    // could match; result should agree with JDK.
+    assertAgrees("(a*?|b)", "bbb");
+  }
+
+  @Test
+  void lazyZeroWidthFindAdvancement() throws Exception {
+    // a*? on "aaa": repeated find() must produce zero-width matches at every position,
+    // matching JDK Matcher.find() positions [0,0], [1,1], [2,2], [3,3], then no match.
+    assertRoute("a*?", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    String pattern = "a*?";
+    String input = "aaa";
+    Pattern jdk = Pattern.compile(pattern);
+    Matcher jm = jdk.matcher(input);
+    ReggieMatcher reggie = Reggie.compile(pattern);
+
+    int pos = 0;
+    while (jm.find()) {
+      MatchResult r = reggie.findMatchFrom(input, pos);
+      assertNotEquals(null, r, "Reggie must find match at pos " + pos);
+      assertEquals(
+          List.of(jm.start(), jm.end()),
+          List.of(r.start(), r.end()),
+          "a*? find() position mismatch at step starting from pos=" + pos);
+      // Advance past zero-width match to avoid infinite loop, same as JDK semantics
+      pos = r.end() == pos ? pos + 1 : r.end();
+    }
+    // After all JDK matches exhausted, Reggie must also find no further match
+    MatchResult noMore = reggie.findMatchFrom(input, pos);
+    assertEquals(
+        null, noMore, "Reggie must not find match after all JDK matches exhausted at pos=" + pos);
+
+    // a*?b on "aaab": non-zero-width lazy star must advance through input and match [0,4].
+    // This exercises a different code path from pure zero-width matching above.
+    assertRoute("a*?b", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    String pattern2 = "a*?b";
+    String input2 = "aaab";
+    Pattern jdk2 = Pattern.compile(pattern2);
+    Matcher jm2 = jdk2.matcher(input2);
+    assertTrue(jm2.find(), "JDK must find a match for a*?b on \"" + input2 + "\"");
+    ReggieMatcher reggie2 = Reggie.compile(pattern2);
+    MatchResult r2 = reggie2.findMatch(input2);
+    assertNotEquals(null, r2, "Reggie must find a match for a*?b on \"" + input2 + "\"");
+    assertEquals(
+        List.of(jm2.start(), jm2.end()),
+        List.of(r2.start(), r2.end()),
+        "a*?b on \"" + input2 + "\" must match [0,4] (cross-checked against JDK)");
+  }
+
+  @Test
+  void nullableBodyLazyMin1() throws Exception {
+    // (a?)+? on "aaa": nullable capturing group under lazy repeatable quantifier. B16 guard routes
+    // this to JDK fallback (same as greedy equivalent), so fallback must be allowed.
+    ReggieOptions opts = ReggieOptions.builder().allowJdkFallback().build();
+    Pattern jdk = Pattern.compile("(a?)+?");
+    ReggieMatcher reggie = Reggie.compile("(a?)+?", opts);
+    String input = "aaa";
+    java.util.regex.Matcher jm = jdk.matcher(input);
+    boolean jdkMatches = jm.matches();
+    MatchResult rm = reggie.match(input);
+    assertEquals(jdkMatches, rm != null, "match() boolean for /(a?)+?/ on \"" + input + "\"");
+    if (jdkMatches) {
+      for (int g = 0; g <= jm.groupCount(); g++) {
+        assertEquals(
+            List.of(jm.start(g), jm.end(g)),
+            List.of(rm.start(g), rm.end(g)),
+            "group " + g + " span for /(a?)+?/ on \"" + input + "\"");
+      }
+    }
+  }
+
+  @Test
+  void lazyNonCapturingGroupRepetition() throws Exception {
+    // (?:ab)*?c on "ababc": lazy non-capturing group repetition must stop at minimum iterations.
+    assertRoute("(?:ab)*?c", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertAgrees("(?:ab)*?c", "ababc");
+    assertGroupsAgree("(?:ab)*?c", "ababc");
+  }
+
+  @Test
+  void ldapPattern() throws Exception {
+    // Lazy quantifier LDAP-style pattern with named group
+    assertRoute(
+        "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)",
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    String pattern = "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)";
+    String input = "(uid=jsmith)";
+    Pattern jdk = Pattern.compile(pattern);
+    Matcher jm = jdk.matcher(input);
+    assertTrue(jm.find(), "JDK must find match in LDAP input");
+    assertEquals("jsmith", jm.group("LITERAL"), "JDK LITERAL group");
+
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    MatchResult r = reggie.findMatch(input);
+    assertNotEquals(null, r, "Reggie must find match in \"" + input + "\"");
+    assertEquals("jsmith", r.group("LITERAL"), "Reggie LITERAL group must equal JDK");
   }
 }

@@ -177,4 +177,17 @@ public class NonGreedyQuantifierTest {
     assertFalse(m.matches("a"), "Should not match 'a'");
     assertFalse(m.matches("b"), "Should not match 'b'");
   }
+
+  @Test
+  void testLazyBareCompileNoThrow() {
+    // After lazy-quantifier routing to PIKEVM_CAPTURE, bare Reggie.compile("a*?b")
+    // must not throw UnsupportedPatternException.
+    assertDoesNotThrow(
+        () -> Reggie.compile("a*?b"),
+        "Reggie.compile(\"a*?b\") must not throw after lazy quantifier routing is implemented");
+    assertDoesNotThrow(() -> Reggie.compile("a+?b"), "Reggie.compile(\"a+?b\") must not throw");
+    assertDoesNotThrow(() -> Reggie.compile("a??b"), "Reggie.compile(\"a??b\") must not throw");
+    assertDoesNotThrow(
+        () -> Reggie.compile("a{2,4}?b"), "Reggie.compile(\"a{2,4}?b\") must not throw");
+  }
 }

@@ -351,12 +351,44 @@ public class PatternAnalyzer {
       }
     }
 
+    // Patterns with lazy (non-greedy) quantifiers require PikeVM with lazy-aware NFA construction
+    // to produce shortest-match semantics. This block must run BEFORE requiresRecursiveDescentFlag
+    // so that safe lazy patterns are intercepted here and do not fall through to RECURSIVE_DESCENT.
+    // Guards:
+    //  - !hasBackrefs: backref routing below handles these correctly
+    //  - !hasLookaround: PikeVM traverses assertions as transparent epsilons (wrong for
+    //    lookahead/lookbehind)
+    //  - !hasPossessiveQuantifiers: possessive/atomic handled by hasAtomicGroups check below
+    //  - !hasSubroutines/!hasConditionals/!hasBranchReset: requiresRecursiveDescentFlag below
+    //  - !hasCapturingGroupWithNullableBodyInRepeatableQuantifier: PikeVM merges threads at the
+    //    same state across quantifier iterations; nullable-body groups under repeatable quantifiers
+    //    produce wrong last-iteration spans (generalisation of B16)
+    if (hasNonGreedyQuantifiers(ast)
+        && !hasBackrefs
+        && !hasLookaround(ast)
+        && !hasPossessiveQuantifiers(ast)
+        && !hasSubroutines(ast)
+        && !hasConditionals(ast)
+        && !hasBranchReset(ast)
+        && !FallbackPatternDetector.hasCapturingGroupWithNullableBodyInRepeatableQuantifier(ast)) {
+      addTrace("lazyQuantifierPikeVm", true);
+      MatchingStrategyResult lazyResult =
+          new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+      lazyResult.lazyNfa = true;
+      return lazyResult;
+    }
+
+    // Lazy patterns that did not qualify above (e.g. capturing group with nullable body under a
+    // repeated quantifier) fall through here. The hasNonGreedyQuantifiers condition in
+    // requiresRecursiveDescentFlag routes them to RECURSIVE_DESCENT, which then falls back to
+    // JDK via the lazy-quantifier guard in FallbackPatternDetector.
     boolean requiresRecursiveDescentFlag =
         hasSubroutines(ast)
             || hasConditionals(ast)
             || hasBranchReset(ast)
-            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs)
-            || hasQuantifiedBackrefs;
+            || hasQuantifiedBackrefs
+            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs);
     addTrace("requiresRecursiveDescent", requiresRecursiveDescentFlag);
     if (requiresRecursiveDescentFlag) {
       return new MatchingStrategyResult(
@@ -2133,6 +2165,11 @@ public class PatternAnalyzer {
     return node.accept(detector);
   }
 
+  private boolean hasPossessiveQuantifiers(RegexNode node) {
+    PossessiveQuantifierDetector detector = new PossessiveQuantifierDetector();
+    return node.accept(detector);
+  }
+
   /**
    * Check if pattern has start or end anchors (^, $). Word boundaries (\b) are not considered
    * anchors for this check.
@@ -3102,6 +3139,13 @@ public class PatternAnalyzer {
      * collide in the bytecode cache.
      */
     public boolean hasAtomicGroups;
+
+    /**
+     * True when the NFA must be built with {@code ThompsonBuilder(lazyAware=true)} to produce
+     * shortest-match (lazy) quantifier semantics. Set when the lazy-quantifier routing block
+     * selects {@link MatchingStrategy#PIKEVM_CAPTURE}.
+     */
+    public boolean lazyNfa;
 
     /** Per-guard routing trace populated by {@link PatternAnalyzer#analyzeAndRecommend}. */
     public final List<String> guardTrace = new ArrayList<>();
@@ -5193,8 +5237,12 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitQuantifier(QuantifierNode node) {
-      // Check if this quantifier is non-greedy
-      if (!node.greedy) {
+      // Check if this quantifier is non-greedy (possessive quantifiers are not lazy).
+      // Note: node.possessive is always false in parsed patterns — the parser converts X*+/X++/
+      // X?+/X{n,m}+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode rather than setting
+      // node.possessive=true. The !node.possessive guard is therefore purely defensive for
+      // hypothetical future parser changes and does not change current behavior.
+      if (!node.greedy && !node.possessive) {
         return true; // Found non-greedy quantifier!
       }
       return node.child.accept(this);
@@ -5218,6 +5266,90 @@ public class PatternAnalyzer {
     @Override
     public Boolean visitAssertion(AssertionNode node) {
       return node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      boolean hasThen = node.thenBranch.accept(this);
+      boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
+      return hasThen || hasElse;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+  }
+
+  /** Visitor to detect possessive quantifiers (X*+, X++, X?+, etc.) in AST. */
+  private static class PossessiveQuantifierDetector implements RegexVisitor<Boolean> {
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      return node.children.stream().anyMatch(child -> child.accept(this));
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      // Note: node.possessive is always false in parsed patterns. The parser converts X*+/X++/
+      // X?+/X{n,m}+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode rather than setting
+      // node.possessive=true. This check is therefore currently dead code, but is kept as a
+      // defensive guard for hypothetical future parser changes. visitGroup() also checks
+      // node.atomic for the current parser representation; both together make this detector
+      // redundant-safe regardless of whether the parser encodes possessives via node.possessive or
+      // GroupNode(atomic=true).
+      if (node.possessive) {
+        return true;
+      }
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      // Also return true for atomic groups (GroupNode.atomic == true), since the parser converts
+      // X*+/X++/X?+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode. This makes the
+      // detector redundant-safe: even if a future caller skips the hasAtomicGroups() check, the
+      // possessive/atomic construct is still caught here.
+      if (node.atomic) {
+        return true;
+      }
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      // node.subPattern is always non-null by design (final field set in constructor), but guard
+      // defensively for consistency with AtomicGroupDetector.visitAssertion.
+      return node.subPattern != null && node.subPattern.accept(this);
     }
 
     @Override
@@ -5997,6 +6129,9 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitQuantifier(QuantifierNode n) {
+      if (n.possessive) {
+        return true; // Possessive quantifiers require atomic-group commit semantics
+      }
       return n.child.accept(this);
     }
 

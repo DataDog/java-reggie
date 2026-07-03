@@ -291,14 +291,16 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testRecursiveDescentNonGreedy() throws Exception {
+    // \d+? has no backrefs/lookaround/possessives — routes to PIKEVM_CAPTURE for lazy NFA
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\d+?");
-    assertEquals(PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE, result.strategy);
   }
 
   @Test
   void testRecursiveDescentNonGreedyStar() throws Exception {
+    // .*?end has no backrefs/lookaround/possessives — routes to PIKEVM_CAPTURE for lazy NFA
     PatternAnalyzer.MatchingStrategyResult result = analyze(".*?end");
-    assertEquals(PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE, result.strategy);
   }
 
   // ── DFA_UNROLLED ────────────────────────────────────────────────────────

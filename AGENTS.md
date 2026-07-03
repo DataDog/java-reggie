@@ -746,10 +746,9 @@ This guarantee is enforced continuously in CI by two automated gates:
 
 - **Differential fuzzer** (`AlgorithmicFuzzTest.divergenceGate_enforcedViaProperty`):
   400k+ deterministic (pattern, input) pairs checked against JDK — divergences must stay within
-  the known budget (69 pre-existing divergences on adversarial inputs classified into classes A–G:
-  group-span gaps in `DFA_UNROLLED`; boolean over-matches in `OPTIMIZED_NFA_WITH_BACKREFS` and
-  `DFA_SWITCH` (\\A anchor enforcement); false negatives in `RECURSIVE_DESCENT`; and shrinker
-  artifacts that do not reproduce as minimal repros).
+  the known budget (28 pre-existing divergences on adversarial inputs: group-span gaps in
+  `DFA_UNROLLED_WITH_GROUPS` and `SPECIALIZED_CONCAT_GREEDY_GROUP`; boolean divergences in
+  `OPTIMIZED_NFA_WITH_BACKREFS`, `DFA_SWITCH` (\\A anchor), and backref/anchor-combo patterns).
   Override with `-Dreggie.fuzz.maxFindings=N`.
 - **Per-strategy correctness meta-test** (`StrategyCorrectnessMetaTest`): all 8 public
   `ReggieMatcher` methods exercised for every `MatchingStrategy` against JDK — 0 mismatches
@@ -788,6 +787,8 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | STRING_END (`\Z`/`$`) anchor inside an alternation combined with capturing group, nullable/empty branch, or broad char-class branch | `OPTIMIZED_NFA` | `string-end anchor in alternation with capturing group or nullable/empty branch: OPTIMIZED_NFA find() span or group-span tracking incorrect` |
 | Start-class anchor (`\A`/`^`) inside an alternation branch alongside a capturing group | `OPTIMIZED_NFA` | `start anchor in alternation with capturing group: OPTIMIZED_NFA group span tracking for unmatched branches incorrect` |
 | Any alternation branch is nullable (can match the empty string) | `OPTIMIZED_NFA` | `nullable alternation branch: find() first-alternative semantics incorrect for empty/nullable branch` |
+| Negated `CharClassNode` as the quantifier child inside a concat greedy group (e.g. `[1]([^b]{2})`) — generator stores un-negated charset without negation flag | `SPECIALIZED_CONCAT_GREEDY_GROUP` | `SPECIALIZED_CONCAT_GREEDY_GROUP: negated char class in group quantifier — generator passes non-negated charset without negation flag, producing wrong matches` |
+| Inner quantifier with `min > 1` inside a quantified capturing group (e.g. `(c{2}){1,}`) — per-char loop allows fewer chars than inner min requires | `SPECIALIZED_QUANTIFIED_GROUP` | `SPECIALIZED_QUANTIFIED_GROUP: inner quantifier min > 1 — per-char greedy loop cannot enforce multi-char per-iteration constraint` |
 | Recursive subroutine call inside an alternation arm (palindrome structure) | all | `recursive subroutine requires intra-call backtracking: pattern is context-free, not regular — use compileAllowingFallback() for JDK delegation` |
 
 ### `RuntimeCompiler` (analyzer-flag checks)
@@ -824,8 +825,10 @@ pattern. `Reggie.compile()` logs a one-time WARNING; `@RegexPattern` emits a `MA
   `ALLOW_JDK_FALLBACK` such patterns are a **build error** — use `Reggie.compile()` at runtime
   instead.
 
-The fallback is transparent to callers of `Reggie.compile()` — correctness is guaranteed at the
-cost of Reggie's allocation-free performance. All other patterns use the fast Reggie engine.
+`Reggie.compile()` **throws** `UnsupportedPatternException` for unsupported patterns — it does not
+silently delegate to JDK. To enable JDK delegation, call `Reggie.compileAllowingFallback()` (or
+pass `ReggieOption.ALLOW_JDK_FALLBACK`). When delegation fires, a `WARNING` log is emitted and
+JDK performance applies for that pattern; all other patterns use the fast Reggie engine.
 
 For `@RegexPattern` (compile-time path): patterns matching a fallback condition fail at build time
 with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for those patterns.

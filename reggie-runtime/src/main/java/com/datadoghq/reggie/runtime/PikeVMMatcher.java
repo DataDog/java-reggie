@@ -157,6 +157,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // PikeVMMatcher is not thread-safe; this field is safe to use as a mode flag.
   private boolean skipCaptures;
 
+  // Boolean find() fast path: true when findDfa==null but the pattern has no lookaround
+  // assertions, backrefs, or atomic groups — only positional anchors (\b, ^, $) whose context
+  // can be supplied inline during epsilon closure. When true, find() uses a lightweight
+  // boolean[stateCount] simulation instead of the full capture-tracking PikeVM loop.
+  private final boolean useBoolFind;
+  private boolean[] boolCur; // active states at the current scan position
+  private boolean[] boolNxt; // active states after consuming the current character (scratch)
+
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
     super(pattern);
@@ -271,6 +279,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
     } else {
       rejectDfa = null;
       rejectStep = null;
+    }
+
+    useBoolFind = findDfa == null && atomicGroupCount == 0 && noAssertionsOrBackrefs(nfa);
+    if (useBoolFind) {
+      boolCur = new boolean[stateCount];
+      boolNxt = new boolean[stateCount];
     }
 
     markNativeRichApi();
@@ -487,6 +501,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
       // Self-anchoring DFA: a non-negative result means the pattern matched some substring.
       return findDfa.findFrom(input, 0, findStep) >= 0;
     }
+    if (useBoolFind) {
+      return findBoolPosFrom(input, 0) >= 0;
+    }
     skipCaptures = true;
     try {
       return findFrom(input, 0) >= 0;
@@ -650,6 +667,50 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private int findStartFrom(String input, int fromPos) {
     return findPosFrom(input, fromPos);
+  }
+
+  /**
+   * Lightweight boolean find() path for patterns with positional anchors (\b, ^, $) but no
+   * lookaround assertions or backreferences. Uses two {@code boolean[stateCount]} arrays instead of
+   * the full capture-tracking clist/nlist thread lists, eliminating per-thread arraycopy overhead.
+   * Returns any non-negative value if a match exists at or after {@code fromPos}; returns -1 if no
+   * match. The exact returned value is unspecified — callers must only test {@code >= 0}.
+   */
+  private int findBoolPosFrom(String input, int fromPos) {
+    int regionEnd = input.length();
+    if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) return -1;
+    Arrays.fill(boolCur, false);
+    for (int pos = fromPos; pos <= regionEnd; pos++) {
+      boolEpsilonClose(boolCur, nfa.getStartState(), pos, input, regionEnd);
+      for (int id = 0; id < stateCount; id++) {
+        if (boolCur[id] && isAccept[id]) return pos;
+      }
+      if (pos == regionEnd) break;
+      Arrays.fill(boolNxt, false);
+      char ch = input.charAt(pos);
+      for (int id = 0; id < stateCount; id++) {
+        if (!boolCur[id]) continue;
+        for (NFA.Transition tr : statesById[id].getTransitions()) {
+          if (tr.chars.contains(ch)) {
+            boolEpsilonClose(boolNxt, tr.target, pos + 1, input, regionEnd);
+          }
+        }
+      }
+      boolean[] tmp = boolCur;
+      boolCur = boolNxt;
+      boolNxt = tmp;
+    }
+    return -1;
+  }
+
+  private void boolEpsilonClose(
+      boolean[] arr, NFA.NFAState state, int pos, String input, int regionEnd) {
+    if (arr[state.id]) return;
+    if (state.anchor != null && !checkAnchor(state.anchor, input, pos, 0, regionEnd)) return;
+    arr[state.id] = true;
+    for (NFA.NFAState next : state.getEpsilonTransitions()) {
+      boolEpsilonClose(arr, next, pos, input, regionEnd);
+    }
   }
 
   /**
@@ -967,7 +1028,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
       return;
     }
 
-    int[] ownCaptures = updateCaptures(state, captures, pos, depth);
+    int[] ownCaptures = skipCaptures ? captures : updateCaptures(state, captures, pos, depth);
     int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos);
 
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
@@ -982,7 +1043,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
         // spurious rebind when the loop body requires character consumption (e.g. `(.)+`
         // cannot empty-iterate, so the capture must not be rebound to [pos,pos)).
         boolean willUpdateGroupEntry =
-            state.exitGroup != null
+            !skipCaptures
+                && state.exitGroup != null
                 && groupBodyNullable[state.id]
                 && next.enterGroup != null
                 && !inNlist[next.id];
@@ -999,7 +1061,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
     inNlist[state.id] = true;
     int k = nlistSize;
     nlistIds[k] = state.id;
-    System.arraycopy(ownCaptures, 0, nlistCaptures[k], 0, ownCaptures.length);
+    if (!skipCaptures) {
+      System.arraycopy(ownCaptures, 0, nlistCaptures[k], 0, ownCaptures.length);
+    }
     if (atomicGroupCount > 0) {
       if (ownAtomicPos != null) {
         System.arraycopy(ownAtomicPos, 0, nlistAtomicPos[k], 0, atomicGroupCount);
@@ -1287,7 +1351,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
         continue;
       }
       clistIds[write] = nlistIds[i];
-      System.arraycopy(nlistCaptures[i], 0, clistCaptures[write], 0, len);
+      if (!skipCaptures) {
+        System.arraycopy(nlistCaptures[i], 0, clistCaptures[write], 0, len);
+      }
       if (atomicGroupCount > 0) {
         System.arraycopy(nlistAtomicPos[i], 0, clistAtomicPos[write], 0, atomicGroupCount);
       }

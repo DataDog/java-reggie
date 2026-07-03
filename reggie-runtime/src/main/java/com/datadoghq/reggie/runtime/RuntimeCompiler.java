@@ -500,7 +500,8 @@ public class RuntimeCompiler {
         if (pikeVmFallbackReason != null) {
           return fallbackOrThrow(pattern, pikeVmFallbackReason, nameMap, options);
         }
-        PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
+        NFA pikeVmNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
+        PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(pikeVmNfa, nameMap));
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -1010,6 +1011,7 @@ public class RuntimeCompiler {
         onePass.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        onePass.generateMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);

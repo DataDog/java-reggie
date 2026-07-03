@@ -101,6 +101,8 @@ public class ReggieMatcherBytecodeGenerator {
     this.resolvedStrategy = result.strategy;
 
     if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+      // Rebuild NFA with lazy-aware epsilon ordering for PikeVM correctness with lazy quantifiers.
+      nfa = new ThompsonBuilder(true).build(ast, groupCount);
       String pikeVmFallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
       if (pikeVmFallbackReason != null) {
         if (allowJdkFallback) {
@@ -160,7 +162,13 @@ public class ReggieMatcherBytecodeGenerator {
     RegexNode ast = parser.parse(pattern);
     Map<String, Integer> nameMap = parser.getGroupNameMap();
 
-    // 2. Build NFA using Thompson construction
+    // 2. Build NFA using Thompson construction (greedy, lazyAware=false).
+    // This greedy NFA is used by PatternAnalyzer for strategy detection and by DFA/NFA-based
+    // bytecode generators. It is intentionally built before strategy selection because
+    // PatternAnalyzer needs an NFA regardless of strategy. For PIKEVM_CAPTURE patterns the greedy
+    // NFA is never used for matching — the throw at line 207 exits before any code generation —
+    // but building it here is simpler than deferring construction until after
+    // analyzeAndRecommend().
     ThompsonBuilder nfaBuilder = new ThompsonBuilder();
     // Count groups in pattern for group tracking
     int groupCount = countGroups(pattern);
@@ -203,6 +211,9 @@ public class ReggieMatcherBytecodeGenerator {
               + " Reggie.compile() for runtime compilation with automatic fallback.");
     }
     if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+      // PIKEVM_CAPTURE requires a lazy-aware NFA for correct shortest-match semantics.
+      // Bytecode generation is not supported at annotation-processing time; route to runtime.
+      // (No NFA rebuild needed here — the result is discarded immediately by the throw below.)
       throw new UnsupportedOperationException(
           "Pattern '"
               + pattern
@@ -573,6 +584,7 @@ public class ReggieMatcherBytecodeGenerator {
       case ONEPASS_NFA:
         OnePassBytecodeGenerator onePass = new OnePassBytecodeGenerator(nfa);
         onePass.generateMatchesMethod(cw, getJavaClassName());
+        onePass.generateMatchFromMethod(cw, getJavaClassName());
         onePass.generateFindMethod(cw, getJavaClassName());
         onePass.generateFindFromMethod(cw, getJavaClassName());
         onePass.generateMatchMethod(cw, getJavaClassName());
