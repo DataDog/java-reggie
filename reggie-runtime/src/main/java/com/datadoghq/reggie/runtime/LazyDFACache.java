@@ -114,7 +114,10 @@ public final class LazyDFACache {
     int dfaState = 0;
     for (int pos = 0; pos < input.length(); pos++) {
       int c = input.charAt(pos);
-      int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
+      int[] table =
+          NEEDS_INT_ARRAY_ACQUIRE
+              ? (int[]) TABLES_VH.getAcquire(asciiTables, dfaState)
+              : asciiTables[dfaState];
       int next =
           (table != null && c < 128)
               ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
@@ -149,7 +152,10 @@ public final class LazyDFACache {
     int dfaState = 0;
     for (int pos = start; pos < len; pos++) {
       int c = input.charAt(pos);
-      int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
+      int[] table =
+          NEEDS_INT_ARRAY_ACQUIRE
+              ? (int[]) TABLES_VH.getAcquire(asciiTables, dfaState)
+              : asciiTables[dfaState];
       int next =
           (table != null && c < 128)
               ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
@@ -238,7 +244,10 @@ public final class LazyDFACache {
     int dfaState = 0;
     for (int pos = start; pos < end; pos++) {
       int c = input.charAt(pos);
-      int[] table = (int[]) TABLES_VH.getAcquire(asciiTables, dfaState);
+      int[] table =
+          NEEDS_INT_ARRAY_ACQUIRE
+              ? (int[]) TABLES_VH.getAcquire(asciiTables, dfaState)
+              : asciiTables[dfaState];
       int next =
           (table != null && c < 128)
               ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
