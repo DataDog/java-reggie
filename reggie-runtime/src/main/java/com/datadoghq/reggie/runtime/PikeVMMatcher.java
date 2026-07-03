@@ -116,6 +116,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // false and no position is skipped. Non-ASCII positions are conservatively never skipped (sound).
   private final boolean[] firstByteAscii;
   private final boolean prefilterUsable;
+  // When exactly one ASCII char can begin a match, String.indexOf() gives a SIMD-accelerated
+  // O(n/lane) scan that is faster than per-char DFA table reads (especially on ARM where the
+  // LazyDFACache tables need acquire-fenced reads). -1 when zero or multiple chars qualify.
+  private final int singleFirstCharAscii;
 
   // T1.4 boolean find() fast path: a SELF-ANCHORING lazy DFA. The step re-injects the start-state
   // closure on every character (an implicit ".*?" prefix), so every candidate start position is
@@ -217,6 +221,18 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // T1.2: precompute the required-first-char prefilter from the start-state epsilon closure.
     firstByteAscii = new boolean[128];
     prefilterUsable = computeFirstByteFilter(nfa, firstByteAscii);
+    int sfc = -1;
+    if (prefilterUsable) {
+      int cnt = 0;
+      for (int c = 0; c < 128; c++) {
+        if (firstByteAscii[c]) {
+          sfc = c;
+          cnt++;
+        }
+      }
+      if (cnt != 1) sfc = -1;
+    }
+    singleFirstCharAscii = sfc;
 
     // T1.4: build the self-anchoring boolean find() DFA when the pattern is anchor/assertion/
     // backref-free (those need position context the position-independent step can't supply).
@@ -495,6 +511,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
   @Override
   public boolean find(String input) {
     if (input == null) throw new NullPointerException("input");
+    // T1.2a: single-char SIMD fast-reject. For patterns whose first consuming char is unique
+    // (e.g. LDAP starts with '('), String.indexOf uses JVM-intrinsified SIMD and is faster than
+    // per-char DFA table reads (particularly the acquire-fenced reads on ARM).
+    if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii) < 0) return false;
     if (findDfa != null) {
       // Empty-matchable patterns match (the empty string) at every position, including "".
       if (findCanMatchEmpty) return true;
@@ -678,6 +698,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    */
   private int findBoolPosFrom(String input, int fromPos) {
     int regionEnd = input.length();
+    if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii, fromPos) < 0) return -1;
     if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) return -1;
     Arrays.fill(boolCur, false);
     for (int pos = fromPos; pos <= regionEnd; pos++) {
