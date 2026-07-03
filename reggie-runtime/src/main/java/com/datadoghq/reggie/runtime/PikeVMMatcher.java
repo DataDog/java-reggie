@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import java.util.Arrays;
 import java.util.Collections;
@@ -80,6 +81,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   // Reusable capture array for the winning thread result.
   private final int[] winCaptures;
+
+  // Greedy dotall-sink fast-forward: sinkGroups[stateId] is non-null when a lone thread parked at
+  // that state's epsilon closure would consume the entire remaining input and accept at regionEnd
+  // (a `(?s).*` tail with no competing consuming transition). The array holds the capturing-group
+  // ids whose end extends to regionEnd; null for every non-sink state. See computeSinkGroups().
+  private final int[][] sinkGroups;
 
   // Scratch capture arrays for DFS capture recording during addThread.
   // One per DFS depth level; bounded by stateCount.
@@ -221,6 +228,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
       this.nlistAlive = null;
       this.scratchAtomicPos = null;
     }
+
+    // Greedy dotall-sink fast-forward table (computed once; see computeSinkGroups()).
+    sinkGroups = computeSinkGroups();
 
     // T1.2: precompute the required-first-char prefilter from the start-state epsilon closure.
     firstByteAscii = new boolean[128];
@@ -919,6 +929,24 @@ public final class PikeVMMatcher extends ReggieMatcher {
           clistFirstAccept = -1;
         }
       }
+
+      // Greedy dotall-sink fast-forward: the sole surviving thread is parked on a `(?s).*` tail
+      // that
+      // will consume the rest of the input and accept at regionEnd (see computeSinkGroups). Extend
+      // the whole match and every group closing in the sink to regionEnd and finish, skipping the
+      // per-character stepping over the tail.
+      if (clistSize == 1) {
+        int[] sg = sinkGroups[clistIds[0]];
+        if (sg != null) {
+          System.arraycopy(clistCaptures[0], 0, winCaptures, 0, winCaptures.length);
+          winCaptures[1] = regionEnd;
+          for (int g : sg) {
+            if (winCaptures[2 * g] != -1) winCaptures[2 * g + 1] = regionEnd;
+          }
+          matched = true;
+          break;
+        }
+      }
       if (pos == regionEnd) break;
 
       char ch = input.charAt(pos);
@@ -1515,6 +1543,98 @@ public final class PikeVMMatcher extends ReggieMatcher {
       return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
     }
     return new MatchResultImpl(input, starts, ends, groupCount, Collections.emptyMap());
+  }
+
+  /**
+   * Precompute the greedy dotall-sink table. A state {@code L} is a sink when a lone thread parked
+   * anywhere in {@code L}'s epsilon closure {@code C} is guaranteed to consume the entire remaining
+   * input and accept at {@code regionEnd} with no competing behaviour — i.e. {@code C} is a {@code
+   * (?s).*} tail. Formally {@code C} (the epsilon closure of {@code L}) must satisfy:
+   *
+   * <ol>
+   *   <li>every consuming transition of every state in {@code C} is a full dotall set ({@code
+   *       [ -￿]}, '\n' included) whose target lies back inside {@code C}, so consuming any
+   *       character keeps the thread inside {@code C};
+   *   <li>{@code C} contains at least one such consuming transition (an actual loop);
+   *   <li>{@code C} contains an accept state (so it accepts at {@code regionEnd});
+   *   <li>{@code C} contains no anchor, assertion, backreference, or atomic-group state (their
+   *       behaviour is position/context dependent and cannot be skipped).
+   * </ol>
+   *
+   * <p>For a qualifying {@code L}, {@code sinkGroups[L]} lists the capturing-group ids whose
+   * GroupExit lies in {@code C} (their end extends to {@code regionEnd}); non-sink states map to
+   * {@code null}. Because {@code C} is epsilon-closed, requiring a consuming transition's target to
+   * be {@code inC} already implies its full epsilon closure is inside {@code C}.
+   */
+  private int[][] computeSinkGroups() {
+    int[][] result = new int[stateCount][];
+    boolean[] inC = new boolean[stateCount];
+    int[] stack = new int[stateCount];
+    for (NFA.NFAState seed : nfa.getStates()) {
+      if (seed.getTransitions().isEmpty()) continue; // must have a consuming transition to loop
+      // Epsilon closure C of seed.
+      Arrays.fill(inC, false);
+      int top = 0;
+      stack[top++] = seed.id;
+      inC[seed.id] = true;
+      while (top > 0) {
+        NFA.NFAState s = statesById[stack[--top]];
+        for (NFA.NFAState e : s.getEpsilonTransitions()) {
+          if (!inC[e.id]) {
+            inC[e.id] = true;
+            stack[top++] = e.id;
+          }
+        }
+      }
+      // Validate C and collect the group ids that close within it.
+      boolean ok = true;
+      boolean hasAccept = false;
+      boolean hasLoop = false;
+      int[] groups = new int[groupCount + 1];
+      int gn = 0;
+      for (int id = 0; id < stateCount && ok; id++) {
+        if (!inC[id]) continue;
+        NFA.NFAState s = statesById[id];
+        if (s.anchor != null
+            || s.assertionType != null
+            || s.backrefCheck != null
+            || s.atomicEntry >= 0
+            || s.atomicExit >= 0) {
+          ok = false;
+          break;
+        }
+        if (isAccept[id]) hasAccept = true;
+        if (s.exitGroup != null) {
+          int g = s.exitGroup;
+          boolean seen = false;
+          for (int i = 0; i < gn; i++) {
+            if (groups[i] == g) {
+              seen = true;
+              break;
+            }
+          }
+          if (!seen) groups[gn++] = g;
+        }
+        for (NFA.Transition tr : s.getTransitions()) {
+          if (!isDotAllCharSet(tr.chars) || !inC[tr.target.id]) {
+            ok = false;
+            break;
+          }
+          hasLoop = true;
+        }
+      }
+      if (ok && hasAccept && hasLoop) {
+        result[seed.id] = Arrays.copyOf(groups, gn);
+      }
+    }
+    return result;
+  }
+
+  /** True only for a full dotall set: the entire Unicode range including {@code '\n'}. */
+  private static boolean isDotAllCharSet(CharSet cs) {
+    // isAnyChar() is also true for any-except-newline; require '\n' membership to exclude it, since
+    // a non-dotall '.' would not consume a newline and could end the greedy match early.
+    return cs.isAnyChar() && cs.contains('\n');
   }
 
   /**
