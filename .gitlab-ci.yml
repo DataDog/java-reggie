@@ -2,6 +2,7 @@ stages:
   - build
   - publish
   - generate-signing-key
+  - benchmarks
 
 variables:
   REGISTRY: registry.ddbuild.io
@@ -111,3 +112,19 @@ create_key:
     expire_in: 13 months
     paths:
       - pubkeys
+
+# Bridge job: triggers the microbenchmarks pipeline in the Benchmarking
+# Platform's own GitLab project, on its own runners (no runner-access
+# provisioning needed on the java-reggie side).
+benchmarks-trigger:
+  stage: benchmarks
+  when: manual
+  needs: []
+  variables:
+    UPSTREAM_PROJECT_NAME: $CI_PROJECT_NAME
+    UPSTREAM_BRANCH: $CI_COMMIT_REF_NAME
+    UPSTREAM_COMMIT_SHA: $CI_COMMIT_SHA
+  trigger:
+    project: DataDog/apm-reliability/benchmarking-platform
+    branch: java-reggie
+    strategy: depend
