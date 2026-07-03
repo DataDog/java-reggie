@@ -49,10 +49,16 @@ a manually-triggered experiment before committing to per-PR automation.
 
 ## Scope decision
 
-Start with a **manually-triggered** benchmarks job (`when: manual`)
-rather than automatic per-PR benchmarking, to validate the pipeline
-end-to-end (image build, JMH invocation, JMH→CBMF analysis via
-`benchmark_analyzer`) before adding automatic triggers and a regression gate.
+Two auto-triggered tiers, split by target branch:
+- **Quick check** on any non-`main` branch (`$CI_COMMIT_BRANCH != "main"`):
+  full benchmark suite, but with reduced JMH iterations
+  (`JMH_ARGS="-wi 0 -i 1 -f 1"`) for fast feedback.
+- **Full suite** on `main` (`$CI_COMMIT_BRANCH == "main"`): normal iteration
+  counts (`JMH_ARGS="-wi 1 -i 3 -f 1"`).
+
+Both forward `JMH_ARGS` to `bp-runner.yml`, which substitutes it into the
+JMH command line (falling back to the full-suite counts if unset, e.g. for
+direct manual runs from the BP project's own UI).
 
 ## Plan
 
@@ -73,18 +79,21 @@ style still on `main`):
 - `.gitlab-ci.yml` — includes `benchmarking-platform-tools`'s
   `build-ci-images.template.yml` (manual `build-benchmark-ci-images` job,
   image tag `registry.ddbuild.io/ci/benchmarking-platform:java-reggie`), plus
-  a `benchmarks` job (`tags: ["runner:apm-k8s-tweaked-metal"]`) that runs
-  automatically when triggered by an upstream pipeline
+  a `benchmarks` job (`tags: ["runner:apm-k8s-tweaked-metal"]`, `timeout: 90m`)
+  that runs automatically when triggered by an upstream pipeline
   (`$CI_PIPELINE_SOURCE == "pipeline"`), manual otherwise.
 
 ### java-reggie repo changes
 
 - Removed `.gitlab/benchmarks/micro/` (the pattern-2 self-contained files —
   no longer needed).
-- Root `.gitlab-ci.yml`: added a `benchmarks` stage and a
-  `benchmarks-trigger` bridge job (`when: manual` for now) that triggers
+- Root `.gitlab-ci.yml`: added a `benchmarks` stage and two bridge jobs
+  (`benchmarks-trigger-quick`, `benchmarks-trigger-full`, both extending a
+  shared `.benchmarks-trigger` hidden job) that trigger
   `DataDog/apm-reliability/benchmarking-platform` branch `java-reggie`,
-  forwarding `UPSTREAM_PROJECT_NAME`/`UPSTREAM_BRANCH`/`UPSTREAM_COMMIT_SHA`.
+  forwarding `UPSTREAM_PROJECT_NAME`/`UPSTREAM_BRANCH`/`UPSTREAM_COMMIT_SHA`
+  plus a tier-specific `JMH_ARGS`. Auto-triggered per the branch rules in
+  "Scope decision" above.
 
 ### Sequencing to actually run this
 
@@ -92,9 +101,9 @@ style still on `main`):
 2. In the `benchmarking-platform` GitLab project, manually trigger
    `build-benchmark-ci-images` once (on the `java-reggie` branch) to publish
    the image.
-3. Manually run `benchmarks-trigger` from java-reggie's pipeline (or trigger
-   the `benchmarks` job directly from the BP project's UI); inspect artifacts
-   / BP UI (`benchmarking.us1.prod.dog`) for results. If `upload_to_bp_api`
+3. Push to a branch / to main; the corresponding bridge job auto-triggers
+   the `benchmarks` job. Inspect artifacts / BP UI
+   (`benchmarking.us1.prod.dog/benchmarks`) for results. If `upload_to_bp_api`
    fails because the project isn't registered, chase down registration at
    that point rather than pre-emptively.
 
@@ -108,12 +117,9 @@ style still on `main`):
 
 ## Out of scope for this pass
 
-- Automatic per-PR triggering (`rules:` instead of `when: manual` on the
-  bridge job).
 - `fail_on_regression` / PR performance gate (`pr-gate.thresholds.yml`
   equivalent).
 - Curating a specific fast "CI regression suite" subset of the 511
-  benchmarks — the first experiment uses a `BENCHMARK_FILTER` CI variable
-  (default matches everything) with reduced JMH iteration counts
-  (`-wi 1 -i 3 -f 1`) to keep the manual run reasonably fast; proper curation
-  is future work.
+  benchmarks — both tiers run the full suite (via `BENCHMARK_FILTER`,
+  default matches everything); the quick tier cuts JMH iteration counts
+  instead of benchmark count. Proper curation is future work.

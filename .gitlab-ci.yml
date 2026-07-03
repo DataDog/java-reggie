@@ -113,12 +113,12 @@ create_key:
     paths:
       - pubkeys
 
-# Bridge job: triggers the microbenchmarks pipeline in the Benchmarking
+# Bridge jobs: trigger the microbenchmarks pipeline in the Benchmarking
 # Platform's own GitLab project, on its own runners (no runner-access
-# provisioning needed on the java-reggie side).
-benchmarks-trigger:
+# provisioning needed on the java-reggie side). Quick check auto-runs on
+# non-main branches (fewer JMH iterations); full suite auto-runs on main.
+.benchmarks-trigger:
   stage: benchmarks
-  when: manual
   needs: []
   variables:
     UPSTREAM_PROJECT_NAME: $CI_PROJECT_NAME
@@ -128,3 +128,19 @@ benchmarks-trigger:
     project: DataDog/apm-reliability/benchmarking-platform
     branch: java-reggie
     strategy: depend
+
+benchmarks-trigger-quick:
+  extends: .benchmarks-trigger
+  rules:
+    - if: '$CI_COMMIT_BRANCH != "main"'
+      when: on_success
+  variables:
+    JMH_ARGS: "-wi 0 -i 1 -f 1"
+
+benchmarks-trigger-full:
+  extends: .benchmarks-trigger
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+  variables:
+    JMH_ARGS: "-wi 1 -i 3 -f 1"
