@@ -152,6 +152,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private final LazyDFACache matchesDfa;
   private final NfaStep matchesStep;
 
+  // Set to true during find()/findFrom() calls; causes seedStart/stepChar to skip
+  // capture-array writes. Reset to false before returning from the find path.
+  // PikeVMMatcher is not thread-safe; this field is safe to use as a mode flag.
+  private boolean skipCaptures;
+
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
     super(pattern);
@@ -482,7 +487,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
       // Self-anchoring DFA: a non-negative result means the pattern matched some substring.
       return findDfa.findFrom(input, 0, findStep) >= 0;
     }
-    return findFrom(input, 0) >= 0;
+    skipCaptures = true;
+    try {
+      return findFrom(input, 0) >= 0;
+    } finally {
+      skipCaptures = false;
+    }
   }
 
   @Override
@@ -612,15 +622,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
         }
         if (!skipSeed) {
           seedStart(input, pos, regionEnd);
+          pruneAtomicClistInitial(input, pos, regionEnd);
         }
       }
 
       int t = clistFirstAccept;
       if (t >= 0) {
-        bestStart = clistCaptures[t][0];
-        if (pos == clistCaptures[t][0]) {
+        bestStart = skipCaptures ? pos : clistCaptures[t][0];
+        if (!skipCaptures && pos == clistCaptures[t][0]) {
           pruneAnchorDerivedAtStart(t, false);
-        } else {
+        } else if (!skipCaptures) {
           clistSize = t;
           clistFirstAccept = -1;
         }
@@ -702,6 +713,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
         }
         if (!skipSeed) {
           seedStart(input, pos, regionEnd);
+          pruneAtomicClistInitial(input, pos, regionEnd);
         }
       }
 
@@ -770,7 +782,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
       for (NFA.Transition tr : state.getTransitions()) {
         if (tr.chars.contains(ch)) {
           int[] nc = scratchCaptures[0];
-          System.arraycopy(caps, 0, nc, 0, nc.length);
+          if (!skipCaptures) {
+            System.arraycopy(caps, 0, nc, 0, nc.length);
+          }
           addThreadToNlist(tr.target, nc, apos, nextPos, 0, input, regionStart, regionEnd);
         }
       }
@@ -912,7 +926,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // Leaf: has character transitions or is an accept state.
     inClist[state.id] = true;
     clistIds[clistSize] = state.id;
-    System.arraycopy(ownCaptures, 0, clistCaptures[clistSize], 0, ownCaptures.length);
+    if (skipCaptures) {
+      clistCaptures[clistSize][0] = ownCaptures[0]; // seed position needed by findPosFrom
+    } else {
+      System.arraycopy(ownCaptures, 0, clistCaptures[clistSize], 0, ownCaptures.length);
+    }
     if (atomicGroupCount > 0) {
       if (ownAtomicPos != null) {
         System.arraycopy(ownAtomicPos, 0, clistAtomicPos[clistSize], 0, atomicGroupCount);
