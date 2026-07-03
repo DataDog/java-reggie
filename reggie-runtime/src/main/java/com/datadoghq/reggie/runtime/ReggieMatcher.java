@@ -60,6 +60,11 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
     this.nameToIndex = map;
   }
 
+  /** Returns true if this matcher embeds nameToIndex into its MatchResult returns directly. */
+  boolean embedsNameMap() {
+    return false;
+  }
+
   /**
    * Marks this matcher as having been classified {@code NATIVE} by {@code StrategyJdkClassifier} —
    * its generator is expected to emit the full rich MatchResult API, so it must never build the JDK

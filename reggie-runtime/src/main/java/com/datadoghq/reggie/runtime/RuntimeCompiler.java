@@ -119,7 +119,9 @@ public class RuntimeCompiler {
       }
       if (!nameMap.isEmpty()) {
         m.setNameToIndex(nameMap);
-        m = new NameEnrichingMatcher(m);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
       }
       return m;
     }
@@ -150,7 +152,9 @@ public class RuntimeCompiler {
       ReggieMatcher m = new PikeVMMatcher(nfa, pattern);
       if (!nameMap.isEmpty()) {
         m.setNameToIndex(nameMap);
-        m = new NameEnrichingMatcher(m);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
       }
       return m;
     }
@@ -596,7 +600,9 @@ public class RuntimeCompiler {
       // 9. Inject name map and wrap for named group support
       if (!nameMap.isEmpty()) {
         matcher.setNameToIndex(nameMap);
-        matcher = new NameEnrichingMatcher(matcher);
+        if (!matcher.embedsNameMap()) {
+          matcher = new NameEnrichingMatcher(matcher);
+        }
       }
 
       return matcher;
@@ -643,7 +649,7 @@ public class RuntimeCompiler {
     return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
         .filter(RuntimeCompiler::isRuntimeExecutableLinearTokenSequence)
         .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
-        .map(NameEnrichingMatcher::new)
+        .map(m -> m.embedsNameMap() ? m : new NameEnrichingMatcher(m))
         .orElse(null);
   }
 

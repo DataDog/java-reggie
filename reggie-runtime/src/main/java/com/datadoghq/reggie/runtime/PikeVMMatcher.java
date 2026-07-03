@@ -1309,12 +1309,20 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Result construction
   // -------------------------------------------------------------------------
 
+  @Override
+  boolean embedsNameMap() {
+    return true;
+  }
+
   private MatchResult buildResult(String input, int[] caps) {
     int[] starts = new int[groupCount + 1];
     int[] ends = new int[groupCount + 1];
     for (int g = 0; g <= groupCount; g++) {
       starts[g] = caps[2 * g];
       ends[g] = caps[2 * g + 1];
+    }
+    if (!nameToIndex.isEmpty()) {
+      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
     }
     return new MatchResultImpl(input, starts, ends, groupCount, Collections.emptyMap());
   }
@@ -1373,7 +1381,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     return nullable;
   }
 
-  private static MatchResult shiftResult(MatchResult r, int delta, String originalInput) {
+  private MatchResult shiftResult(MatchResult r, int delta, String originalInput) {
     int gc = r.groupCount();
     int[] starts = new int[gc + 1];
     int[] ends = new int[gc + 1];
@@ -1382,6 +1390,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
       int e = r.end(i);
       starts[i] = s == -1 ? -1 : s + delta;
       ends[i] = e == -1 ? -1 : e + delta;
+    }
+    if (!nameToIndex.isEmpty()) {
+      return new NamedMatchResultImpl(originalInput, starts, ends, gc, nameToIndex);
     }
     return new MatchResultImpl(originalInput, starts, ends, gc, Collections.emptyMap());
   }

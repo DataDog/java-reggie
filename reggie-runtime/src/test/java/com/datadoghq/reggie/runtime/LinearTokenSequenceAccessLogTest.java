@@ -287,6 +287,9 @@ class LinearTokenSequenceAccessLogTest {
 
   private static void assertDelegateType(ReggieMatcher matcher, Class<?> expectedType)
       throws Exception {
+    if (matcher.getClass() == expectedType) {
+      return;
+    }
     Field delegate = matcher.getClass().getDeclaredField("delegate");
     delegate.setAccessible(true);
     assertEquals(expectedType, delegate.get(matcher).getClass());

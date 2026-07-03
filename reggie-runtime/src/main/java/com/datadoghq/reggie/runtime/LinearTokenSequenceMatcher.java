@@ -46,6 +46,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   @Override
+  boolean embedsNameMap() {
+    return true;
+  }
+
+  @Override
   public boolean matches(String input) {
     return matchInto(input, scratchStarts, scratchEnds);
   }
@@ -69,9 +74,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public MatchResult match(String input) {
     int[] starts = new int[groupCount + 1];
     int[] ends = new int[groupCount + 1];
-    return matchInto(input, starts, ends)
-        ? new MatchResultImpl(input, starts, ends, groupCount, nameToIndex)
-        : null;
+    if (!matchInto(input, starts, ends)) return null;
+    if (!nameToIndex.isEmpty()) {
+      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    }
+    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
   }
 
   @Override
@@ -101,9 +108,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     if (pos < 0) return null;
     int[] starts = new int[groupCount + 1];
     int[] ends = new int[groupCount + 1];
-    return matchesAt(input, pos, starts, ends, false)
-        ? new MatchResultImpl(input, starts, ends, groupCount, nameToIndex)
-        : null;
+    if (!matchesAt(input, pos, starts, ends, false)) return null;
+    if (!nameToIndex.isEmpty()) {
+      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    }
+    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
   }
 
   @Override
