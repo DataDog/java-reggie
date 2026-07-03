@@ -131,8 +131,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private final LazyDFACache findDfa;
   private final NfaStep findStep;
   private final boolean findCanMatchEmpty;
-  private int[] startClosureIds; // pos-0 closure (START/\A anchors crossed); set in ctor
-  private int[] reinjectClosureIds; // pos>0 closure (START/\A anchors blocked); set in ctor
+  private int[] startClosureIds; // pos-0 closure (START/\A/^ml anchors crossed); set in ctor
+  private int[] reinjectClosureIds; // mid-line pos>0 closure (START/\A/^ml blocked); set in ctor
+  // After-newline reinject closure: START/\A blocked, but START_MULTILINE crossed (^ fires after
+  // \n).
+  // null when the pattern has no START_MULTILINE anchors.
+  private int[] reinjectAfterNlClosureIds;
 
   // Over-approximating "reject DFA": built for anchored patterns where the EXACT findDfa cannot be
   // (its anchors need per-position context), but only when there are no assertions/backrefs. Every
@@ -236,13 +240,24 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
     // T1.4: build the self-anchoring boolean find() DFA when the pattern is anchor/assertion/
     // backref-free (those need position context the position-independent step can't supply).
+    // START_MULTILINE ((?m)^) is handled by splitting re-injection: mid-line blocks it; after-\n
+    // crosses it, so line-start matches work without fracturing the DFA state space.
     if (findDfaEligible(nfa)) {
       int[] start = {nfa.getStartState().id};
-      // Initial state (pos 0): START/\A anchors are satisfied → cross them.
-      startClosureIds = sortedEpsilonClosure(start, false);
-      // Re-inject / step (pos > 0): START/\A unsatisfied → block them, so ^-gated branches can
-      // only begin at pos 0. For anchor-free patterns this equals startClosureIds.
-      reinjectClosureIds = sortedEpsilonClosure(start, true);
+      boolean hasMultiline = nfaHasMultilineAnchor(nfa);
+      // Initial state (pos 0): all start anchors satisfied → cross everything.
+      startClosureIds = sortedEpsilonClosure(start, false, false);
+      if (hasMultiline) {
+        // Mid-line reinject (pos > 0, prev char ≠ \n): block START, STRING_START, and
+        // START_MULTILINE — none of the start-of-line anchors fire in mid-line positions.
+        reinjectClosureIds = sortedEpsilonClosure(start, true, true);
+        // After-newline reinject (prev char == \n): block START/STRING_START but cross
+        // START_MULTILINE — (?m)^ fires at the start of every line, i.e. after \n.
+        reinjectAfterNlClosureIds = sortedEpsilonClosure(start, true, false);
+      } else {
+        reinjectClosureIds = sortedEpsilonClosure(start, true, false);
+        reinjectAfterNlClosureIds = null;
+      }
       boolean empty = false;
       for (int id : startClosureIds) {
         if (isAccept[id]) {
@@ -255,17 +270,27 @@ public final class PikeVMMatcher extends ReggieMatcher {
       int ai = 0;
       for (NFA.NFAState s : nfa.getAcceptStates()) acceptArr[ai++] = s.id;
       findDfa = new LazyDFACache(startClosureIds, acceptArr);
-      // Self-anchoring find step: closureNoStart(targets) UNION reinjectClosure.
-      findStep = (cur, c) -> findStepClosure(transitionTargets(cur, (char) c));
-      // Strict matches() step (whole-input, pos>0): closureNoStart(targets), no re-injection.
+      if (hasMultiline) {
+        // After consuming '\n', inject the after-newline closure (crosses START_MULTILINE).
+        findStep = (cur, c) -> findStepClosureMultiline(transitionTargets(cur, (char) c), c);
+        // matches(): after '\n', START_MULTILINE can fire; at all other positions block it.
+        matchesStep =
+            (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c), true, c != '\n');
+      } else {
+        // Self-anchoring find step: closureNoStart(targets) UNION reinjectClosure.
+        findStep = (cur, c) -> findStepClosure(transitionTargets(cur, (char) c));
+        // Strict matches() step (whole-input, pos>0): closureNoStart(targets), no re-injection.
+        matchesStep =
+            (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c), true, false);
+      }
       matchesDfa = new LazyDFACache(startClosureIds, acceptArr);
-      matchesStep = (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c), true);
     } else {
       findDfa = null;
       findStep = null;
       findCanMatchEmpty = false;
       matchesDfa = null;
       matchesStep = null;
+      reinjectAfterNlClosureIds = null;
     }
 
     // Build the over-approximating reject DFA for anchored (but assertion/backref-free) patterns
@@ -273,7 +298,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // sound fast-reject (see field doc). Skipped when the over-approximation can match empty (it
     // would then accept at every position, making it useless as a reject filter).
     if (findDfa == null && noAssertionsOrBackrefs(nfa)) {
-      int[] startAll = sortedEpsilonClosure(new int[] {nfa.getStartState().id}, false);
+      int[] startAll = sortedEpsilonClosure(new int[] {nfa.getStartState().id}, false, false);
       boolean approxEmpty = false;
       for (int id : startAll) {
         if (isAccept[id]) {
@@ -307,28 +332,32 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /**
-   * Eligible for the boolean find() fast path: no anchors, assertions, backreferences, or atomic
-   * groups. Atomic groups require per-thread priority-based commit tracking that the position-
-   * independent lazy DFA cannot model.
+   * Eligible for the boolean find() fast path: no anchors other than START/STRING_START/
+   * START_MULTILINE, no assertions, backreferences, or atomic groups.
+   *
+   * <p>START_MULTILINE ((?m)^) is handled by splitting the re-injection closure: after consuming
+   * '\n' the DFA re-injects a closure that crosses START_MULTILINE anchors; at all other positions
+   * a closure that blocks them is used. Both closures block START/STRING_START (pos-0-only).
    */
   private static boolean findDfaEligible(NFA nfa) {
     boolean hasStartAnchor = false;
     for (NFA.NFAState s : nfa.getStates()) {
       if (s.assertionType != null || s.backrefCheck != null) return false;
       if (s.atomicEntry >= 0 || s.atomicExit >= 0) return false; // atomic groups not DFA-safe
-      // Only START (^) / STRING_START (\A) anchors are handleable (pos-0-only, via the
-      // initial-vs-reinject closure split). \b, $, multiline ^, end-class need char/end context
-      // the position-independent step can't supply → ineligible.
+      // Handleable anchors: START (^), STRING_START (\A), START_MULTILINE ((?m)^).
+      // Everything else (\b, $, end-class) needs char/end context the step cannot supply.
       NFA.AnchorType a = s.anchor;
-      if (a != null && a != NFA.AnchorType.START && a != NFA.AnchorType.STRING_START) return false;
-      if (a == NFA.AnchorType.START || a == NFA.AnchorType.STRING_START) hasStartAnchor = true;
+      if (a != null
+          && a != NFA.AnchorType.START
+          && a != NFA.AnchorType.STRING_START
+          && a != NFA.AnchorType.START_MULTILINE) return false;
+      if (a != null) hasStartAnchor = true;
     }
     if (!hasStartAnchor) return true; // anchor-free: always eligible
 
-    // START-anchored: the pos-0-only model is sound ONLY if every START/\A anchor is leading —
-    // i.e. NOT reachable after consuming a character. A ^ inside a loop/quantifier (e.g.
-    // `(0|^a?){3}`) is reachable via a consume+loop-back and can fire across empty iterations that
-    // stay at pos 0; the set-based closure cannot model that, so decline it (stays on PikeVM).
+    // Anchored: the model is sound ONLY when every start anchor is leading — i.e. NOT reachable
+    // after consuming a character. An anchor inside a loop (e.g. `(0|^a?){3}`) can fire across
+    // empty iterations; the set-based closure cannot model that → decline it (stays on PikeVM).
     java.util.Set<Integer> reached = new java.util.HashSet<>();
     java.util.ArrayDeque<NFA.NFAState> q = new java.util.ArrayDeque<>();
     for (NFA.NFAState s : nfa.getStates()) {
@@ -338,8 +367,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
     while (!q.isEmpty()) {
       NFA.NFAState s = q.poll();
-      if (s.anchor == NFA.AnchorType.START || s.anchor == NFA.AnchorType.STRING_START) {
-        return false; // START anchor reachable after a consume → not leading-only
+      NFA.AnchorType a = s.anchor;
+      if (a == NFA.AnchorType.START
+          || a == NFA.AnchorType.STRING_START
+          || a == NFA.AnchorType.START_MULTILINE) {
+        return false; // start anchor reachable after a consume → not leading-only
       }
       for (NFA.NFAState e : s.getEpsilonTransitions()) {
         if (reached.add(e.id)) q.add(e);
@@ -366,12 +398,19 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   /** Sorted, de-duplicated epsilon closure of the given seed ids (anchor-free patterns). */
   /**
-   * Sorted epsilon closure of {@code seed}. When {@code blockStartAnchor} is true, START/\A anchor
-   * states are not traversed past (their anchor is unsatisfied at any position &gt; 0); this models
-   * PikeVM's checkAnchor returning false for those anchors at pos&gt;0. With it false (pos 0) the
-   * closure crosses them. For anchor-free patterns both behave identically.
+   * Sorted epsilon closure of {@code seed}.
+   *
+   * <ul>
+   *   <li>{@code blockStartAnchor=true}: do not traverse through START/STRING_START anchor states
+   *       (their anchor is unsatisfied at pos &gt; 0).
+   *   <li>{@code blockMultilineAnchor=true}: also do not traverse through START_MULTILINE states
+   *       ((?m)^ unsatisfied when the previous char was not '\n').
+   * </ul>
+   *
+   * With both false (pos 0 / all-anchors-open) the closure crosses every anchor state.
    */
-  private int[] sortedEpsilonClosure(int[] seed, boolean blockStartAnchor) {
+  private int[] sortedEpsilonClosure(
+      int[] seed, boolean blockStartAnchor, boolean blockMultilineAnchor) {
     boolean[] inSet = new boolean[stateCount];
     int[] stack = new int[stateCount];
     int sp = 0;
@@ -384,9 +423,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
     int count = sp;
     while (sp > 0) {
       int id = stack[--sp];
-      if (blockStartAnchor) {
-        NFA.AnchorType a = statesById[id].anchor;
-        if (a == NFA.AnchorType.START || a == NFA.AnchorType.STRING_START) continue;
+      NFA.AnchorType a = statesById[id].anchor;
+      if (a != null) {
+        if (blockStartAnchor && (a == NFA.AnchorType.START || a == NFA.AnchorType.STRING_START))
+          continue;
+        if (blockMultilineAnchor && a == NFA.AnchorType.START_MULTILINE) continue;
       }
       for (NFA.NFAState e : statesById[id].getEpsilonTransitions()) {
         if (!inSet[e.id]) {
@@ -429,27 +470,66 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /**
-   * The self-anchoring find() step: {@code sortedEpsilonClosure(targets, blockStart=true)} UNION
-   * {@code reinjectClosureIds}. Re-injecting the pos&gt;0 start closure each character lets a match
-   * begin at any position (implicit ".*?" prefix); blocking START/\A means a {@code ^}-gated branch
-   * can only begin at pos 0 (it is in {@code startClosureIds}, the DFA's initial state, but never
-   * re-injected). {@code reinjectClosureIds} is already closed, so unioning it stays closed.
+   * The self-anchoring find() step for non-multiline patterns: {@code sortedEpsilonClosure(targets,
+   * blockStart=true, blockMultiline=false)} UNION {@code reinjectClosureIds}. Re-injecting the
+   * pos&gt;0 start closure each character lets a match begin at any position (implicit ".*?"
+   * prefix); blocking START/\A means a {@code ^}-gated branch can only begin at pos 0 (it is in
+   * {@code startClosureIds}, the DFA's initial state, but never re-injected). {@code
+   * reinjectClosureIds} is already closed, so unioning it stays closed.
    */
   private int[] findStepClosure(int[] targets) {
-    int[] tc = sortedEpsilonClosure(targets, true);
+    int[] tc = sortedEpsilonClosure(targets, true, false);
     return sortedUnion(tc, reinjectClosureIds);
   }
 
   /**
-   * The reject-DFA step: {@code sortedEpsilonClosure(targets, blockStart=false)} (cross ALL
-   * anchors, including START/\A) UNION {@link #rejectStartClosureIds}. Re-injecting the
-   * all-anchors-crossed start closure each char makes a match begin at any position
+   * The self-anchoring find() step for patterns with START_MULTILINE ((?m)^): after consuming
+   * {@code '\n'} the after-newline reinject closure is used (crosses START_MULTILINE); at all other
+   * positions the mid-line reinject closure is used (blocks START_MULTILINE).
+   */
+  private int[] findStepClosureMultiline(int[] targets, int c) {
+    int[] tc = sortedEpsilonClosure(targets, true, true);
+    int[] reinject = (c == '\n') ? reinjectAfterNlClosureIds : reinjectClosureIds;
+    return sortedUnion(tc, reinject);
+  }
+
+  /**
+   * The reject-DFA step: {@code sortedEpsilonClosure(targets, blockStart=false,
+   * blockMultiline=false)} (cross ALL anchors) UNION {@link #rejectStartClosureIds}. Re-injecting
+   * the all-anchors-crossed start closure each char makes a match begin at any position
    * (self-anchoring); crossing every anchor is the over-approximation that keeps this a sound
    * necessary-condition filter.
    */
   private int[] rejectStepClosure(int[] targets) {
-    int[] tc = sortedEpsilonClosure(targets, false);
+    int[] tc = sortedEpsilonClosure(targets, false, false);
     return sortedUnion(tc, rejectStartClosureIds);
+  }
+
+  /**
+   * Returns true if any line-start position (pos 0 or the char immediately after a {@code '\n'})
+   * holds an ASCII char that can begin a match per {@link #firstByteAscii}. Used as a fast-reject
+   * guard for {@code (?m)^} patterns: if no such position exists, no match is possible.
+   *
+   * <p>Uses SIMD-accelerated {@code String.indexOf('\n')} to hop between line starts in O(L/line)
+   * rather than scanning every character.
+   */
+  private boolean hasMultilineFirstCharCandidate(String input) {
+    int len = input.length();
+    if (len == 0) return false;
+    // Check pos 0.
+    char c0 = input.charAt(0);
+    if (c0 < 128 && firstByteAscii[c0]) return true;
+    // Check each position immediately after a '\n'.
+    int nl = input.indexOf('\n');
+    while (nl >= 0) {
+      int next = nl + 1;
+      if (next < len) {
+        char c = input.charAt(next);
+        if (c < 128 && firstByteAscii[c]) return true;
+      }
+      nl = input.indexOf('\n', next);
+    }
+    return false;
   }
 
   /** True when no NFA state carries a lookaround assertion or a backreference check. */
@@ -458,6 +538,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
       if (s.assertionType != null || s.backrefCheck != null) return false;
     }
     return true;
+  }
+
+  /** True when at least one NFA state is a START_MULTILINE anchor ((?m)^). */
+  private static boolean nfaHasMultilineAnchor(NFA nfa) {
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.anchor == NFA.AnchorType.START_MULTILINE) return true;
+    }
+    return false;
   }
 
   /**
@@ -518,6 +606,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
     if (findDfa != null) {
       // Empty-matchable patterns match (the empty string) at every position, including "".
       if (findCanMatchEmpty) return true;
+      // T1.4a: START_MULTILINE fast-reject. (?m)^ patterns can only match at pos 0 or after '\n'.
+      // Scan line-start positions using SIMD indexOf('\n') and check the first-char bitmap. If no
+      // line start has a valid first char, no match is possible — avoids all acquire-fenced DFA
+      // reads on ARM for pure no-match inputs (e.g. all-digits input for (?m)^[a-z]+).
+      if (reinjectAfterNlClosureIds != null
+          && prefilterUsable
+          && !hasMultilineFirstCharCandidate(input)) {
+        return false;
+      }
       // Self-anchoring DFA: a non-negative result means the pattern matched some substring.
       return findDfa.findFrom(input, 0, findStep) >= 0;
     }
