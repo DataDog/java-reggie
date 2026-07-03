@@ -875,14 +875,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
       return null;
     }
     resetClist();
-    MatchResult best = null;
+    boolean matched = false;
 
     for (int pos = fromPos; pos <= regionEnd; pos++) {
       // Re-seed the start thread (appended last = lowest priority) until a match accepts. Once
       // `best` is set the accept-time cut removes lower-priority threads (incl. any new seed), so a
       // later start cannot beat the already-found leftmost match; stop seeding. A still-running
       // higher-priority thread can still override `best` (greedy give-back).
-      if (best == null) {
+      if (!matched) {
         // T1.2 prefilter: don't seed a start whose char cannot begin any match (the single-pass
         // equivalent of the former per-start `continue`). Live higher-priority threads still step.
         boolean skipSeed = false;
@@ -898,9 +898,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
       int t = clistFirstAccept;
       if (t >= 0) {
-        int[] caps = Arrays.copyOf(clistCaptures[t], winCaptures.length);
-        caps[1] = pos;
-        best = buildResult(input, caps);
+        // Record the winner into the preallocated winCaptures buffer; build the MatchResult once
+        // after the loop. A greedy tail (e.g. `(.*)`) makes the highest-priority thread accept at
+        // every remaining position (greedy give-back), so building a MatchResult per accept would
+        // allocate O(matchLen) throwaway garbage (starts/ends arrays, the result, a name-map
+        // wrapper). Last write wins: each surviving override comes from a strictly higher-priority
+        // thread, so the final winCaptures is the leftmost-greedy match.
+        System.arraycopy(clistCaptures[t], 0, winCaptures, 0, winCaptures.length);
+        winCaptures[1] = pos;
+        matched = true;
         if (pos == clistCaptures[t][0]) {
           // Zero-length accept at this thread's own seed position: clistViaMultipleAnchors flags
           // are still valid (swapLists has not yet cleared them). Prune multi-anchor-derived
@@ -920,11 +926,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
       stepChar(ch, pos + 1, input, 0, regionEnd);
       pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
-      // Finalize only once a match is in progress: when its threads are all gone `best` is final.
-      // With best == null we must keep scanning (and re-seeding) for a start further right.
-      if (best != null && clistSize == 0) break;
+      // Finalize only once a match is in progress: when its threads are all gone the winner is
+      // final. While unmatched we must keep scanning (and re-seeding) for a start further right.
+      if (matched && clistSize == 0) break;
     }
-    return best;
+    return matched ? buildResult(input, winCaptures) : null;
   }
 
   /**
