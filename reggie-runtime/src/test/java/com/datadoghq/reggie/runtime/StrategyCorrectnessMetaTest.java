@@ -235,10 +235,21 @@ public class StrategyCorrectnessMetaTest {
     // PIKEVM_CAPTURE: used for isCaptureAmbiguous patterns with named groups or anchors (A7 fix),
     // and as the overflow path when the tagged DFA has too many states. Routing confirmation is
     // skipped (see captureAmbiguousIntercepted); behavioral coverage is via
-    // allStrategiesAgreeWithJdkAcrossPublicApi. The representative (a)?b matches and extracts
-    // group spans correctly via PikeVM.
+    // allStrategiesAgreeWithJdkAcrossPublicApi. The representative (a)?(?>b) is capture-ambiguous
+    // (same shape as (a)?b) but the atomic group excludes it from PatternAnalyzer.
+    // isBitStateEligible's post-hoc BITSTATE_CAPTURE substitution, so it stays genuinely
+    // PIKEVM_CAPTURE (see BITSTATE_CAPTURE below for the substituted-eligible representative).
     m.put(
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        new Spec("(a)?(?>b)", List.of("b", "xaby", "ab", "", "bé")));
+    // BITSTATE_CAPTURE: post-hoc substitution for PIKEVM_CAPTURE (see
+    // PatternAnalyzer.isBitStateEligible) whenever a pattern that would otherwise route to
+    // PIKEVM_CAPTURE is free of backreferences, lookaround, atomic groups, possessive
+    // quantifiers, and the anchored-nullable-repeated-body shape. (a)?b is the same
+    // capture-ambiguous shape as the PIKEVM_CAPTURE representative but without the atomic group,
+    // so it is eligible for the substitution.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
 
     return m;

@@ -100,10 +100,22 @@ public class ReggieMatcherBytecodeGenerator {
     PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
     this.resolvedStrategy = result.strategy;
 
-    if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+    // BITSTATE_CAPTURE is never emitted by the annotation-processor path: PatternAnalyzer only
+    // substitutes it for the dynamic RuntimeCompiler.compile() path, but a pattern that is
+    // BITSTATE_CAPTURE-eligible is by definition also PIKEVM_CAPTURE-eligible (same NFA-interpreter
+    // semantics), so it is folded into the same branch here and realized as DELEGATE_PIKEVM —
+    // meaning a @RegexPattern-compiled BITSTATE_CAPTURE-eligible pattern still runs on
+    // PikeVMMatcher
+    // at runtime, while the same pattern compiled via RuntimeCompiler.compile() gets
+    // BitStateMatcher.
+    // That asymmetry is intentional for P1.
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
       // Rebuild NFA with lazy-aware epsilon ordering for PikeVM correctness with lazy quantifiers.
       nfa = new ThompsonBuilder(true).build(ast, groupCount);
-      String pikeVmFallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+      String pikeVmFallbackReason =
+          FallbackPatternDetector.needsFallback(
+              ast, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
       if (pikeVmFallbackReason != null) {
         if (allowJdkFallback) {
           return Realization.DELEGATE_FALLBACK;
@@ -210,15 +222,18 @@ public class ReggieMatcherBytecodeGenerator {
               + " bindings — the DFA cannot determine the correct group spans. Use"
               + " Reggie.compile() for runtime compilation with automatic fallback.");
     }
-    if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
-      // PIKEVM_CAPTURE requires a lazy-aware NFA for correct shortest-match semantics.
-      // Bytecode generation is not supported at annotation-processing time; route to runtime.
+    if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        || strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+      // PIKEVM_CAPTURE (and its BITSTATE_CAPTURE substitution, see resolveRealization) requires a
+      // lazy-aware NFA for correct shortest-match semantics. Bytecode generation is not supported
+      // at annotation-processing time; route to runtime.
       // (No NFA rebuild needed here — the result is discarded immediately by the throw below.)
       throw new UnsupportedOperationException(
           "Pattern '"
               + pattern
-              + "' cannot be compiled at annotation-processing time: PIKEVM_CAPTURE requires a"
-              + " PikeVMMatcher instance at runtime. Use Reggie.compile() instead.");
+              + "' cannot be compiled at annotation-processing time: "
+              + strategy
+              + " requires a PikeVMMatcher instance at runtime. Use Reggie.compile() instead.");
     }
     String fallbackReason = FallbackPatternDetector.needsFallback(ast, strategy);
     if (fallbackReason != null) {

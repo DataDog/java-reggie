@@ -204,29 +204,31 @@ class StrategySelectionTest {
 
   // ==================== Lazy Quantifier Routing Tests ====================
 
+  /**
+   * Asserts that a pattern routed to the PikeVM-family NFA interpreter. {@code BITSTATE_CAPTURE} is
+   * a post-hoc substitution for {@code PIKEVM_CAPTURE} (see {@code
+   * PatternAnalyzer.isBitStateEligible}) over the same leftmost-greedy, native group-extraction
+   * semantics, so every guard this test exercises is satisfied by either strategy.
+   */
+  private static void assertRoutesToPikeVmCapture(
+      PatternAnalyzer.MatchingStrategy actual, String message) {
+    assertTrue(
+        actual == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+            || actual == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        message + " (actual strategy: " + actual + ")");
+  }
+
   @Test
   void lazyQuantifierRoutesToPikeVm() throws Exception {
-    // Positive: plain lazy quantifiers must route to PIKEVM_CAPTURE
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        analyze("a*?b").strategy,
-        "a*?b should route to PIKEVM_CAPTURE");
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        analyze("a+?b").strategy,
-        "a+?b should route to PIKEVM_CAPTURE");
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        analyze("a??b").strategy,
-        "a??b should route to PIKEVM_CAPTURE");
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        analyze("a{2,4}?b").strategy,
-        "a{2,4}?b should route to PIKEVM_CAPTURE");
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        analyze("(a*?)b").strategy,
-        "(a*?)b should route to PIKEVM_CAPTURE");
+    // Positive: plain lazy quantifiers must route to PIKEVM_CAPTURE (or its BITSTATE_CAPTURE
+    // substitution)
+    assertRoutesToPikeVmCapture(analyze("a*?b").strategy, "a*?b should route to PIKEVM_CAPTURE");
+    assertRoutesToPikeVmCapture(analyze("a+?b").strategy, "a+?b should route to PIKEVM_CAPTURE");
+    assertRoutesToPikeVmCapture(analyze("a??b").strategy, "a??b should route to PIKEVM_CAPTURE");
+    assertRoutesToPikeVmCapture(
+        analyze("a{2,4}?b").strategy, "a{2,4}?b should route to PIKEVM_CAPTURE");
+    assertRoutesToPikeVmCapture(
+        analyze("(a*?)b").strategy, "(a*?)b should route to PIKEVM_CAPTURE");
 
     // Negative: backreference blocks the lazy route
     assertNotEquals(

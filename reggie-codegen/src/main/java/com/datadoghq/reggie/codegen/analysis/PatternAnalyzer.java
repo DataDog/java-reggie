@@ -294,7 +294,85 @@ public class PatternAnalyzer {
     MatchingStrategyResult result = doAnalyze(ignoreGroupCount);
     result.guardTrace.addAll(guardTrace);
     result.hasAtomicGroups = hasAtomicGroups(ast);
+    // Single funnel point for BITSTATE_CAPTURE routing (see isBitStateEligible javadoc): every one
+    // of the ~30 branches in doAnalyze() that can return PIKEVM_CAPTURE passes through here, so the
+    // eligibility check is applied once instead of at each branch.
+    if (result.strategy == MatchingStrategy.PIKEVM_CAPTURE && isBitStateEligible(ast)) {
+      result.strategy = MatchingStrategy.BITSTATE_CAPTURE;
+    }
     return result;
+  }
+
+  /**
+   * Pattern-level (AST) eligibility check for the {@link MatchingStrategy#BITSTATE_CAPTURE} engine.
+   * Independent of which branch in {@code doAnalyze()} produced {@code PIKEVM_CAPTURE}; applied
+   * once at the {@link #analyzeAndRecommend(boolean)} funnel point rather than at each branch.
+   *
+   * <p>Excludes the same construct classes {@code PikeVMMatcher} itself cannot handle
+   * (backreferences, lookaround) plus atomic groups and possessive quantifiers (P1 non-goals per
+   * the BitState capture-engine design doc, ported over defensively even though delegation to
+   * {@code PikeVMMatcher} is currently correctness-safe for them), plus the anchored-nullable-body
+   * shape ({@code (^a?){3}}, {@code (?m)(^x?)+}, {@code \A{3}a}) where a start anchor is repeated
+   * by an outer quantifier — a structural pattern known to be fragile under thread-merging NFA
+   * interpreters.
+   */
+  private boolean isBitStateEligible(RegexNode ast) {
+    return !hasBackreferences(ast)
+        && !hasLookaround(ast)
+        && !hasAtomicGroups(ast)
+        && !hasPossessiveQuantifiers(ast)
+        && !hasAnchoredNullableQuantifiedBody(ast);
+  }
+
+  /**
+   * Returns true if the AST contains a quantifier (min &gt;= 1, so it is guaranteed to repeat the
+   * anchor check at least once) whose body starts with a {@code ^}/{@code (?m)^}/{@code \A} anchor
+   * followed only by nullable content (or is just the bare anchor). Matches shapes like {@code
+   * (^a?){3}}, {@code (?m)(^x?)+}, {@code \A{3}a}.
+   */
+  private boolean hasAnchoredNullableQuantifiedBody(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.min >= 1 && startsWithAnchorThenNullable(q.child)) {
+        return true;
+      }
+      return hasAnchoredNullableQuantifiedBody(q.child);
+    }
+    if (node instanceof GroupNode) {
+      return hasAnchoredNullableQuantifiedBody(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasAnchoredNullableQuantifiedBody(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasAnchoredNullableQuantifiedBody(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  private boolean startsWithAnchorThenNullable(RegexNode body) {
+    RegexNode unwrapped = body instanceof GroupNode ? ((GroupNode) body).child : body;
+    if (unwrapped instanceof AnchorNode) {
+      AnchorNode.Type type = ((AnchorNode) unwrapped).type;
+      return type == AnchorNode.Type.START || type == AnchorNode.Type.STRING_START;
+    }
+    if (unwrapped instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) unwrapped).children;
+      if (children.isEmpty() || !(children.get(0) instanceof AnchorNode)) return false;
+      AnchorNode.Type type = ((AnchorNode) children.get(0)).type;
+      if (type != AnchorNode.Type.START && type != AnchorNode.Type.STRING_START) return false;
+      for (int i = 1; i < children.size(); i++) {
+        if (!isNullable(children.get(i))) return false;
+      }
+      return true;
+    }
+    return false;
   }
 
   private MatchingStrategyResult doAnalyze(boolean ignoreGroupCount) {
@@ -3090,13 +3168,27 @@ public class PatternAnalyzer {
     RECURSIVE_DESCENT, // Subroutines, conditionals, branch reset - requires recursive descent
     // parser
 
+    /**
+     * BitState NFA-with-capture: same leftmost-greedy semantics as {@link #PIKEVM_CAPTURE}, chosen
+     * post-hoc by {@link PatternAnalyzer#isBitStateEligible} whenever a pattern that would
+     * otherwise route to {@code PIKEVM_CAPTURE} is free of backreferences, lookaround, atomic
+     * groups, possessive quantifiers, and the anchored-nullable-repeated-body shape. Dynamic
+     * ({@code RuntimeCompiler.compile}) routing only; the annotation-processor path always maps
+     * this to {@code PIKEVM_CAPTURE} (see {@code
+     * ReggieMatcherBytecodeGenerator.resolveRealization}).
+     */
+    BITSTATE_CAPTURE,
+
     /** PikeVM NFA-with-capture: O(n·m) native group extraction, leftmost-greedy, ReDoS-safe. */
     PIKEVM_CAPTURE
   }
 
   /** Result of pattern analysis containing strategy and optional DFA. */
   public static class MatchingStrategyResult {
-    public final MatchingStrategy strategy;
+    // Not final: analyzeAndRecommend()/analyzeAndRecommend(boolean) may substitute
+    // BITSTATE_CAPTURE for PIKEVM_CAPTURE post-hoc (see isBitStateEligible) without rebuilding the
+    // rest of this result.
+    public MatchingStrategy strategy;
     public final DFA dfa; // null for NFA strategies
     public final PatternInfo patternInfo; // Pattern-specific info for specialized generators
     public final boolean useTaggedDFA; // Use Tagged DFA for group tracking

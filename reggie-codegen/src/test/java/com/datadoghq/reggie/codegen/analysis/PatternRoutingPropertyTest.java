@@ -219,12 +219,14 @@ public class PatternRoutingPropertyTest {
 
         // (a|b|c){50} and (a|b|c|d|e|f){100}: capturing group inside a repeating quantifier.
         // PIKEVM_CAPTURE is chosen because DFA_SWITCH and OPTIMIZED_NFA cannot track
-        // per-iteration group spans for such patterns.
+        // per-iteration group spans for such patterns; both are eligible for the post-hoc
+        // BITSTATE_CAPTURE substitution (see PatternAnalyzer.isBitStateEligible), which is what
+        // analyzeAndRecommend() now actually returns.
         new PatternRoutingTestCase(
-            "(a|b|c){50}", PIKEVM_CAPTURE, "capturing alternation+quantifier (151 DFA states)"),
+            "(a|b|c){50}", BITSTATE_CAPTURE, "capturing alternation+quantifier (151 DFA states)"),
         new PatternRoutingTestCase(
             "(a|b|c|d|e|f){100}",
-            PIKEVM_CAPTURE,
+            BITSTATE_CAPTURE,
             "capturing alternation+quantifier (601 DFA states)"));
   }
 

@@ -27,23 +27,33 @@ class PikeVMRoutingTest {
   private static final ReggieOptions WITH_FALLBACK =
       ReggieOptions.builder().allowJdkFallback().build();
 
+  /**
+   * Asserts that a pattern routed to the PikeVM-family NFA interpreter. {@code BITSTATE_CAPTURE} is
+   * a post-hoc substitution for {@code PIKEVM_CAPTURE} (see {@code
+   * PatternAnalyzer.isBitStateEligible}) over the same leftmost-greedy, native group-extraction
+   * semantics, so every guard this test file exercises is satisfied by either strategy.
+   */
+  private static void assertRoutesToPikeVmCapture(
+      PatternAnalyzer.MatchingStrategy actual, String message) {
+    assertTrue(
+        actual == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+            || actual == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        message + " (actual strategy: " + actual + ")");
+  }
+
   @Test
   void captureAmbiguousRoutes_toPikevmCapture() throws Exception {
     // (a)?b has a nullable outer quantifier on a capturing group (B16): PIKEVM_CAPTURE gives
     // correct per-iteration spans; DFA_UNROLLED_WITH_GROUPS POSIX last-match span is wrong.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        StrategyCorrectnessMetaTest.routeOf("(a)?b"),
-        "(a)?b must route to PIKEVM_CAPTURE");
+    assertRoutesToPikeVmCapture(
+        StrategyCorrectnessMetaTest.routeOf("(a)?b"), "(a)?b must route to PIKEVM_CAPTURE");
   }
 
   @Test
   void captureAmbiguousRoutes_dotOptionalB() throws Exception {
     // (.)?b: nullable outer quantifier on capturing group — PIKEVM_CAPTURE.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
-        StrategyCorrectnessMetaTest.routeOf("(.)?b"),
-        "(.)?b must route to PIKEVM_CAPTURE");
+    assertRoutesToPikeVmCapture(
+        StrategyCorrectnessMetaTest.routeOf("(.)?b"), "(.)?b must route to PIKEVM_CAPTURE");
   }
 
   @Test
@@ -117,8 +127,7 @@ class PikeVMRoutingTest {
     // ((?:a|ab))((?:c|bcd)) — same Class E shape as (a|ab)(c|bcd) but alternations
     // are wrapped in a transparent non-capturing group; capturingGroupAlternation must
     // unwrap the NCG layer to detect the interacting variable-length alternations.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("((?:a|ab))((?:c|bcd))"),
         "((?:a|ab))((?:c|bcd)) must route to PIKEVM_CAPTURE (Class E via NCG unwrap)");
   }
@@ -138,8 +147,7 @@ class PikeVMRoutingTest {
   @Test
   void groupAbsentFromAlt_literalThenGroup_routesToPikevm() throws Exception {
     // Group 1 `(.)` only in alt 2; DFA_UNROLLED_WITH_GROUPS binds group 1 when alt 1 wins.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("[a][1-b]|(.)"),
         "[a][1-b]|(.) must route to PIKEVM_CAPTURE (A2: group absent from alt 1)");
   }
@@ -147,8 +155,7 @@ class PikeVMRoutingTest {
   @Test
   void groupAbsentFromAlt_dotThenGroup_routesToPikevm() throws Exception {
     // Group 1 `(_)` only in alt 2.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("_.|(_)"),
         "_.|(_) must route to PIKEVM_CAPTURE (A2: group absent from alt 2)");
   }
@@ -156,8 +163,7 @@ class PikeVMRoutingTest {
   @Test
   void groupAbsentFromAlt_groupFirstAlt_routesToPikevm() throws Exception {
     // Group 1 `(1)` only in alt 1; DFA binds group 1 when alt 2 wins.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("(1)c|10"),
         "(1)c|10 must route to PIKEVM_CAPTURE (A2: group absent from alt 2)");
   }
@@ -182,8 +188,7 @@ class PikeVMRoutingTest {
   @Test
   void nullableFirstElem_optionalPrefix_routesToPikevm() throws Exception {
     // Group body `a?.*` starts with `a?` (min=0); TDFA fires group-start too early.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("-{1}(a?.*)"),
         "-{1}(a?.*) must route to PIKEVM_CAPTURE (A1: nullable first element a?)");
   }
@@ -191,8 +196,7 @@ class PikeVMRoutingTest {
   @Test
   void nullableFirstElem_zeroQuantifier_routesToPikevm() throws Exception {
     // Group body `0{0}[^_]{1,}` starts with `0{0}` (min=0,max=0); TDFA group-start fires too early.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("(0{0}[^_]{1,})-"),
         "(0{0}[^_]{1,})- must route to PIKEVM_CAPTURE (A1: nullable first element 0{0})");
   }
@@ -215,8 +219,7 @@ class PikeVMRoutingTest {
   @Test
   void anchorOnlyGroupBody_routesToPikevm() throws Exception {
     // ($): capturing group whose body is a sole anchor — must route to PIKEVM_CAPTURE (B3a).
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("($)"),
         "($) must route to PIKEVM_CAPTURE (B3a: anchor-only capturing group body)");
   }
@@ -226,8 +229,7 @@ class PikeVMRoutingTest {
   @Test
   void dollarInAlternation_routesToPikevm() throws Exception {
     // $|[^c]{1}: $ anchor in alternation — must route to PIKEVM_CAPTURE (B3b).
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("$|[^c]{1}"),
         "$|[^c]{1} must route to PIKEVM_CAPTURE (B3b: $ in alternation)");
   }
@@ -235,8 +237,7 @@ class PikeVMRoutingTest {
   @Test
   void dollarInAlternationAlt_routesToPikevm() throws Exception {
     // $|[^0]{1}: $ anchor in alternation — must route to PIKEVM_CAPTURE (B3b).
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("$|[^0]{1}"),
         "$|[^0]{1} must route to PIKEVM_CAPTURE (B3b: $ in alternation)");
   }
@@ -266,8 +267,7 @@ class PikeVMRoutingTest {
   void greedyDotPlusWithSuffix_routesToPikevm() throws Exception {
     // (.+)_ has a greedy .+ group with a literal suffix — GREEDY_BACKTRACK's indexOf scan
     // overshoots on inputs ending with '\n' (B4: greedy .+ with non-group suffix).
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("(.+)_"),
         "(.+)_ must route to PIKEVM_CAPTURE (B4: greedy .+ with suffix)");
   }
@@ -276,8 +276,7 @@ class PikeVMRoutingTest {
   void greedyDotPlusWrappedInNonCapturing_routesToPikevm() throws Exception {
     // (?:(.+))_ — the capturing group is wrapped inside a non-capturing group at the concat level.
     // B4 detection must unwrap the non-capturing outer group to find the (.+) capture.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("(?:(.+))_"),
         "(?:(.+))_ must route to PIKEVM_CAPTURE (B4: non-capturing wrapper around capture)");
   }
@@ -286,8 +285,7 @@ class PikeVMRoutingTest {
   void greedyDotPlusBodyWrappedInNonCapturing_routesToPikevm() throws Exception {
     // ((?:.+))_ — the .+ quantifier is wrapped inside a non-capturing group inside the capture.
     // B4 detection must also unwrap the non-capturing inner group to find the quantifier.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("((?:.+))_"),
         "((?:.+))_ must route to PIKEVM_CAPTURE (B4: non-capturing wrapper around quantifier body)");
   }
@@ -306,8 +304,7 @@ class PikeVMRoutingTest {
   @Test
   void variableLengthAltInGroup_routesToPikevm() throws Exception {
     // ([1]|1.)[b]_: group 1 has alternation with branch lengths 1 and 2 — variable-length (B5).
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("([1]|1.)[b]_"),
         "([1]|1.)[b]_ must route to PIKEVM_CAPTURE (B5: variable-length alt in group)");
   }
@@ -316,8 +313,7 @@ class PikeVMRoutingTest {
   void variableLengthAltWrappedInNonCapturing_routesToPikevm() throws Exception {
     // ((?:[1]|1.))[b]_ — the alternation is wrapped in a non-capturing group inside the capture.
     // B5 detection must unwrap the non-capturing wrapper before checking for AlternationNode.
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+    assertRoutesToPikeVmCapture(
         StrategyCorrectnessMetaTest.routeOf("((?:[1]|1.))[b]_"),
         "((?:[1]|1.))[b]_ must route to PIKEVM_CAPTURE (B5: non-capturing wrapper around alt)");
   }

@@ -28,9 +28,18 @@ public class DfaUnrolledGroupAndFindRegressionTest {
 
   private static void assertRoute(String pattern, PatternAnalyzer.MatchingStrategy expected)
       throws Exception {
+    PatternAnalyzer.MatchingStrategy actual = StrategyCorrectnessMetaTest.routeOf(pattern);
+    // BITSTATE_CAPTURE is a post-hoc substitution for PIKEVM_CAPTURE (see
+    // PatternAnalyzer.isBitStateEligible) over the same leftmost-greedy, native group-extraction
+    // semantics — accept either so these guards still exercise the intended fix.
+    PatternAnalyzer.MatchingStrategy normalizedExpected =
+        expected == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+                && actual == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
+            ? actual
+            : expected;
     assertEquals(
-        expected,
-        StrategyCorrectnessMetaTest.routeOf(pattern),
+        normalizedExpected,
+        actual,
         "routing changed for /" + pattern + "/ — fix would not be exercised");
   }
 

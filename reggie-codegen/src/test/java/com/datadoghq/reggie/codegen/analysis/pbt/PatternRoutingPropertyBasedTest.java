@@ -130,16 +130,25 @@ public class PatternRoutingPropertyBasedTest {
 
     // The largeStateSpace() generator produces (a|b|...){N} — capturing alternation under a
     // fixed quantifier. These currently route to PIKEVM_CAPTURE (correct per-iteration group
-    // spans). The remaining strategies are retained as valid in case routing evolves.
+    // spans), or its BITSTATE_CAPTURE substitution (see PatternAnalyzer.isBitStateEligible) —
+    // same semantics, same guards. The remaining strategies are retained as valid in case
+    // routing evolves.
     List<PatternAnalyzer.MatchingStrategy> validStrategies =
-        List.of(PIKEVM_CAPTURE, DFA_SWITCH, SPECIALIZED_QUANTIFIED_GROUP, OPTIMIZED_NFA);
+        List.of(
+            PIKEVM_CAPTURE,
+            BITSTATE_CAPTURE,
+            DFA_SWITCH,
+            SPECIALIZED_QUANTIFIED_GROUP,
+            OPTIMIZED_NFA);
 
     assertTrue(
         validStrategies.contains(result.strategy),
         () ->
             "Large state space pattern: '"
                 + pattern
-                + "' should use PIKEVM_CAPTURE/DFA_SWITCH/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA, got: "
+                + "' should use"
+                + " PIKEVM_CAPTURE/BITSTATE_CAPTURE/DFA_SWITCH/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA,"
+                + " got: "
                 + result.strategy);
   }
 

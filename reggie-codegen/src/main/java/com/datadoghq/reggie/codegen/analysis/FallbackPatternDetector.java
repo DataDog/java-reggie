@@ -91,7 +91,11 @@ public final class FallbackPatternDetector {
     // PIKEVM_CAPTURE is safe here only because PatternAnalyzer's hasLookaround routing precedes
     // the lazy-quantifier PIKEVM_CAPTURE block, and !hasLookaround is an explicit guard in that
     // block.
-    if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+    // BITSTATE_CAPTURE is a post-hoc substitution for PIKEVM_CAPTURE (see
+    // PatternAnalyzer.isBitStateEligible) over the same NFA-interpreter semantics, so every
+    // PIKEVM_CAPTURE-specific guard in this method applies equally to it.
+    if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        && strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
       // B1 — Lookahead inside a quantified group (issue #28).
       // Root cause (NEEDS-RND): Thompson/Pike NFA has no per-thread quantifier-iteration counter.
       // Multiple threads at the same NFA state after different iteration counts are merged in the
@@ -289,7 +293,8 @@ public final class FallbackPatternDetector {
     // sub-case (e.g. (a)?) is handled by PatternAnalyzer routing to PIKEVM_CAPTURE.
     if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
             || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+            || strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE)
         && hasNullableGroupContentWithNullableQuantifier(ast)) {
       return "capturing group with nullable content and nullable outer quantifier: "
           + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect";

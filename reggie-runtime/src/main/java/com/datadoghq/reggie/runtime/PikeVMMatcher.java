@@ -20,6 +20,7 @@ import com.datadoghq.reggie.codegen.automaton.NFA;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Interpreted PikeVM over a Thompson NFA. Implements Perl leftmost-greedy (first-thread-wins)
@@ -1284,7 +1285,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Anchor checking
   // -------------------------------------------------------------------------
 
-  private static boolean checkAnchor(
+  // Package-visible (not private): shared with BitStateMatcher, which needs identical anchor
+  // semantics. No behavior change from the prior `private static` — visibility widening only.
+  static boolean checkAnchor(
       NFA.AnchorType anchor, String input, int pos, int regionStart, int regionEnd) {
     switch (anchor) {
       case START:
@@ -1533,6 +1536,17 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   private MatchResult buildResult(String input, int[] caps) {
+    return buildCaptureResult(input, caps, groupCount, nameToIndex);
+  }
+
+  /**
+   * Builds a {@link MatchResult} from a flat capture-slot array (slot {@code 2*g}/{@code 2*g+1} =
+   * start/end of group {@code g}), shared between {@link PikeVMMatcher} and {@link BitStateMatcher}
+   * — both engines carry capture state in this exact layout. Extracted from the former {@code
+   * PikeVMMatcher.buildResult} (per BitState capture-engine design §12) with no behavior change.
+   */
+  static MatchResult buildCaptureResult(
+      String input, int[] caps, int groupCount, Map<String, Integer> nameToIndex) {
     int[] starts = new int[groupCount + 1];
     int[] ends = new int[groupCount + 1];
     for (int g = 0; g <= groupCount; g++) {

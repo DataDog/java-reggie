@@ -166,6 +166,38 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<String, PikeVMEntry> PIKEVM_NFA_CACHE =
       new ConcurrentHashMap<>();
 
+  /**
+   * Cached entry for BITSTATE_CAPTURE patterns: same shape as {@link PikeVMEntry}, kept as a
+   * parallel cache rather than generalizing {@code PikeVMEntry} into a shared engine-factory
+   * abstraction (smaller diff, zero risk to the existing PikeVM caching; see P1 implementation plan
+   * §3, open question 1).
+   */
+  private static final class BitStateEntry {
+    final NFA nfa;
+    final Map<String, Integer> nameMap;
+
+    BitStateEntry(NFA nfa, Map<String, Integer> nameMap) {
+      this.nfa = nfa;
+      this.nameMap = nameMap;
+    }
+
+    ReggieMatcher newMatcher(String pattern) {
+      ReggieMatcher m = new BitStateMatcher(nfa, pattern);
+      if (!nameMap.isEmpty()) {
+        m.setNameToIndex(nameMap);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
+      }
+      return m;
+    }
+  }
+
+  // Level 1d: Pattern string → BitStateEntry for BITSTATE_CAPTURE patterns. Mirrors
+  // PIKEVM_NFA_CACHE: BitStateMatcher also carries mutable per-call buffers.
+  private static final ConcurrentHashMap<String, BitStateEntry> BITSTATE_NFA_CACHE =
+      new ConcurrentHashMap<>();
+
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
   // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
   // sets; an int key was observed to cause structural-cache false-hits with wrong match semantics.
@@ -217,6 +249,13 @@ public class RuntimeCompiler {
       return pikevmEntry.newMatcher(pattern);
     }
 
+    // Fast path: BITSTATE_CAPTURE patterns are in BITSTATE_NFA_CACHE — return a fresh matcher.
+    // BitStateMatcher carries mutable per-call buffers and must not be shared across calls.
+    BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
+    if (bitStateEntry != null) {
+      return bitStateEntry.newMatcher(pattern);
+    }
+
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
     // NFA matchers mutate shared instance fields during matching and cannot be shared across
     // threads or calls; we cache a factory and instantiate per-call instead.
@@ -237,6 +276,14 @@ public class RuntimeCompiler {
     if (pikevmEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
       return pikevmEntry.newMatcher(pattern);
+    }
+
+    // Post-compilation fixup: if compileInternal registered this pattern as BITSTATE_CAPTURE,
+    // remove it from L1 and return a fresh matcher so callers never share mutable state.
+    bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
+    if (bitStateEntry != null) {
+      PATTERN_CACHE.remove(cacheKey, compiled);
+      return bitStateEntry.newMatcher(pattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
@@ -362,6 +409,7 @@ public class RuntimeCompiler {
     PATTERN_CACHE.clear();
     NFA_CLASS_CACHE.clear();
     PIKEVM_NFA_CACHE.clear();
+    BITSTATE_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
   }
 
@@ -464,10 +512,13 @@ public class RuntimeCompiler {
       // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
       // results for these patterns (e.g. dot matching newline, group-span bugs).
-      // PIKEVM_CAPTURE evaluates anchors correctly at every search position; anchorConditionDiluted
-      // on a PIKEVM result is only used by the hybrid pre-check (§4 below) to skip the DFA pass.
+      // PIKEVM_CAPTURE (and its BITSTATE_CAPTURE substitution — both are NFA interpreters with
+      // identical anchor semantics) evaluates anchors correctly at every search position;
+      // anchorConditionDiluted on such a result is only used by the hybrid pre-check (§4 below) to
+      // skip the DFA pass.
       if (result.anchorConditionDiluted
-          && result.strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+          && result.strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+          && result.strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
         return fallbackOrThrow(
             pattern, "anchor condition diluted in DFA construction", nameMap, options);
       }
@@ -503,6 +554,19 @@ public class RuntimeCompiler {
         NFA pikeVmNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
         PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(pikeVmNfa, nameMap));
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+      }
+
+      // 3.6b. BITSTATE_CAPTURE: post-hoc substitution for PIKEVM_CAPTURE (see
+      // PatternAnalyzer.isBitStateEligible); same NFA-interpreter semantics, so it is cached and
+      // guarded identically, just via a parallel BitStateEntry/BITSTATE_NFA_CACHE.
+      if (result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+        String bitStateFallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+        if (bitStateFallbackReason != null) {
+          return fallbackOrThrow(pattern, bitStateFallbackReason, nameMap, options);
+        }
+        NFA bitStateNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
+        BITSTATE_NFA_CACHE.putIfAbsent(cacheKey, new BitStateEntry(bitStateNfa, nameMap));
+        return BITSTATE_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);

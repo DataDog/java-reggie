@@ -350,9 +350,15 @@ public class FallbackDetectorBugFixTest {
     assertFalse(
         m instanceof JavaRegexFallbackMatcher,
         "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
+    // BitStateMatcher is a post-hoc substitution for PikeVMMatcher (see
+    // PatternAnalyzer.isBitStateEligible) over the same leftmost-greedy, native
+    // group-extraction semantics — accept either.
     assertTrue(
-        m instanceof PikeVMMatcher,
-        "Expected PikeVMMatcher for: " + pat + " but got: " + m.getClass().getSimpleName());
+        m instanceof PikeVMMatcher || m instanceof BitStateMatcher,
+        "Expected PikeVMMatcher or BitStateMatcher for: "
+            + pat
+            + " but got: "
+            + m.getClass().getSimpleName());
   }
 
   static Stream<Arguments> greedyPrefixNullableSiblingBackref() {
