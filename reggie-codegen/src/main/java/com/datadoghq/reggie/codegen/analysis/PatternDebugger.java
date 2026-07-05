@@ -112,6 +112,10 @@ public class PatternDebugger {
                   + "]");
         }
         break;
+
+      case BITSTATE_CAPTURE:
+        System.out.println("Bounded-backtracking BitState capture engine");
+        break;
     }
   }
 }

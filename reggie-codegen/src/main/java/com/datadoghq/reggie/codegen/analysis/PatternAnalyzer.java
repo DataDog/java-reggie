@@ -315,13 +315,22 @@ public class PatternAnalyzer {
    * shape ({@code (^a?){3}}, {@code (?m)(^x?)+}, {@code \A{3}a}) where a start anchor is repeated
    * by an outer quantifier — a structural pattern known to be fragile under thread-merging NFA
    * interpreters.
+   *
+   * <p>Also excludes a capturing group with a nullable body under a repeatable quantifier (e.g.
+   * {@code (.*[_]*)+}), via the same {@code
+   * FallbackPatternDetector.hasCapturingGroupWithNullableBodyInRepeatableQuantifier} guard used for
+   * the PikeVM lazy-quantifier route above: BitState's DFS visited set is keyed on {@code (stateId,
+   * pos)}, so a trailing empty loop iteration that re-reaches the same group-exit state at the same
+   * position as a prior non-empty iteration is pruned as already-visited, and the rebound
+   * (empty-iteration) capture span is lost — design doc §7.3.
    */
   private boolean isBitStateEligible(RegexNode ast) {
     return !hasBackreferences(ast)
         && !hasLookaround(ast)
         && !hasAtomicGroups(ast)
         && !hasPossessiveQuantifiers(ast)
-        && !hasAnchoredNullableQuantifiedBody(ast);
+        && !hasAnchoredNullableQuantifiedBody(ast)
+        && !FallbackPatternDetector.hasCapturingGroupWithNullableBodyInRepeatableQuantifier(ast);
   }
 
   /**
@@ -357,7 +366,11 @@ public class PatternAnalyzer {
   }
 
   private boolean startsWithAnchorThenNullable(RegexNode body) {
-    RegexNode unwrapped = body instanceof GroupNode ? ((GroupNode) body).child : body;
+    // Unwrap any nesting depth of groups (e.g. ((^a?))+) — a group is transparent to this shape.
+    RegexNode unwrapped = body;
+    while (unwrapped instanceof GroupNode) {
+      unwrapped = ((GroupNode) unwrapped).child;
+    }
     if (unwrapped instanceof AnchorNode) {
       AnchorNode.Type type = ((AnchorNode) unwrapped).type;
       return type == AnchorNode.Type.START || type == AnchorNode.Type.STRING_START;
@@ -371,6 +384,13 @@ public class PatternAnalyzer {
         if (!isNullable(children.get(i))) return false;
       }
       return true;
+    }
+    if (unwrapped instanceof AlternationNode) {
+      // Conservative: any alternative with this shape means picking it repeatedly hits the hazard.
+      for (RegexNode alt : ((AlternationNode) unwrapped).alternatives) {
+        if (startsWithAnchorThenNullable(alt)) return true;
+      }
+      return false;
     }
     return false;
   }

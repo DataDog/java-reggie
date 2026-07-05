@@ -10991,7 +10991,10 @@ public class NFABytecodeGenerator {
       case OPTIMIZED_NFA:
       case OPTIMIZED_NFA_WITH_LOOKAROUND:
       default:
-        // Use NFA execution for main pattern
+        // Use NFA execution for main pattern. PIKEVM_CAPTURE and BITSTATE_CAPTURE fall through
+        // here intentionally: this AP codegen path never targets either engine directly (see
+        // ReggieMatcherBytecodeGenerator.resolveRealization(), which maps both to
+        // DELEGATE_PIKEVM), so a plain NFA walk is the correct AP-side execution regardless.
         generateInlineNFA(mv, mainNFA);
         break;
     }

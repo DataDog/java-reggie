@@ -1865,9 +1865,17 @@ public final class FallbackPatternDetector {
       // but the same state, and PikeVM cannot always pick the correct last-iteration binding.
       // This applies regardless of greedy/lazy: even lazy repeatable quantifiers with nullable
       // body produce wrong group spans in PikeVM.
-      if ((q.max == -1 || q.max > 1) && q.child instanceof GroupNode) {
-        GroupNode g = (GroupNode) q.child;
-        if (g.capturing && isNullable(g.child)) return true;
+      if (q.max == -1 || q.max > 1) {
+        // Unwrap non-capturing wrapper groups (e.g. (?:(.*[_]*))+) to find the capturing group
+        // directly under the quantifier — a non-capturing group is transparent to this hazard.
+        RegexNode child = q.child;
+        while (child instanceof GroupNode && !((GroupNode) child).capturing) {
+          child = ((GroupNode) child).child;
+        }
+        if (child instanceof GroupNode) {
+          GroupNode g = (GroupNode) child;
+          if (g.capturing && isNullable(g.child)) return true;
+        }
       }
       return hasCapturingGroupWithNullableBodyInRepeatableQuantifier(q.child);
     }

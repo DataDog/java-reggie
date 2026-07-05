@@ -242,19 +242,18 @@ class BitStateMatcherTest {
   }
 
   // -------------------------------------------------------------------------
-  // Budget/fallback (P1 implementation plan §2.6 / design §9.5): BitStateMatcher currently
-  // delegates every call to a lazily-constructed PikeVMMatcher (see BitStateMatcher class javadoc
-  // for the P1 scope note), so results must be identical to pure PikeVM for any input size,
-  // including inputs large enough that a real interpreter would need to fall back.
+  // Budget/fallback (P1 implementation plan §2.6 / design §9.5): once stateCount * (span + 1)
+  // exceeds BUDGET_CELLS, BitStateMatcher must delegate the whole call to PikeVMMatcher and record
+  // the delegation via fallbackCount() — no silent truncation.
   // -------------------------------------------------------------------------
 
   @Test
-  void largeInputMatchesPikeVmResult() throws Exception {
+  void oversizedInputFallsBackToPikeVmAndCountsIt() throws Exception {
     String pattern = "(a+)(b+)(c+)";
     StringBuilder sb = new StringBuilder();
-    for (int i = 0; i < 2000; i++) sb.append('a');
-    for (int i = 0; i < 2000; i++) sb.append('b');
-    for (int i = 0; i < 2000; i++) sb.append('c');
+    for (int i = 0; i < 100_000; i++) sb.append('a');
+    for (int i = 0; i < 100_000; i++) sb.append('b');
+    for (int i = 0; i < 100_000; i++) sb.append('c');
     String input = sb.toString();
 
     RegexParser parser = new RegexParser();
@@ -274,5 +273,6 @@ class BitStateMatcherTest {
       assertEquals(expected.start(g), actual.start(g), "group " + g + " start");
       assertEquals(expected.end(g), actual.end(g), "group " + g + " end");
     }
+    assertEquals(1, bitState.fallbackCount(), "expected exactly one budget-exceeded delegation");
   }
 }
