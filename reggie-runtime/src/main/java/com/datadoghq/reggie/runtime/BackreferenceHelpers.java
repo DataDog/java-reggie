@@ -25,8 +25,10 @@ public final class BackreferenceHelpers {
   private BackreferenceHelpers() {}
 
   /**
-   * Finds the first occurrence of an HTML-tag-style backreference pattern starting at {@code
-   * startPos}.
+   * Finds the match of an HTML-tag-style backreference pattern at the leftmost valid start position
+   * at or after {@code startPos}; among multiple valid closing-tag occurrences for that start
+   * (possible because the {@code .*} gap is unbounded), returns the one matching JDK's greedy
+   * semantics: the rightmost (longest) valid occurrence, not the first found.
    *
    * <p>Matches patterns of the form: {@code openPrefix + (\w+) + openSuffix + .* + closePrefix + \1
    * + closeSuffix}
@@ -57,7 +59,12 @@ public final class BackreferenceHelpers {
       if (group1End >= len || input.charAt(group1End) != (char) openSuffixChar) continue;
       int group1Len = group1End - group1Start;
       int searchFrom = group1End + 1;
-      // Look for closePrefix + tagname + closeSuffix
+      // Look for closePrefix + tagname + closeSuffix. The gap in between is unbounded (.*), so
+      // more than one occurrence of the closing tag can be valid for this start position (e.g.
+      // "<a>x</a>y</a>" - "</a>" at index 4 and again at index 9). Greedy .* prefers to consume
+      // as much as possible, so the correct match is the LAST valid occurrence, not the first -
+      // keep searching past a successful candidate instead of returning immediately.
+      MatchResult best = null;
       while (searchFrom <= len - (closePrefixStr.length() + group1Len + 1)) {
         int closeIdx = input.indexOf(closePrefixStr, searchFrom);
         if (closeIdx < 0) break;
@@ -73,8 +80,13 @@ public final class BackreferenceHelpers {
           continue;
         }
         int matchEnd = afterBackref + 1;
-        return new MatchResultImpl(
-            input, new int[] {pos, group1Start}, new int[] {matchEnd, group1End}, 1);
+        best =
+            new MatchResultImpl(
+                input, new int[] {pos, group1Start}, new int[] {matchEnd, group1End}, 1);
+        searchFrom = closeIdx + 1;
+      }
+      if (best != null) {
+        return best;
       }
     }
     return null;

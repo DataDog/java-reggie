@@ -105,6 +105,22 @@ class RepeatedWordPatternTest {
     assertFalse(m.find("<br/>"));
   }
 
+  @Test
+  void htmlTagMatchesContinuesPastEarlierSameNamedClose() {
+    // Regression: matches() previously gave up as soon as it found a candidate closing tag with
+    // the right name, even when that candidate left trailing content unconsumed - instead of
+    // continuing to search for a later occurrence of the same tag name that reaches end-of-input.
+    // "<a>x</a>y</a>": the first "</a>" is a real closing tag for "a", but leaves "y</a>"
+    // unconsumed; JDK correctly keeps searching and matches on the second "</a>".
+    ReggieMatcher m = Reggie.compile("<(\\w+)>.*</\\1>");
+    assertTrue(m.matches("<a>x</a>y</a>"));
+    assertTrue(m.matches("<a>p</a>q</a>r</a>")); // two false starts before the real close
+    MatchResult result = m.match("<a>x</a>y</a>");
+    assertNotNull(result);
+    assertEquals(0, result.start());
+    assertEquals("<a>x</a>y</a>".length(), result.end());
+  }
+
   // ── Fixed-repetition backreferences ───────────────────────────────────────
 
   @Test
