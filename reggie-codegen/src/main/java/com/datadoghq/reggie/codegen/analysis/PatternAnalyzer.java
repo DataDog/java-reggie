@@ -793,6 +793,15 @@ public class PatternAnalyzer {
       }
       // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
 
+      // Try to detect a structurally-pinned backreference boundary: the group's content charset
+      // is disjoint from what follows it, so there is only one candidate boundary - no retry
+      // needed.
+      PinnedBackreferenceInfo pinnedInfo = detectPinnedBackreference(ast);
+      if (pinnedInfo != null) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PINNED_BACKREFERENCE, null, pinnedInfo, false, requiredLiterals);
+      }
+
       // Try to detect variable-capture backreference patterns: (.*)\d+\1, (.+)=\1
       // These require backtracking from longest to shortest capture
       VariableCaptureBackrefInfo varCaptureBackrefInfo = detectVariableCaptureBackref(ast);
@@ -3272,6 +3281,12 @@ public class PatternAnalyzer {
     // Backreference-specific strategies (require limited backtracking)
     FIXED_REPETITION_BACKREF, // Fixed-repetition backrefs: (a)\1{8,}, (abc|def)=(\1){2,3}
     VARIABLE_CAPTURE_BACKREF, // Variable-capture backrefs: ((.*))\\d+\\1, (a+)\1
+
+    /**
+     * Backreference whose group boundary is provably unambiguous (disjoint follow-set): single
+     * forward pass, no retry/backtracking.
+     */
+    PINNED_BACKREFERENCE,
     OPTIONAL_GROUP_BACKREF, // Optional group backrefs: (a)?\\1, (another)?(\1+)test
     NESTED_QUANTIFIED_GROUPS, // Nested quantified groups: ((a|bc)+)*, ((a+|b)*)?c
 
@@ -3505,6 +3520,111 @@ public class PatternAnalyzer {
         isSingleCharGroup,
         groupCharSet,
         literalChar);
+  }
+
+  /**
+   * Detect a structurally-pinned backreference boundary: a capturing group whose content charset is
+   * disjoint from whatever immediately follows it (and, if present, from any separator between the
+   * group's close and the backreference site). Because the group's closing boundary is therefore
+   * unambiguous, matching needs only a single forward scan - no retry/backtracking.
+   *
+   * <p>Reuses the group/backref-pairing loop shape from {@link #detectFixedRepetitionBackref}.
+   *
+   * @return a populated {@link PinnedBackreferenceInfo}, or {@code null} if the pattern isn't a
+   *     top-level concatenation containing a disjoint-boundary group/backreference pair.
+   */
+  private PinnedBackreferenceInfo detectPinnedBackreference(RegexNode ast) {
+    // Only handle ConcatNode at top level
+    if (!(ast instanceof ConcatNode)) {
+      return null;
+    }
+
+    ConcatNode concat = (ConcatNode) ast;
+    List<RegexNode> children = concat.children;
+
+    if (children.size() < 2) {
+      return null;
+    }
+
+    // Find the capturing group and its matching backreference (same pairing style as
+    // detectFixedRepetitionBackref).
+    int groupIndex = -1;
+    int backrefIndex = -1;
+    GroupNode capturingGroup = null;
+
+    for (int i = 0; i < children.size(); i++) {
+      RegexNode child = children.get(i);
+
+      if (child instanceof GroupNode) {
+        GroupNode group = (GroupNode) child;
+        if (group.capturing && groupIndex == -1) {
+          groupIndex = i;
+          capturingGroup = group;
+        }
+      }
+
+      if (child instanceof BackreferenceNode) {
+        BackreferenceNode backref = (BackreferenceNode) child;
+        if (capturingGroup != null && backref.groupNumber == capturingGroup.groupNumber) {
+          backrefIndex = i;
+        }
+      }
+    }
+
+    if (groupIndex == -1 || backrefIndex == -1 || groupIndex >= backrefIndex) {
+      return null;
+    }
+
+    // The codegen forward-scans the group's content as a single flat "one-or-more chars from
+    // groupCharSet" loop with no notion of an upper bound, so only an unbounded (max == -1),
+    // greedy, min >= 1 quantifier directly wrapping a charset-bearing child is safe - this
+    // excludes both fixed/bounded-repetition groups (e.g. \w{1,4}, whose codegen would ignore the
+    // max bound) and composite bodies (e.g. a ConcatNode with a trailing optional quantifier),
+    // whose charset isn't representative of the whole group content.
+    if (!(capturingGroup.child instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode groupQuant = (QuantifierNode) capturingGroup.child;
+    if (!groupQuant.greedy || groupQuant.min < 1 || groupQuant.max != -1) {
+      return null;
+    }
+    CharSet groupCharSet = getNodeCharSet(groupQuant.child);
+
+    // Charset of whatever immediately follows the group in the concat.
+    CharSet nextCharSet = getSuffixFirstCharSetSkippingNullable(concat, groupIndex + 1);
+
+    // Disjointness condition 1: group content vs. what follows it.
+    if (groupCharSet == null || nextCharSet == null || !groupCharSet.isDisjoint(nextCharSet)) {
+      return null;
+    }
+
+    // Separator (if any) between the group's close and the backreference site. The codegen scans
+    // the separator with the same flat "chars from separatorCharSet" loop, which is only sound
+    // for a single homogeneous node (e.g. \s+) - a separator spanning multiple AST nodes (as in
+    // the tag-close shape's literal+`.*`+literal delimiter, an intervening capturing group, or an
+    // earlier occurrence of the same backreference) is rejected rather than approximated.
+    RegexNode separator = null;
+    CharSet separatorCharSet = null;
+    if (backrefIndex > groupIndex + 1) {
+      List<RegexNode> sepNodes = children.subList(groupIndex + 1, backrefIndex);
+      if (sepNodes.size() != 1) {
+        return null;
+      }
+      separator = sepNodes.get(0);
+      separatorCharSet = getFirstCharSet(separator);
+
+      // Disjointness condition 2: separator vs. group content.
+      if (separatorCharSet == null || !groupCharSet.isDisjoint(separatorCharSet)) {
+        return null;
+      }
+    }
+
+    return new PinnedBackreferenceInfo(
+        capturingGroup.groupNumber,
+        capturingGroup.child,
+        groupCharSet,
+        separator,
+        separatorCharSet);
   }
 
   /** Check if a node represents a single character or character class. */

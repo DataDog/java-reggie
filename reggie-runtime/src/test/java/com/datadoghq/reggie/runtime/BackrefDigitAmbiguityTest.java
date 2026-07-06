@@ -103,4 +103,22 @@ public class BackrefDigitAmbiguityTest {
     ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertNotNull(reg.match(input), "Reggie should match canonical PCRE backref case");
   }
+
+  /**
+   * {@code (\w+)#\1(a?)(\2)} is pinned-eligible ({@code \w+}'s charset is disjoint from the literal
+   * {@code #} separator between group 1 and backref {@code \1}), so it would route to {@code
+   * PINNED_BACKREFERENCE} if the B9 danger-condition guard did not also cover that strategy. Group
+   * 3 {@code (\2)} is a capturing group whose body is a backref to the nullable group 2 ({@code
+   * a?}), so {@code hasNullableBackrefInsideCapturingGroup} must still exclude it, routing to JDK
+   * fallback instead.
+   */
+  @Test
+  void pinnedEligibleNullableBackrefInsideCapturingGroup_routesToFallback_notPinnedBackreference() {
+    String pat = "(\\w+)#\\1(a?)(\\2)";
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
+    assertTrue(
+        reg instanceof JavaRegexFallbackMatcher,
+        "(\\w+)#\\1(a?)(\\2) must fall back to JDK: pinned-eligible boundary but nullable "
+            + "backref inside capturing group (B9 guard) must still apply");
+  }
 }

@@ -116,6 +116,12 @@ public class PatternDebugger {
                   + "]");
         }
         break;
+
+      case PINNED_BACKREFERENCE:
+        System.out.println(
+            "Pinned backreference — disjoint group boundary, single forward pass, no"
+                + " retry/backtracking");
+        break;
     }
   }
 }

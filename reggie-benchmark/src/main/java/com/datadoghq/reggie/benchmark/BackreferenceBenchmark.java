@@ -63,6 +63,28 @@ public class BackreferenceBenchmark {
   private static final String SELF_REF_MATCH_6 = "aaaaaa"; // matches 4-group variant
   private static final String SELF_REF_NO_MATCH = "aaa"; // doesn't match either
 
+  // Adversarial data for \b(\w+)\s+\1\b (routes to PINNED_BACKREFERENCE): many distinct
+  // consecutive words, each word boundary a false start the old retry-loop codegen would have
+  // to re-examine before finding (or failing to find) an actual repeat.
+  private static final String REPEATED_WORD_ADVERSARIAL_PREFIX =
+      "the quick brown fox jumps over lazy dog while cat sits under table near window ".repeat(30);
+  private static final String REPEATED_WORD_ADVERSARIAL_MATCH =
+      REPEATED_WORD_ADVERSARIAL_PREFIX + "banana banana";
+  private static final String REPEATED_WORD_ADVERSARIAL_NO_MATCH =
+      REPEATED_WORD_ADVERSARIAL_PREFIX + "banana";
+
+  // Adversarial data for <(\w+)>.*</\1> (stays on SPECIALIZED_BACKREFERENCE's retry-loop
+  // codegen): many closing tags with different names between the opening <div> and the real
+  // (or missing) </div>, each "</...>" a false start for the retry loop.
+  private static final String HTML_TAG_ADVERSARIAL_CONTENT =
+      ("<span>x</span><a>y</a><p>z</p><b>w</b><i>v</i><em>u</em><small>t</small>"
+              + "<strong>s</strong><code>r</code><mark>q</mark>")
+          .repeat(20);
+  private static final String HTML_TAG_ADVERSARIAL_MATCH =
+      "<div>" + HTML_TAG_ADVERSARIAL_CONTENT + "</div>";
+  private static final String HTML_TAG_ADVERSARIAL_NO_MATCH =
+      "<div>" + HTML_TAG_ADVERSARIAL_CONTENT + "</section>";
+
   @Setup
   public void setup() {
     // JDK patterns
@@ -124,6 +146,28 @@ public class BackreferenceBenchmark {
     return jdkRepeatedWord.matcher(REPEATED_WORD_NO_MATCH).find();
   }
 
+  // Adversarial repeated-word benchmarks: PINNED_BACKREFERENCE's single-pass forward scan vs.
+  // JDK's backtracking, over many false-start word boundaries.
+  @Benchmark
+  public boolean reggieRepeatedWordAdversarialMatch() {
+    return reggieRepeatedWord.find(REPEATED_WORD_ADVERSARIAL_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkRepeatedWordAdversarialMatch() {
+    return jdkRepeatedWord.matcher(REPEATED_WORD_ADVERSARIAL_MATCH).find();
+  }
+
+  @Benchmark
+  public boolean reggieRepeatedWordAdversarialNoMatch() {
+    return reggieRepeatedWord.find(REPEATED_WORD_ADVERSARIAL_NO_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkRepeatedWordAdversarialNoMatch() {
+    return jdkRepeatedWord.matcher(REPEATED_WORD_ADVERSARIAL_NO_MATCH).find();
+  }
+
   // HTML tag benchmarks
   @Benchmark
   public boolean reggieHtmlTagMatch() {
@@ -143,6 +187,29 @@ public class BackreferenceBenchmark {
   @Benchmark
   public boolean jdkHtmlTagNoMatch() {
     return jdkHtmlTag.matcher(HTML_TAG_NO_MATCH).matches();
+  }
+
+  // Adversarial HTML-tag benchmarks: SPECIALIZED_BACKREFERENCE's existing retry-loop codegen vs.
+  // JDK's backtracking, over many false-start "</...>" occurrences before the real (or missing)
+  // closing tag.
+  @Benchmark
+  public boolean reggieHtmlTagAdversarialMatch() {
+    return reggieHtmlTag.matches(HTML_TAG_ADVERSARIAL_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkHtmlTagAdversarialMatch() {
+    return jdkHtmlTag.matcher(HTML_TAG_ADVERSARIAL_MATCH).matches();
+  }
+
+  @Benchmark
+  public boolean reggieHtmlTagAdversarialNoMatch() {
+    return reggieHtmlTag.matches(HTML_TAG_ADVERSARIAL_NO_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkHtmlTagAdversarialNoMatch() {
+    return jdkHtmlTag.matcher(HTML_TAG_ADVERSARIAL_NO_MATCH).matches();
   }
 
   // Multiple backreferences benchmarks

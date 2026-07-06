@@ -33,6 +33,7 @@ import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
+import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
@@ -62,6 +63,7 @@ import com.datadoghq.reggie.codegen.codegen.NFABytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.NestedQuantifiedGroupsBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.QuantifiedGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
@@ -1197,6 +1199,21 @@ public class RuntimeCompiler {
         fixedRepGen.generateFindMatchFromMethod(cw);
         fixedRepGen.generateMatchesBoundedMethod(cw);
         fixedRepGen.generateMatchBoundedMethod(cw);
+        break;
+
+      case PINNED_BACKREFERENCE:
+        PinnedBackreferenceInfo pinnedBackrefInfo = (PinnedBackreferenceInfo) result.patternInfo;
+        PinnedBackreferenceBytecodeGenerator pinnedBackrefGen =
+            new PinnedBackreferenceBytecodeGenerator(
+                pinnedBackrefInfo, "com/datadoghq/reggie/runtime/" + className);
+        pinnedBackrefGen.generateMatchesMethod(cw);
+        pinnedBackrefGen.generateFindMethod(cw);
+        pinnedBackrefGen.generateFindFromMethod(cw);
+        pinnedBackrefGen.generateMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchFromMethod(cw);
+        pinnedBackrefGen.generateMatchesBoundedMethod(cw);
+        pinnedBackrefGen.generateMatchBoundedMethod(cw);
         break;
 
       case VARIABLE_CAPTURE_BACKREF:

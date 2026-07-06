@@ -77,6 +77,7 @@ public class PatternRoutingPropertyBasedTest {
             LINEAR_BACKREFERENCE,
             SPECIALIZED_BACKREFERENCE,
             FIXED_REPETITION_BACKREF,
+            PINNED_BACKREFERENCE,
             VARIABLE_CAPTURE_BACKREF,
             OPTIONAL_GROUP_BACKREF,
             OPTIMIZED_NFA_WITH_BACKREFS,

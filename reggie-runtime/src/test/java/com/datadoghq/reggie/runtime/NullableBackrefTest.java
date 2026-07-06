@@ -18,6 +18,7 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
@@ -204,5 +205,23 @@ class NullableBackrefTest {
     assertNotNull(r, "Reggie must match 'bell'");
     assertEquals(jdk.group(1), r.group(1), "group(1) must match JDK");
     assertEquals(jdk.group(2), r.group(2), "group(2) must match JDK");
+  }
+
+  // ── PINNED_BACKREFERENCE interaction: hasAmbiguouslyNullableBackrefGroup guard ────────────
+
+  /**
+   * {@code (a{0,3})\d+\1} is pinned-eligible (group content charset {@code a} is disjoint from the
+   * {@code \d+} suffix that follows it), so it would route to {@code PINNED_BACKREFERENCE} if the
+   * B7 danger-condition guard did not also cover that strategy. Group 1 is nullable ({@code a{0,3}}
+   * can match empty) and can capture strings of length &gt; 1, so {@code
+   * hasAmbiguouslyNullableBackrefGroup} must still exclude it, routing to JDK fallback instead.
+   */
+  @Test
+  void pinnedEligibleAmbiguouslyNullableGroup_routesToFallback_notPinnedBackreference() {
+    ReggieOptions withFallback = ReggieOptions.builder().allowJdkFallback().build();
+    assertTrue(
+        Reggie.compile("(a{0,3})\\d+\\1", withFallback) instanceof JavaRegexFallbackMatcher,
+        "(a{0,3})\\d+\\1 must fall back to JDK: pinned-eligible boundary but ambiguously "
+            + "nullable backref group (B7 guard) must still apply");
   }
 }

@@ -263,6 +263,22 @@ class PikeVMRoutingTest {
   }
 
   @Test
+  void fixedRepetitionBackrefWithDisjointSuffix_staysOnOptimizedNfaWithBackrefs() throws Exception {
+    // (a)\1{8,}xyz has a suffix ("xyz") that is disjoint from the group's charset, but this is
+    // NOT the shape detectPinnedBackreference handles: that detector requires the capturing
+    // group's OWN body to be an unbounded greedy quantifier (e.g. (\w+)) so it can forward-scan
+    // the group itself to its boundary. Here the group body is a single literal 'a' — it's the
+    // *backreference* that is quantified ({8,}) — so detectPinnedBackreference's
+    // `capturingGroup.child instanceof QuantifierNode` guard rejects it and it falls through,
+    // same as before this strategy existed, to OPTIMIZED_NFA_WITH_BACKREFS via B6.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+        StrategyCorrectnessMetaTest.routeOf("(a)\\1{8,}xyz"),
+        "(a)\\1{8,}xyz must stay on OPTIMIZED_NFA_WITH_BACKREFS"
+            + " (disjoint suffix does not qualify for PINNED_BACKREFERENCE: different shape)");
+  }
+
+  @Test
   void greedyDotPlusWithSuffix_routesToPikevm() throws Exception {
     // (.+)_ has a greedy .+ group with a literal suffix — GREEDY_BACKTRACK's indexOf scan
     // overshoots on inputs ending with '\n' (B4: greedy .+ with non-group suffix).

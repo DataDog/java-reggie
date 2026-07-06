@@ -24,6 +24,7 @@ import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
 import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
+import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -46,6 +47,7 @@ import com.datadoghq.reggie.codegen.codegen.NFABytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.NestedQuantifiedGroupsBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
@@ -657,6 +659,20 @@ public class ReggieMatcherBytecodeGenerator {
         fixedRepGen.generateMatchBoundedMethod(cw);
         fixedRepGen.generateFindMatchMethod(cw);
         fixedRepGen.generateFindMatchFromMethod(cw);
+        break;
+
+      case PINNED_BACKREFERENCE:
+        PinnedBackreferenceInfo pinnedBackrefInfo = (PinnedBackreferenceInfo) result.patternInfo;
+        PinnedBackreferenceBytecodeGenerator pinnedBackrefGen =
+            new PinnedBackreferenceBytecodeGenerator(pinnedBackrefInfo, getJavaClassName());
+        pinnedBackrefGen.generateMatchesMethod(cw);
+        pinnedBackrefGen.generateFindMethod(cw);
+        pinnedBackrefGen.generateFindFromMethod(cw);
+        pinnedBackrefGen.generateMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchFromMethod(cw);
+        pinnedBackrefGen.generateMatchesBoundedMethod(cw);
+        pinnedBackrefGen.generateMatchBoundedMethod(cw);
         break;
 
       case NESTED_QUANTIFIED_GROUPS:

@@ -158,7 +158,8 @@ public final class FallbackPatternDetector {
     // alternative of an alternation but group N is defined in a DIFFERENT alternative of the same
     // alternation. Fix requires per-state group arrays (issue #38 Cat B).
     if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
-            || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT)
+            || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+            || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
         && hasCrossAlternativeBackref(ast)) {
       return "cross-alternative backref: group captured in one branch, used in another";
     }
@@ -169,7 +170,8 @@ public final class FallbackPatternDetector {
     // semantics plus the early-accept ensure correct results. Groups whose body can capture strings
     // of length > 1 (e.g. [0]?-*, a{0,2}) can produce contaminated groupLen > 1, causing spurious
     // bounds-check failures that the early-accept cannot prevent. Those cases still need fallback.
-    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
+    if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
+            || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
         && hasAmbiguouslyNullableBackrefGroup(ast)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
@@ -190,7 +192,8 @@ public final class FallbackPatternDetector {
     // capture into nested group boundaries incorrectly, mismatching the expected position. Simple
     // top-level quantified backrefs like \1+ are handled correctly; only nested-inside-group uses
     // are affected. Fix requires per-frame capture state in the descent parser.
-    if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+    if ((strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+            || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
         && hasNullableBackrefInsideCapturingGroup(ast)) {
       return "backref to nullable group inside capturing group: "
           + "recursive descent parser mishandles zero-length capture in nested group context";
