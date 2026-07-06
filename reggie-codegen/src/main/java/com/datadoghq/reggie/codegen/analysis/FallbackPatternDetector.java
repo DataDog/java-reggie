@@ -91,7 +91,13 @@ public final class FallbackPatternDetector {
     // PIKEVM_CAPTURE is safe here only because PatternAnalyzer's hasLookaround routing precedes
     // the lazy-quantifier PIKEVM_CAPTURE block, and !hasLookaround is an explicit guard in that
     // block.
-    if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+    // BITSTATE_CAPTURE shares this exemption: PatternAnalyzer#isBitStateEligible declines any
+    // pattern with lookaround before ever recommending BITSTATE_CAPTURE, so B1/B1-narrow (both
+    // lookaround-only failure modes) can never trigger for it; B4 is an anchor-evaluation guard,
+    // and BitStateMatcher delegates anchor checks to the exact same PikeVMMatcher#checkAnchor used
+    // here, so it is equally safe.
+    if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        && strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
       // B1 — Lookahead inside a quantified group (issue #28).
       // Root cause (NEEDS-RND): Thompson/Pike NFA has no per-thread quantifier-iteration counter.
       // Multiple threads at the same NFA state after different iteration counts are merged in the
@@ -287,9 +293,16 @@ public final class FallbackPatternDetector {
     // When the group content is itself nullable (e.g. (0*-?){0,}), PIKEVM_CAPTURE also diverges
     // (wrong last-iteration spans), so these still fall back to JDK. The non-nullable-content
     // sub-case (e.g. (a)?) is handled by PatternAnalyzer routing to PIKEVM_CAPTURE.
+    // BITSTATE_CAPTURE is included here too: PatternAnalyzer#isBitStateEligible does not exclude
+    // this shape (its anchored-nullable-quantifier check requires a start anchor, which this
+    // pattern class does not have), and there is no evidence BitState's DFS+RESTORE capture model
+    // resolves the same last-iteration-span bug differently than PikeVM's — so patterns that
+    // PatternAnalyzer#routeBitState substituted PIKEVM_CAPTURE→BITSTATE_CAPTURE for must still hit
+    // this guard.
     if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
             || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+            || strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE)
         && hasNullableGroupContentWithNullableQuantifier(ast)) {
       return "capturing group with nullable content and nullable outer quantifier: "
           + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect";

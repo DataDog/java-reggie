@@ -151,7 +151,7 @@ public class PikeVmCaptureRegressionTest {
   @Test
   void lazyShortestMatch_star() throws Exception {
     // a.*?b must stop at the first 'b', not consume the whole string
-    assertRoute("a.*?b", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("a.*?b", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     String pattern = "a.*?b";
     String input = "axxbxxb";
     Pattern jdk = Pattern.compile(pattern);
@@ -169,7 +169,7 @@ public class PikeVmCaptureRegressionTest {
   @Test
   void lazyShortestMatch_plus() throws Exception {
     // <.+?> must stop at the first '>'
-    assertRoute("<.+?>", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("<.+?>", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     String pattern = "<.+?>";
     String input = "<a><b>";
     Pattern jdk = Pattern.compile(pattern);
@@ -187,7 +187,7 @@ public class PikeVmCaptureRegressionTest {
   @Test
   void lazyCountedQuantifier() throws Exception {
     // a{2,5}? on "aaaaa" — find() must return a match of length 2 (minimum)
-    assertRoute("a{2,5}?", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("a{2,5}?", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     String pattern = "a{2,5}?";
     Pattern jdk = Pattern.compile(pattern);
 
@@ -208,7 +208,7 @@ public class PikeVmCaptureRegressionTest {
 
   @Test
   void lazyGreedyOverlapGiveBack() throws Exception {
-    assertRoute("(a*?)(\\d+)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("(a*?)(\\d+)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertGroupsAgree("(a*?)(\\d+)", "aaa123");
     assertGroupsAgree("(a+?)(a+)", "aaa");
   }
@@ -218,7 +218,7 @@ public class PikeVmCaptureRegressionTest {
     // a*?a on "baaa": lazy star must prefer the shortest match (at position 1, matching one 'a'),
     // not consume all 'a's greedily.  This would fail if ThompsonBuilder emits greedy epsilon
     // order.
-    assertRoute("a*?a", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("a*?a", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     String pattern = "a*?a";
     String input = "baaa";
     Pattern jdk = Pattern.compile(pattern);
@@ -237,7 +237,7 @@ public class PikeVmCaptureRegressionTest {
   void lazyGroupSpan_minimalFirstGroup() throws Exception {
     // (\\w*?)(\\w+) on "abc": lazy first group must be minimal (empty), second captures all.
     // This would fail if ThompsonBuilder emits greedy epsilon order for the lazy quantifier.
-    assertRoute("(\\w*?)(\\w+)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("(\\w*?)(\\w+)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertGroupsAgree("(\\w*?)(\\w+)", "abc");
   }
 
@@ -256,7 +256,7 @@ public class PikeVmCaptureRegressionTest {
   void lazyZeroWidthFindAdvancement() throws Exception {
     // a*? on "aaa": repeated find() must produce zero-width matches at every position,
     // matching JDK Matcher.find() positions [0,0], [1,1], [2,2], [3,3], then no match.
-    assertRoute("a*?", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("a*?", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     String pattern = "a*?";
     String input = "aaa";
     Pattern jdk = Pattern.compile(pattern);
@@ -281,7 +281,7 @@ public class PikeVmCaptureRegressionTest {
 
     // a*?b on "aaab": non-zero-width lazy star must advance through input and match [0,4].
     // This exercises a different code path from pure zero-width matching above.
-    assertRoute("a*?b", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("a*?b", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     String pattern2 = "a*?b";
     String input2 = "aaab";
     Pattern jdk2 = Pattern.compile(pattern2);
@@ -321,7 +321,7 @@ public class PikeVmCaptureRegressionTest {
   @Test
   void lazyNonCapturingGroupRepetition() throws Exception {
     // (?:ab)*?c on "ababc": lazy non-capturing group repetition must stop at minimum iterations.
-    assertRoute("(?:ab)*?c", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    assertRoute("(?:ab)*?c", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertAgrees("(?:ab)*?c", "ababc");
     assertGroupsAgree("(?:ab)*?c", "ababc");
   }
@@ -331,7 +331,7 @@ public class PikeVmCaptureRegressionTest {
     // Lazy quantifier LDAP-style pattern with named group
     assertRoute(
         "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)",
-        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     String pattern = "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)";
     String input = "(uid=jsmith)";
     Pattern jdk = Pattern.compile(pattern);

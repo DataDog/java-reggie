@@ -181,6 +181,58 @@ public final class LazyDFACache {
     return -1;
   }
 
+  /**
+   * Upper bound on how far a match already proven to exist at/after {@code start} can extend. Walks
+   * the DFA forward from state 0 over {@code input[start, limit)} using the SAME self-anchoring
+   * step function as {@link #findFrom}, tracking the last position at which {@link #accepting} was
+   * observed true. Never restarts on DEAD — once dead, no tracked continuation (of {@code start} or
+   * any later re-injected start) survives.
+   *
+   * <p>Because {@code nfaStep}'s closure re-injects a fresh start at every position
+   * (self-anchoring, see {@code PikeVMMatcher.findStepClosure}), the returned bound is a union over
+   * ALL match attempts beginning at or after {@code start} — a strict superset of the single
+   * leftmost-greedy match's continuations. This makes the bound sound as an upper bound (it can
+   * only be ≥ the true match end, never <), but NOT authoritative for which capture path was taken
+   * — callers must still run the real capture engine to resolve priority.
+   *
+   * @return the last position (0-based, exclusive-end style: pos+1 after a consuming step) at which
+   *     an accepting state was reached, or {@code start} if state 0 itself is accepting (empty
+   *     match), or {@code -1} if no accepting state was ever reached before DEAD/limit.
+   */
+  public int findEnd(String input, int start, int limit, NfaStep nfaStep) {
+    if (input == null) return -1;
+    int dfaState = 0;
+    int lastAccept = accepting[dfaState] ? start : -1;
+    for (int pos = start; pos < limit; pos++) {
+      int c = input.charAt(pos);
+      int[] table =
+          NEEDS_INT_ARRAY_ACQUIRE
+              ? (int[]) TABLES_VH.getAcquire(asciiTables, dfaState)
+              : asciiTables[dfaState];
+      int next =
+          (table != null && c < 128)
+              ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
+              : UNCACHED;
+      if (next == UNCACHED) {
+        next = lookupOrCompute(dfaState, c, nfaStep);
+      }
+      if (next == FALLBACK) {
+        // Cache is frozen; delegate remaining scan to NFA.
+        int fallback = nfaFallbackFindEnd(input, pos, limit, nfaStateSets[dfaState], nfaStep);
+        return fallback >= 0 ? fallback : lastAccept;
+      }
+      if (next == DEAD) {
+        // Once dead, no tracked continuation survives — stop scanning.
+        break;
+      }
+      dfaState = next;
+      if (accepting[dfaState]) {
+        lastAccept = pos + 1;
+      }
+    }
+    return lastAccept;
+  }
+
   int lookupOrCompute(int state, int c, NfaStep nfaStep) {
     int[] nextSet = nfaStep.apply(nfaStateSets[state], c);
     if (nextSet.length == 0) {
@@ -320,6 +372,30 @@ public final class LazyDFACache {
       if (found) return start;
     }
     return -1;
+  }
+
+  /**
+   * NFA fallback for {@link #findEnd} when the cache freezes mid-scan. Continues stepping the raw
+   * NFA state-set forward from {@code frozenPos} (no restart on empty state-sets), tracking the
+   * last position at which an accepting state was observed.
+   *
+   * @param frozenPos position in the input where the FALLBACK transition was encountered
+   * @param limit exclusive upper bound on how far the scan may proceed
+   * @param nfaSet NFA state-set at {@code frozenPos} (the partially-consumed DFA state's NFA set)
+   * @return the last position an accepting state was reached at, or {@code -1} if none was
+   */
+  private int nfaFallbackFindEnd(
+      String input, int frozenPos, int limit, int[] nfaSet, NfaStep nfaStep) {
+    int lastAccept = -1;
+    int[] states = nfaSet;
+    for (int pos = frozenPos; pos < limit; pos++) {
+      states = nfaStep.apply(states, input.charAt(pos));
+      if (states.length == 0) break;
+      if (containsAny(states, acceptStateIds)) {
+        lastAccept = pos + 1;
+      }
+    }
+    return lastAccept;
   }
 
   // package-private for tests

@@ -240,6 +240,12 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
+    // BITSTATE_CAPTURE: eligible capture-ambiguous patterns are substituted in for PIKEVM_CAPTURE
+    // (see PatternAnalyzer#isBitStateEligible). (a)?b is the same shape as the PIKEVM_CAPTURE
+    // representative above and now routes here; BitStateMatcher gives correct per-iteration spans.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
 
     return m;
   }

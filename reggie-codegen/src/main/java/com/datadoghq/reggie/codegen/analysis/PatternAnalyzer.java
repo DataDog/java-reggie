@@ -294,7 +294,37 @@ public class PatternAnalyzer {
     MatchingStrategyResult result = doAnalyze(ignoreGroupCount);
     result.guardTrace.addAll(guardTrace);
     result.hasAtomicGroups = hasAtomicGroups(ast);
-    return result;
+    return routeBitState(result);
+  }
+
+  /**
+   * Single post-processing funnel: every {@link MatchingStrategy#PIKEVM_CAPTURE} result produced by
+   * {@link #doAnalyze} passes through here before being returned. If the pattern is eligible for
+   * the BitState capture engine (see {@link #isBitStateEligible}), substitute {@link
+   * MatchingStrategy#BITSTATE_CAPTURE} in place of {@link MatchingStrategy#PIKEVM_CAPTURE}. {@code
+   * strategy} is final on {@link MatchingStrategyResult}, so a replacement is a new instance with
+   * every other field copied over unchanged.
+   */
+  private MatchingStrategyResult routeBitState(MatchingStrategyResult result) {
+    if (result.strategy != MatchingStrategy.PIKEVM_CAPTURE || !isBitStateEligible(ast)) {
+      return result;
+    }
+    MatchingStrategyResult replaced =
+        new MatchingStrategyResult(
+            MatchingStrategy.BITSTATE_CAPTURE,
+            result.dfa,
+            result.patternInfo,
+            result.useTaggedDFA,
+            result.requiredLiterals,
+            result.lookaheadGreedyInfo,
+            result.usePosixLastMatch);
+    replaced.alternationPriorityConflict = result.alternationPriorityConflict;
+    replaced.captureAmbiguous = result.captureAmbiguous;
+    replaced.anchorConditionDiluted = result.anchorConditionDiluted;
+    replaced.hasAtomicGroups = result.hasAtomicGroups;
+    replaced.lazyNfa = result.lazyNfa;
+    replaced.guardTrace.addAll(result.guardTrace);
+    return replaced;
   }
 
   private MatchingStrategyResult doAnalyze(boolean ignoreGroupCount) {
@@ -2171,6 +2201,182 @@ public class PatternAnalyzer {
   }
 
   /**
+   * AST-level eligibility check for {@link MatchingStrategy#BITSTATE_CAPTURE} (see
+   * doc/2026-07-03-bitstate-capture-engine-design.md §6). Declines the same non-goals PikeVM
+   * already handles correctly: backreferences, lookaround, atomic groups, possessive quantifiers,
+   * (§7.5) anchored quantifiers wrapping a nullable {@code ^}/{@code \A}/{@code (?m)^} body, where
+   * BitState's first-accept-wins DFS does not reproduce JDK's anchor-derived zero-length-loop
+   * suppression, and quantifiers (repeatable more than once) wrapping a nullable body that contains
+   * a nested capturing group: the {@code (stateId, pos)} visited set collapses the empty re-entry
+   * iteration before it reaches the inner group's exit write, so the reported group span reflects a
+   * stale earlier iteration instead of JDK's final (zero-width) one (e.g. {@code (?:(.*[_]*))+} on
+   * {@code "a_b"}: JDK reports group 1 as {@code [3,3)}, BitState's DFS reports {@code [0,3)}).
+   */
+  private boolean isBitStateEligible(RegexNode node) {
+    if (hasBackreferences(node)) return false;
+    if (hasLookaround(node)) return false;
+    if (hasAtomicGroups(node)) return false;
+    if (hasPossessiveQuantifiers(node)) return false;
+    if (hasAnchoredNullableQuantifierBody(node)) return false;
+    return !hasNullableQuantifierBodyWithNestedCapture(node);
+  }
+
+  /**
+   * Detects a quantifier capable of repeating more than once (max == -1, i.e. unbounded, or max
+   * &gt;= 2) whose body both can match the empty string and contains a nested capturing group. See
+   * {@link #isBitStateEligible} for why this shape is declined.
+   */
+  private boolean hasNullableQuantifierBodyWithNestedCapture(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode quantifier = (QuantifierNode) node;
+      boolean canRepeat = quantifier.max == -1 || quantifier.max >= 2;
+      if (canRepeat
+          && isZeroWidthNullable(quantifier.child)
+          && hasCapturingGroup(quantifier.child)) {
+        return true;
+      }
+      return hasNullableQuantifierBodyWithNestedCapture(quantifier.child);
+    }
+    if (node instanceof GroupNode) {
+      return hasNullableQuantifierBodyWithNestedCapture(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasNullableQuantifierBodyWithNestedCapture(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasNullableQuantifierBodyWithNestedCapture(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /** Returns true if {@code node} contains a capturing group anywhere within it. */
+  private boolean hasCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode group = (GroupNode) node;
+      if (group.capturing) return true;
+      return hasCapturingGroup(group.child);
+    }
+    if (node instanceof QuantifierNode) {
+      return hasCapturingGroup(((QuantifierNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasCapturingGroup(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasCapturingGroup(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Detects a quantifier capable of repeating more than once (max == -1, i.e. unbounded, or max
+   * &gt;= 2) whose body both contains a start-of-input anchor ({@code ^}, {@code \A}, or {@code
+   * (?m)^}) and can match the empty string. This is the {@code (^a?){3}} / {@code (?m)(^x?)+} /
+   * {@code \A{3}a} shape from doc/2026-07-03-bitstate-capture-engine-design.md §7.5: unrolling the
+   * quantifier produces distinct anchor-state copies that a {@code (stateId, pos)} visited set does
+   * not collapse, so a plain first-accept-wins DFS diverges from JDK's rule that a consuming path
+   * reached through multiple anchor firings must not override a zero-length match.
+   */
+  private boolean hasAnchoredNullableQuantifierBody(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode quantifier = (QuantifierNode) node;
+      boolean canRepeat = quantifier.max == -1 || quantifier.max >= 2;
+      if (canRepeat
+          && containsStartAnchor(quantifier.child)
+          && isZeroWidthNullable(quantifier.child)) {
+        return true;
+      }
+      return hasAnchoredNullableQuantifierBody(quantifier.child);
+    }
+    if (node instanceof GroupNode) {
+      return hasAnchoredNullableQuantifierBody(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasAnchoredNullableQuantifierBody(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasAnchoredNullableQuantifierBody(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /** Returns true if {@code node} contains a start-of-input anchor ({@code ^} or {@code \A}). */
+  private boolean containsStartAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) {
+      AnchorNode.Type type = ((AnchorNode) node).type;
+      return type == AnchorNode.Type.START || type == AnchorNode.Type.STRING_START;
+    }
+    if (node instanceof QuantifierNode) {
+      return containsStartAnchor(((QuantifierNode) node).child);
+    }
+    if (node instanceof GroupNode) {
+      return containsStartAnchor(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (containsStartAnchor(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsStartAnchor(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if {@code node} can match the empty string, treating anchors and lookaround as
+   * inherently zero-width (unlike {@link #isNullable}, which only tracks quantifier/alternation
+   * emptiness and is not used here for that reason).
+   */
+  private boolean isZeroWidthNullable(RegexNode node) {
+    if (node instanceof AnchorNode || node instanceof AssertionNode) {
+      return true;
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode quantifier = (QuantifierNode) node;
+      return quantifier.min == 0 || isZeroWidthNullable(quantifier.child);
+    }
+    if (node instanceof GroupNode) {
+      return isZeroWidthNullable(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (!isZeroWidthNullable(child)) return false;
+      }
+      return true;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (isZeroWidthNullable(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
    * Check if pattern has start or end anchors (^, $). Word boundaries (\b) are not considered
    * anchors for this check.
    */
@@ -3089,6 +3295,14 @@ public class PatternAnalyzer {
     // Context-free strategies (for features beyond regular languages)
     RECURSIVE_DESCENT, // Subroutines, conditionals, branch reset - requires recursive descent
     // parser
+
+    /**
+     * Bounded-backtracking NFA-with-capture: same semantics as {@link #PIKEVM_CAPTURE} but without
+     * PikeVM's per-character thread-set bookkeeping and capture-array copying. Selected instead of
+     * {@link #PIKEVM_CAPTURE} by {@link PatternAnalyzer#isBitStateEligible} (see
+     * doc/2026-07-03-bitstate-capture-engine-design.md).
+     */
+    BITSTATE_CAPTURE,
 
     /** PikeVM NFA-with-capture: O(n·m) native group extraction, leftmost-greedy, ReDoS-safe. */
     PIKEVM_CAPTURE

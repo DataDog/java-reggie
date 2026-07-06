@@ -754,10 +754,22 @@ public final class PikeVMMatcher extends ReggieMatcher {
     } else if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) {
       return -1;
     }
+    // A match is known to exist at/after fromPos; tighten the loop's iteration bound (scanLimit)
+    // to the DFA-computed upper bound on how far it can extend. This is purely a loop-limit
+    // optimization: regionEnd (the true input length) still flows unchanged into every
+    // anchor/step call below so ^/$/\b/\z semantics are unaffected.
+    int scanLimit = regionEnd;
+    if (findDfa != null && !findCanMatchEmpty) {
+      int bound = findDfa.findEnd(input, fromPos, regionEnd, findStep);
+      if (bound >= 0) scanLimit = bound;
+    } else if (rejectDfa != null) {
+      int bound = rejectDfa.findEnd(input, fromPos, regionEnd, rejectStep);
+      if (bound >= 0) scanLimit = bound;
+    }
     resetClist();
     int bestStart = -1;
 
-    for (int pos = fromPos; pos <= regionEnd; pos++) {
+    for (int pos = fromPos; pos <= scanLimit; pos++) {
       if (bestStart < 0) {
         boolean skipSeed = false;
         if (prefilterUsable && pos < regionEnd) {
@@ -780,7 +792,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
           clistFirstAccept = -1;
         }
       }
-      if (pos == regionEnd) break;
+      if (pos == scanLimit) break;
 
       char ch = input.charAt(pos);
       resetNlist();
@@ -884,10 +896,22 @@ public final class PikeVMMatcher extends ReggieMatcher {
       // findCanMatchEmpty guard is needed here.
       return null;
     }
+    // A match is known to exist at/after fromPos; tighten the loop's iteration bound (scanLimit)
+    // to the DFA-computed upper bound on how far it can extend. This is purely a loop-limit
+    // optimization: regionEnd (the true input length) still flows unchanged into checkAnchor,
+    // stepChar, and the dotall-sink extension below so ^/$/\b/\z semantics are unaffected.
+    int scanLimit = regionEnd;
+    if (findDfa != null && !findCanMatchEmpty) {
+      int bound = findDfa.findEnd(input, fromPos, regionEnd, findStep);
+      if (bound >= 0) scanLimit = bound;
+    } else if (rejectDfa != null) {
+      int bound = rejectDfa.findEnd(input, fromPos, regionEnd, rejectStep);
+      if (bound >= 0) scanLimit = bound;
+    }
     resetClist();
     boolean matched = false;
 
-    for (int pos = fromPos; pos <= regionEnd; pos++) {
+    for (int pos = fromPos; pos <= scanLimit; pos++) {
       // Re-seed the start thread (appended last = lowest priority) until a match accepts. Once
       // `best` is set the accept-time cut removes lower-priority threads (incl. any new seed), so a
       // later start cannot beat the already-found leftmost match; stop seeding. A still-running
@@ -947,7 +971,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
           break;
         }
       }
-      if (pos == regionEnd) break;
+      if (pos == scanLimit) break;
 
       char ch = input.charAt(pos);
       resetNlist();
@@ -1284,7 +1308,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Anchor checking
   // -------------------------------------------------------------------------
 
-  private static boolean checkAnchor(
+  static boolean checkAnchor(
       NFA.AnchorType anchor, String input, int pos, int regionStart, int regionEnd) {
     switch (anchor) {
       case START:
@@ -1527,22 +1551,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Result construction
   // -------------------------------------------------------------------------
 
+  // embedsNameMap() == true tells RuntimeCompiler this matcher's MatchResult returns already
+  // resolve group names via nameToIndex (through buildResult/buildCaptureResult below), so it must
+  // not wrap this matcher in a NameEnrichingMatcher — doing so would double-apply the name map.
   @Override
   boolean embedsNameMap() {
     return true;
   }
 
   private MatchResult buildResult(String input, int[] caps) {
-    int[] starts = new int[groupCount + 1];
-    int[] ends = new int[groupCount + 1];
-    for (int g = 0; g <= groupCount; g++) {
-      starts[g] = caps[2 * g];
-      ends[g] = caps[2 * g + 1];
-    }
-    if (!nameToIndex.isEmpty()) {
-      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
-    }
-    return new MatchResultImpl(input, starts, ends, groupCount, Collections.emptyMap());
+    return buildCaptureResult(input, caps, groupCount);
   }
 
   /**

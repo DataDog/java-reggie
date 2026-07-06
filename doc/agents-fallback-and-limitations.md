@@ -77,9 +77,11 @@ and `FIXED_REPETITION_BACKREF` generate native boolean methods (`matches`/`find`
 delegate group-extraction (`match`/`findMatch`/`findMatchFrom`) to a lazily-compiled `java.util.regex`
 pattern. `Reggie.compile()` logs a one-time WARNING; `@RegexPattern` emits a `MANDATORY_WARNING`.
 
-**FULL_FALLBACK strategies** (5): `SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`,
-`HYBRID_DFA_LOOKAHEAD` (lookahead boolean-engine defects); `VARIABLE_CAPTURE_BACKREF`,
-`NESTED_QUANTIFIED_GROUPS` (incomplete MatchResult API).
+**FULL_FALLBACK strategies** (2): `VARIABLE_CAPTURE_BACKREF`, `NESTED_QUANTIFIED_GROUPS`
+(incomplete MatchResult API). `SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`,
+and `HYBRID_DFA_LOOKAHEAD` are no longer FULL_FALLBACK — their boolean-engine defects were fixed
+(see line 111 below); `StrategyJdkClassifier.classifyJdkDependency()` has no case for any
+lookahead strategy and falls through to `default: NATIVE`.
 
 **RICH_API_HYBRID strategies** (2): `SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`.
 

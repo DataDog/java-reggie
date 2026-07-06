@@ -24,6 +24,7 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import com.datadoghq.reggie.codegen.automaton.ProductDFA;
 import com.datadoghq.reggie.codegen.automaton.SubsetConstructor;
 import java.util.*;
 import org.objectweb.asm.ClassWriter;
@@ -390,6 +391,14 @@ public class NFABytecodeGenerator {
    * field).
    */
   private static final int PER_CONFIG_CAP = 256;
+
+  /**
+   * Upper bound on the product of DFA state counts (`∏ dfa.getStateCount()`) fused into a single
+   * multi-lookahead check by {@link #collectSequentialLookaheads}. Mirrors {@code
+   * PatternAnalyzer.DFA_UNROLLED_STATE_LIMIT}/{@code DFA_SWITCH_STATE_LIMIT}'s role of bounding
+   * generated-code size, but for the product-automaton state space rather than a single DFA.
+   */
+  private static final long FUSED_LOOKAHEAD_PRODUCT_BUDGET = 10_000L;
 
   /**
    * Emit a guarded push of a single (stateId, pos) configuration onto the SoA outer worklist.
@@ -4772,31 +4781,32 @@ public class NFABytecodeGenerator {
       Label assertionComplete) {
     int numLookaheads = lookaheadStates.size();
 
-    // Allocate local variables for each DFA
-    int[] dfaStateVars = new int[numLookaheads];
-    int[] passedVars = new int[numLookaheads];
     DFA[] dfas = new DFA[numLookaheads];
-
     for (int i = 0; i < numLookaheads; i++) {
-      dfaStateVars[i] = allocator.allocateInt();
-      passedVars[i] = allocator.allocateInt(); // boolean stored as int (0 or 1)
       dfas[i] = hybridInfo.assertionDFAs.get(lookaheadStates.get(i).id);
     }
+    // Task 2.1 already bounded ∏ dfas[i].getStateCount() to FUSED_LOOKAHEAD_PRODUCT_BUDGET before
+    // selecting this fused subset, so the reachable product below stays within that same bound
+    // (often far fewer states than the naive upper bound) — no second budget check here.
+    ProductDFA product = ProductDFA.build(dfas);
 
+    int[] passedVars = new int[numLookaheads];
+    for (int i = 0; i < numLookaheads; i++) {
+      passedVars[i] = allocator.allocateInt(); // boolean stored as int (0 or 1)
+    }
+
+    int productStateVar = allocator.allocateInt();
     int posVar = allocator.allocateInt();
     int lenVar = allocator.allocateInt();
     int chVar = allocator.allocateInt();
 
-    // Initialize all DFA states and passed flags
+    // Initialize passed flags and the product state
     for (int i = 0; i < numLookaheads; i++) {
-      // dfaState[i] = dfa[i].getStartState().id;
-      pushInt(mv, dfas[i].getStartState().id);
-      mv.visitVarInsn(ISTORE, dfaStateVars[i]);
-
-      // passed[i] = false (0);
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, passedVars[i]);
     }
+    pushInt(mv, product.getStartState().id);
+    mv.visitVarInsn(ISTORE, productStateVar);
 
     // int pos = checkPos;
     mv.visitVarInsn(ILOAD, checkPosVar);
@@ -4809,7 +4819,6 @@ public class NFABytecodeGenerator {
 
     Label loopStart = new Label();
     Label loopEnd = new Label();
-    Label allPassed = new Label();
 
     mv.visitLabel(loopStart);
 
@@ -4824,38 +4833,13 @@ public class NFABytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
 
-    // Process each DFA
-    for (int i = 0; i < numLookaheads; i++) {
-      Label skipDFA = new Label();
+    // One table lookup steps all N components at once, instead of N per-lookahead switches.
+    generateProductTransitionSwitch(mv, product, productStateVar, chVar);
 
-      // if (passed[i]) skip this DFA
-      mv.visitVarInsn(ILOAD, passedVars[i]);
-      mv.visitJumpInsn(IFNE, skipDFA);
-
-      // if (state[i] == -1) skip this DFA (dead state)
-      mv.visitVarInsn(ILOAD, dfaStateVars[i]);
-      mv.visitInsn(ICONST_M1);
-      mv.visitJumpInsn(IF_ICMPEQ, skipDFA);
-
-      // Transition: state[i] = transition(state[i], ch)
-      generateDFATransitionSwitch(mv, dfas[i], dfaStateVars[i], chVar);
-
-      // Check if accepting: if (isAccepting(state[i])) passed[i] = true;
-      Label notAccepting = new Label();
-      for (DFA.DFAState acceptState : dfas[i].getAcceptStates()) {
-        mv.visitVarInsn(ILOAD, dfaStateVars[i]);
-        pushInt(mv, acceptState.id);
-        Label nextCheck = new Label();
-        mv.visitJumpInsn(IF_ICMPNE, nextCheck);
-        mv.visitInsn(ICONST_1);
-        mv.visitVarInsn(ISTORE, passedVars[i]);
-        mv.visitJumpInsn(GOTO, notAccepting);
-        mv.visitLabel(nextCheck);
-      }
-      mv.visitLabel(notAccepting);
-
-      mv.visitLabel(skipDFA);
-    }
+    // Latch passed[i] = true for every component individually accepting at the new product
+    // state. Never cleared once set, matching the single-DFA version's "skip once passed"
+    // freeze semantics.
+    generateProductAcceptanceDecode(mv, product, productStateVar, passedVars);
 
     // Early exit check: if all passed, break
     Label notAllPassed = new Label();
@@ -4867,16 +4851,10 @@ public class NFABytecodeGenerator {
     mv.visitJumpInsn(GOTO, loopEnd);
     mv.visitLabel(notAllPassed);
 
-    // Early exit check: if all dead, break
-    Label notAllDead = new Label();
-    for (int i = 0; i < numLookaheads; i++) {
-      mv.visitVarInsn(ILOAD, dfaStateVars[i]);
-      mv.visitInsn(ICONST_M1);
-      mv.visitJumpInsn(IF_ICMPNE, notAllDead);
-    }
-    // All dead - exit loop (will fail later)
-    mv.visitJumpInsn(GOTO, loopEnd);
-    mv.visitLabel(notAllDead);
+    // Early exit check: product state dead (no component can ever become accepting again)
+    mv.visitVarInsn(ILOAD, productStateVar);
+    mv.visitInsn(ICONST_M1);
+    mv.visitJumpInsn(IF_ICMPEQ, loopEnd);
 
     // pos++;
     mv.visitIincInsn(posVar, 1);
@@ -4917,13 +4895,115 @@ public class NFABytecodeGenerator {
     mv.visitJumpInsn(GOTO, assertionComplete);
 
     // Release allocated variables
-    for (int i = numLookaheads - 1; i >= 0; i--) {
-      allocator.release(passedVars[i]);
-      allocator.release(dfaStateVars[i]);
-    }
     allocator.release(chVar);
     allocator.release(lenVar);
     allocator.release(posVar);
+    allocator.release(productStateVar);
+    for (int i = numLookaheads - 1; i >= 0; i--) {
+      allocator.release(passedVars[i]);
+    }
+  }
+
+  /**
+   * Generate bytecode for a single LOOKUPSWITCH-based transition over the product automaton,
+   * analogous to {@link #generateDFATransitionSwitch} but keyed on {@link ProductDFA.ProductState}
+   * ids instead of a single component {@link DFA.DFAState}. Sets stateVar to -1 if no product
+   * state's transition matches the character (all live components dead going forward).
+   */
+  private void generateProductTransitionSwitch(
+      MethodVisitor mv, ProductDFA product, int stateVar, int chVar) {
+    List<ProductDFA.ProductState> states = new ArrayList<>(product.getAllStates());
+    states.sort(Comparator.comparingInt(s -> s.id));
+
+    Label defaultLabel = new Label();
+    Label afterSwitch = new Label();
+    Label[] caseLabels = new Label[states.size()];
+    int[] caseKeys = new int[states.size()];
+    for (int i = 0; i < states.size(); i++) {
+      caseLabels[i] = new Label();
+      caseKeys[i] = states.get(i).id;
+    }
+
+    mv.visitVarInsn(ILOAD, stateVar);
+    mv.visitLookupSwitchInsn(defaultLabel, caseKeys, caseLabels);
+
+    for (int i = 0; i < states.size(); i++) {
+      mv.visitLabel(caseLabels[i]);
+      ProductDFA.ProductState state = states.get(i);
+
+      if (state.transitions.isEmpty()) {
+        mv.visitInsn(ICONST_M1);
+        mv.visitVarInsn(ISTORE, stateVar);
+      } else {
+        for (Map.Entry<CharSet, ProductDFA.ProductState> entry : state.transitions.entrySet()) {
+          Label notMatch = new Label();
+          generateCharSetCheck(mv, entry.getKey(), chVar);
+          mv.visitJumpInsn(IFEQ, notMatch);
+          pushInt(mv, entry.getValue().id);
+          mv.visitVarInsn(ISTORE, stateVar);
+          mv.visitJumpInsn(GOTO, afterSwitch);
+          mv.visitLabel(notMatch);
+        }
+        mv.visitInsn(ICONST_M1);
+        mv.visitVarInsn(ISTORE, stateVar);
+      }
+
+      mv.visitJumpInsn(GOTO, afterSwitch);
+    }
+
+    mv.visitLabel(defaultLabel);
+    mv.visitInsn(ICONST_M1);
+    mv.visitVarInsn(ISTORE, stateVar);
+
+    mv.visitLabel(afterSwitch);
+  }
+
+  /**
+   * Generate bytecode that, given the current product state, sets {@code passed[i] = 1} for every
+   * component individually accepting at that state. A LOOKUPSWITCH over only the product states
+   * with at least one accepting component; states with none (including the -1 dead sentinel, which
+   * never matches) fall through the default case and do nothing.
+   */
+  private void generateProductAcceptanceDecode(
+      MethodVisitor mv, ProductDFA product, int stateVar, int[] passedVars) {
+    List<ProductDFA.ProductState> acceptingStates = new ArrayList<>();
+    for (ProductDFA.ProductState state : product.getAllStates()) {
+      for (boolean accepting : state.componentAccepting) {
+        if (accepting) {
+          acceptingStates.add(state);
+          break;
+        }
+      }
+    }
+    if (acceptingStates.isEmpty()) return;
+
+    acceptingStates.sort(Comparator.comparingInt(s -> s.id));
+    Label defaultLabel = new Label();
+    Label afterSwitch = new Label();
+    Label[] caseLabels = new Label[acceptingStates.size()];
+    int[] caseKeys = new int[acceptingStates.size()];
+    for (int i = 0; i < acceptingStates.size(); i++) {
+      caseLabels[i] = new Label();
+      caseKeys[i] = acceptingStates.get(i).id;
+    }
+
+    mv.visitVarInsn(ILOAD, stateVar);
+    mv.visitLookupSwitchInsn(defaultLabel, caseKeys, caseLabels);
+
+    for (int i = 0; i < acceptingStates.size(); i++) {
+      mv.visitLabel(caseLabels[i]);
+      ProductDFA.ProductState state = acceptingStates.get(i);
+      for (int c = 0; c < state.componentAccepting.length; c++) {
+        if (state.componentAccepting[c]) {
+          mv.visitInsn(ICONST_1);
+          mv.visitVarInsn(ISTORE, passedVars[c]);
+        }
+      }
+      mv.visitJumpInsn(GOTO, afterSwitch);
+    }
+
+    mv.visitLabel(defaultLabel);
+    mv.visitLabel(afterSwitch);
   }
 
   /**
@@ -4991,6 +5071,17 @@ public class NFABytecodeGenerator {
   }
 
   /**
+   * True for states that fire at the same input position as their epsilon-predecessor: genuine
+   * zero-width anchors (^, $, \b, \A, \Z, \z, \K). False for alternation-branch and quantifier
+   * epsilon splits, which consume no character but are not positionally interchangeable with their
+   * predecessor (crossing one could pull in a lookahead from a sibling branch/iteration that does
+   * not fire at the same position). Set exclusively by {@code ThompsonBuilder.visitAnchor}.
+   */
+  private static boolean isAnchorState(NFA.NFAState state) {
+    return state.anchor != null;
+  }
+
+  /**
    * Collect sequential positive lookahead assertions starting from the given state. Returns a list
    * of assertion states if multiple are found, null otherwise. This enables fused evaluation of
    * multiple lookaheads in a single pass.
@@ -5015,7 +5106,7 @@ public class NFABytecodeGenerator {
     queue.add(startAssertion);
     Set<Integer> visited = new HashSet<>();
 
-    while (!queue.isEmpty() && lookaheads.size() < 5) { // Limit to 5 fused lookaheads
+    while (!queue.isEmpty()) {
       NFA.NFAState current = queue.poll();
       if (!visited.add(current.id)) continue;
 
@@ -5027,8 +5118,9 @@ public class NFABytecodeGenerator {
           lookaheads.add(target);
         }
 
-        // Continue exploring epsilon transitions (but don't process non-assertion states)
-        if (target.assertionType != null) {
+        // Continue exploring through other assertions and confirmed-safe zero-width anchors, but
+        // not through alternation-branch/quantifier epsilon splits (see isAnchorState).
+        if (target.assertionType != null || isAnchorState(target)) {
           queue.add(target);
         }
       }
@@ -5036,6 +5128,36 @@ public class NFABytecodeGenerator {
 
     // Return list only if we found multiple lookaheads
     return lookaheads.size() > 1 ? lookaheads : null;
+  }
+
+  /**
+   * Select the largest subset of {@code lookaheads} whose combined DFA-state-count product fits
+   * {@link #FUSED_LOOKAHEAD_PRODUCT_BUDGET}, always including the seed (index 0, whose own epsilon
+   * targets must be added by whichever path handles it). Candidates are added in ascending
+   * state-count order so the budget favors the most (cheapest) lookaheads; the result is returned
+   * in original chain order. Never returns an empty list.
+   */
+  private List<NFA.NFAState> selectFusedSubset(List<NFA.NFAState> lookaheads) {
+    NFA.NFAState seed = lookaheads.get(0);
+    long product = hybridInfo.assertionDFAs.get(seed.id).getStateCount();
+
+    List<NFA.NFAState> candidates = new ArrayList<>(lookaheads.subList(1, lookaheads.size()));
+    candidates.sort(
+        Comparator.comparingInt(la -> hybridInfo.assertionDFAs.get(la.id).getStateCount()));
+
+    List<NFA.NFAState> selected = new ArrayList<>();
+    selected.add(seed);
+    for (NFA.NFAState candidate : candidates) {
+      long stateCount = hybridInfo.assertionDFAs.get(candidate.id).getStateCount();
+      long nextProduct = product * stateCount;
+      // Sorted ascending: once one candidate overflows the budget, no later (>=) candidate fits.
+      if (nextProduct > FUSED_LOOKAHEAD_PRODUCT_BUDGET) break;
+      selected.add(candidate);
+      product = nextProduct;
+    }
+
+    selected.sort(Comparator.comparingInt(lookaheads::indexOf));
+    return selected;
   }
 
   /**
@@ -5177,21 +5299,28 @@ public class NFABytecodeGenerator {
         List<NFA.NFAState> sequentialLookaheads = collectSequentialLookaheads(assertionState);
 
         if (sequentialLookaheads != null && sequentialLookaheads.size() > 1) {
-          // Multiple lookaheads detected - use fused evaluation
-          generateFusedMultiLookaheadCheck(
-              mv,
-              sequentialLookaheads,
-              inputVar,
-              checkPosVar,
-              statesVar,
-              worklistVar,
-              worklistSizeVar,
-              allocator,
-              assertionFailed,
-              assertionComplete);
-          mv.visitLabel(assertionFailed);
-          mv.visitLabel(assertionComplete);
-          return; // Early return - fused check handled everything
+          // Budget the DFA-state-count product; excluded members still get their own check when
+          // reached as active states via their own switch case (they remain epsilon-reachable
+          // through the fused subset's targets, unchanged from before this budget was added).
+          List<NFA.NFAState> fusedSubset = selectFusedSubset(sequentialLookaheads);
+
+          if (fusedSubset.size() > 1) {
+            // Multiple lookaheads detected - use fused evaluation
+            generateFusedMultiLookaheadCheck(
+                mv,
+                fusedSubset,
+                inputVar,
+                checkPosVar,
+                statesVar,
+                worklistVar,
+                worklistSizeVar,
+                allocator,
+                assertionFailed,
+                assertionComplete);
+            mv.visitLabel(assertionFailed);
+            mv.visitLabel(assertionComplete);
+            return; // Early return - fused check handled everything
+          }
         }
 
         // Single lookahead - use existing individual DFA check

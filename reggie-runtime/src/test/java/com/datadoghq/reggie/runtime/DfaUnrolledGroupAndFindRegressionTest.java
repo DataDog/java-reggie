@@ -79,36 +79,36 @@ public class DfaUnrolledGroupAndFindRegressionTest {
 
   @Test
   void a1_trailingEmptyGroup() throws Exception {
-    // A1 routing: nullable group body → PIKEVM_CAPTURE gives correct group spans.
-    assertRoute(".+()", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    // A1 routing: nullable group body → BITSTATE_CAPTURE gives correct group spans.
+    assertRoute(".+()", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertGroupsAgree(".+()", "0");
   }
 
   @Test
   void a1_emptyAltGroupDash() throws Exception {
-    // A1 routing: nullable group body → PIKEVM_CAPTURE gives correct group spans.
-    assertRoute("-(|)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    // A1 routing: nullable group body → BITSTATE_CAPTURE gives correct group spans.
+    assertRoute("-(|)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertGroupsAgree("-(|)", "-");
   }
 
   @Test
   void a1_emptyAltGroupB() throws Exception {
-    // A1 routing: nullable group body → PIKEVM_CAPTURE gives correct group spans.
-    assertRoute("b(|)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    // A1 routing: nullable group body → BITSTATE_CAPTURE gives correct group spans.
+    assertRoute("b(|)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertGroupsAgree("b(|)", "b");
   }
 
   @Test
   void a1_endAnchorGroup() throws Exception {
-    // A1 routing: nullable group body → PIKEVM_CAPTURE gives correct group spans.
-    assertRoute("1+(\\z)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    // A1 routing: nullable group body → BITSTATE_CAPTURE gives correct group spans.
+    assertRoute("1+(\\z)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertGroupsAgree("1+(\\z)", "1");
   }
 
   @Test
   void a1_optionalThenDot() throws Exception {
-    // A1 routing: group body starts with nullable a? → PIKEVM_CAPTURE gives correct group spans.
-    assertRoute("-{1}(a?.*).x", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    // A1 routing: group body starts with nullable a? → BITSTATE_CAPTURE gives correct group spans.
+    assertRoute("-{1}(a?.*).x", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     // Zero-width group at accepting state: when (a?.*) matches empty and the accept state holds
     // BOTH ENTER and EXIT for the group, group 1 should be [1,1) not the stale [0,1) start.
     // Use a simpler input where the group IS zero-width at the only accepting state.
@@ -145,8 +145,8 @@ public class DfaUnrolledGroupAndFindRegressionTest {
 
   @Test
   void a2_singleGroupStartLost() throws Exception {
-    // A1 routing: group body starts with nullable c* → PIKEVM_CAPTURE gives correct group spans.
-    assertRoute("(c*.)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    // A1 routing: group body starts with nullable c* → BITSTATE_CAPTURE gives correct group spans.
+    assertRoute("(c*.)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertGroupsAgree("(c*.)", "c");
   }
 
@@ -182,8 +182,8 @@ public class DfaUnrolledGroupAndFindRegressionTest {
 
   @Test
   void c_emptyGroupPlusUnderscore() throws Exception {
-    // A1 routing: nullable group body → PIKEVM_CAPTURE gives correct group spans.
-    assertRoute("[_]()+", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    // A1 routing: nullable group body → BITSTATE_CAPTURE gives correct group spans.
+    assertRoute("[_]()+", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
     assertAgrees("[_]()+", "_");
   }
 

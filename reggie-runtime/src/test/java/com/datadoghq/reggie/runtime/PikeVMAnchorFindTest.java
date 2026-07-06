@@ -131,4 +131,42 @@ class PikeVMAnchorFindTest {
     PikeVMMatcher m = build("\\Aa|b");
     assertEquals(true, m.matchesBounded("xxa", 2, 3), "region \"a\" should match \\Aa|b");
   }
+
+  // -------------------------------------------------------------------------
+  // Phase 2a regression tests: findMatchResultFrom/findPosFrom's DFA-computed scanLimit must
+  // bound only the loop's iteration, never the regionEnd fed to checkAnchor/stepChar/the
+  // dotall-sink extension. See doc/2026-07-06-bitstate-span-tightening-impl-plan.md §2.
+  // -------------------------------------------------------------------------
+
+  @Test
+  void trailingWordBoundaryNotSatisfiedNearStartOfLongInput() throws Exception {
+    // "ab\b" disqualifies the exact findDfa (word-boundary anchors need char context), so this
+    // routes through the over-approximating rejectDfa fast-reject/scanLimit path. Ignoring \b, the
+    // rejectDfa sees a literal "ab" match at [0,2) and nowhere else in a 10000+ char tail, so
+    // scanLimit collapses to exactly 2 — the tightest possible bound, landing the loop's
+    // "pos == scanLimit" exit right on top of the \b check.
+    //
+    // Discriminating case: 'c' (a word char) immediately follows "ab", so the true regionEnd
+    // (input.length(), far away) is needed to see it and correctly conclude NO boundary exists
+    // here (beforeWord='b'=true, afterWord='c'=true -> no boundary -> this occurrence fails, and
+    // since no other "ab" exists in the tail, JDK finds nothing at all). If checkAnchor were ever
+    // fed scanLimit (==2==pos) instead of the true regionEnd, "pos < regionEnd" at the boundary
+    // check would wrongly evaluate false, forcing afterWord=false and falsely reporting a boundary
+    // (and therefore a match) that JDK does not find.
+    StringBuilder sb = new StringBuilder("abc");
+    for (int i = 0; i < 10000; i++) sb.append('x');
+    assertFindMatchesJdk("ab\\b", sb.toString());
+  }
+
+  @Test
+  void laterNonWinningCandidateDoesNotTruncateLeftmostWinner() throws Exception {
+    // Union-of-all-starts scanLimit safety: a second, later "foo" occurrence in the haystack that
+    // fails to complete the pattern (no digits follow it, so its own continuation dies) must not
+    // cause the DFA-computed scanLimit to undershoot the true (earlier, shorter) winner's real end.
+    StringBuilder sb = new StringBuilder("xxxfoo123");
+    for (int i = 0; i < 5000; i++) sb.append('x');
+    sb.append("foobar"); // "foo" with no trailing digits: starts matching, then dies
+    for (int i = 0; i < 5000; i++) sb.append('x');
+    assertFindMatchesJdk("foo\\d+", sb.toString());
+  }
 }

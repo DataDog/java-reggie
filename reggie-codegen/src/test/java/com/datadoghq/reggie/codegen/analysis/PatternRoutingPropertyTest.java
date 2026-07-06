@@ -218,13 +218,13 @@ public class PatternRoutingPropertyTest {
             "(abc)", DFA_UNROLLED, "capturing group with literal (groups not tracked in DFA)"),
 
         // (a|b|c){50} and (a|b|c|d|e|f){100}: capturing group inside a repeating quantifier.
-        // PIKEVM_CAPTURE is chosen because DFA_SWITCH and OPTIMIZED_NFA cannot track
+        // BITSTATE_CAPTURE is chosen because DFA_SWITCH and OPTIMIZED_NFA cannot track
         // per-iteration group spans for such patterns.
         new PatternRoutingTestCase(
-            "(a|b|c){50}", PIKEVM_CAPTURE, "capturing alternation+quantifier (151 DFA states)"),
+            "(a|b|c){50}", BITSTATE_CAPTURE, "capturing alternation+quantifier (151 DFA states)"),
         new PatternRoutingTestCase(
             "(a|b|c|d|e|f){100}",
-            PIKEVM_CAPTURE,
+            BITSTATE_CAPTURE,
             "capturing alternation+quantifier (601 DFA states)"));
   }
 

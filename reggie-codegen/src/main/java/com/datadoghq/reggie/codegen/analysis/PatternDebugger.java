@@ -100,6 +100,10 @@ public class PatternDebugger {
         System.out.println("Fallback to NFA simulation");
         break;
 
+      case BITSTATE_CAPTURE:
+        System.out.println("Bounded-backtracking BitState capture engine (PikeVM alternative)");
+        break;
+
       case COUNTING_GLUSHKOV:
         if (result.patternInfo instanceof PatternAnalyzer.CountingGlushkovInfo cgInfo) {
           System.out.println(
