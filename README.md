@@ -142,7 +142,8 @@ Reggie achieves **21x speedup** over JDK's `Pattern` and **50x speedup** over RE
 
 ### Performance by Category
 
-Latest results from May 2026 benchmark report:
+Results from a May 2026 JMH benchmark run (not committed to this repo — regenerate with the
+command below to get current numbers for your JVM/hardware):
 
 | Category | vs JDK | vs RE2J | Notes |
 |----------|--------|---------|-------|
