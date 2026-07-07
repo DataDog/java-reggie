@@ -1,8 +1,81 @@
 # PCRE Conformance Roadmap
 
-**Current Status**: 95.4% pass rate (329/345 evaluated tests, 364-entry corpus)
-**Last Updated**: 2026-05-30
-**Target**: 97%+ pass rate
+**Current Status**: 98.1% pass rate (257/262 evaluated tests, 364-entry corpus). 102 of the 364
+corpus entries error out as unsupported syntax rather than being evaluated pass/fail — the pass
+rate describes only the 262 evaluable entries, not the full corpus. See
+`doc/agents-fallback-and-limitations.md` for the fallback-condition breakdown.
+**Last Updated**: 2026-07-07
+**Target**: no fixed percentage — see "Architectural Ceiling" below. 100% is not a goal; the
+goal is 100% of the regular-language-representable subset of the corpus, with every non-regular
+pattern transparently declined rather than silently mishandled.
+
+## Architectural Ceiling: 100% Is Not the Target
+
+Reggie's core guarantee is **provable O(n) matching with no unbounded backtracking** — every
+native strategy is a deterministic automaton (DFA), a Thompson-construction NFA/PikeVM simulation,
+or a bytecode-generated variant of one of those. This is a fundamentally different execution model
+from PCRE's own engine, which is a *recursive backtracking interpreter* — PCRE's grammar includes
+constructs (self-embedding recursive subroutines, backtracking control verbs) that require
+unbounded call-stack depth or priority-ordered backtracking to implement correctly, i.e. they
+describe **context-free languages, not regular ones**. No amount of engineering effort inside
+Reggie's automaton-based model can add support for these without either (a) abandoning the O(n)
+guarantee, or (b) delegating to a backtracking interpreter (`compileAllowingFallback()`). This is
+not a temporary implementation gap — it is a structural consequence of choosing automata over
+backtracking.
+
+Concretely (check any pattern's classification with `./gradlew :reggie-runtime:debugPattern -Ppattern="..."`):
+
+- **Self-embedding recursive subroutines** (palindrome-style `(?1)`/`(?R)` where the recursive
+  call appears inside a structure that recurses on both sides of a comparison, e.g.
+  `^((.)(?1)\2|.?)$`) throw `UnsupportedPatternException` with the explicit message *"pattern is
+  context-free, not regular"*. This is by design (`RuntimeCompiler.fallbackOrThrow`), not a bug to
+  fix. **Not all recursive-subroutine patterns fall in this bucket** — `(?1)` calls that don't
+  self-embed (e.g. `^(a?)+b(?1)a`) compile natively via `RECURSIVE_DESCENT` with no exception; only
+  the genuinely context-free subset is declined. See Category 3 below for the split.
+- **Backtracking control verbs** (`(*MARK)`, `(*PRUNE)`, `(*SKIP)`, `(*THEN)`) are inherently
+  imperative backtracking-engine directives with no automaton equivalent — permanently out of
+  scope (Category 10).
+- Some declines are **not** permanent architecture limits but simply haven't had the fix applied
+  yet — e.g. the alternation-priority conflict between DFA longest-match and PCRE's leftmost-first
+  semantics (Category 9) could plausibly be resolved by routing to a PikeVM-backed strategy
+  (Thompson priority order matches leftmost-first) instead of a DFA-backed one, and the
+  capture-ambiguous backref/group-span decline (Category 9) is exactly the class of problem the
+  rich-API-hybrid design (lazy JDK delegation for group-span extraction only, keeping the fast
+  boolean path native) already solves for other strategies — it just hasn't been extended to this
+  pattern shape. These stay in the TODO list, not the ceiling.
+
+**This document does not yet have an exact count of how many of the 364 corpus entries are
+permanently out of scope (context-free/backtracking-verb) vs. fixable-in-linear-time bugs** — that
+audit is real follow-up work, not a number to guess at here. Until that audit exists, treat any
+"97%" or similar target as aspirational shorthand for "everything regular," not a literal
+percentage of the raw 364-entry denominator.
+
+## Engine Architecture (Context for Fix Difficulty)
+
+Reggie is not a single algorithm — it's a **strategy dispatcher** that picks one of 28+
+bytecode-generated matcher shapes per pattern (`PatternAnalyzer.analyzeStrategy()`), spanning three
+families:
+
+- **DFA-backed** (`DFA_UNROLLED`, `DFA_SWITCH`, `DFA_UNROLLED_WITH_GROUPS`, ...): subset-construct
+  a deterministic automaton at compile time; stateless, shared/cached instances. Longest-match by
+  construction — this is *why* Category 9's alternation-priority conflict exists, not a bug in one
+  generator.
+- **NFA/PikeVM-backed** (`OPTIMIZED_NFA`, `PIKEVM_CAPTURE`, `BITSTATE_CAPTURE`, ...): Thompson
+  construction simulated without backtracking (Pike's algorithm — parallel thread simulation, or
+  bitset-based state tracking); naturally leftmost-first, supports lazy quantifiers and capture
+  groups that DFA determinization can't represent.
+- **Bounded-backtracking bytecode generators** (`GREEDY_BACKTRACK`, `RECURSIVE_DESCENT`,
+  `OPTIMIZED_NFA_WITH_BACKREFS`, `PINNED_BACKREFERENCE`, ...): generate backtracking *bytecode*,
+  but only for pattern shapes `PatternAnalyzer` has proven have bounded retry counts (e.g.
+  `(.*)suffix`, fixed-arity backreferences) — this is why these strategies can still claim O(n) /
+  ReDoS-safety despite the name "backtrack": the backtracking is shape-restricted at compile time,
+  not the general unbounded kind PCRE's interpreter does.
+
+Full strategy list and dispatch flow: `AGENTS.md` → `doc/ARCHITECTURE.md` (Component Details) and
+`doc/agents-fallback-and-limitations.md` (fallback trigger conditions). When triaging a failure
+category below, the fix difficulty depends on which family the pattern currently routes to — check
+with `./gradlew :reggie-runtime:debugPattern -Ppattern="..."` before assuming a category is a
+"deep engine bug" vs. "route to a different existing strategy."
 
 ## How to Use This Document
 
@@ -44,46 +117,68 @@ When starting a new session to work on PCRE conformance:
 
 ### Category 2: Non-Greedy Quantifiers in Capturing Groups (5 tests)
 
-**Patterns**:
-- `(|ab)*?d` on "abd" - expected group 1 = 'ab', got null
-- `^[ab]{1,3}?(ab*?|b)` on "aabbbbb" - expected group 1 = 'a', got 'abbbbb'
-- `^[ab]{1,3}?(ab*|b)` on "aabbbbb" - expected group 1 = 'abbbbb', got 'b'
-- `(?i)(a+|b){0,1}?` on "AB" - expected group 1 = '', got 'A'
-- `(([a-c])b*?\2){3}` should match "ababbbcbc" but didn't
+This category has two distinct root causes:
 
-**Root Cause**: Non-greedy (lazy) quantifiers with capturing groups require backtracking to find the minimal match. Thompson NFA doesn't natively support this.
+**2a. Architectural ceiling — declined by design**:
+- `(|ab)*?d` on "abd" — `RECURSIVE_DESCENT` throws `UnsupportedPatternException`: *"lazy
+  quantifier: requires shortest-match semantics not supported by this strategy"*. The
+  zero-width-alternative + lazy-quantifier combination requires trying the shortest match first
+  and backing off, which this strategy family declines rather than mishandles. A fix would mean
+  routing this shape to a PikeVM-backed strategy instead (see Engine Architecture above); no fix
+  exists yet.
 
-**Difficulty**: High
-**Impact**: +5 tests
+**2b. Real bug — compiles natively, wrong result**:
+- `^[ab]{1,3}?(ab*?|b)` on "aabbbbb" — routes to `BITSTATE_CAPTURE`, compiles without error, but
+  returns the wrong group span (got 'abbbbb', expected 'a'). This is implementable in linear time
+  (`BITSTATE_CAPTURE` already handles the pattern shape, just incorrectly) — a genuine fix
+  candidate, not an architecture question.
+- `^[ab]{1,3}?(ab*|b)`, `(?i)(a+|b){0,1}?`, `(([a-c])b*?\2){3}` — routing and pass/fail status not
+  yet classified.
+
+**Difficulty**: 2a — not applicable (declined by design). 2b — Medium (existing strategy, wrong
+group-span logic).
+**Impact**: 2a's pattern belongs outside the pass-rate denominator (permanently declined); 2b's
+patterns are real +N candidates once classified.
 
 ---
 
 ### Category 3: Recursive Patterns (9 tests)
 
-**Patterns**:
-- `^((.)(?1)\2|.?)$` - palindrome check - should match 'abba', 'ababa', 'abccba'
-- `^(.|(.)(?1)\2)$` - should match 'aba', 'abcba', 'ababa'
-- `^(.|(.)(?1)?\2)$` - should match 'abcba'
-- `^(a?)+b(?1)a` - should match 'aba', 'ba'
-- `^(a?)b(?1)a` - should match 'aba'
+`RuntimeCompiler` distinguishes self-embedding (context-free) recursion from simple, non-embedding
+subroutine calls, so this category has two distinct root causes:
 
-**Root Cause**: Recursive subroutine calls `(?1)` and `(?R)` are partially implemented but have bugs in group capture tracking during recursion.
+**3a. Architectural ceiling — self-embedding recursion, declined by design**:
+- `^((.)(?1)\2|.?)$` (palindrome), `^(.|(.)(?1)\2)$`, `^(.|(.)(?1)?\2)$` — all three throw
+  `UnsupportedPatternException`: *"recursive subroutine requires intra-call backtracking: pattern
+  is context-free, not regular — use compileAllowingFallback() for JDK delegation"*. These
+  patterns describe balanced/palindromic structures — provably not regular languages.
+  `compileAllowingFallback()` is the correct and only answer for users who need this; no native fix
+  is possible without dropping the O(n) guarantee.
 
-**Difficulty**: High
-**Impact**: +9 tests
+**3b. Real bug — compiles natively**:
+- `^(a?)+b(?1)a`, `^(a?)b(?1)a` — both route to `RECURSIVE_DESCENT` without error (a simple,
+  non-self-embedding subroutine reference — this is a regular-language-representable pattern).
+  Match/group-span correctness against JDK is not yet confirmed; that confirmation is the
+  remaining TODO here.
+
+**Difficulty**: 3a — not applicable (declined by design, permanent). 3b — unknown until confirmed.
+**Impact**: 3a's 3 patterns belong outside the pass-rate denominator (permanently declined); 3b's
+2 patterns are a real, smaller TODO.
 
 ---
 
-### Category 4: Self-Referencing Backreferences (3 tests)
+### Category 4: Self-Referencing Backreferences (3 tests) — resolved
 
 **Patterns**:
-- `^(a\1?)(a\1?)(a\2?)(a\3?)$` - should match 'aaaa', 'aaaaaa'
-- `^(a\1?){4}$` - should match 'aaaa'
+- `^(a\1?)(a\1?)(a\2?)(a\3?)$` - matches 'aaaa', 'aaaaaa'
+- `^(a\1?){4}$` - matches 'aaaa'
 
-**Root Cause**: A group that references itself (like `(a\1?)`) requires the backref to match the *current partial* content of the group being built. This is fundamentally different from normal backrefs.
+Both route to `RECURSIVE_DESCENT` and pass in `testPCRECapturingGroups` (not present in either the
+Failures or Errors list). This is not an architectural ceiling case — a self-referencing backref
+within a single group is regular (bounded per-iteration state), unlike Category 3a's cross-branch
+palindrome recursion. The "What is NOT Supported" table further down is corrected accordingly.
 
-**Difficulty**: Very High
-**Impact**: +3 tests
+**Difficulty**: resolved, no further work.
 
 ---
 
@@ -139,33 +234,56 @@ When starting a new session to work on PCRE conformance:
 
 ---
 
-### Category 9: Complex Nested Patterns (5 tests remaining)
+### Category 9: Complex Nested Patterns (5 tests remaining) — 2 of 5 are architecture-tied, not generic bugs
 
 **Patterns**:
-- `"([^\\"]+|\\.)*"` on escaped quote string - group extraction wrong
-- `(?:(?!foo)...|^.{0,2})bar(.*)` - negative lookahead in alternation
-- `^(ba|b*){1,2}?bc` should match 'bbabc'
-- `(cat(a(ract|tonic)|erpillar)) \1()2(3)` - nested groups with literal backref
-- `(?i)^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z)` - scoped flags
+- `"([^\\"]+|\\.)*"` on escaped quote string — routes to `OPTIMIZED_NFA`, **declines** with
+  `UnsupportedPatternException`: *"alternation priority conflict: DFA longest-match vs NFA
+  first-alternative"*. This is a real architecture gap, not an unfixable ceiling: DFA-backed
+  strategies determinize to longest-match by construction (see Engine Architecture note above),
+  which conflicts with PCRE's leftmost-first alternation semantics for this pattern shape. Fix
+  candidate: route this shape to a PikeVM-backed strategy instead of the DFA/NFA path currently
+  selected — Thompson priority order is leftmost-first natively. Not yet attempted.
+- `(cat(a(ract|tonic)|erpillar)) \1()2(3)` — routes to `OPTIMIZED_NFA`, **declines** with
+  `UnsupportedPatternException`: *"capture-ambiguous group bindings: group spans require
+  java.util.regex semantics"*. This is exactly the class of problem the rich-API-hybrid design
+  (lazy JDK `Pattern` delegation for group-span extraction only, on strategies whose boolean
+  match/`find()` stay native and fast) was built to solve for other backref/lookahead strategies —
+  it hasn't been extended to this `OPTIMIZED_NFA` pattern shape yet. Fix candidate: extend hybrid
+  dispatch here, don't attempt native span-tracking (that's the approach explicitly rejected for
+  other strategies as reintroducing backtracking complexity).
+- `(?:(?!foo)...|^.{0,2})bar(.*)` on 'foobar crowbar etc' — compiles natively and produces the
+  wrong group 1 span; confirmed as a real bug in `testPCRECapturingGroups`'s Failures list, not a
+  decline. No known architectural angle; ordinary bug-fix candidate.
+- `^(ba|b*){1,2}?bc`, `(?i)^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z)` — status not yet checked against
+  `debugPattern` or the corpus test's pass/fail/error lists; no architectural angle known yet.
 - ~~`(?i)^(\d+)\s+IN\s+SOA\s+(\S+)\s+(\S+)\s*\(\s*$`~~ - **FIXED** (27e03c6) - recursive nested backtracking
 
-**Root Cause**: Various issues with nested groups, scoped flags, and complex alternations.
-
-**Difficulty**: Medium-High
+**Difficulty**: The two architecture-tied patterns need a strategy-routing change (Medium — reuse
+existing PikeVM/hybrid infrastructure, don't build new machinery); the other three are
+Medium-High pending individual triage.
 **Impact**: +5 tests (was +6)
 
 ---
 
-### Category 10: Unsupported PCRE Features (19 errors - out of scope)
+### Category 10: Unsupported PCRE Features (19 errors) — split by whether it's a ceiling or just unwritten
 
-These are advanced PCRE features not currently planned for implementation:
+- **Backtracking control verbs**: `(*MARK:)`, `(*PRUNE:)`, `(*SKIP:)`, `(*THEN:)` — **architectural
+  ceiling**. These are imperative directives to a backtracking interpreter's control flow; there is
+  no automaton equivalent. Permanently out of scope regardless of engineering effort (see
+  "Architectural Ceiling" above).
+- **Relative backreferences**: `(?-2)` — reference group by relative position. Not a ceiling —
+  purely syntax sugar over an absolute-index backref, which Reggie already supports. Unwritten,
+  not unwritable; low-difficulty parser-level TODO if it turns out to matter.
+- **Branch reset groups (numbered)**: `(?|...)` — now supported via `RECURSIVE_DESCENT`; see
+  `BranchResetCorrectnessTest`.
+- **Branch reset groups (named)**: `(?|(?'a'...)|(?'a'...))` — named-capture variant not yet
+  supported. Not a ceiling — the numbered form already works, this is the same mechanism with name
+  resolution added at the parser level.
 
-- **Relative backreferences**: `(?-2)` - reference group by relative position
-- **Branch reset groups (numbered)**: `(?|...)` — now supported via RECURSIVE_DESCENT; see `BranchResetCorrectnessTest`
-- **Branch reset groups (named)**: `(?|(?'a'...)|(?'a'...))` — named-capture variant not yet supported
-- **Backtracking control verbs**: `(*MARK:)`, `(*PRUNE:)`, `(*SKIP:)`, `(*THEN:)`
-
-**Status**: Out of scope for initial PCRE conformance. These are rarely used in practice.
+**Status**: Backtracking verbs are permanently out of scope. Relative backrefs and named
+branch-reset groups are low-priority unwritten features, not architecture limits — deprioritized
+because they're rare in practice, not because they're impossible.
 
 ---
 
@@ -234,20 +352,26 @@ Mark items `[x]` when completed. Add commit hash in parentheses.
   - Test pattern: `(cat(a(ract|tonic)|erpillar)) \1()2(3)`
   - Expected gain: +2 tests
 
-### Phase 3: High Complexity (Target: 95% pass rate)
+### Phase 3: High Complexity — split per Categories 2 and 3 above; no fixed target
 
-- [ ] **3.1** Implement non-greedy quantifiers in capturing groups
-  - Requires backtracking support for lazy quantifiers
-  - Consider new strategy: `LAZY_QUANTIFIER_BACKTRACK`
-  - Test patterns: `(|ab)*?d`, `^[ab]{1,3}?(ab*?|b)`
-  - Expected gain: +5 tests
+- [ ] **3.1** Fix `^[ab]{1,3}?(ab*?|b)`-style lazy-quantifier group-span bug (Category 2b)
+  - `BITSTATE_CAPTURE` already compiles this natively — wrong group span, not a missing feature
+  - Debug existing strategy's group-span logic for lazy quantifiers, no new strategy needed
+  - Test pattern: `^[ab]{1,3}?(ab*?|b)`
+  - Expected gain: up to +4 tests, pending individual re-check of the other Category 2 patterns
+  - **Not in scope**: `(|ab)*?d` — this one is declined by design (Category 2a, architectural
+    ceiling), do not attempt to "fix" it; a fix here means routing to a different existing
+    strategy family (e.g. PikeVM) if one is found to support it, not new backtracking machinery
 
-- [ ] **3.2** Fix recursive pattern group capture tracking
-  - Debug existing RECURSIVE_DESCENT implementation
-  - Test patterns: `^((.)(?1)\2|.?)$` palindrome
-  - Expected gain: +9 tests
+- [ ] **3.2** Re-verify and fix non-self-embedding recursive-subroutine patterns (Category 3b)
+  - `^(a?)+b(?1)a`, `^(a?)b(?1)a` — both compile via `RECURSIVE_DESCENT` with no exception; check
+    whether the match/group result is actually correct against JDK, fix if not
+  - Expected gain: up to +2 tests
+  - **Not in scope**: `^((.)(?1)\2|.?)$` and the other self-embedding palindrome patterns —
+    declined by design (Category 3a, architectural ceiling, context-free not regular); "debugging
+    the existing RECURSIVE_DESCENT implementation" will not fix these, they are correctly declined
 
-### Phase 4: Very High Complexity (Target: 97% pass rate)
+### Phase 4: Reconciliation, not "very high complexity" — see Category 4 above
 
 - [x] **4.1** Implement self-referencing backreferences (2026-05-07)
   - Added `PatternAnalyzer.hasSelfReferencingBackref()` compile-time predicate
@@ -342,9 +466,14 @@ Pattern → PatternAnalyzer.analyzeStrategy()
 
 ---
 
-## Current Status Summary (2026-05-30)
+## Current Status Summary
 
-### Pass Rate: 95.4% (329/345 evaluated tests, 364-entry corpus)
+### Pass Rate: 98.1% (257/262 evaluated tests, 364-entry corpus)
+
+`testPCRECapturingGroups` reports 257 passed, 5 failed, 102 errors. "Failed" means the pattern
+compiled natively and produced a wrong result (real bugs); "Errors" means the pattern was declined
+(`UnsupportedPatternException`) or rejected at parse time — a mix of permanent architectural
+ceiling and unwritten-but-writable syntax (see split above and below).
 
 ### What IS Supported
 
@@ -354,6 +483,7 @@ Pattern → PatternAnalyzer.analyzeStrategy()
 | Capturing groups | ✅ Full | Numbered groups, nested groups |
 | Non-capturing groups | ✅ Full | `(?:...)` |
 | Backreferences | ✅ Mostly | `\1`, `\2`, etc. (some edge cases not supported) |
+| Self-referencing backrefs | ✅ Full | `(a\1?){4}` — routes to `RECURSIVE_DESCENT`, passes in the corpus |
 | Lookahead | ✅ Full | Positive `(?=...)` and negative `(?!...)` |
 | Lookbehind | ✅ Full | Positive `(?<=...)` and negative `(?<!...)` |
 | Case-insensitive | ✅ Full | `(?i)` flag |
@@ -365,49 +495,76 @@ Pattern → PatternAnalyzer.analyzeStrategy()
 | Non-greedy quantifiers | ⚠️ Partial | Basic patterns work; complex group captures may fail |
 | Alternation | ✅ Full | `a|b|c` |
 | Named groups | ✅ Full | `(?<name>...)`, `(?'name'...)` |
-| Subroutines | ⚠️ Partial | `(?1)`, `(?R)` - basic cases work |
-| Conditionals | ⚠️ Partial | `(?(1)yes|no)` - basic cases work |
+| Subroutines | ⚠️ Partial | `(?1)`, `(?R)` — non-self-embedding calls work (`RECURSIVE_DESCENT`); self-embedding/context-free recursion is a permanent architectural ceiling, see below |
+| Conditionals | ⚠️ Partial | `(?(1)yes|no)` — basic cases work; `(?(1)\1)` per-iteration conditional-backref combination fails (see Remaining Failures) |
+| Atomic groups | ✅ Full | `(?>...)` — routes to `PIKEVM_CAPTURE` |
+| Possessive quantifiers | ✅ Full | `*+`, `++`, `?+` — routes to `PIKEVM_CAPTURE` |
+| Unicode properties | ✅ Full | `\p{L}`, `\p{N}` — routes to `STATELESS_LOOP` |
 
 ### What is NOT Supported
 
-| Feature | Status | Reason |
-|---------|--------|--------|
-| Self-referencing backrefs | ❌ | `(a\1?){4}` - requires per-iteration capture updates |
-| Recursive palindromes | ❌ | `^((.)(?1)\2|.?)$` - requires backtrackable subroutines |
-| Branch reset groups (named) | ⚠️ | `(?|(?'a'aaa)|(?'a'b))` - numbered form works via RECURSIVE_DESCENT; named-capture variant not yet supported |
-| Relative backrefs | ❌ | `(?-2)` - advanced PCRE feature |
-| Backtracking verbs | ❌ | `(*PRUNE)`, `(*SKIP)`, `(*MARK)`, `(*THEN)` |
-| Atomic groups | ❌ | `(?>...)` - not implemented |
-| Possessive quantifiers | ❌ | `*+`, `++`, `?+` - not implemented |
-| Unicode properties | ❌ | `\p{L}`, `\p{N}` - not implemented |
-| Scoped inline flags | ❌ | `(?i:...)` - global flags only |
+**Permanent architectural ceiling** (automaton model can't represent these — not a fix backlog):
 
-### Remaining Work (29 failing tests)
+| Feature | Reason |
+|---------|--------|
+| Self-embedding recursive subroutines | `^((.)(?1)\2|.?)$` — context-free, not regular; throws `UnsupportedPatternException` by design. Non-self-embedding `(?1)` calls (e.g. `^(a?)+b(?1)a`) are NOT in this bucket — they compile natively, see Category 3 |
+| Backtracking control verbs | `(*PRUNE)`, `(*SKIP)`, `(*MARK)`, `(*THEN)` — imperative backtracking-interpreter directives, no automaton equivalent |
 
-| Category | Tests | Difficulty | Notes |
-|----------|-------|------------|-------|
-| Non-greedy quantifiers in groups | 5 | High | Requires lazy backtracking |
-| Recursive patterns | 9 | High | Group capture in recursion |
-| Self-referencing backrefs | 3 | Very High | Fundamental limitation |
-| Multiline anchors | 5 | Medium | Inline flag handling |
-| Complex nested patterns | 5 | Medium-High | Scoped flags, nested groups |
-| Lookahead combinations | 2 | Medium | Edge cases |
+**Unwritten but not unwritable** (real TODO backlog, no architecture change needed):
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Branch reset groups (named) | ⚠️ Partial | `(?|(?'a'aaa)|(?'a'b))` — numbered form works via `RECURSIVE_DESCENT`; named-capture variant currently rejected at parse time with "Duplicate group name" (the parser's duplicate-name check runs before branch-reset dedup logic) |
+| Relative backrefs | ❌ unwritten | `(?-2)` — parser currently reports "Expected ':' or ')' after modifiers", i.e. it isn't recognized as a backref form at all yet; syntax sugar over absolute-index backrefs, which already work |
+| Scoped inline flags | ❌ unwritten | `(?i:...)` — global flags only |
+
+### Remaining Failures (5 patterns compile natively, wrong result)
+
+Live output from `testPCRECapturingGroups`:
+
+| Pattern | Expected | Category |
+|---------|----------|----------|
+| `(abc)\100` | matches 'abc@' (octal escape `\100` = '@') | New — octal-escape-adjacent-to-backref parsing, not yet in a category above |
+| `(abc)\1000` | matches 'abc@0' | Same root cause as above — octal escape length/boundary handling |
+| `(?:(?!foo)...|^.{0,2})bar(.*)` | group 1 = ' etc' on 'foobar crowbar etc' | Category 9 — confirmed real bug, not a decline |
+| `^(a(?(1)\1)){4}$` | matches 'aaaaaaaaaa' | New — conditional + backref per iteration, distinct from the working `(a\1?){4}` self-referencing-backref case |
+| `^(\D*)(?=\d)(?!123)` | matches 'ABC445' | Category 6 — lookahead combination |
+
+### Remaining Errors (102 patterns declined or parse-rejected)
+
+The error list spans the two known permanent-ceiling categories (self-embedding recursion,
+backtracking verbs) and the known unwritten-syntax cases (relative backrefs, named branch-reset)
+documented above, plus three decline reasons not yet assigned to a category in this document:
+
+- `capturing group with nullable content and nullable outer quantifier: PIKEVM_CAPTURE diverges;
+  TDFA POSIX last-match span also incorrect` — the single largest cluster in the error list.
+- `anchor condition diluted in DFA construction` — second-largest cluster.
+- `lookahead inside quantified group` — smaller cluster.
+
+These three have not yet been triaged into ceiling-vs-bug the way Categories 2, 3, and 9 were in
+this update. That triage is the next concrete step, not a number to guess at here.
 
 ### Plan Forward
 
-**Phase 2 (Target: 92%)** - Medium complexity fixes:
-- Fix scoped inline flags `(?i:...)`
-- Fix nested groups with literal backrefs
-- Fix remaining lookahead edge cases
+There is no fixed percentage target (see "Architectural Ceiling" above). The plan is to work
+category-by-category, separating each remaining failure into "declined by design — leave it" vs.
+"compiles natively and is wrong — fix it," the same way Categories 2, 3, and 9 were split:
 
-**Phase 3 (Target: 95%)** - High complexity:
-- Implement proper non-greedy backtracking for capturing groups
-- Fix recursive pattern group capture tracking
+1. Triage the three untriaged decline-reason clusters (nullable-content/PIKEVM divergence,
+   anchor-dilution in DFA construction, lookahead-inside-quantified-group) into ceiling-vs-bug,
+   using `debugPattern` on representative corpus entries from each cluster.
+2. Check `^(ba|b*){1,2}?bc` and `(?i)^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z)` (Category 9's two remaining
+   unclassified patterns) against `debugPattern` and the corpus test's pass/fail/error lists.
+3. Fix the 5 confirmed real bugs listed under "Remaining Failures": the octal-escape parsing pair
+   (`(abc)\100`, `(abc)\1000`), the negative-lookahead-in-alternation capture bug, the
+   conditional-plus-backref-per-iteration bug, and the lookahead-combination bug.
+4. For the two Category 9 architecture-tied patterns, prototype the PikeVM-routing fix (alternation
+   priority) and the rich-API-hybrid extension (capture-ambiguous backref) — both reuse existing
+   infrastructure rather than requiring new strategies.
+5. Once the three untriaged clusters are resolved, a meaningful percentage target becomes possible
+   — one that explicitly excludes the permanent-ceiling patterns from the denominator (see
+   Architectural Ceiling), not 100% of the raw 364-entry corpus.
 
-**Phase 4 (Target: 97%)** - Very high complexity:
-- Self-referencing backreferences (may require architectural changes)
-
-**Out of Scope**:
-- Backtracking control verbs (`*PRUNE`, `*SKIP`, etc.)
-- Branch reset groups with named captures (`(?|(?'a'...)|(?'a'...))`) — numbered `(?|...)` is already supported
-- These are rarely used in practice and add significant complexity
+**Permanently out of scope** (architectural ceiling, restated from above):
+- Self-embedding recursive subroutines (context-free, not regular)
+- Backtracking control verbs (`*PRUNE`, `*SKIP`, `*MARK`, `*THEN`)
