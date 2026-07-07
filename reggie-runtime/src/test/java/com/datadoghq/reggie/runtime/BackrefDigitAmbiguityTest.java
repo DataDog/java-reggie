@@ -105,20 +105,27 @@ public class BackrefDigitAmbiguityTest {
   }
 
   /**
-   * {@code (\w+)#\1(a?)(\2)} is pinned-eligible ({@code \w+}'s charset is disjoint from the literal
-   * {@code #} separator between group 1 and backref {@code \1}), so it would route to {@code
-   * PINNED_BACKREFERENCE} if the B9 danger-condition guard did not also cover that strategy. Group
-   * 3 {@code (\2)} is a capturing group whose body is a backref to the nullable group 2 ({@code
-   * a?}), so {@code hasNullableBackrefInsideCapturingGroup} must still exclude it, routing to JDK
-   * fallback instead.
+   * {@code (\w+)#\1(a?)(\2)} has trailing content ({@code (a?)(\2)}) after the group 1 / backref 1
+   * pair, so PINNED_BACKREFERENCE now requires the group and its backreference to span the whole
+   * pattern and rejects it. It routes to VARIABLE_CAPTURE_BACKREF instead, which is unaffected by
+   * the B9 danger condition (backref to nullable group 2 inside capturing group 3) and matches
+   * correctly without needing the JDK fallback.
    */
   @Test
-  void pinnedEligibleNullableBackrefInsideCapturingGroup_routesToFallback_notPinnedBackreference() {
+  void pinnedIneligibleNullableBackrefInsideCapturingGroup_matchesNatively() {
     String pat = "(\\w+)#\\1(a?)(\\2)";
+    String input = "hello#hello";
+    Matcher jdk = Pattern.compile(pat).matcher(input);
+    assertTrue(jdk.matches(), "JDK should match");
     ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
-    assertTrue(
+    assertFalse(
         reg instanceof JavaRegexFallbackMatcher,
-        "(\\w+)#\\1(a?)(\\2) must fall back to JDK: pinned-eligible boundary but nullable "
-            + "backref inside capturing group (B9 guard) must still apply");
+        "(\\w+)#\\1(a?)(\\2) is not PINNED_BACKREFERENCE-eligible (trailing groups after the "
+            + "backref), so it should match natively rather than falling back to JDK");
+    MatchResult r = reg.match(input);
+    assertNotNull(r, "Reggie should match");
+    assertEquals(jdk.group(1), r.group(1));
+    assertEquals(jdk.group(2), r.group(2));
+    assertEquals(jdk.group(3), r.group(3));
   }
 }

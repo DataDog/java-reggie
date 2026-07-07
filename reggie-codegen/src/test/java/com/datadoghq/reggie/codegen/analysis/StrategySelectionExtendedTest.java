@@ -243,10 +243,11 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testSpecializedBackrefRepeatedWord() throws Exception {
-    // Word-charset content is disjoint from the whitespace separator, so this now routes to
-    // PINNED_BACKREFERENCE (single forward scan, no retry) instead of VARIABLE_CAPTURE_BACKREF.
+    // The \b anchors sit outside the group/backref span, which PINNED_BACKREFERENCE now rejects
+    // (its generated matcher has no code path to evaluate anything outside that span), so this
+    // falls through to VARIABLE_CAPTURE_BACKREF instead.
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\b(\\w+)\\s+\\1\\b");
-    assertEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
   }
 
   // ── VARIABLE_CAPTURE_BACKREF ─────────────────────────────────────────────
@@ -262,9 +263,11 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testVariableCaptureBackrefAnchored() throws Exception {
-    // Anchors don't change the disjointness proof - still routes to PINNED_BACKREFERENCE.
+    // The ^ and $ anchors sit outside the group/backref span, which PINNED_BACKREFERENCE now
+    // rejects (its generated matcher has no code path to evaluate them), so this routes to
+    // VARIABLE_CAPTURE_BACKREF instead.
     PatternAnalyzer.MatchingStrategyResult result = analyze("^(\\w+)\\s+\\1$");
-    assertEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
     if (result.patternInfo != null) assertNotNull(result.patternInfo.toString());
   }
 
@@ -452,8 +455,18 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testPinnedBackrefRepeatedWordShape() throws Exception {
-    // \w+ content disjoint from \s+ separator - proven single forward-scan boundary.
+    // \w+ content disjoint from \s+ separator - proven single forward-scan boundary - but the
+    // \b anchors sit outside the group/backref span, which PINNED_BACKREFERENCE now rejects, so
+    // it falls through to VARIABLE_CAPTURE_BACKREF instead.
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\b(\\w+)\\s+\\1\\b");
+    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
+  }
+
+  @Test
+  void testPinnedBackrefRepeatedWordShapeWithoutAnchors() throws Exception {
+    // Same shape without the \b anchors - the group/backref pair now spans the whole pattern,
+    // so this is PINNED_BACKREFERENCE-eligible.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("(\\w+)\\s+\\1");
     assertEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
   }
 

@@ -41,11 +41,16 @@ public class PinnedBackreferenceMatchResultTest {
   }
 
   @Test
-  public void testRepeatedWordRoutesToPinnedBackreference() throws Exception {
-    assertEquals(
+  public void testRepeatedWordWithBoundaryAnchorsDoesNotRouteToPinnedBackreference()
+      throws Exception {
+    // \b(\w+)\s+\1\b has \b anchors outside the group/backref span, which the generated
+    // matcher has no code path to evaluate - PINNED_BACKREFERENCE requires the group and
+    // backreference to span the whole pattern, so this falls through to another strategy.
+    assertNotEquals(
         PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE,
         routeOf("\\b(\\w+)\\s+\\1\\b"),
-        "Pattern \\b(\\w+)\\s+\\1\\b should route to PINNED_BACKREFERENCE");
+        "Pattern \\b(\\w+)\\s+\\1\\b has anchors outside the group/backref span and must not "
+            + "route to PINNED_BACKREFERENCE");
   }
 
   @Test
@@ -198,11 +203,16 @@ public class PinnedBackreferenceMatchResultTest {
         "matchBounded with a mismatched prefix in the bound should fail");
   }
 
-  // ---- \b(\w+)\s+\1\b : whitespace separator ----
+  // ---- (\w+)\s+\1 : whitespace separator ----
+  // Unlike \b(\w+)\s+\1\b (covered by
+  // testRepeatedWordWithBoundaryAnchorsDoesNotRouteToPinnedBackreference
+  // above), this pattern has no anchors outside the group/backref span, so it routes to
+  // PINNED_BACKREFERENCE - the \b anchors are zero-width, so removing them doesn't change the
+  // expected match boundaries below.
 
   @Test
   public void testRepeatedWord_match() {
-    ReggieMatcher matcher = RuntimeCompiler.compile("\\b(\\w+)\\s+\\1\\b");
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)\\s+\\1");
     MatchResult result = matcher.match("hello hello");
 
     assertNotNull(result, "match(\"hello hello\") should succeed");
@@ -212,7 +222,7 @@ public class PinnedBackreferenceMatchResultTest {
 
   @Test
   public void testRepeatedWord_findMatch() {
-    ReggieMatcher matcher = RuntimeCompiler.compile("\\b(\\w+)\\s+\\1\\b");
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)\\s+\\1");
     MatchResult result = matcher.findMatch("say hello hello now");
 
     assertNotNull(result, "findMatch should locate the repeated word");
@@ -223,7 +233,7 @@ public class PinnedBackreferenceMatchResultTest {
 
   @Test
   public void testRepeatedWord_notFound() {
-    ReggieMatcher matcher = RuntimeCompiler.compile("\\b(\\w+)\\s+\\1\\b");
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)\\s+\\1");
     assertNull(matcher.findMatch("hello world foo"), "no repeated word should return null");
   }
 
@@ -271,5 +281,26 @@ public class PinnedBackreferenceMatchResultTest {
   public void testCharsetSeparator_mismatch() {
     ReggieMatcher matcher = RuntimeCompiler.compile("([a-z]+)\\d+\\1");
     assertNull(matcher.match("ab12cd"), "match(\"ab12cd\") should return null");
+  }
+
+  // ---- (\w+)(?:--){2}\1 : multi-char literal separator with explicit repetition count ----
+  // (?:--){2} matches exactly 4 dashes; separator length bounds must be tracked in characters,
+  // not in repetitions of the "--" atom, or a valid 4-dash separator is wrongly rejected.
+
+  @Test
+  public void testMultiCharSeparatorWithRepetitionCount_match() {
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)(?:--){2}\\1");
+    MatchResult result = matcher.match("ab----ab");
+
+    assertNotNull(result, "match(\"ab----ab\") should succeed (4 dashes = (?:--){2})");
+    assertEquals("ab----ab", result.group(0));
+    assertEquals("ab", result.group(1));
+  }
+
+  @Test
+  public void testMultiCharSeparatorWithRepetitionCount_mismatchWrongDashCount() {
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)(?:--){2}\\1");
+    assertNull(matcher.match("ab--ab"), "2 dashes should not satisfy (?:--){2} (needs 4)");
+    assertNull(matcher.match("ab------ab"), "6 dashes should not satisfy (?:--){2} (needs 4)");
   }
 }

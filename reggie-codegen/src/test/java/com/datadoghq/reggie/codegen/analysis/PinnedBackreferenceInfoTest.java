@@ -32,9 +32,10 @@ class PinnedBackreferenceInfoTest {
   @Test
   void structuralHashCodeDiffersOnGroupIndexAndCharSet() {
     PinnedBackreferenceInfo a =
-        new PinnedBackreferenceInfo(1, bodyNode(CharSet.WORD), CharSet.WORD, null, null);
+        new PinnedBackreferenceInfo(1, bodyNode(CharSet.WORD), CharSet.WORD, 1, null, null, 0, -1);
     PinnedBackreferenceInfo b =
-        new PinnedBackreferenceInfo(2, bodyNode(CharSet.DIGIT), CharSet.DIGIT, null, null);
+        new PinnedBackreferenceInfo(
+            2, bodyNode(CharSet.DIGIT), CharSet.DIGIT, 1, null, null, 0, -1);
 
     assertNotEquals(a.structuralHashCode(), b.structuralHashCode());
   }
@@ -42,13 +43,13 @@ class PinnedBackreferenceInfoTest {
   @Test
   void hasSeparatorReflectsConstructorArgument() {
     PinnedBackreferenceInfo noSeparator =
-        new PinnedBackreferenceInfo(1, bodyNode(CharSet.WORD), CharSet.WORD, null, null);
+        new PinnedBackreferenceInfo(1, bodyNode(CharSet.WORD), CharSet.WORD, 1, null, null, 0, -1);
     assertFalse(noSeparator.hasSeparator());
 
     RegexNode separatorNode = bodyNode(CharSet.WHITESPACE);
     PinnedBackreferenceInfo withSeparator =
         new PinnedBackreferenceInfo(
-            1, bodyNode(CharSet.WORD), CharSet.WORD, separatorNode, CharSet.WHITESPACE);
+            1, bodyNode(CharSet.WORD), CharSet.WORD, 1, separatorNode, CharSet.WHITESPACE, 1, -1);
     assertTrue(withSeparator.hasSeparator());
   }
 }

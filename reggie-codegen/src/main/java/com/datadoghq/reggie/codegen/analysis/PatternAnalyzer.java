@@ -2638,6 +2638,41 @@ public class PatternAnalyzer {
     return null; // Unknown node type - be conservative
   }
 
+  /**
+   * Fixed number of characters {@code node} always consumes, provided every character it can
+   * produce belongs to {@code charSet}. The pinned-backreference codegen's separator scan is a flat
+   * run of {@code charSet} characters with no notion of grouping, so a quantified atom (e.g. the
+   * {@code --} in {@code (?:--){2}}) can only be converted from a repetition count to a character
+   * count if its own characters are indistinguishable from that flat run. Returns -1 if the length
+   * isn't fixed or a character falls outside {@code charSet}.
+   */
+  private int getFixedLengthInCharSet(RegexNode node, CharSet charSet) {
+    if (node instanceof LiteralNode) {
+      return charSet.contains(((LiteralNode) node).ch) ? 1 : -1;
+    }
+    if (node instanceof CharClassNode) {
+      CharClassNode charClass = (CharClassNode) node;
+      CharSet nodeSet = charClass.negated ? charClass.chars.complement() : charClass.chars;
+      return nodeSet.minus(charSet).isEmpty() ? 1 : -1;
+    }
+    if (node instanceof GroupNode) {
+      GroupNode group = (GroupNode) node;
+      return group.capturing ? -1 : getFixedLengthInCharSet(group.child, charSet);
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode child : ((ConcatNode) node).children) {
+        int len = getFixedLengthInCharSet(child, charSet);
+        if (len < 0) {
+          return -1;
+        }
+        total += len;
+      }
+      return total;
+    }
+    return -1;
+  }
+
   private boolean isNullable(RegexNode node) {
     if (node instanceof QuantifierNode) {
       return ((QuantifierNode) node).min == 0;
@@ -3575,6 +3610,14 @@ public class PatternAnalyzer {
       return null;
     }
 
+    // The generated matcher only ever scans the group, the optional separator, and the
+    // backreference echo - it has no code path for anything else in the concatenation. A
+    // non-empty prefix/suffix (e.g. the \b anchors in \b(\w+)\s+\1\b) would therefore be silently
+    // ignored rather than evaluated, so require the group/backref pair to span the whole pattern.
+    if (groupIndex != 0 || backrefIndex != children.size() - 1) {
+      return null;
+    }
+
     // The codegen forward-scans the group's content as a single flat "one-or-more chars from
     // groupCharSet" loop with no notion of an upper bound, so only an unbounded (max == -1),
     // greedy, min >= 1 quantifier directly wrapping a charset-bearing child is safe - this
@@ -3586,6 +3629,12 @@ public class PatternAnalyzer {
     }
     QuantifierNode groupQuant = (QuantifierNode) capturingGroup.child;
     if (!groupQuant.greedy || groupQuant.min < 1 || groupQuant.max != -1) {
+      return null;
+    }
+    // The generated matcher's group count is derived solely from the pinned group's own number;
+    // a capturing group nested inside its quantified body would be silently unaccounted for,
+    // making group(n) inaccessible or throwing for n beyond the pinned group's index.
+    if (hasCapturingGroup(groupQuant.child)) {
       return null;
     }
     CharSet groupCharSet = getNodeCharSet(groupQuant.child);
@@ -3605,16 +3654,78 @@ public class PatternAnalyzer {
     // earlier occurrence of the same backreference) is rejected rather than approximated.
     RegexNode separator = null;
     CharSet separatorCharSet = null;
+    int separatorMinLength = 0;
+    int separatorMaxLength = -1;
     if (backrefIndex > groupIndex + 1) {
       List<RegexNode> sepNodes = children.subList(groupIndex + 1, backrefIndex);
       if (sepNodes.size() != 1) {
         return null;
       }
       separator = sepNodes.get(0);
+      if (hasCapturingGroup(separator)) {
+        return null;
+      }
       separatorCharSet = getFirstCharSet(separator);
+      if (separatorCharSet == null) {
+        return null;
+      }
+
+      // The scan can't backtrack, so it always consumes the longest run of separator-charset
+      // chars available; that's only correct if the separator's quantifier bounds either equal
+      // that run (min <= run) or don't cap it below that run (max == -1 or max >= run). Track the
+      // bounds here so codegen can reject a candidate whose actual run falls outside them, instead
+      // of accepting whatever length the greedy scan happens to consume.
+      // A non-capturing group (e.g. (?:\s+)) wraps its child without changing what's matched, so
+      // unwrap it before checking for a quantifier - otherwise a wrapped quantifier's bounds are
+      // silently replaced with "exactly one occurrence" below.
+      RegexNode sepQuantCandidate = separator;
+      if (sepQuantCandidate instanceof GroupNode) {
+        GroupNode sepGroup = (GroupNode) sepQuantCandidate;
+        if (!sepGroup.capturing && !sepGroup.atomic) {
+          sepQuantCandidate = sepGroup.child;
+        }
+      }
+      RegexNode sepAtom;
+      int sepRepMin;
+      int sepRepMax;
+      if (sepQuantCandidate instanceof QuantifierNode) {
+        QuantifierNode sepQuant = (QuantifierNode) sepQuantCandidate;
+        if (!sepQuant.greedy) {
+          return null;
+        }
+        sepAtom = sepQuant.child;
+        sepRepMin = sepQuant.min;
+        sepRepMax = sepQuant.max;
+      } else {
+        // No quantifier wrapping the separator node means exactly one occurrence.
+        sepAtom = sepQuantCandidate;
+        sepRepMin = 1;
+        sepRepMax = 1;
+      }
+      if (separatorCharSet.isEmpty()) {
+        // Zero-width separator (e.g. \b): the codegen has no code path to evaluate the anchor
+        // itself, and its scan of an empty charset always consumes 0 chars, so pin the bounds to
+        // something that scan can never satisfy - the pattern is unsatisfiable anyway, since the
+        // group and backreference charsets can't both be disjoint from and equal to each other.
+        separatorMinLength = 1;
+        separatorMaxLength = 1;
+      } else {
+        // The codegen's separator scan reports a character count, not a repetition count, so the
+        // quantifier's bounds must be converted via the atom's own fixed character width (e.g. 2
+        // for the "--" in (?:--){2}) - reject if that width can't be established.
+        int sepAtomLength = getFixedLengthInCharSet(sepAtom, separatorCharSet);
+        if (sepAtomLength < 1) {
+          return null;
+        }
+        separatorMinLength = sepRepMin * sepAtomLength;
+        separatorMaxLength = sepRepMax == -1 ? -1 : sepRepMax * sepAtomLength;
+        if (separatorMinLength < 1) {
+          return null;
+        }
+      }
 
       // Disjointness condition 2: separator vs. group content.
-      if (separatorCharSet == null || !groupCharSet.isDisjoint(separatorCharSet)) {
+      if (!groupCharSet.isDisjoint(separatorCharSet)) {
         return null;
       }
     }
@@ -3623,8 +3734,11 @@ public class PatternAnalyzer {
         capturingGroup.groupNumber,
         capturingGroup.child,
         groupCharSet,
+        groupQuant.min,
         separator,
-        separatorCharSet);
+        separatorCharSet,
+        separatorMinLength,
+        separatorMaxLength);
   }
 
   /** Check if a node represents a single character or character class. */

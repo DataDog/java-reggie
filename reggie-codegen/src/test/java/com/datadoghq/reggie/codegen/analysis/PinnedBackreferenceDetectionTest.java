@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.codegen.analysis;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -79,7 +80,15 @@ class PinnedBackreferenceDetectionTest {
 
   @Test
   void detectsRepeatedWordShape() throws Exception {
-    assertNotNull(detect("\\b(\\w+)\\s+\\1\\b"));
+    assertNotNull(detect("(\\w+)\\s+\\1"));
+  }
+
+  @Test
+  void rejectsPatternWithAnchorsOutsideGroupAndBackrefSpan() throws Exception {
+    // The generated matcher only scans the group, separator, and backreference echo - it has
+    // no code path for the \b anchors here, so the whole pattern must be rejected rather than
+    // silently ignoring them.
+    assertNull(detect("\\b(\\w+)\\s+\\1\\b"));
   }
 
   @Test
@@ -90,5 +99,61 @@ class PinnedBackreferenceDetectionTest {
   @Test
   void rejectsAmbiguousQuotedStringWithEscape() throws Exception {
     assertNull(detect("([\"'])(?:\\\\\\1|.)*?\\1"));
+  }
+
+  @Test
+  void rejectsPatternWithPrefixEvenWhenBackrefIsLast() throws Exception {
+    // Exercises the groupIndex/backrefIndex span check with only one side violated: a prefix
+    // before the group, but the backreference is still the last child. Both conditions must
+    // independently be able to trigger the rejection, not just their conjunction.
+    assertNull(detect("x(\\w+)\\s+\\1"));
+  }
+
+  @Test
+  void rejectsZeroMinLengthSeparator() throws Exception {
+    // A separator quantifier with min == 0 (e.g. \s*) can match empty, making the group's
+    // closing boundary ambiguous - the scan can't tell where the group ends and the separator
+    // begins, so this must be rejected rather than accepted with a bogus zero-length separator.
+    assertNull(detect("(\\w+)\\s*\\1"));
+  }
+
+  @Test
+  void detectsSeparatorWrappedInNonCapturingGroup() throws Exception {
+    // (?:\s+) wraps the separator's quantifier without changing what's matched, so it must be
+    // unwrapped to read the real bounds instead of being treated as a single fixed occurrence.
+    PinnedBackreferenceInfo info = detect("(\\w+)(?:\\s+)\\1");
+    assertNotNull(info);
+  }
+
+  @Test
+  void rejectsLazySeparatorQuantifier() throws Exception {
+    // The codegen's separator scan always consumes the longest available run; a lazy quantifier
+    // (\s+?) has the opposite semantics, so it must be rejected rather than approximated.
+    assertNull(detect("(\\w+)\\s+?\\1"));
+  }
+
+  @Test
+  void rejectsNestedCapturingGroupInSeparator() throws Exception {
+    // A capturing group nested inside the separator (even wrapped in a non-capturing group)
+    // would be silently unaccounted for by totalGroupCount(), so it must be rejected.
+    assertNull(detect("(\\w+)(?:(x)+)\\1"));
+  }
+
+  @Test
+  void rejectsNestedCapturingGroupInPinnedGroupBody() throws Exception {
+    // A capturing group nested inside the pinned group's quantified body would likewise be
+    // silently unaccounted for by totalGroupCount(), so it must be rejected.
+    assertNull(detect("((a)+)\\s+\\1"));
+  }
+
+  @Test
+  void detectsMultiCharLiteralSeparatorWithExplicitRepetitionCount() throws Exception {
+    // (?:--){2} matches exactly 4 dashes; separatorMinLength/separatorMaxLength must be the
+    // resulting character count (4), not the raw repetition count (2), since the codegen's
+    // separator scan measures characters.
+    PinnedBackreferenceInfo info = detect("(\\w+)(?:--){2}\\1");
+    assertNotNull(info);
+    assertEquals(4, info.separatorMinLength);
+    assertEquals(4, info.separatorMaxLength);
   }
 }

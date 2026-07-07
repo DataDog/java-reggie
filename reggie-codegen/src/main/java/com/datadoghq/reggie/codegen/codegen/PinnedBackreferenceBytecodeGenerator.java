@@ -37,7 +37,7 @@ import org.objectweb.asm.MethodVisitor;
  * <h3>Supported Pattern Shape</h3>
  *
  * <ul>
- *   <li>{@code \b(\w+)\s+\1\b} - word charset disjoint from whitespace separator charset
+ *   <li>{@code (\w+)\s+\1} - word charset disjoint from whitespace separator charset
  * </ul>
  *
  * <p>Modeled directly on {@link FixedRepetitionBackrefBytecodeGenerator} (single forward
@@ -75,6 +75,7 @@ public class PinnedBackreferenceBytecodeGenerator {
     int groupLenVar = alloc.allocate();
     int scanCharVar = alloc.allocate();
     int sepStartVar = info.hasSeparator() ? alloc.allocate() : -1;
+    int sepLenVar = info.hasSeparator() ? alloc.allocate() : -1;
 
     Label returnFalse = new Label();
 
@@ -101,16 +102,13 @@ public class PinnedBackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, groupLenVar);
-    mv.visitVarInsn(ILOAD, groupLenVar);
-    mv.visitJumpInsn(IFLE, returnFalse);
+    generateGroupLengthCheck(mv, groupLenVar, returnFalse);
 
     if (info.hasSeparator()) {
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ISTORE, sepStartVar);
       generateCharSetScan(mv, posVar, lenVar, scanCharVar, info.separatorCharSet);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, sepStartVar);
-      mv.visitJumpInsn(IF_ICMPEQ, returnFalse);
+      generateSeparatorLengthCheck(mv, posVar, sepStartVar, sepLenVar, returnFalse);
     }
 
     generateBackrefCheck(mv, posVar, lenVar, groupStartVar, groupLenVar, returnFalse);
@@ -153,13 +151,12 @@ public class PinnedBackreferenceBytecodeGenerator {
   }
 
   /**
-   * Minimum number of chars a match needs from a given start: 1+ for the group, 1+ for the
-   * separator (if present), plus groupLen more for the backreference - the last term is unknown
-   * until the group is scanned, so the static lower bound only covers the two known-nonempty pieces
-   * plus a single char for the (at-least-1-char) backreference echo.
+   * Minimum number of chars a match needs from a given start: {@code groupMinLength} for the group,
+   * {@code separatorMinLength} for the separator (if present), plus {@code groupMinLength} again
+   * for the backreference echo, which always matches the group's length.
    */
   private int minCandidateLength() {
-    return 2 + (info.hasSeparator() ? 1 : 0);
+    return 2 * info.groupMinLength + (info.hasSeparator() ? info.separatorMinLength : 0);
   }
 
   /** Generate the findFrom() method. */
@@ -175,6 +172,7 @@ public class PinnedBackreferenceBytecodeGenerator {
     int groupLenVar = alloc.allocate();
     int scanCharVar = alloc.allocate();
     int sepStartVar = info.hasSeparator() ? alloc.allocate() : -1;
+    int sepLenVar = info.hasSeparator() ? alloc.allocate() : -1;
 
     Label notNull = new Label();
     mv.visitVarInsn(ALOAD, 1);
@@ -187,8 +185,15 @@ public class PinnedBackreferenceBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, lenVar);
 
+    // int start = Math.max(0, startPos);
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ISTORE, startVar);
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, startVar);
+    mv.visitLabel(startNotNeg);
 
     Label outerLoop = new Label();
     Label outerEnd = new Label();
@@ -214,16 +219,13 @@ public class PinnedBackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, groupLenVar);
-    mv.visitVarInsn(ILOAD, groupLenVar);
-    mv.visitJumpInsn(IFLE, tryNextStart);
+    generateGroupLengthCheck(mv, groupLenVar, tryNextStart);
 
     if (info.hasSeparator()) {
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ISTORE, sepStartVar);
       generateCharSetScan(mv, posVar, lenVar, scanCharVar, info.separatorCharSet);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, sepStartVar);
-      mv.visitJumpInsn(IF_ICMPEQ, tryNextStart);
+      generateSeparatorLengthCheck(mv, posVar, sepStartVar, sepLenVar, tryNextStart);
     }
 
     generateBackrefCheck(mv, posVar, lenVar, groupStartVar, groupLenVar, tryNextStart);
@@ -262,6 +264,7 @@ public class PinnedBackreferenceBytecodeGenerator {
     int groupLenVar = alloc.allocate();
     int scanCharVar = alloc.allocate();
     int sepStartVar = info.hasSeparator() ? alloc.allocate() : -1;
+    int sepLenVar = info.hasSeparator() ? alloc.allocate() : -1;
     int startsArrayVar = alloc.allocate();
     int endsArrayVar = alloc.allocate();
 
@@ -306,13 +309,12 @@ public class PinnedBackreferenceBytecodeGenerator {
 
     generateCharSetScan(mv, posVar, lenVar, scanCharVar, info.groupCharSet);
 
-    // groupLen = pos - groupStart; require non-empty.
+    // groupLen = pos - groupStart; require it meets the quantifier's minimum.
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, groupLenVar);
-    mv.visitVarInsn(ILOAD, groupLenVar);
-    mv.visitJumpInsn(IFLE, returnNull);
+    generateGroupLengthCheck(mv, groupLenVar, returnNull);
 
     // ends[groupIndex] = pos
     mv.visitVarInsn(ALOAD, endsArrayVar);
@@ -324,9 +326,7 @@ public class PinnedBackreferenceBytecodeGenerator {
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ISTORE, sepStartVar);
       generateCharSetScan(mv, posVar, lenVar, scanCharVar, info.separatorCharSet);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, sepStartVar);
-      mv.visitJumpInsn(IF_ICMPEQ, returnNull);
+      generateSeparatorLengthCheck(mv, posVar, sepStartVar, sepLenVar, returnNull);
     }
 
     generateBackrefCheck(mv, posVar, lenVar, groupStartVar, groupLenVar, returnNull);
@@ -398,50 +398,6 @@ public class PinnedBackreferenceBytecodeGenerator {
     mv.visitEnd();
   }
 
-  /**
-   * Generate matchBounded(CharSequence, int, int) - extracts the bounded region, delegates to
-   * match(String).
-   */
-  public void generateMatchBoundedMethod(ClassWriter cw) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-
-    LocalVarAllocator alloc = new LocalVarAllocator(4);
-    int subStringVar = alloc.allocate();
-
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitVarInsn(ASTORE, subStringVar);
-
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, subStringVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className,
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
-
-    mv.visitMaxs(3, alloc.peek());
-    mv.visitEnd();
-  }
-
   /** Generate findMatch(String) - delegates to findMatchFrom(input, 0). */
   public void generateFindMatchMethod(ClassWriter cw) {
     MethodVisitor mv =
@@ -492,6 +448,7 @@ public class PinnedBackreferenceBytecodeGenerator {
     int groupLenVar = alloc.allocate();
     int scanCharVar = alloc.allocate();
     int sepStartVar = info.hasSeparator() ? alloc.allocate() : -1;
+    int sepLenVar = info.hasSeparator() ? alloc.allocate() : -1;
     int startsArrayVar = alloc.allocate();
     int endsArrayVar = alloc.allocate();
 
@@ -508,8 +465,15 @@ public class PinnedBackreferenceBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, lenVar);
 
+    // int start = Math.max(0, startPos);
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ISTORE, startVar);
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, startVar);
+    mv.visitLabel(startNotNeg);
 
     BytecodeUtil.pushInt(mv, totalGroupCount() + 1);
     mv.visitIntInsn(NEWARRAY, T_INT);
@@ -555,8 +519,7 @@ public class PinnedBackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupStartVar);
     mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, groupLenVar);
-    mv.visitVarInsn(ILOAD, groupLenVar);
-    mv.visitJumpInsn(IFLE, tryNextStart);
+    generateGroupLengthCheck(mv, groupLenVar, tryNextStart);
 
     // ends[groupIndex] = pos
     mv.visitVarInsn(ALOAD, endsArrayVar);
@@ -568,9 +531,7 @@ public class PinnedBackreferenceBytecodeGenerator {
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitVarInsn(ISTORE, sepStartVar);
       generateCharSetScan(mv, posVar, lenVar, scanCharVar, info.separatorCharSet);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, sepStartVar);
-      mv.visitJumpInsn(IF_ICMPEQ, tryNextStart);
+      generateSeparatorLengthCheck(mv, posVar, sepStartVar, sepLenVar, tryNextStart);
     }
 
     generateBackrefCheck(mv, posVar, lenVar, groupStartVar, groupLenVar, tryNextStart);
@@ -711,6 +672,43 @@ public class PinnedBackreferenceBytecodeGenerator {
       }
       mv.visitJumpInsn(GOTO, failLabel);
       mv.visitLabel(matches);
+    }
+  }
+
+  /**
+   * Jumps to {@code failLabel} unless the scanned group run meets the quantifier's minimum length
+   * ({@code info.groupMinLength}).
+   */
+  private void generateGroupLengthCheck(MethodVisitor mv, int groupLenVar, Label failLabel) {
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    BytecodeUtil.pushInt(mv, info.groupMinLength);
+    mv.visitJumpInsn(IF_ICMPLT, failLabel);
+  }
+
+  /**
+   * Computes the scanned separator run length ({@code posVar - sepStartVar}), stores it in {@code
+   * sepLenVar}, and jumps to {@code failLabel} unless that length falls within the separator
+   * quantifier's bounds ({@code info.separatorMinLength}..{@code info.separatorMaxLength}, where -1
+   * means unbounded).
+   */
+  private void generateSeparatorLengthCheck(
+      MethodVisitor mv, int posVar, int sepStartVar, int sepLenVar, Label failLabel) {
+    // sepLen = pos - sepStart
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, sepStartVar);
+    mv.visitInsn(ISUB);
+    mv.visitVarInsn(ISTORE, sepLenVar);
+
+    // if (sepLen < info.separatorMinLength) goto failLabel;
+    mv.visitVarInsn(ILOAD, sepLenVar);
+    BytecodeUtil.pushInt(mv, info.separatorMinLength);
+    mv.visitJumpInsn(IF_ICMPLT, failLabel);
+
+    if (info.separatorMaxLength != -1) {
+      // if (sepLen > info.separatorMaxLength) goto failLabel;
+      mv.visitVarInsn(ILOAD, sepLenVar);
+      BytecodeUtil.pushInt(mv, info.separatorMaxLength);
+      mv.visitJumpInsn(IF_ICMPGT, failLabel);
     }
   }
 }

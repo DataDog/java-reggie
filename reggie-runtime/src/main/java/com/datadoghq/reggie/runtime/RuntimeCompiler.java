@@ -1212,7 +1212,6 @@ public class RuntimeCompiler {
         pinnedBackrefGen.generateFindMatchMethod(cw);
         pinnedBackrefGen.generateFindMatchFromMethod(cw);
         pinnedBackrefGen.generateMatchesBoundedMethod(cw);
-        pinnedBackrefGen.generateMatchBoundedMethod(cw);
         break;
 
       case VARIABLE_CAPTURE_BACKREF:
