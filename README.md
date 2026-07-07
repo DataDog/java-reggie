@@ -11,7 +11,10 @@ Reggie is a high-performance Java regex library that provides **two complementar
 1. **Compile-Time Generation** - Zero runtime overhead via annotation processing
 2. **Runtime Compilation** - Lazy bytecode generation with automatic caching
 
-Both approaches use intelligent strategy selection (DFA/NFA) and generate optimized bytecode for **guaranteed linear-time matching** without ReDoS vulnerabilities.
+Both approaches analyze each pattern and route it to one of three strategy families —
+DFA-backed (deterministic, longest-match), NFA/PikeVM-backed (Thompson construction, leftmost-first),
+or bounded-backtracking bytecode (shape-restricted, still O(n)) — then generate specialized
+bytecode for **guaranteed linear-time matching** without ReDoS vulnerabilities.
 
 ## Table of Contents
 
@@ -145,10 +148,12 @@ categories.
 ### Why So Fast?
 
 1. **Zero initialization**: No `Pattern.compile()` overhead
-2. **Specialized bytecode**: Each pattern gets custom-generated code
+2. **Specialized bytecode**: Each pattern gets custom-generated code, not a generic interpreter loop
 3. **Maximum JIT optimization**: HotSpot can fully inline specialized matchers
 4. **No interpreter**: Direct execution, no generic pattern interpreter
-5. **Linear-time matching**: DFA-based approach eliminates backtracking
+5. **Linear-time matching**: strategy selection picks a DFA, NFA/PikeVM, or bounded-backtracking
+   bytecode strategy per pattern — each is O(n) by construction, so none can degrade into
+   unbounded backtracking
 
 ### Engine Comparison
 
