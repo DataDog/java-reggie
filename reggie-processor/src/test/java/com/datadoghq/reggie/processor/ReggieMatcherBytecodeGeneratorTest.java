@@ -334,11 +334,23 @@ class ReggieMatcherBytecodeGeneratorTest {
 
   @Test
   void testOnePassNfaStrategy() throws Exception {
-    Object matcher = compile("(abc)(def)(ghi)", "OnePassNfaMatcher");
+    // (abc)(def)(ghi) routes to SPECIALIZED_FIXED_SEQUENCE, not ONEPASS_NFA; an end-anchored
+    // capturing group is what actually selects ONEPASS_NFA (see OnePassNfaAnchorFindTest).
+    Object matcher = compile("(a)$", "OnePassNfaMatcher");
     Method matches = matcher.getClass().getMethod("matches", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "abcdefghi"));
-    assertFalse((Boolean) matches.invoke(matcher, "abcdef"));
-    assertFalse((Boolean) matches.invoke(matcher, "xyz"));
+    assertTrue((Boolean) matches.invoke(matcher, "a"));
+    assertFalse((Boolean) matches.invoke(matcher, "ba"));
+    assertFalse((Boolean) matches.invoke(matcher, "ab"));
+    assertFalse((Boolean) matches.invoke(matcher, ""));
+  }
+
+  @Test
+  void testOnePassNfaMatchFromMethod() throws Exception {
+    Object matcher = compile("(a)$", "OnePassNfaMatchFromMatcher");
+    Method matchFrom = matcher.getClass().getMethod("matchFrom", String.class, int.class);
+    assertEquals(2, (Integer) matchFrom.invoke(matcher, "ba", 1));
+    assertEquals(-1, (Integer) matchFrom.invoke(matcher, "ba", 0));
+    assertEquals(-1, (Integer) matchFrom.invoke(matcher, (String) null, 0));
   }
 
   @Test

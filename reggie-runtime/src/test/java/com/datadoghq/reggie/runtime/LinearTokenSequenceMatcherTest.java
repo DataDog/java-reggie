@@ -18,6 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -55,6 +57,56 @@ class LinearTokenSequenceMatcherTest {
     MatchResult result = matcher.match(input);
 
     assertEquals("https://example.com/index.html", result.group("referer"));
+  }
+
+  @Test
+  void matchReturnsNullWhenSequenceDoesNotMatch() throws Exception {
+    ReggieMatcher matcher = matcherFor("host=(?<host>\\S+) status=(?<status>[+-]?\\d+)");
+
+    assertNull(matcher.match("host=api.example.com status=not-a-number"));
+  }
+
+  @Test
+  void matchReturnsPlainResultForUnnamedGroups() throws Exception {
+    ReggieMatcher matcher = matcherFor("host=(\\S+) status=([+-]?\\d+)", 2);
+
+    MatchResult result = matcher.match("host=api.example.com status=200");
+
+    assertNotNull(result);
+    assertEquals("host=api.example.com status=200", result.group());
+    assertEquals("api.example.com", result.group(1));
+    assertEquals("200", result.group(2));
+  }
+
+  @Test
+  void findMatchLocatesNamedGroupsPastLeadingNoise() throws Exception {
+    ReggieMatcher matcher = matcherFor("host=(?<host>\\S+) status=(?<status>[+-]?\\d+)");
+
+    MatchResult result = matcher.findMatch("noise noise host=api.example.com status=200");
+
+    assertNotNull(result);
+    assertEquals("api.example.com", result.group("host"));
+    assertEquals("200", result.group("status"));
+  }
+
+  @Test
+  void findMatchFromLocatesUnnamedGroupsAfterOffset() throws Exception {
+    ReggieMatcher matcher = matcherFor("host=(\\S+) status=([+-]?\\d+)", 2);
+    String input = "host=first status=1 host=api.example.com status=200";
+    int offset = input.indexOf("host=", 1);
+
+    MatchResult result = matcher.findMatchFrom(input, offset);
+
+    assertNotNull(result);
+    assertEquals("api.example.com", result.group(1));
+    assertEquals("200", result.group(2));
+  }
+
+  @Test
+  void findMatchReturnsNullWhenNoOccurrenceExists() throws Exception {
+    ReggieMatcher matcher = matcherFor("host=(?<host>\\S+) status=(?<status>[+-]?\\d+)");
+
+    assertNull(matcher.findMatch("no host or status here"));
   }
 
   @Test
@@ -173,9 +225,21 @@ class LinearTokenSequenceMatcherTest {
     RegexParser parser = new RegexParser();
     RegexNode ast = parser.parse(pattern);
     Map<String, Integer> names = parser.getGroupNameMap();
+    int groupCount = names.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+    return matcherFor(pattern, groupCount);
+  }
+
+  /**
+   * Like {@link #matcherFor(String)}, but with an explicit total capturing-group count. Needed when
+   * the pattern has unnamed capturing groups: {@code parser.getGroupNameMap()} only reports named
+   * groups, so the max-named-index used by {@link #matcherFor(String)} would undercount.
+   */
+  private static ReggieMatcher matcherFor(String pattern, int groupCount) throws Exception {
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pattern);
+    Map<String, Integer> names = parser.getGroupNameMap();
     LinearTokenSequencePlan plan =
         LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElseThrow();
-    int groupCount = names.values().stream().mapToInt(Integer::intValue).max().orElse(0);
     return new LinearTokenSequenceMatcher(pattern, plan, groupCount, names);
   }
 }

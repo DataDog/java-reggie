@@ -322,6 +322,157 @@ class BitStateMatcherTest {
     assertEquals(2L, bitState.fallbackCount());
   }
 
+  private static String oversizedInput() {
+    StringBuilder sb = new StringBuilder("a");
+    for (int i = 0; i < 300_000; i++) sb.append('b');
+    sb.append('c');
+    return sb.toString();
+  }
+
+  @Test
+  void findNullInputThrowsNpe() throws Exception {
+    BitStateMatcher m = build("(a)(b)");
+    assertThrows(NullPointerException.class, () -> m.find(null));
+  }
+
+  @Test
+  void findOversizedInputDelegatesToPikeVmAndIncrementsFallbackCounter() throws Exception {
+    RegexParser parser = new RegexParser();
+    String pat = "(a)(b)*c";
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat);
+    PikeVMMatcher pikeVm = new PikeVMMatcher(nfa, pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.fallbackCount());
+    assertEquals(pikeVm.find(input), bitState.find(input));
+    assertEquals(1L, bitState.fallbackCount());
+  }
+
+  @Test
+  void findFromOversizedInputDelegatesToPikeVmAndIncrementsFallbackCounter() throws Exception {
+    RegexParser parser = new RegexParser();
+    String pat = "(a)(b)*c";
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat);
+    PikeVMMatcher pikeVm = new PikeVMMatcher(nfa, pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.fallbackCount());
+    assertEquals(pikeVm.findFrom(input, 0), bitState.findFrom(input, 0));
+    assertEquals(1L, bitState.fallbackCount());
+  }
+
+  @Test
+  void findMatchFromOversizedInputDelegatesToPikeVmAndIncrementsFallbackCounter() throws Exception {
+    RegexParser parser = new RegexParser();
+    String pat = "(a)(b)*c";
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat);
+    PikeVMMatcher pikeVm = new PikeVMMatcher(nfa, pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.fallbackCount());
+    MatchResult expected = pikeVm.findMatchFrom(input, 0);
+    MatchResult actual = bitState.findMatchFrom(input, 0);
+    assertNotNull(expected);
+    assertNotNull(actual);
+    assertEquals(expected.start(0), actual.start(0));
+    assertEquals(expected.end(0), actual.end(0));
+    assertEquals(1L, bitState.fallbackCount());
+  }
+
+  @Test
+  void matchesBoundedOversizedRegionDelegatesToPikeVmAndIncrementsFallbackCounter()
+      throws Exception {
+    RegexParser parser = new RegexParser();
+    String pat = "(a)(b)*c";
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat);
+    PikeVMMatcher pikeVm = new PikeVMMatcher(nfa, pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.fallbackCount());
+    boolean expected = pikeVm.matchesBounded(input, 0, input.length());
+    boolean actual = bitState.matchesBounded(input, 0, input.length());
+    assertEquals(expected, actual);
+    assertTrue(actual);
+    assertEquals(1L, bitState.fallbackCount());
+  }
+
+  @Test
+  void matchBoundedOversizedRegionDelegatesToPikeVmAndIncrementsFallbackCounter() throws Exception {
+    RegexParser parser = new RegexParser();
+    String pat = "(a)(b)*c";
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat);
+    PikeVMMatcher pikeVm = new PikeVMMatcher(nfa, pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.fallbackCount());
+    MatchResult expected = pikeVm.matchBounded(input, 0, input.length());
+    MatchResult actual = bitState.matchBounded(input, 0, input.length());
+    assertNotNull(expected);
+    assertNotNull(actual);
+    assertEquals(expected.start(0), actual.start(0));
+    assertEquals(expected.end(0), actual.end(0));
+    assertEquals(1L, bitState.fallbackCount());
+  }
+
+  @Test
+  void visitedGenerationWrapsAtIntMaxValueWithoutCorruptingVisitedSet() throws Exception {
+    BitStateMatcher m = build("(a)(b)");
+    // Warm up the visited-set array first: ensureVisitedCapacity resets visitedGeneration to 0
+    // whenever it (re)allocates, which would otherwise wipe out the injected value below on the
+    // very first search.
+    assertTrue(m.matches("ab"));
+
+    java.lang.reflect.Field genField = BitStateMatcher.class.getDeclaredField("visitedGeneration");
+    genField.setAccessible(true);
+    genField.setInt(m, Integer.MAX_VALUE - 1);
+
+    assertTrue(m.matches("ab"));
+    assertEquals(1, genField.getInt(m));
+
+    // The wrap-around must not corrupt visited-set bookkeeping: repeated searches on the same
+    // matcher instance must still produce correct results.
+    assertTrue(m.matches("ab"));
+    assertFalse(m.matches("ba"));
+  }
+
+  @Test
+  void matchBoundedShiftsNamedGroupAndUnmatchedOptionalGroupSpans() throws Exception {
+    String pat = "(?<num>a)(b)?c";
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder(true);
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher m = new BitStateMatcher(nfa, pat);
+    m.setNameToIndex(parser.getGroupNameMap());
+
+    String input = "xxacxx";
+    MatchResult r = m.matchBounded(input, 2, 4);
+    assertNotNull(r);
+    assertTrue(r instanceof NamedMatchResultImpl);
+    assertEquals(2, r.start(0));
+    assertEquals(4, r.end(0));
+    assertEquals(2, r.start(1));
+    assertEquals(3, r.end(1));
+    assertEquals(-1, r.start(2));
+    assertEquals(-1, r.end(2));
+    assertEquals(2, r.start("num"));
+  }
+
   // -------------------------------------------------------------------------
   // Utilities
   // -------------------------------------------------------------------------

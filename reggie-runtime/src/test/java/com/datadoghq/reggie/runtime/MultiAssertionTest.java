@@ -247,6 +247,16 @@ class MultiAssertionTest {
   }
 
   @Test
+  void fusedLookaheadsWithUnsatisfiableCharsetNeverAccept() {
+    // [^\s\S] matches no character at all, so both fused lookaheads' component DFAs never reach
+    // an accepting state anywhere in the reachable product - generateProductAcceptanceDecode's
+    // acceptingStates-is-empty early return (no LOOKUPSWITCH needed since nothing ever passes).
+    ReggieMatcher m = Reggie.compile("(?=.*[^\\s\\S])(?=.*[^\\s\\S]).*");
+    assertFalse(m.matches("anything"));
+    assertFalse(m.matches(""));
+  }
+
+  @Test
   void lookaheadsOnDifferentAlternationBranchesNotFused() {
     // Task 1.1a's predicate must exclude alternation-branch epsilon splits: these two lookaheads
     // sit at the same nominal position but are never live simultaneously (different branches), so

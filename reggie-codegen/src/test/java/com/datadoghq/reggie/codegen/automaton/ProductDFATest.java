@@ -19,6 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -71,6 +74,27 @@ class ProductDFATest {
     // A character both components reject has no materialized transition (implicit dead, matching
     // generateDFATransitionSwitch's existing "no transition matched -> dead" semantics).
     assertEquals(null, transitionForOrNull(start, '5'));
+  }
+
+  @Test
+  void tupleKeyEqualsSelfAndRejectsNonTupleKey() throws Exception {
+    // TupleKey is the private HashMap cache key ProductDFA.build() uses to dedupe component-state
+    // tuples; HashMap's own == short-circuit and same-type key population mean neither equals()
+    // branch is exercised via ProductDFA's public API, so this drives the private class directly.
+    Class<?> tupleKeyClass =
+        Arrays.stream(ProductDFA.class.getDeclaredClasses())
+            .filter(c -> c.getSimpleName().equals("TupleKey"))
+            .findFirst()
+            .orElseThrow();
+    Constructor<?> ctor = tupleKeyClass.getDeclaredConstructor(DFA.DFAState[].class);
+    ctor.setAccessible(true);
+    DFA.DFAState[] tuple = new DFA.DFAState[] {new DFA.DFAState(0, Collections.emptySet(), false)};
+    Object key = ctor.newInstance((Object) tuple);
+    Method equals = tupleKeyClass.getDeclaredMethod("equals", Object.class);
+    equals.setAccessible(true);
+
+    assertTrue((Boolean) equals.invoke(key, key));
+    assertFalse((Boolean) equals.invoke(key, "not a tuple key"));
   }
 
   private static ProductDFA.ProductState transitionFor(ProductDFA.ProductState from, char ch) {

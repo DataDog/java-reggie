@@ -1590,29 +1590,20 @@ public final class PikeVMMatcher extends ReggieMatcher {
     int[] stack = new int[stateCount];
     for (NFA.NFAState seed : nfa.getStates()) {
       if (seed.getTransitions().isEmpty()) continue; // must have a consuming transition to loop
-      // Epsilon closure C of seed.
+      // Grow C as a single fixed point across BOTH epsilon edges and dotall-consuming edges: a
+      // dotall-consuming edge is safe to cross unconditionally while building the closure, since
+      // by definition every character keeps a lone thread inside the sink. This is what actually
+      // reaches the loop-back state - Thompson's X* construction wires exit --eps--> entry AFTER
+      // the consuming step (entry --[dotall]--> exit), so entry's own epsilon closure alone never
+      // contains exit; only crossing the consuming edge during closure-building does.
       Arrays.fill(inC, false);
       int top = 0;
       stack[top++] = seed.id;
       inC[seed.id] = true;
-      while (top > 0) {
-        NFA.NFAState s = statesById[stack[--top]];
-        for (NFA.NFAState e : s.getEpsilonTransitions()) {
-          if (!inC[e.id]) {
-            inC[e.id] = true;
-            stack[top++] = e.id;
-          }
-        }
-      }
-      // Validate C and collect the group ids that close within it.
       boolean ok = true;
-      boolean hasAccept = false;
       boolean hasLoop = false;
-      int[] groups = new int[groupCount + 1];
-      int gn = 0;
-      for (int id = 0; id < stateCount && ok; id++) {
-        if (!inC[id]) continue;
-        NFA.NFAState s = statesById[id];
+      while (top > 0 && ok) {
+        NFA.NFAState s = statesById[stack[--top]];
         if (s.anchor != null
             || s.assertionType != null
             || s.backrefCheck != null
@@ -1621,6 +1612,32 @@ public final class PikeVMMatcher extends ReggieMatcher {
           ok = false;
           break;
         }
+        for (NFA.NFAState e : s.getEpsilonTransitions()) {
+          if (!inC[e.id]) {
+            inC[e.id] = true;
+            stack[top++] = e.id;
+          }
+        }
+        for (NFA.Transition tr : s.getTransitions()) {
+          if (!isDotAllCharSet(tr.chars)) {
+            ok = false;
+            break;
+          }
+          hasLoop = true;
+          if (!inC[tr.target.id]) {
+            inC[tr.target.id] = true;
+            stack[top++] = tr.target.id;
+          }
+        }
+      }
+      if (!ok || !hasLoop) continue;
+      // Collect accept/group info from the now-stable C.
+      boolean hasAccept = false;
+      int[] groups = new int[groupCount + 1];
+      int gn = 0;
+      for (int id = 0; id < stateCount; id++) {
+        if (!inC[id]) continue;
+        NFA.NFAState s = statesById[id];
         if (isAccept[id]) hasAccept = true;
         if (s.exitGroup != null) {
           int g = s.exitGroup;
@@ -1633,15 +1650,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
           }
           if (!seen) groups[gn++] = g;
         }
-        for (NFA.Transition tr : s.getTransitions()) {
-          if (!isDotAllCharSet(tr.chars) || !inC[tr.target.id]) {
-            ok = false;
-            break;
-          }
-          hasLoop = true;
-        }
       }
-      if (ok && hasAccept && hasLoop) {
+      if (hasAccept) {
         result[seed.id] = Arrays.copyOf(groups, gn);
       }
     }

@@ -58,6 +58,12 @@ class PinnedBackreferenceBytecodeGeneratorTest {
         CharSet.WHITESPACE);
   }
 
+  /** (\w+)\1 with no separator between the group's close and the backreference site. */
+  private PinnedBackreferenceInfo noSeparatorInfo() {
+    return new PinnedBackreferenceInfo(
+        1, new CharClassNode(CharSet.WORD, false), CharSet.WORD, null, null);
+  }
+
   private ClassWriter newClassWriter(String className) {
     ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
     cw.visit(
@@ -88,6 +94,37 @@ class PinnedBackreferenceBytecodeGeneratorTest {
     ClassWriter cw = newClassWriter("PinnedBackrefFullApi");
     PinnedBackreferenceBytecodeGenerator gen =
         new PinnedBackreferenceBytecodeGenerator(repeatedWordInfo(), "PinnedBackrefFullApi");
+
+    assertDoesNotThrow(
+        () -> {
+          gen.generateMatchesMethod(cw);
+          gen.generateFindMethod(cw);
+          gen.generateFindFromMethod(cw);
+          gen.generateMatchMethod(cw);
+          gen.generateMatchesBoundedMethod(cw);
+          gen.generateMatchBoundedMethod(cw);
+          gen.generateFindMatchMethod(cw);
+          gen.generateFindMatchFromMethod(cw);
+          cw.visitEnd();
+        });
+
+    byte[] bytecode = cw.toByteArray();
+    assertNotNull(bytecode);
+    assertTrue(bytecode.length > 0);
+  }
+
+  /**
+   * Same as {@link #generatesFullRichApiMethodSetWithoutCrashing()} but with a no-separator {@link
+   * PinnedBackreferenceInfo}, which takes the other side of the {@code hasSeparator()} ternaries
+   * that allocate {@code sepStartVar} in every generate*Method (no local slot needed when there's
+   * no separator to scan).
+   */
+  @Test
+  void generatesFullRichApiMethodSetWithoutSeparatorWithoutCrashing() {
+    ClassWriter cw = newClassWriter("PinnedBackrefNoSeparatorFullApi");
+    PinnedBackreferenceBytecodeGenerator gen =
+        new PinnedBackreferenceBytecodeGenerator(
+            noSeparatorInfo(), "PinnedBackrefNoSeparatorFullApi");
 
     assertDoesNotThrow(
         () -> {
@@ -175,5 +212,23 @@ class PinnedBackreferenceBytecodeGeneratorTest {
     Method findFrom = matcher.getClass().getMethod("findFrom", String.class, int.class);
     int pos = (Integer) findFrom.invoke(matcher, "xx hello hello yy", 0);
     assertEquals(3, pos);
+  }
+
+  /**
+   * Without a separator, the group and the backreference share the same charset (WORD), so the
+   * greedy group scan always consumes every following WORD character too - nothing is ever left for
+   * the backreference echo to match against. This no-separator shape is structurally unreachable
+   * from real pattern detection (a disjoint separator is what makes the boundary unambiguous in the
+   * first place), but the generator still must not crash and must never falsely report a match.
+   */
+  @Test
+  void noSeparatorShapeNeverMatchesSinceBoundaryIsAmbiguous() throws Exception {
+    Object matcher = compileBooleanApi(noSeparatorInfo(), "NoSeparatorMatcher1");
+    Method matches = matcher.getClass().getMethod("matches", String.class);
+    Method findFrom = matcher.getClass().getMethod("findFrom", String.class, int.class);
+
+    assertFalse((Boolean) matches.invoke(matcher, "hellohello"));
+    assertFalse((Boolean) matches.invoke(matcher, "hello"));
+    assertEquals(-1, (Integer) findFrom.invoke(matcher, "hellohello", 0));
   }
 }

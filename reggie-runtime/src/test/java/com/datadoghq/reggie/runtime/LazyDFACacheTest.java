@@ -367,4 +367,35 @@ class LazyDFACacheTest {
     LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
     assertEquals(-1, cache.findEnd(null, 0, 4, TWO_STEP));
   }
+
+  @Test
+  void testFindEndFallbackNoFurtherAcceptFallsBackToPriorLastAccept() {
+    // {0} +'a'-> {1} (accepting), {1} +'a'-> {2} (not accepting, dead-ends on anything else).
+    // cap=2 freezes the moment {2} needs to be interned (right after reaching the accepting
+    // state {1}), so the fallback scan starting at {1} never sees another accepting state and
+    // must return -1, forcing findEnd to fall back to the lastAccept recorded before the freeze.
+    NfaStep step =
+        (s, c) -> {
+          if (s.length == 1 && s[0] == 0 && c == 'a') return new int[] {1};
+          if (s.length == 1 && s[0] == 1 && c == 'a') return new int[] {2};
+          return new int[0];
+        };
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {1}, 2);
+    assertEquals(1, cache.findEnd("aaa", 0, 3, step));
+    assertTrue(cache.isFrozen());
+  }
+
+  @Test
+  void testFindEndNonAsciiCharBypassesAsciiTable() {
+    AtomicInteger callCount = new AtomicInteger();
+    NfaStep tracker =
+        (states, c) -> {
+          callCount.incrementAndGet();
+          return new int[0];
+        };
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {1});
+    String withCode128 = "\u0080";
+    assertEquals(-1, cache.findEnd(withCode128, 0, 1, tracker));
+    assertEquals(1, callCount.get());
+  }
 }

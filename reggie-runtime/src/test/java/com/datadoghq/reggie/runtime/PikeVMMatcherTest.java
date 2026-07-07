@@ -203,6 +203,210 @@ class PikeVMMatcherTest {
   }
 
   // -------------------------------------------------------------------------
+  // Multiline ((?m)^) reinject-closure coverage
+  // -------------------------------------------------------------------------
+
+  /** {@code (?m)^foo} must match at the start of the second line, not just at input start. */
+  @Test
+  void multilineFindMatchesAfterNewline() throws Exception {
+    String pat = "(?m)^foo";
+    String input = "xxx\nfoo";
+    PikeVMMatcher m = build(pat);
+    assertTrue(m.find(input));
+    assertEquals(jdkFind(pat, input) != null, m.find(input));
+  }
+
+  /** No line start (pos 0 or after '\n') carries a valid first char: find() must fast-reject. */
+  @Test
+  void multilineFindRejectsWhenNoLineStartCandidate() throws Exception {
+    String pat = "(?m)^[a-z]+";
+    String input = "123\n456";
+    PikeVMMatcher m = build(pat);
+    assertFalse(m.find(input));
+    assertNull(jdkFind(pat, input));
+  }
+
+  /** A line start after an embedded '\n' (not pos 0) carries a valid first char. */
+  @Test
+  void multilineFindMatchesLineStartAfterNewline() throws Exception {
+    String pat = "(?m)^[a-z]+";
+    String input = "123\nabc";
+    PikeVMMatcher m = build(pat);
+    assertTrue(m.find(input));
+    java.util.regex.Matcher oracle = jdkFind(pat, input);
+    assertNotNull(oracle);
+    assertEquals(oracle.start(), m.findFrom(input, 0));
+  }
+
+  /** pos 0 itself carries a valid first char — no need to scan for '\n'. */
+  @Test
+  void multilineFindMatchesAtPositionZero() throws Exception {
+    String pat = "(?m)^[a-z]+";
+    String input = "abc123";
+    PikeVMMatcher m = build(pat);
+    assertTrue(m.find(input));
+  }
+
+  /** Empty input has no line-start candidate at all. */
+  @Test
+  void multilineFindRejectsEmptyInput() throws Exception {
+    PikeVMMatcher m = build("(?m)^[a-z]+");
+    assertFalse(m.find(""));
+  }
+
+  /** matches() on a multiline-eligible pattern exercises the strict matchesStep lambda. */
+  @Test
+  void multilineMatchesWholeInput() throws Exception {
+    String pat = "(?m)^foo";
+    PikeVMMatcher m = build(pat);
+    assertTrue(m.matches("foo"));
+    assertFalse(m.matches("xxx"));
+  }
+
+  /**
+   * {@code a^b}: the {@code ^} anchor is reachable via a real consuming transition (after {@code
+   * a}), not just epsilon-only from the NFA start — so the pos-0-only find()/matches() DFA model
+   * cannot be sound and findDfaEligible() must decline it. The pattern can never match (no input
+   * position satisfies {@code ^} after consuming a character), but PikeVMMatcher must still build
+   * and answer correctly via the general thread simulation.
+   */
+  @Test
+  void anchorReachableAfterConsumeDisqualifiesFindDfa() throws Exception {
+    PikeVMMatcher m = build("a^b");
+    assertFalse(m.matches("ab"));
+    assertFalse(m.find("ab"));
+  }
+
+  // -------------------------------------------------------------------------
+  // Single required first char (SIMD fast-reject) coverage
+  // -------------------------------------------------------------------------
+
+  @Test
+  void singleFirstCharFastRejectsWhenAbsent() throws Exception {
+    PikeVMMatcher m = build("cat");
+    assertFalse(m.find("no feline here"));
+  }
+
+  @Test
+  void singleFirstCharProceedsWhenPresent() throws Exception {
+    PikeVMMatcher m = build("cat");
+    assertTrue(m.find("a cat sat"));
+  }
+
+  // -------------------------------------------------------------------------
+  // Boolean find() fast path for positional-anchor (non-leading) patterns
+  // -------------------------------------------------------------------------
+
+  /** {@code \bfoo\b} is not findDfaEligible (word boundary) but qualifies for useBoolFind. */
+  @Test
+  void wordBoundaryBoolFindLocatesMatch() throws Exception {
+    PikeVMMatcher m = build("\\bfoo\\b");
+    assertTrue(m.find("xx foo yy"));
+  }
+
+  @Test
+  void wordBoundaryBoolFindNoMatch() throws Exception {
+    PikeVMMatcher m = build("\\bfoo\\b");
+    assertFalse(m.find("xxxxxxxx"));
+  }
+
+  /** matches() still runs the full thread simulation, exercising nlist anchor traversal. */
+  @Test
+  void wordBoundaryMatchesWholeInput() throws Exception {
+    PikeVMMatcher m = build("\\bfoo\\b");
+    assertTrue(m.matches("foo"));
+  }
+
+  /**
+   * {@code findFrom} (position API) always runs the general thread simulation, independent of the
+   * boolean-find fast path; on a word-boundary pattern it exercises the over-approximating reject
+   * DFA's {@code findEnd} scan-limit computation.
+   */
+  @Test
+  void wordBoundaryFindFromUsesRejectDfaScanLimit() throws Exception {
+    PikeVMMatcher m = build("\\bfoo\\b");
+    assertEquals(3, m.findFrom("xx foo yy", 0));
+  }
+
+  // -------------------------------------------------------------------------
+  // Backreference fallback: neither findDfa nor useBoolFind eligible
+  // -------------------------------------------------------------------------
+
+  /**
+   * {@code (a)\1} has a backreference, so it is ineligible for both the findDfa and useBoolFind
+   * fast paths; find() falls back to the general thread simulation with capture recording
+   * suppressed ({@code skipCaptures}).
+   */
+  @Test
+  void backrefFindUsesSkipCapturesFallback() throws Exception {
+    PikeVMMatcher m = build("(a)\\1");
+    assertTrue(m.find("xaayy"));
+    assertFalse(m.find("xyz"));
+  }
+
+  /** Zero-length match at the seed position exercises the pos==seed branch in findPosFrom. */
+  @Test
+  void findFromZeroLengthMatchAtSeedPosition() throws Exception {
+    PikeVMMatcher m = build("a*");
+    assertEquals(0, m.findFrom("bbb", 0));
+  }
+
+  // -------------------------------------------------------------------------
+  // Greedy dotall-sink fast-forward
+  // -------------------------------------------------------------------------
+
+  /** {@code (?s)(.*)} qualifies as a dotall sink: group 1's end extends straight to regionEnd. */
+  @Test
+  void dotallStarIsSinkAndExtendsGroupToEnd() throws Exception {
+    String pat = "(?s)(.*)";
+    String input = "abc\ndef";
+    PikeVMMatcher m = build(pat);
+    MatchResult r = m.findMatch(input);
+    assertNotNull(r);
+    assertEquals(input, r.group(1));
+  }
+
+  /** Plain {@code .*} (non-dotall) is disqualified as a sink: it must stop before '\n'. */
+  @Test
+  void nonDotallStarIsNotSinkAcrossNewline() throws Exception {
+    PikeVMMatcher m = build(".*");
+    MatchResult r = m.findMatch("ab\ncd");
+    assertNotNull(r);
+    assertEquals("ab", r.group(0));
+  }
+
+  /**
+   * {@code (?s).*$} has a trailing {@code $} anchor reachable via epsilon from the loop's exit
+   * path, disqualifying the sink table (anchors are position-dependent and cannot be skipped).
+   */
+  @Test
+  void dotallStarWithTrailingAnchorIsNotSink() throws Exception {
+    PikeVMMatcher m = build("(?s).*$");
+    assertTrue(m.matches("abc\ndef"));
+  }
+
+  // -------------------------------------------------------------------------
+  // Misc API contract coverage
+  // -------------------------------------------------------------------------
+
+  @Test
+  void embedsNameMapReturnsTrue() throws Exception {
+    assertTrue(build("(a)").embedsNameMap());
+  }
+
+  /** matchBounded() with a non-zero start shifts a named-group result via shiftResult(). */
+  @Test
+  void matchBoundedShiftsNamedGroupResult() throws Exception {
+    PikeVMMatcher m = build("(?<foo>a)b");
+    m.setNameToIndex(java.util.Map.of("foo", 1));
+    MatchResult r = m.matchBounded("xxab", 2, 4);
+    assertNotNull(r);
+    assertEquals("a", r.group("foo"));
+    assertEquals(2, r.start(1));
+    assertEquals(3, r.end(1));
+  }
+
+  // -------------------------------------------------------------------------
   // Utilities
   // -------------------------------------------------------------------------
 
