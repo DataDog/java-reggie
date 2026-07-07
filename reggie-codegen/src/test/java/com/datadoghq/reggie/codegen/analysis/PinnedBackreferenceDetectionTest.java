@@ -115,4 +115,33 @@ class PinnedBackreferenceDetectionTest {
     // begins, so this must be rejected rather than accepted with a bogus zero-length separator.
     assertNull(detect("(\\w+)\\s*\\1"));
   }
+
+  @Test
+  void detectsSeparatorWrappedInNonCapturingGroup() throws Exception {
+    // (?:\s+) wraps the separator's quantifier without changing what's matched, so it must be
+    // unwrapped to read the real bounds instead of being treated as a single fixed occurrence.
+    PinnedBackreferenceInfo info = detect("(\\w+)(?:\\s+)\\1");
+    assertNotNull(info);
+  }
+
+  @Test
+  void rejectsLazySeparatorQuantifier() throws Exception {
+    // The codegen's separator scan always consumes the longest available run; a lazy quantifier
+    // (\s+?) has the opposite semantics, so it must be rejected rather than approximated.
+    assertNull(detect("(\\w+)\\s+?\\1"));
+  }
+
+  @Test
+  void rejectsNestedCapturingGroupInSeparator() throws Exception {
+    // A capturing group nested inside the separator (even wrapped in a non-capturing group)
+    // would be silently unaccounted for by totalGroupCount(), so it must be rejected.
+    assertNull(detect("(\\w+)(?:(x)+)\\1"));
+  }
+
+  @Test
+  void rejectsNestedCapturingGroupInPinnedGroupBody() throws Exception {
+    // A capturing group nested inside the pinned group's quantified body would likewise be
+    // silently unaccounted for by totalGroupCount(), so it must be rejected.
+    assertNull(detect("((a)+)\\s+\\1"));
+  }
 }
