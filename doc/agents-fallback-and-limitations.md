@@ -156,7 +156,9 @@ with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for thos
 The following are **performance-only** issues — not correctness issues. Observed in the JMH
 benchmark suite and deferred as follow-up work:
 
-- **`ONEPASS_NFA` `find()` regression**: `find()` on `ONEPASS_NFA` patterns measures below JDK
-  throughput. This is a pre-existing gap in the native path.
+- **`ONEPASS_NFA` `findMatch()`/`findBoundsFrom()`**: fixed — both now reuse `matchFrom`'s
+  single-pass end position directly instead of re-scanning every candidate length via
+  `matchesInRange` (was effectively O(n²) with per-length substring allocation). Boolean `find()`
+  was already O(n) as of `6841723`.
 - **`SPECIALIZED_MULTI_GROUP_GREEDY` and `SPECIALIZED_BOUNDED_QUANTIFIERS`**: ~2–2.5x over JDK, the
   weakest gains among generated strategies. Profiling may reveal further optimization opportunities.
