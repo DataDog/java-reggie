@@ -592,7 +592,9 @@ evaluate; the remaining 102 entries use PCRE features not yet implemented (see
 - **Groups**:
   - Capturing: `(...)`
   - Non-capturing: `(?:...)`
-  - Named groups: `(?<name>...)` (in progress)
+  - Named groups: `(?<name>...)`, including extraction by name
+  - Non-capturing branch reset (numbered): `(?|(...)|(...))`
+  - Atomic groups: `(?>...)`
 - **Anchors**:
   - Line: `^`, `$`
   - String: `\A` (absolute start), `\Z` (end before optional newline)
@@ -604,7 +606,14 @@ evaluate; the remaining 102 entries use PCRE features not yet implemented (see
   - Dotall mode: `(?s)` - `.` matches newlines
   - Multiline: `(?m)`
   - Extended: `(?x)` - ignore whitespace and comments
-- **Backreferences**: `\1`, `\2`, etc. (with limitations - see below)
+  - Scoped: `(?i:...)` - modifier applies only inside the group
+- **Quantifiers**: greedy, non-greedy (`*?`, `+?`, `??`), possessive (`*+`, `++`, `?+`)
+- **Unicode**: `\p{L}`, `\p{N}`, and their negations `\P{L}`, `\P{N}` (script-based forms like
+  `\p{Script=Greek}` are not yet supported)
+- **Backreferences**: `\1`, `\2`, etc., including self-referencing backrefs within a single group
+  (`(a\1?){4}`), with limitations - see below
+- **Subroutine calls**: `(?1)`, `(?R)` for non-self-embedding references (calls that don't recurse
+  into themselves); self-embedding/context-free recursion is a permanent limitation - see below
 
 ### 🚧 Partial Support / Limitations
 
@@ -617,25 +626,34 @@ evaluate; the remaining 102 entries use PCRE features not yet implemented (see
   - Specialized patterns optimized: `<(\w+)>.*</\1>` (HTML tags)
 - **Non-greedy quantifiers**: `*?`, `+?`, `??`
   - Basic support, complex interactions with lookahead/backref limited
+- **Conditional patterns**: `(?(condition)yes|no)` - basic cases work; combining a conditional with
+  a backref inside a repeated group (`(a(?(1)\1)){4}`) is a known bug, not yet fixed
 
 ### ❌ Not Yet Supported
 
-- **Subroutine calls**: `(?1)`, `(?R)` - recursive pattern matching (PCRE extension)
-- **Conditional patterns**: `(?(condition)yes|no)` - partial support, edge cases remain
-- **Possessive quantifiers**: `*+`, `++`, `?+`
-- **Atomic groups**: `(?>...)`
-- **Unicode categories**: `\p{L}`, `\p{N}`, `\P{L}` (planned)
-- **Unicode properties**: `\p{Script=Greek}`, etc.
-- **Scoped inline modifiers**: `(?i:...)` (global modifiers work: `(?i)`)
+**Permanent limitation** (would require unbounded backtracking to support - see
+[PCRE Conformance Roadmap](doc/plans/pcre-conformance-roadmap.md#architectural-ceiling-100-is-not-the-target)):
 
-### Recent Improvements (January 2026)
+- **Self-embedding recursive subroutines**: `(?1)`/`(?R)` calls that recurse into their own group,
+  e.g. palindrome patterns like `^((.)(?1)\2|.?)$`
+- **Backtracking control verbs**: `(*MARK)`, `(*PRUNE)`, `(*SKIP)`, `(*THEN)`
+
+**Not yet implemented** (ordinary backlog, no architecture change needed):
+
+- **Branch reset groups with named captures**: `(?|(?'a'aaa)|(?'a'b))` - the numbered form works
+- **Relative backreferences**: `(?-2)`, `(?+1)`
+- **Unicode script/name properties**: `\p{Script=Greek}`, `\p{Name=...}`
+
+### Recent Improvements
 
 - ✅ Whitespace in quantifiers (PCRE compatible)
-- ✅ Octal escape sequences (`\100`, `\377`)
+- ✅ Octal escape sequences (`\100`, `\377`); note `(abc)\100` immediately after a captured group is
+  a known parsing bug (ambiguity with backreference `\1` followed by digits `00`)
 - ✅ Hex escape sequences (`\x40`, `\xFF`)
 - ✅ Dotall mode `(?s)` - dot matches newlines
 - ✅ Absolute string anchors `\A` and `\Z`
-- ✅ Greedy backtracking for complex patterns
+- ✅ Possessive quantifiers, atomic groups, Unicode `\p{L}`/`\p{N}`, scoped inline modifiers, named
+  group extraction, self-referencing backrefs
 
 See [PCRE Conformance Roadmap](doc/plans/pcre-conformance-roadmap.md) for detailed compatibility status.
 
