@@ -282,4 +282,25 @@ public class PinnedBackreferenceMatchResultTest {
     ReggieMatcher matcher = RuntimeCompiler.compile("([a-z]+)\\d+\\1");
     assertNull(matcher.match("ab12cd"), "match(\"ab12cd\") should return null");
   }
+
+  // ---- (\w+)(?:--){2}\1 : multi-char literal separator with explicit repetition count ----
+  // (?:--){2} matches exactly 4 dashes; separator length bounds must be tracked in characters,
+  // not in repetitions of the "--" atom, or a valid 4-dash separator is wrongly rejected.
+
+  @Test
+  public void testMultiCharSeparatorWithRepetitionCount_match() {
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)(?:--){2}\\1");
+    MatchResult result = matcher.match("ab----ab");
+
+    assertNotNull(result, "match(\"ab----ab\") should succeed (4 dashes = (?:--){2})");
+    assertEquals("ab----ab", result.group(0));
+    assertEquals("ab", result.group(1));
+  }
+
+  @Test
+  public void testMultiCharSeparatorWithRepetitionCount_mismatchWrongDashCount() {
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)(?:--){2}\\1");
+    assertNull(matcher.match("ab--ab"), "2 dashes should not satisfy (?:--){2} (needs 4)");
+    assertNull(matcher.match("ab------ab"), "6 dashes should not satisfy (?:--){2} (needs 4)");
+  }
 }

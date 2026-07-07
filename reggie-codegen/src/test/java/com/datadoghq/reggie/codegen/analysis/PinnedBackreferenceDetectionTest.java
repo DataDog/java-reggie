@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.codegen.analysis;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -143,5 +144,16 @@ class PinnedBackreferenceDetectionTest {
     // A capturing group nested inside the pinned group's quantified body would likewise be
     // silently unaccounted for by totalGroupCount(), so it must be rejected.
     assertNull(detect("((a)+)\\s+\\1"));
+  }
+
+  @Test
+  void detectsMultiCharLiteralSeparatorWithExplicitRepetitionCount() throws Exception {
+    // (?:--){2} matches exactly 4 dashes; separatorMinLength/separatorMaxLength must be the
+    // resulting character count (4), not the raw repetition count (2), since the codegen's
+    // separator scan measures characters.
+    PinnedBackreferenceInfo info = detect("(\\w+)(?:--){2}\\1");
+    assertNotNull(info);
+    assertEquals(4, info.separatorMinLength);
+    assertEquals(4, info.separatorMaxLength);
   }
 }

@@ -2638,6 +2638,41 @@ public class PatternAnalyzer {
     return null; // Unknown node type - be conservative
   }
 
+  /**
+   * Fixed number of characters {@code node} always consumes, provided every character it can
+   * produce belongs to {@code charSet}. The pinned-backreference codegen's separator scan is a flat
+   * run of {@code charSet} characters with no notion of grouping, so a quantified atom (e.g. the
+   * {@code --} in {@code (?:--){2}}) can only be converted from a repetition count to a character
+   * count if its own characters are indistinguishable from that flat run. Returns -1 if the length
+   * isn't fixed or a character falls outside {@code charSet}.
+   */
+  private int getFixedLengthInCharSet(RegexNode node, CharSet charSet) {
+    if (node instanceof LiteralNode) {
+      return charSet.contains(((LiteralNode) node).ch) ? 1 : -1;
+    }
+    if (node instanceof CharClassNode) {
+      CharClassNode charClass = (CharClassNode) node;
+      CharSet nodeSet = charClass.negated ? charClass.chars.complement() : charClass.chars;
+      return nodeSet.minus(charSet).isEmpty() ? 1 : -1;
+    }
+    if (node instanceof GroupNode) {
+      GroupNode group = (GroupNode) node;
+      return group.capturing ? -1 : getFixedLengthInCharSet(group.child, charSet);
+    }
+    if (node instanceof ConcatNode) {
+      int total = 0;
+      for (RegexNode child : ((ConcatNode) node).children) {
+        int len = getFixedLengthInCharSet(child, charSet);
+        if (len < 0) {
+          return -1;
+        }
+        total += len;
+      }
+      return total;
+    }
+    return -1;
+  }
+
   private boolean isNullable(RegexNode node) {
     if (node instanceof QuantifierNode) {
       return ((QuantifierNode) node).min == 0;
@@ -3631,6 +3666,9 @@ public class PatternAnalyzer {
         return null;
       }
       separatorCharSet = getFirstCharSet(separator);
+      if (separatorCharSet == null) {
+        return null;
+      }
 
       // The scan can't backtrack, so it always consumes the longest run of separator-charset
       // chars available; that's only correct if the separator's quantifier bounds either equal
@@ -3647,24 +3685,47 @@ public class PatternAnalyzer {
           sepQuantCandidate = sepGroup.child;
         }
       }
+      RegexNode sepAtom;
+      int sepRepMin;
+      int sepRepMax;
       if (sepQuantCandidate instanceof QuantifierNode) {
         QuantifierNode sepQuant = (QuantifierNode) sepQuantCandidate;
         if (!sepQuant.greedy) {
           return null;
         }
-        separatorMinLength = sepQuant.min;
-        separatorMaxLength = sepQuant.max;
+        sepAtom = sepQuant.child;
+        sepRepMin = sepQuant.min;
+        sepRepMax = sepQuant.max;
       } else {
         // No quantifier wrapping the separator node means exactly one occurrence.
+        sepAtom = sepQuantCandidate;
+        sepRepMin = 1;
+        sepRepMax = 1;
+      }
+      if (separatorCharSet.isEmpty()) {
+        // Zero-width separator (e.g. \b): the codegen has no code path to evaluate the anchor
+        // itself, and its scan of an empty charset always consumes 0 chars, so pin the bounds to
+        // something that scan can never satisfy - the pattern is unsatisfiable anyway, since the
+        // group and backreference charsets can't both be disjoint from and equal to each other.
         separatorMinLength = 1;
         separatorMaxLength = 1;
-      }
-      if (separatorMinLength < 1) {
-        return null;
+      } else {
+        // The codegen's separator scan reports a character count, not a repetition count, so the
+        // quantifier's bounds must be converted via the atom's own fixed character width (e.g. 2
+        // for the "--" in (?:--){2}) - reject if that width can't be established.
+        int sepAtomLength = getFixedLengthInCharSet(sepAtom, separatorCharSet);
+        if (sepAtomLength < 1) {
+          return null;
+        }
+        separatorMinLength = sepRepMin * sepAtomLength;
+        separatorMaxLength = sepRepMax == -1 ? -1 : sepRepMax * sepAtomLength;
+        if (separatorMinLength < 1) {
+          return null;
+        }
       }
 
       // Disjointness condition 2: separator vs. group content.
-      if (separatorCharSet == null || !groupCharSet.isDisjoint(separatorCharSet)) {
+      if (!groupCharSet.isDisjoint(separatorCharSet)) {
         return null;
       }
     }
