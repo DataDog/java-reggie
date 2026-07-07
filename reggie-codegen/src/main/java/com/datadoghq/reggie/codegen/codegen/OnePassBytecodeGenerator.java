@@ -1113,65 +1113,22 @@ public class OnePassBytecodeGenerator {
 
     mv.visitLabel(found);
 
-    // Find longest match by trying all lengths WITHOUT substring allocation
-    // Start from zero-length to support empty groups like ()
-    // int len = input.length();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitVarInsn(ISTORE, 4);
-
-    // int matchEnd = matchStart (start with zero-length);
-    // S: [] -> [matchStart]
-    mv.visitVarInsn(ILOAD, 3);
-    // S: [matchStart] -> []
-    mv.visitVarInsn(ISTORE, 5);
-
-    // int longestEnd = -1 (use -1 to indicate no match found);
-    // S: [] -> [-1]
-    mv.visitInsn(ICONST_M1);
-    // S: [-1] -> []
-    mv.visitVarInsn(ISTORE, 6);
-
-    Label loopStart = new Label();
-    Label loopEnd = new Label();
-
-    mv.visitLabel(loopStart);
-
-    // while (matchEnd <= len)
-    mv.visitVarInsn(ILOAD, 5);
-    mv.visitVarInsn(ILOAD, 4);
-    mv.visitJumpInsn(IF_ICMPGT, loopEnd);
-
-    // Use matchesInRange() instead of substring allocation
-    // if (matchesInRange(input, matchStart, matchEnd)) longestEnd = matchEnd;
+    // ONEPASS_NFA patterns admit at most one epsilon transition and no overlapping character
+    // transitions per state (PatternAnalyzer.isOnePassEligible()), so a quantifier branch point
+    // can never occur and there is structurally only one possible accepting length from a given
+    // start. matchFrom's single forward pass already computed that length once inside findFrom;
+    // just re-run it here instead of re-scanning every candidate length via matchesInRange.
+    // int matchEnd = matchFrom(input, matchStart);
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitVarInsn(ILOAD, 5);
     mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "matchesInRange",
-        "(Ljava/lang/String;II)Z",
-        false);
+        INVOKEVIRTUAL, className.replace('.', '/'), "matchFrom", "(Ljava/lang/String;I)I", false);
+    mv.visitVarInsn(ISTORE, 4);
 
-    Label noMatch = new Label();
-    mv.visitJumpInsn(IFEQ, noMatch);
-    mv.visitVarInsn(ILOAD, 5);
-    mv.visitVarInsn(ISTORE, 6);
-    mv.visitLabel(noMatch);
-
-    // matchEnd++
-    mv.visitIincInsn(5, 1);
-    mv.visitJumpInsn(GOTO, loopStart);
-
-    mv.visitLabel(loopEnd);
-
-    // if (longestEnd < 0) return null;  // No match found (including zero-length)
+    // if (matchEnd < 0) return null;
     Label hasMatch = new Label();
-    // S: [] -> [longestEnd]
-    mv.visitVarInsn(ILOAD, 6);
-    // S: [longestEnd] -> []
+    mv.visitVarInsn(ILOAD, 4);
     mv.visitJumpInsn(IFGE, hasMatch);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
@@ -1182,18 +1139,18 @@ public class OnePassBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitVarInsn(ILOAD, 6);
+    mv.visitVarInsn(ILOAD, 4);
     mv.visitMethodInsn(
         INVOKEVIRTUAL,
         className.replace('.', '/'),
         "matchInRange",
         "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
         false);
-    mv.visitVarInsn(ASTORE, 7);
+    mv.visitVarInsn(ASTORE, 5);
 
     // if (result == null) return null;
     Label hasResult = new Label();
-    mv.visitVarInsn(ALOAD, 7);
+    mv.visitVarInsn(ALOAD, 5);
     mv.visitJumpInsn(IFNONNULL, hasResult);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
@@ -1204,7 +1161,7 @@ public class OnePassBytecodeGenerator {
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/HybridMatcher$OffsetMatchResult");
     mv.visitInsn(DUP);
     mv.visitVarInsn(ALOAD, 1); // original input
-    mv.visitVarInsn(ALOAD, 7); // delegate result
+    mv.visitVarInsn(ALOAD, 5); // delegate result
     mv.visitVarInsn(ILOAD, 3); // offset
     mv.visitMethodInsn(
         INVOKESPECIAL,
@@ -1213,34 +1170,6 @@ public class OnePassBytecodeGenerator {
         "(Ljava/lang/String;Lcom/datadoghq/reggie/runtime/MatchResult;I)V",
         false);
     mv.visitInsn(ARETURN);
-
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
-  }
-
-  /**
-   * Generate matchesInRange() helper method - matches substring without allocation. Matches
-   * input[startPos..endPos) without creating substring.
-   */
-  public void generateMatchesInRangeMethod(ClassWriter cw, String className) {
-    MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "matchesInRange", "(Ljava/lang/String;II)Z", null, null);
-    mv.visitCode();
-
-    // Extract substring and delegate to matches()
-    // This is still one allocation, but only when we find a candidate match
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", false);
-    mv.visitVarInsn(ASTORE, 4);
-
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, 4);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, className.replace('.', '/'), "matches", "(Ljava/lang/String;)Z", false);
-    mv.visitInsn(IRETURN);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -1281,9 +1210,9 @@ public class OnePassBytecodeGenerator {
 
   /**
    * Generate findBoundsFrom() method - allocation-free boundary detection. Returns match boundaries
-   * in the provided int[] array instead of allocating MatchResult. Note: This implementation still
-   * has O(N²) complexity for greedy quantifiers, but avoids MatchResult allocation for use in
-   * replaceAll operations.
+   * in the provided int[] array instead of allocating MatchResult. Reuses matchFrom's single-pass
+   * end position directly (see generateFindMatchFromMethod for why this is exact, not approximate,
+   * for every pattern that can reach ONEPASS_NFA).
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
@@ -1315,65 +1244,19 @@ public class OnePassBytecodeGenerator {
 
     mv.visitLabel(found);
 
-    // Find longest match by trying all lengths WITHOUT substring allocation
-    // Start from zero-length to support empty groups like ()
-    // int len = input.length();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitVarInsn(ISTORE, 5); // len in var 5
-
-    // int matchEnd = matchStart (start with zero-length);
-    // S: [] -> [matchStart]
-    mv.visitVarInsn(ILOAD, 4);
-    // S: [matchStart] -> []
-    mv.visitVarInsn(ISTORE, 6); // matchEnd in var 6
-
-    // int longestEnd = -1 (use -1 to indicate no match found);
-    // S: [] -> [-1]
-    mv.visitInsn(ICONST_M1);
-    // S: [-1] -> []
-    mv.visitVarInsn(ISTORE, 7); // longestEnd in var 7
-
-    Label loopStart = new Label();
-    Label loopEnd = new Label();
-
-    mv.visitLabel(loopStart);
-
-    // while (matchEnd <= len)
-    mv.visitVarInsn(ILOAD, 6);
-    mv.visitVarInsn(ILOAD, 5);
-    mv.visitJumpInsn(IF_ICMPGT, loopEnd);
-
-    // Use matchesInRange() instead of substring allocation
-    // if (matchesInRange(input, matchStart, matchEnd)) longestEnd = matchEnd;
+    // Reuse matchFrom's single forward pass for the end position instead of re-scanning every
+    // candidate length via matchesInRange (see generateFindMatchFromMethod for correctness proof).
+    // int matchEnd = matchFrom(input, matchStart);
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 4); // matchStart
-    mv.visitVarInsn(ILOAD, 6); // matchEnd
     mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "matchesInRange",
-        "(Ljava/lang/String;II)Z",
-        false);
+        INVOKEVIRTUAL, className.replace('.', '/'), "matchFrom", "(Ljava/lang/String;I)I", false);
+    mv.visitVarInsn(ISTORE, 5); // matchEnd in var 5
 
-    Label noMatch = new Label();
-    mv.visitJumpInsn(IFEQ, noMatch);
-    mv.visitVarInsn(ILOAD, 6);
-    mv.visitVarInsn(ISTORE, 7); // longestEnd = matchEnd
-    mv.visitLabel(noMatch);
-
-    // matchEnd++
-    mv.visitIincInsn(6, 1);
-    mv.visitJumpInsn(GOTO, loopStart);
-
-    mv.visitLabel(loopEnd);
-
-    // if (longestEnd < 0) return false;  // No match found (including zero-length)
+    // if (matchEnd < 0) return false;
     Label hasMatch = new Label();
-    // S: [] -> [longestEnd]
-    mv.visitVarInsn(ILOAD, 7);
-    // S: [longestEnd] -> []
+    mv.visitVarInsn(ILOAD, 5);
     mv.visitJumpInsn(IFGE, hasMatch);
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
@@ -1386,10 +1269,10 @@ public class OnePassBytecodeGenerator {
     mv.visitVarInsn(ILOAD, 4);
     mv.visitInsn(IASTORE);
 
-    // bounds[1] = longestEnd;
+    // bounds[1] = matchEnd;
     mv.visitVarInsn(ALOAD, 3);
     mv.visitInsn(ICONST_1);
-    mv.visitVarInsn(ILOAD, 7);
+    mv.visitVarInsn(ILOAD, 5);
     mv.visitInsn(IASTORE);
 
     // return true;

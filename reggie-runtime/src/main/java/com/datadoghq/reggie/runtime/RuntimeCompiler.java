@@ -1086,7 +1086,6 @@ public class RuntimeCompiler {
         onePass.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        onePass.generateMatchesInRangeMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateMatchInRangeMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;

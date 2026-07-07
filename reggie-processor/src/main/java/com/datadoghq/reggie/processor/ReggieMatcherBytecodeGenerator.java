@@ -605,7 +605,6 @@ public class ReggieMatcherBytecodeGenerator {
         onePass.generateMatchMethod(cw, getJavaClassName());
         onePass.generateFindMatchMethod(cw, getJavaClassName());
         onePass.generateFindMatchFromMethod(cw, getJavaClassName());
-        onePass.generateMatchesInRangeMethod(cw, getJavaClassName());
         onePass.generateMatchInRangeMethod(cw, getJavaClassName());
         onePass.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;
