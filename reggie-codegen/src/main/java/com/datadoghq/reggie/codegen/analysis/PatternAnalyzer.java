@@ -3575,6 +3575,14 @@ public class PatternAnalyzer {
       return null;
     }
 
+    // The generated matcher only ever scans the group, the optional separator, and the
+    // backreference echo - it has no code path for anything else in the concatenation. A
+    // non-empty prefix/suffix (e.g. the \b anchors in \b(\w+)\s+\1\b) would therefore be silently
+    // ignored rather than evaluated, so require the group/backref pair to span the whole pattern.
+    if (groupIndex != 0 || backrefIndex != children.size() - 1) {
+      return null;
+    }
+
     // The codegen forward-scans the group's content as a single flat "one-or-more chars from
     // groupCharSet" loop with no notion of an upper bound, so only an unbounded (max == -1),
     // greedy, min >= 1 quantifier directly wrapping a charset-bearing child is safe - this
@@ -3605,6 +3613,8 @@ public class PatternAnalyzer {
     // earlier occurrence of the same backreference) is rejected rather than approximated.
     RegexNode separator = null;
     CharSet separatorCharSet = null;
+    int separatorMinLength = 0;
+    int separatorMaxLength = -1;
     if (backrefIndex > groupIndex + 1) {
       List<RegexNode> sepNodes = children.subList(groupIndex + 1, backrefIndex);
       if (sepNodes.size() != 1) {
@@ -3612,6 +3622,27 @@ public class PatternAnalyzer {
       }
       separator = sepNodes.get(0);
       separatorCharSet = getFirstCharSet(separator);
+
+      // The scan can't backtrack, so it always consumes the longest run of separator-charset
+      // chars available; that's only correct if the separator's quantifier bounds either equal
+      // that run (min <= run) or don't cap it below that run (max == -1 or max >= run). Track the
+      // bounds here so codegen can reject a candidate whose actual run falls outside them, instead
+      // of accepting whatever length the greedy scan happens to consume.
+      if (separator instanceof QuantifierNode) {
+        QuantifierNode sepQuant = (QuantifierNode) separator;
+        if (!sepQuant.greedy) {
+          return null;
+        }
+        separatorMinLength = sepQuant.min;
+        separatorMaxLength = sepQuant.max;
+      } else {
+        // No quantifier wrapping the separator node means exactly one occurrence.
+        separatorMinLength = 1;
+        separatorMaxLength = 1;
+      }
+      if (separatorMinLength < 1) {
+        return null;
+      }
 
       // Disjointness condition 2: separator vs. group content.
       if (separatorCharSet == null || !groupCharSet.isDisjoint(separatorCharSet)) {
@@ -3623,8 +3654,11 @@ public class PatternAnalyzer {
         capturingGroup.groupNumber,
         capturingGroup.child,
         groupCharSet,
+        groupQuant.min,
         separator,
-        separatorCharSet);
+        separatorCharSet,
+        separatorMinLength,
+        separatorMaxLength);
   }
 
   /** Check if a node represents a single character or character class. */

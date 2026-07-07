@@ -54,14 +54,17 @@ class PinnedBackreferenceBytecodeGeneratorTest {
         1,
         new CharClassNode(CharSet.WORD, false),
         CharSet.WORD,
+        1,
         new CharClassNode(CharSet.WHITESPACE, false),
-        CharSet.WHITESPACE);
+        CharSet.WHITESPACE,
+        1,
+        -1);
   }
 
   /** (\w+)\1 with no separator between the group's close and the backreference site. */
   private PinnedBackreferenceInfo noSeparatorInfo() {
     return new PinnedBackreferenceInfo(
-        1, new CharClassNode(CharSet.WORD, false), CharSet.WORD, null, null);
+        1, new CharClassNode(CharSet.WORD, false), CharSet.WORD, 1, null, null, 0, -1);
   }
 
   private ClassWriter newClassWriter(String className) {

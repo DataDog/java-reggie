@@ -269,9 +269,10 @@ public class PatternRoutingPropertyTest {
 
   static Stream<PatternRoutingTestCase> providePinnedBackrefPositiveExamples() {
     return Stream.of(
-        // Repeated-word shape: \w+ content is disjoint from the \s+ separator.
+        // Repeated-word shape: \w+ content is disjoint from the \s+ separator. No anchors, so
+        // the group/backref pair spans the whole pattern.
         new PatternRoutingTestCase(
-            "\\b(\\w+)\\s+\\1\\b",
+            "(\\w+)\\s+\\1",
             PINNED_BACKREFERENCE,
             "repeated-word shape: word charset disjoint from whitespace separator"));
   }
@@ -308,6 +309,14 @@ public class PatternRoutingPropertyTest {
             "<(\\w+)>.*</\\1>",
             SPECIALIZED_BACKREFERENCE,
             "tag-close shape: multi-node separator, must not be PINNED_BACKREFERENCE"),
+
+        // Repeated-word shape with \b anchors outside the group/backref span: the generated
+        // matcher has no code path to evaluate them, so the detector rejects this and it falls
+        // through to VARIABLE_CAPTURE_BACKREF.
+        new PatternRoutingTestCase(
+            "\\b(\\w+)\\s+\\1\\b",
+            VARIABLE_CAPTURE_BACKREF,
+            "repeated-word shape with anchors outside the group/backref span"),
 
         // Overlapping-charset shape (backreferenced variant): [bc] overlaps with 'c' in
         // (c+d), so the group's own closing boundary is genuinely ambiguous.

@@ -22,16 +22,11 @@ import com.datadoghq.reggie.codegen.ast.ConcatNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
-import com.datadoghq.reggie.codegen.codegen.BackreferenceBytecodeGenerator;
-import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.lang.reflect.Method;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.Opcodes;
 
 /**
  * Evidence-gathering test for a FUTURE decision about retiring {@code detectHTMLTagPattern} /
@@ -39,44 +34,15 @@ import org.objectweb.asm.Opcodes;
  * predicate (design doc {@code doc/2026-07-06-backreference-pinned-boundary-design.md}, §5/§6; impl
  * plan Task 8.4).
  *
- * <p>This test does NOT change routing or retire either hardcoded detector - it only (a) records,
- * for a corpus of tag-close-shaped and repeated-word-shaped pattern variants, whether the general
- * detector and the corresponding hardcoded detector agree on eligibility, and (b) where both are
- * eligible for the same pattern, confirms the two independently-generated matchers (({@code
- * PinnedBackreferenceBytecodeGenerator} vs. {@code BackreferenceBytecodeGenerator}) produce
- * byte-identical {@code matches}/{@code find}/{@code findFrom} results on a shared input corpus.
+ * <p>This test does NOT change routing or retire either hardcoded detector - it only records, for a
+ * corpus of tag-close-shaped and repeated-word-shaped pattern variants, whether the general
+ * detector and the corresponding hardcoded detector agree on eligibility.
  *
  * <p>Disagreement between the two detectors for a given variant is an expected, documented outcome
  * for this test - not necessarily a bug (see per-case comments below for why each disagreement is
  * unsurprising given each detector's known limitations).
  */
 class PinnedBackreferenceEquivalenceTest {
-
-  private static final AtomicInteger CLASS_COUNTER = new AtomicInteger();
-
-  /**
-   * Shared differential input corpus exercised against any repeated-word pattern eligible for both
-   * detectors (no tag-close-shaped variant in this corpus is eligible for both - see the
-   * eligibility tests below - so no tag-input corpus is needed).
-   */
-  private static final String[] WORD_INPUTS = {
-    "hello hello",
-    "the the cat",
-    "hello world",
-    "word   word",
-    "foo\tfoo",
-    "",
-    "single",
-    "hello hello hello",
-    "Hello hello",
-    "  hello hello  ",
-  };
-
-  private static final class TestClassLoader extends ClassLoader {
-    Class<?> defineClass(String name, byte[] bytecode) {
-      return defineClass(name, bytecode, 0, bytecode.length);
-    }
-  }
 
   private static RegexNode parse(String pattern) throws Exception {
     return new RegexParser().parse(pattern);
@@ -231,30 +197,31 @@ class PinnedBackreferenceEquivalenceTest {
   // ── Eligibility agreement: repeated-word-shaped corpus ───────────────────
 
   /**
-   * {@code \b(\w+)\s+\1\b} - the canonical repeated-word shape. Both detectors accept: the
-   * separator here is a single node ({@code \s+}) whose charset (whitespace) is disjoint from the
-   * group's charset (word chars), satisfying the general detector's single-node-separator
-   * requirement, and matching the hardcoded shape exactly.
+   * {@code \b(\w+)\s+\1\b} - the canonical repeated-word shape. The general detector now rejects
+   * this: it requires the group/backref pair to span the whole pattern, and the leading/trailing
+   * {@code \b} anchors here violate that (the generated matcher has no code path to evaluate them).
+   * The hardcoded detector still accepts it (its shape explicitly requires those anchors), so this
+   * is now a documented disagreement rather than an agreement.
    */
   @TestFactory
-  DynamicTest repeatedWordCanonicalShapeAgreement() {
+  DynamicTest repeatedWordCanonicalShapeDivergence() {
     return DynamicTest.dynamicTest(
-        "\\b(\\w+)\\s+\\1\\b : both accept",
+        "\\b(\\w+)\\s+\\1\\b : pinned rejects (anchors outside group/backref span), hardcoded accepts",
         () -> {
           Eligibility e = eligibilityForWord("\\b(\\w+)\\s+\\1\\b");
-          assertEquals(true, e.pinned);
+          assertEquals(false, e.pinned);
           assertEquals(true, e.hardcoded);
         });
   }
 
-  /** Restricted word-charset variant - same agreement. */
+  /** Restricted word-charset variant - same divergence, for the same reason. */
   @TestFactory
-  DynamicTest repeatedWordRestrictedCharsetAgreement() {
+  DynamicTest repeatedWordRestrictedCharsetDivergence() {
     return DynamicTest.dynamicTest(
-        "\\b([a-z]+)\\s+\\1\\b : both accept",
+        "\\b([a-z]+)\\s+\\1\\b : pinned rejects (anchors outside group/backref span), hardcoded accepts",
         () -> {
           Eligibility e = eligibilityForWord("\\b([a-z]+)\\s+\\1\\b");
-          assertEquals(true, e.pinned);
+          assertEquals(false, e.pinned);
           assertEquals(true, e.hardcoded);
         });
   }
@@ -296,136 +263,44 @@ class PinnedBackreferenceEquivalenceTest {
   }
 
   /**
-   * Literal separator instead of {@code \s+} - both reject (hardcoded needs a {@code \s+}
-   * QuantifierNode; general detector's own disjointness proof would actually hold for a literal
-   * separator too, but the shape doesn't match {@code detectRepeatedWordPattern} at all here since
-   * we're only invoking it directly, not the pinned detector's separator-node acceptance path -
-   * recorded for completeness).
+   * Literal separator instead of {@code \s+}, with {@code \b} anchors - both reject: the hardcoded
+   * detector needs a {@code \s+} QuantifierNode separator, and the general detector rejects the
+   * {@code \b} anchors outside the group/backref span regardless of the separator shape.
    */
   @TestFactory
-  DynamicTest repeatedWordLiteralSeparatorHardcodedRejects() {
+  DynamicTest repeatedWordLiteralSeparatorBothReject() {
     return DynamicTest.dynamicTest(
-        "\\b(\\w+),\\1\\b : pinned accepts (literal separator disjoint from \\w), hardcoded rejects",
+        "\\b(\\w+),\\1\\b : both reject (pinned: anchors outside span; hardcoded: wrong separator)",
         () -> {
           Eligibility e = eligibilityForWord("\\b(\\w+),\\1\\b");
-          assertEquals(true, e.pinned);
+          assertEquals(false, e.pinned);
           assertEquals(false, e.hardcoded);
         });
   }
 
-  // ── Byte-identical behavior where BOTH detectors agree the pattern is eligible ──
-
-  private Object compilePinnedBooleanApi(PinnedBackreferenceInfo info) throws Exception {
-    String className = "PinnedEquiv" + CLASS_COUNTER.incrementAndGet();
-    ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-    cw.visit(
-        Opcodes.V21,
-        Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL,
-        className,
-        null,
-        "java/lang/Object",
-        null);
-    org.objectweb.asm.MethodVisitor ctor =
-        cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
-    ctor.visitCode();
-    ctor.visitVarInsn(Opcodes.ALOAD, 0);
-    ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
-    ctor.visitInsn(Opcodes.RETURN);
-    ctor.visitMaxs(1, 1);
-    ctor.visitEnd();
-
-    PinnedBackreferenceBytecodeGenerator gen =
-        new PinnedBackreferenceBytecodeGenerator(info, className);
-    gen.generateMatchesMethod(cw);
-    gen.generateFindMethod(cw);
-    gen.generateFindFromMethod(cw);
-    cw.visitEnd();
-
-    byte[] bytecode = cw.toByteArray();
-    Class<?> cls = new TestClassLoader().defineClass(className, bytecode);
-    return cls.getDeclaredConstructor().newInstance();
-  }
-
-  private Object compileHardcodedBooleanApi(BackreferencePatternInfo info) throws Exception {
-    String className = "HardcodedEquiv" + CLASS_COUNTER.incrementAndGet();
-    ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-    cw.visit(
-        Opcodes.V21,
-        Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL,
-        className,
-        null,
-        "java/lang/Object",
-        null);
-    org.objectweb.asm.MethodVisitor ctor =
-        cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
-    ctor.visitCode();
-    ctor.visitVarInsn(Opcodes.ALOAD, 0);
-    ctor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
-    ctor.visitInsn(Opcodes.RETURN);
-    ctor.visitMaxs(1, 1);
-    ctor.visitEnd();
-
-    BackreferenceBytecodeGenerator gen = new BackreferenceBytecodeGenerator(info);
-    gen.generateMatchesMethod(cw, className);
-    gen.generateFindMethod(cw, className);
-    gen.generateFindFromMethod(cw, className);
-    cw.visitEnd();
-
-    byte[] bytecode = cw.toByteArray();
-    Class<?> cls = new TestClassLoader().defineClass(className, bytecode);
-    return cls.getDeclaredConstructor().newInstance();
-  }
-
-  private static boolean invokeMatches(Object matcher, String input) throws Exception {
-    Method m = matcher.getClass().getMethod("matches", String.class);
-    return (Boolean) m.invoke(matcher, input);
-  }
-
-  private static boolean invokeFind(Object matcher, String input) throws Exception {
-    Method m = matcher.getClass().getMethod("find", String.class);
-    return (Boolean) m.invoke(matcher, input);
-  }
-
-  private static int invokeFindFrom(Object matcher, String input, int from) throws Exception {
-    Method m = matcher.getClass().getMethod("findFrom", String.class, int.class);
-    return (Integer) m.invoke(matcher, input, from);
-  }
-
   /**
-   * Only the repeated-word canonical shape has both detectors eligible in this corpus (see
-   * eligibility tests above), so it is the only case exercised for byte-identical behavior.
+   * The general detector now requires the group/backref pair to span the whole pattern, so no
+   * pattern in the repeated-word corpus is eligible for both detectors simultaneously anymore (the
+   * hardcoded shape requires {@code \b} anchors, which the general detector always rejects as
+   * prefix/suffix content). This test therefore just confirms that absence of overlap rather than
+   * exercising byte-identical behavior, which no longer applies.
    */
   @TestFactory
-  DynamicTest repeatedWordCanonicalShapeProducesIdenticalResults() throws Exception {
+  DynamicTest noSharedEligiblePatternRemainsInWordCorpus() throws Exception {
     String pattern = "\\b(\\w+)\\s+\\1\\b";
     RegexNode ast = parse(pattern);
     PatternAnalyzer analyzer = newAnalyzer(pattern, ast);
     PinnedBackreferenceInfo pinnedInfo = detectPinned(analyzer, ast);
     BackreferencePatternInfo hardcodedInfo =
         detectRepeatedWord(analyzer, ((ConcatNode) ast).children);
-    assertNotNull(pinnedInfo, "expected pinned detector to accept the canonical shape");
-    assertNotNull(hardcodedInfo, "expected hardcoded detector to accept the canonical shape");
-
-    Object pinnedMatcher = compilePinnedBooleanApi(pinnedInfo);
-    Object hardcodedMatcher = compileHardcodedBooleanApi(hardcodedInfo);
 
     return DynamicTest.dynamicTest(
-        "matches/find/findFrom identical across WORD_INPUTS for " + pattern,
+        "pinned rejects, hardcoded accepts " + pattern,
         () -> {
-          for (String input : WORD_INPUTS) {
-            assertEquals(
-                invokeMatches(hardcodedMatcher, input),
-                invokeMatches(pinnedMatcher, input),
-                "matches() diverged for input: " + input);
-            assertEquals(
-                invokeFind(hardcodedMatcher, input),
-                invokeFind(pinnedMatcher, input),
-                "find() diverged for input: " + input);
-            assertEquals(
-                invokeFindFrom(hardcodedMatcher, input, 0),
-                invokeFindFrom(pinnedMatcher, input, 0),
-                "findFrom(input, 0) diverged for input: " + input);
-          }
+          assertEquals(
+              null, pinnedInfo, "pinned detector should reject anchors outside group/backref span");
+          assertNotNull(
+              hardcodedInfo, "hardcoded detector should still accept the canonical shape");
         });
   }
 }

@@ -41,11 +41,16 @@ public class PinnedBackreferenceMatchResultTest {
   }
 
   @Test
-  public void testRepeatedWordRoutesToPinnedBackreference() throws Exception {
-    assertEquals(
+  public void testRepeatedWordWithBoundaryAnchorsDoesNotRouteToPinnedBackreference()
+      throws Exception {
+    // \b(\w+)\s+\1\b has \b anchors outside the group/backref span, which the generated
+    // matcher has no code path to evaluate - PINNED_BACKREFERENCE requires the group and
+    // backreference to span the whole pattern, so this falls through to another strategy.
+    assertNotEquals(
         PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE,
         routeOf("\\b(\\w+)\\s+\\1\\b"),
-        "Pattern \\b(\\w+)\\s+\\1\\b should route to PINNED_BACKREFERENCE");
+        "Pattern \\b(\\w+)\\s+\\1\\b has anchors outside the group/backref span and must not "
+            + "route to PINNED_BACKREFERENCE");
   }
 
   @Test

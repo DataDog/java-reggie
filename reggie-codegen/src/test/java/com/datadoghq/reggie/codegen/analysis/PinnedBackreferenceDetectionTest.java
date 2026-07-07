@@ -79,7 +79,15 @@ class PinnedBackreferenceDetectionTest {
 
   @Test
   void detectsRepeatedWordShape() throws Exception {
-    assertNotNull(detect("\\b(\\w+)\\s+\\1\\b"));
+    assertNotNull(detect("(\\w+)\\s+\\1"));
+  }
+
+  @Test
+  void rejectsPatternWithAnchorsOutsideGroupAndBackrefSpan() throws Exception {
+    // The generated matcher only scans the group, separator, and backreference echo - it has
+    // no code path for the \b anchors here, so the whole pattern must be rejected rather than
+    // silently ignoring them.
+    assertNull(detect("\\b(\\w+)\\s+\\1\\b"));
   }
 
   @Test

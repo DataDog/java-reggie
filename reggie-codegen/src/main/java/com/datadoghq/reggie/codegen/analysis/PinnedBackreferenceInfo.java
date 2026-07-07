@@ -42,6 +42,9 @@ public class PinnedBackreferenceInfo implements PatternInfo {
   /** Character set the group's content matches. */
   public final CharSet groupCharSet;
 
+  /** Minimum number of chars the group's quantifier requires (e.g. 2 for {@code \w{2,}}). */
+  public final int groupMinLength;
+
   /**
    * Node(s) between the group's close and the backreference site, or null if the backreference
    * directly follows the group.
@@ -51,17 +54,34 @@ public class PinnedBackreferenceInfo implements PatternInfo {
   /** Character set of the separator, or null if there is no separator. */
   public final CharSet separatorCharSet;
 
+  /**
+   * Minimum number of chars the separator's quantifier requires. Unused if there's no separator.
+   */
+  public final int separatorMinLength;
+
+  /**
+   * Maximum number of chars the separator's quantifier allows, or -1 if unbounded. Unused if
+   * there's no separator.
+   */
+  public final int separatorMaxLength;
+
   public PinnedBackreferenceInfo(
       int groupIndex,
       RegexNode groupBody,
       CharSet groupCharSet,
+      int groupMinLength,
       RegexNode separator,
-      CharSet separatorCharSet) {
+      CharSet separatorCharSet,
+      int separatorMinLength,
+      int separatorMaxLength) {
     this.groupIndex = groupIndex;
     this.groupBody = Objects.requireNonNull(groupBody);
     this.groupCharSet = Objects.requireNonNull(groupCharSet);
+    this.groupMinLength = groupMinLength;
     this.separator = separator;
     this.separatorCharSet = separatorCharSet;
+    this.separatorMinLength = separatorMinLength;
+    this.separatorMaxLength = separatorMaxLength;
   }
 
   /** Whether a separator exists between the group's close and the backreference site. */
@@ -75,8 +95,11 @@ public class PinnedBackreferenceInfo implements PatternInfo {
     hash = 31 * hash + groupIndex;
     hash = 31 * hash + groupBody.getClass().getName().hashCode();
     hash = 31 * hash + groupCharSet.hashCode();
+    hash = 31 * hash + groupMinLength;
     hash = 31 * hash + (separator != null ? separator.getClass().getName().hashCode() : 0);
     hash = 31 * hash + (separatorCharSet != null ? separatorCharSet.hashCode() : 0);
+    hash = 31 * hash + separatorMinLength;
+    hash = 31 * hash + separatorMaxLength;
     return hash;
   }
 
