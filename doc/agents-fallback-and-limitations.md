@@ -146,10 +146,13 @@ with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for thos
 - **Branch reset groups**: Partially supported — `(?|...)` with numbered groups routes to
   `RECURSIVE_DESCENT` and passes correctness tests. The named-capture variant
   `(?|(?'name'...)|(?'name'...))` is not yet supported and throws at compile time.
-- **Unicode properties**: Not yet supported (`\p{L}`, `\p{N}`, etc.)
-- **Atomic groups**: Not supported (`(?>...)`)
-- **Possessive quantifiers**: Not supported (`*+`, `++`, `?+`)
-- **Inline flags**: Partially supported - `(?i)`, `(?m)`, `(?s)`, `(?x)` work globally; scoped flags like `(?i:...)` not yet supported
+- **Unicode properties**: Supported — general categories (`\p{L}`, `\p{N}`, `\p{Lu}`, `\p{Nd}`,
+  etc., see `CharSet.UNICODE_CATEGORIES`) and negation (`\P{...}`). Unrecognized category names
+  throw `UnsupportedPatternException` at parse time.
+- **Atomic groups**: Supported (`(?>...)`)
+- **Possessive quantifiers**: Supported (`*+`, `++`, `?+`)
+- **Inline flags**: Supported - `(?i)`, `(?m)`, `(?s)`, `(?x)` work globally; scoped flags like
+  `(?i:...)` are also supported
 
 ### Performance known gaps
 

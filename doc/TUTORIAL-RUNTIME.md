@@ -29,7 +29,7 @@ Runtime compilation means regex patterns are:
 3. **Lazy bytecode generation** - Only compiled when actually used
 4. **Hidden classes** - Uses Java 21+ hidden classes for efficient memory use
 
-**PCRE Compatibility**: Reggie achieves 91.3% PCRE compatibility (303/332 tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences.
+**PCRE Compatibility**: Reggie achieves 95.4% PCRE compatibility (329/345 evaluated tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences. See the [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for current status.
 
 ### Benefits
 
@@ -292,6 +292,37 @@ public class SafeCompiler {
     }
 }
 ```
+
+#### Unsupported Constructs and JDK Fallback
+
+By default, `Reggie.compile()` throws `UnsupportedPatternException` (a `RuntimeException`
+subclass) for constructs it cannot compile natively, rather than silently delegating to
+`java.util.regex`:
+
+```java
+try {
+    ReggieMatcher matcher = Reggie.compile("^((.)(?1)\\2|.?)$"); // recursive palindrome
+} catch (UnsupportedPatternException e) {
+    System.err.println("Not supported natively: " + e.getMessage());
+}
+```
+
+To opt into JDK delegation for such patterns instead of failing, use
+`Reggie.compileAllowingFallback()` or pass `ReggieOption.ALLOW_JDK_FALLBACK` explicitly via
+`ReggieOptions`:
+
+```java
+// Convenience method
+ReggieMatcher matcher = Reggie.compileAllowingFallback("^((.)(?1)\\2|.?)$");
+
+// Equivalent, explicit form — also useful for combining with other options
+ReggieOptions options = ReggieOptions.builder().allowJdkFallback().build();
+ReggieMatcher matcher2 = Reggie.compile("^((.)(?1)\\2|.?)$", options);
+```
+
+`ReggieOptions` also supports `CAPTURE_NAMED_ONLY` (via `.namedOnly()`), which tracks only named
+and backreference-target capturing groups instead of every group, matching `java.util.regex`
+numbering only when explicitly requested.
 
 #### Escape Sequences
 
@@ -956,6 +987,37 @@ String longHexString = "deadbeef".repeat(1000); // 8000 chars
 
 **Bottom line**: Add `--add-opens` if you're processing large volumes of text or running in performance-critical hot paths. Otherwise, the automatic fallback is excellent.
 
+### Allocation-Free Matching (Advanced)
+
+For hot paths that need group boundaries but want to avoid `MatchResult` allocation, `ReggieMatcher`
+offers array-output variants that write directly into caller-provided arrays:
+
+```java
+ReggieMatcher matcher = Reggie.compile("(\\d+)-(\\d+)");
+
+// matchInto / findMatchInto: group boundaries into caller arrays.
+// Arrays must be at least groupCount()+1 long; group 0 is the whole match.
+int[] starts = new int[3];
+int[] ends = new int[3];
+if (matcher.findMatchInto("id 42-7", starts, ends)) {
+    String group1 = "id 42-7".substring(starts[1], ends[1]); // "42"
+}
+
+// findMatchInto with an explicit start offset
+matcher.findMatchInto("id 42-7", 3, starts, ends);
+
+// findBoundsFrom: only the overall match bounds, no group tracking at all —
+// cheapest option when you only need "did it match, and where"
+int[] bounds = new int[2];
+if (matcher.findBoundsFrom("id 42-7", 0, bounds)) {
+    System.out.println("Matched [" + bounds[0] + ", " + bounds[1] + ")");
+}
+```
+
+`matchInto` is the array-output equivalent of `match()`; it requires the whole input to match.
+All three throw `IndexOutOfBoundsException` if the supplied arrays are too small for the pattern's
+group count, and leave the arrays unchanged on a failed match.
+
 ## Troubleshooting
 
 ### Problem: Slow First Use
@@ -1103,12 +1165,11 @@ for (int i = 0; i < 100; i++) {
 ## Next Steps
 
 - Read the [Compile-Time API Tutorial](TUTORIAL-COMPILE-TIME.md) for static patterns
-- Check out [Best Practices](BEST-PRACTICES.md) for advanced usage
-- See the [API Reference](../README.md#api-reference) for complete API documentation
-- Explore [Performance Tuning](PERFORMANCE-TUNING.md) for optimization tips
+- See [Fallback Behavior & Known Limitations](agents-fallback-and-limitations.md) for correctness
+  guarantees and known gaps
+- Read the [main README](../README.md) for the full API surface
 
 ## Questions?
 
 - Open an issue on [GitHub](https://github.com/DataDog/java-reggie)
-- Check the [FAQ](FAQ.md)
 - Read the [main README](../README.md)

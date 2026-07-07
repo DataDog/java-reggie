@@ -41,8 +41,8 @@ Full detail, examples, and the concurrency contract: **`doc/agents-conventions.m
 `Reggie.compile()` throws `UnsupportedPatternException` for unsupported constructs instead of
 silently falling back — use `Reggie.compileAllowingFallback()` / `ReggieOption.ALLOW_JDK_FALLBACK`
 to opt into `java.util.regex` delegation. Full fallback-condition tables (`FallbackPatternDetector`,
-`RuntimeCompiler`), current known limitations (Unicode properties, atomic groups, possessive
-quantifiers, scoped inline flags), and performance-only gaps:
+`RuntimeCompiler`), current known limitations (recursive palindromes, named-capture branch reset
+groups), and performance-only gaps:
 **`doc/agents-fallback-and-limitations.md`**.
 
 ## Common Task Workflows

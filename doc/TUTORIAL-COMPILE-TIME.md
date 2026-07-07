@@ -25,7 +25,7 @@ Compile-time compilation means your regex patterns are:
 3. **Optimized aggressively** - JIT compiler can fully inline the generated code
 4. **Zero overhead** - No Pattern.compile() cost at runtime
 
-**PCRE Compatibility**: Reggie achieves 91.3% PCRE compatibility (303/332 tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences.
+**PCRE Compatibility**: Reggie achieves 95.4% PCRE compatibility (329/345 evaluated tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences. See the [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for current status.
 
 ### Benefits
 
@@ -166,7 +166,7 @@ public abstract class ValidationPatterns implements ReggiePatterns {
     @RegexPattern("\\d+")
     public abstract ReggieMatcher digits();
 
-    // Only letters (case-insensitive not yet supported, use [a-zA-Z])
+    // Only letters
     @RegexPattern("[a-zA-Z]+")
     public abstract ReggieMatcher letters();
 
@@ -997,12 +997,11 @@ public class Validator {
 ## Next Steps
 
 - Read the [Runtime API Tutorial](TUTORIAL-RUNTIME.md) for dynamic patterns
-- Check out [Best Practices](BEST-PRACTICES.md) for advanced usage
-- See the [API Reference](../README.md#api-reference) for complete API documentation
-- Explore [Performance Tuning](PERFORMANCE-TUNING.md) for optimization tips
+- See [Fallback Behavior & Known Limitations](agents-fallback-and-limitations.md) for correctness
+  guarantees and known gaps
+- Read the [main README](../README.md) for the full API surface
 
 ## Questions?
 
 - Open an issue on [GitHub](https://github.com/DataDog/java-reggie)
-- Check the [FAQ](FAQ.md)
 - Read the [main README](../README.md)

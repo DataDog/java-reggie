@@ -44,7 +44,7 @@ correctness_gate:
     - build
   timeout: 10 minutes
   script:
-    - ./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.divergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforce=true -Dreggie.fuzz.maxFindings=65 $GRADLE_ARGS
+    - ./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.divergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforce=true -Dreggie.fuzz.maxFindings=28 $GRADLE_ARGS
   artifacts:
     when: always
     reports:
