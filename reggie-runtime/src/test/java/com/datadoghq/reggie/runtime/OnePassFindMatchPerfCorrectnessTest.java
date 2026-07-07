@@ -46,6 +46,48 @@ public class OnePassFindMatchPerfCorrectnessTest {
   }
 
   @Test
+  void alternationPattern_doesNotRouteToOnepassNfa() throws Exception {
+    // Alternation, like quantifiers, produces a Thompson-construction split state with two
+    // epsilon transitions, so isOnePassEligible's totalEpsilons > 1 check excludes it from
+    // ONEPASS_NFA as well. This pins down that matchFrom's single-accept-position reuse in
+    // generateFindMatchFromMethod/generateFindBoundsFromMethod never has to handle an
+    // alternation pattern with ambiguous accepting lengths.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
+        StrategyCorrectnessMetaTest.routeOf("(cat|dog)"),
+        "(cat|dog) must not route to ONEPASS_NFA");
+  }
+
+  @Test
+  void emptyGroupPattern_findMatchHandlesZeroLengthMatch() throws Exception {
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.ONEPASS_NFA,
+        StrategyCorrectnessMetaTest.routeOf("()"),
+        "() must route to ONEPASS_NFA");
+
+    ReggieMatcher m = Reggie.compile("()");
+    MatchResult mr = m.findMatch("xyz");
+    assertTrue(mr != null, "expected a zero-length match");
+    assertEquals(0, mr.start());
+    assertEquals(0, mr.end());
+    assertEquals("", mr.group(1));
+  }
+
+  @Test
+  void emptyGroupPattern_findBoundsFromHandlesZeroLengthMatch() throws Exception {
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.ONEPASS_NFA,
+        StrategyCorrectnessMetaTest.routeOf("()"),
+        "() must route to ONEPASS_NFA");
+
+    ReggieMatcher m = Reggie.compile("()");
+    int[] bounds = new int[2];
+    assertTrue(m.findBoundsFrom("xyz", 0, bounds));
+    assertEquals(0, bounds[0]);
+    assertEquals(0, bounds[1]);
+  }
+
+  @Test
   void multiGroupPattern_findMatchGroupSpans() {
     ReggieMatcher m = Reggie.compile("([a-z])(bar)");
     MatchResult mr = m.findMatch("xxxzbarxxx");

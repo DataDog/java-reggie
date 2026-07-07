@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
 import java.util.concurrent.TimeUnit;
@@ -88,6 +89,25 @@ public class StrategyBenchmark {
   private ReggieMatcher reggieOnepass;
   private Pattern jdkOnepass;
 
+  // ── ONEPASS_NFA findMatch/findBoundsFrom (long haystack) ────────────────────
+  // Exercises the group-capturing find path fixed in this branch: matchFrom's end position is
+  // now reused directly instead of being re-derived via an O(remaining input) matchesInRange
+  // trial loop. Match sits near the end of a long haystack so any leftover rescan dominates.
+  private static final String ONEPASS_LONG_PATTERN = "(abc)";
+  private static final String ONEPASS_LONG_INPUT;
+
+  static {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < 20_000; i++) {
+      sb.append('x');
+    }
+    sb.append("abc");
+    ONEPASS_LONG_INPUT = sb.toString();
+  }
+
+  private ReggieMatcher reggieOnepassLong;
+  private Pattern jdkOnepassLong;
+
   @Setup(Level.Trial)
   public void setup() {
     reggieFixedRep = RuntimeCompiler.compile(FIXED_REP_PATTERN);
@@ -101,6 +121,9 @@ public class StrategyBenchmark {
 
     reggieOnepass = RuntimeCompiler.compile(ONEPASS_PATTERN);
     jdkOnepass = Pattern.compile(ONEPASS_PATTERN);
+
+    reggieOnepassLong = RuntimeCompiler.compile(ONEPASS_LONG_PATTERN);
+    jdkOnepassLong = Pattern.compile(ONEPASS_LONG_PATTERN);
   }
 
   // ── FIXED_REPETITION_BACKREF benchmarks ─────────────────────────────────────
@@ -229,5 +252,25 @@ public class StrategyBenchmark {
   @Benchmark
   public boolean jdkOnepassFind() {
     return jdkOnepass.matcher(ONEPASS_FIND_INPUT).find();
+  }
+
+  // ── ONEPASS_NFA findMatch/findBoundsFrom benchmarks (long haystack) ─────────
+
+  @Benchmark
+  public MatchResult reggieOnepassFindMatchLong() {
+    return reggieOnepassLong.findMatch(ONEPASS_LONG_INPUT);
+  }
+
+  @Benchmark
+  public java.util.regex.MatchResult jdkOnepassFindMatchLong() {
+    java.util.regex.Matcher m = jdkOnepassLong.matcher(ONEPASS_LONG_INPUT);
+    m.find();
+    return m.toMatchResult();
+  }
+
+  @Benchmark
+  public boolean reggieOnepassFindBoundsFromLong() {
+    int[] bounds = new int[2];
+    return reggieOnepassLong.findBoundsFrom(ONEPASS_LONG_INPUT, 0, bounds);
   }
 }
