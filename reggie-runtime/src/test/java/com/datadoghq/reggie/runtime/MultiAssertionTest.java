@@ -191,4 +191,82 @@ class MultiAssertionTest {
     assertFalse(m.find("0xDEAD"));
     assertFalse(m.find("DEADh"));
   }
+
+  // ── Fused multi-lookahead generalization (doc/2026-07-06-fused-multi-lookahead...) ────────
+
+  @Test
+  void sixLookaheadsFuseAllWithinBudget() {
+    // Small single-char lookaheads: product of DFA state counts stays well under the fusion
+    // budget, so all six fuse into one product-DFA check.
+    ReggieMatcher m = Reggie.compile("(?=.*a)(?=.*b)(?=.*c)(?=.*d)(?=.*e)(?=.*f).*");
+    assertTrue(m.matches("fedcba"));
+    assertTrue(m.matches("xaxbxcxdxexfx"));
+    assertFalse(m.matches("abcde")); // missing f
+    assertFalse(m.matches(""));
+  }
+
+  @Test
+  void manyLookaheadsExceedProductBudgetStillCorrect() {
+    // Each ~10-char literal lookahead builds a KMP-style DFA of ~11 states; 11^4 = 14641 exceeds
+    // FUSED_LOOKAHEAD_PRODUCT_BUDGET (10_000), forcing the selector to fuse a subset and fall
+    // back to individual per-lookahead checks for the rest, with correct results either way.
+    ReggieMatcher m =
+        Reggie.compile("(?=.*AAAAAAAAAA)(?=.*BBBBBBBBBB)(?=.*CCCCCCCCCC)(?=.*DDDDDDDDDD).+");
+
+    String base =
+        "xxxxxxxxxxAAAAAAAAAAxxxxxxxxxxBBBBBBBBBBxxxxxxxxxxCCCCCCCCCCxxxxxxxxxxDDDDDDDDDD";
+    assertTrue(m.matches(base));
+    assertFalse(m.matches(base.replace("AAAAAAAAAA", "aaaaaaaaaa")));
+    assertFalse(m.matches(base.replace("BBBBBBBBBB", "bbbbbbbbbb")));
+    assertFalse(m.matches(base.replace("CCCCCCCCCC", "cccccccccc")));
+    assertFalse(m.matches(base.replace("DDDDDDDDDD", "dddddddddd")));
+  }
+
+  @Test
+  void mixedPositiveAndNegativeLookaheadsAtSamePosition() {
+    // The positive lookahead is fusable; the co-located negative lookahead is excluded from
+    // fusion (collectSequentialLookaheads only collects POSITIVE_LOOKAHEAD) but must still get
+    // its own correct check. (A variant with two co-located positives plus this negative hits a
+    // pre-existing, unrelated bug where the negative lookahead's check is dropped — confirmed via
+    // git stash to reproduce identically on the pre-Phase-1 baseline — so this test intentionally
+    // stays at one positive + one negative, which already passes on baseline.)
+    ReggieMatcher m = Reggie.compile("(?=.*[0-9])(?!.*X).+");
+    assertTrue(m.matches("abc1")); // digit, no X
+    assertFalse(m.matches("abc1X")); // has X -> negative lookahead fails
+    assertFalse(m.matches("abc")); // no digit -> positive fails
+  }
+
+  @Test
+  void lookaheadsSeparatedByWordBoundaryAnchorFuse() {
+    // Regression for Task 1.0/1.1: a zero-width \b anchor between two DFA-compatible lookaheads
+    // must not block the epsilon-walk from fusing them.
+    ReggieMatcher m = Reggie.compile("(?=.*[A-Z])\\b(?=.*\\d).{5,}");
+    assertTrue(m.find("Abcde12345"));
+    assertFalse(m.find("abcde12345")); // no uppercase
+    assertFalse(m.find("Abcdefghij")); // no digit
+  }
+
+  @Test
+  void fusedLookaheadsWithUnsatisfiableCharsetNeverAccept() {
+    // [^\s\S] matches no character at all, so both fused lookaheads' component DFAs never reach
+    // an accepting state anywhere in the reachable product - generateProductAcceptanceDecode's
+    // acceptingStates-is-empty early return (no LOOKUPSWITCH needed since nothing ever passes).
+    ReggieMatcher m = Reggie.compile("(?=.*[^\\s\\S])(?=.*[^\\s\\S]).*");
+    assertFalse(m.matches("anything"));
+    assertFalse(m.matches(""));
+  }
+
+  @Test
+  void lookaheadsOnDifferentAlternationBranchesNotFused() {
+    // Task 1.1a's predicate must exclude alternation-branch epsilon splits: these two lookaheads
+    // sit at the same nominal position but are never live simultaneously (different branches), so
+    // fusing them would incorrectly let one branch's condition leak into the other's. Reggie
+    // currently routes any lookahead-inside-alternation-branch pattern to the JDK fallback
+    // (NFA thread scheduler doesn't isolate assertions per branch), so this exercises that
+    // guardrail: per-branch results must stay correct, not bleed into each other.
+    ReggieMatcher m = Reggie.compile("(a(?=bc)bc|d(?=ef)ef)xyz", WITH_FALLBACK);
+    assertTrue(m.matches("abcxyz")); // branch a, lookahead satisfied
+    assertTrue(m.matches("defxyz")); // branch d, lookahead satisfied
+    assertFalse(m.matches("abxxyz")); // branch a chosen, but lookahead content wrong
+  }
 }

@@ -165,7 +165,7 @@ public class OnePassBytecodeGenerator {
     mv.visitLabel(loopStart);
 
     // Process epsilon chain (group markers, anchors)
-    generateEpsilonChainProcessing(mv, stateVar, posVar, inputVar, null, null);
+    generateEpsilonChainProcessing(mv, stateVar, posVar, inputVar, null, null, false);
 
     // Check end of input
     mv.visitVarInsn(ILOAD, posVar);
@@ -193,7 +193,7 @@ public class OnePassBytecodeGenerator {
 
     // End of input - process final epsilon chain and check acceptance
     mv.visitLabel(loopEnd);
-    generateEpsilonChainProcessing(mv, stateVar, posVar, inputVar, null, null);
+    generateEpsilonChainProcessing(mv, stateVar, posVar, inputVar, null, null, false);
 
     // Check if in accept state
     for (NFA.NFAState acceptState : nfa.getAcceptStates()) {
@@ -306,7 +306,7 @@ public class OnePassBytecodeGenerator {
     mv.visitLabel(loopStart);
 
     // Process epsilon chain with group tracking
-    generateEpsilonChainProcessing(mv, 4, 5, 1, 2, 3);
+    generateEpsilonChainProcessing(mv, 4, 5, 1, 2, 3, false);
 
     // Check end of input
     mv.visitVarInsn(ILOAD, 5);
@@ -334,7 +334,7 @@ public class OnePassBytecodeGenerator {
 
     // End of input - process final epsilon chain
     mv.visitLabel(loopEnd);
-    generateEpsilonChainProcessing(mv, 4, 5, 1, 2, 3);
+    generateEpsilonChainProcessing(mv, 4, 5, 1, 2, 3, false);
 
     // Check if in accept state
     Label notAccepting = new Label();
@@ -384,6 +384,7 @@ public class OnePassBytecodeGenerator {
    * @param inputVar variable holding input string
    * @param groupStartsVar variable holding groupStarts array (null if not tracking)
    * @param groupEndsVar variable holding groupEnds array (null if not tracking)
+   * @param returnMinusOne true if anchor failures should emit {@code return -1} (int methods)
    */
   private void generateEpsilonChainProcessing(
       MethodVisitor mv,
@@ -391,7 +392,8 @@ public class OnePassBytecodeGenerator {
       int posVar,
       int inputVar,
       Integer groupStartsVar,
-      Integer groupEndsVar) {
+      Integer groupEndsVar,
+      boolean returnMinusOne) {
     Label epsilonLoopStart = new Label();
     Label epsilonLoopEnd = new Label();
 
@@ -442,9 +444,10 @@ public class OnePassBytecodeGenerator {
           mv.visitInsn(IASTORE);
         }
 
-        // Check anchors (failures should return false/null)
+        // Check anchors (failures should return false/null/-1 depending on method type)
         if (state.anchor != null) {
-          generateAnchorCheck(mv, state.anchor, posVar, inputVar, groupStartsVar == null);
+          generateAnchorCheck(
+              mv, state.anchor, posVar, inputVar, groupStartsVar == null, returnMinusOne);
         }
 
         // Follow epsilon transition (OnePass guarantees at most one)
@@ -463,21 +466,44 @@ public class OnePassBytecodeGenerator {
   }
 
   /**
+   * Emits the return-on-failure instruction sequence for anchor checks.
+   *
+   * @param returnMinusOne true → {@code return -1} (int methods like matchFrom)
+   * @param returnBoolean true → {@code return false} (boolean methods); ignored when returnMinusOne
+   *     is true; false → {@code return null} (object methods)
+   */
+  private static void emitFailReturn(
+      MethodVisitor mv, boolean returnMinusOne, boolean returnBoolean) {
+    if (returnMinusOne) {
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+    } else if (returnBoolean) {
+      mv.visitInsn(ICONST_0);
+      mv.visitInsn(IRETURN);
+    } else {
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+    }
+  }
+
+  /**
    * Generate anchor check bytecode.
    *
    * @param mv method visitor
    * @param anchorType type of anchor to check
    * @param posVar variable holding current position
    * @param inputVar variable holding input string
-   * @param returnBoolean true if failure should return false (matches method), false for null
-   *     (match method)
+   * @param returnBoolean true if failure should return false (boolean methods)
+   * @param returnMinusOne true if failure should return -1 (int methods like matchFrom); takes
+   *     precedence over returnBoolean
    */
   private void generateAnchorCheck(
       MethodVisitor mv,
       NFA.AnchorType anchorType,
       int posVar,
       int inputVar,
-      boolean returnBoolean) {
+      boolean returnBoolean,
+      boolean returnMinusOne) {
     Label passLabel = new Label();
 
     switch (anchorType) {
@@ -485,14 +511,7 @@ public class OnePassBytecodeGenerator {
         // if (pos == 0) pass; else fail;
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitJumpInsn(IFEQ, passLabel);
-        // Anchor failed - return false/null
-        if (returnBoolean) {
-          mv.visitInsn(ICONST_0);
-          mv.visitInsn(IRETURN);
-        } else {
-          mv.visitInsn(ACONST_NULL);
-          mv.visitInsn(ARETURN);
-        }
+        emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
         break;
 
@@ -584,13 +603,7 @@ public class OnePassBytecodeGenerator {
           mv.visitJumpInsn(GOTO, passLabel);
 
           mv.visitLabel(failZE);
-          if (returnBoolean) {
-            mv.visitInsn(ICONST_0);
-            mv.visitInsn(IRETURN);
-          } else {
-            mv.visitInsn(ACONST_NULL);
-            mv.visitInsn(ARETURN);
-          }
+          emitFailReturn(mv, returnMinusOne, returnBoolean);
           mv.visitLabel(passLabel);
           break;
         }
@@ -610,14 +623,7 @@ public class OnePassBytecodeGenerator {
         pushInt(mv, '\n');
         mv.visitJumpInsn(IF_ICMPEQ, passLabel);
 
-        // Anchor failed - return false/null
-        if (returnBoolean) {
-          mv.visitInsn(ICONST_0);
-          mv.visitInsn(IRETURN);
-        } else {
-          mv.visitInsn(ACONST_NULL);
-          mv.visitInsn(ARETURN);
-        }
+        emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
         break;
 
@@ -636,14 +642,7 @@ public class OnePassBytecodeGenerator {
         pushInt(mv, '\n');
         mv.visitJumpInsn(IF_ICMPEQ, passLabel);
 
-        // Anchor failed - return false/null
-        if (returnBoolean) {
-          mv.visitInsn(ICONST_0);
-          mv.visitInsn(IRETURN);
-        } else {
-          mv.visitInsn(ACONST_NULL);
-          mv.visitInsn(ARETURN);
-        }
+        emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
         break;
 
@@ -656,14 +655,7 @@ public class OnePassBytecodeGenerator {
         // if (pos == 0) pass; else fail;
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitJumpInsn(IFEQ, passLabel);
-        // Anchor failed - return false/null
-        if (returnBoolean) {
-          mv.visitInsn(ICONST_0);
-          mv.visitInsn(IRETURN);
-        } else {
-          mv.visitInsn(ACONST_NULL);
-          mv.visitInsn(ARETURN);
-        }
+        emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
         break;
 
@@ -756,14 +748,7 @@ public class OnePassBytecodeGenerator {
         mv.visitJumpInsn(GOTO, passLabel);
 
         mv.visitLabel(failZ);
-        // Anchor failed - return false/null
-        if (returnBoolean) {
-          mv.visitInsn(ICONST_0);
-          mv.visitInsn(IRETURN);
-        } else {
-          mv.visitInsn(ACONST_NULL);
-          mv.visitInsn(ARETURN);
-        }
+        emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
         break;
 
@@ -774,14 +759,7 @@ public class OnePassBytecodeGenerator {
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
         mv.visitJumpInsn(IF_ICMPEQ, passLabel);
-        // Anchor failed - return false/null
-        if (returnBoolean) {
-          mv.visitInsn(ICONST_0);
-          mv.visitInsn(IRETURN);
-        } else {
-          mv.visitInsn(ACONST_NULL);
-          mv.visitInsn(ARETURN);
-        }
+        emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
         break;
 
@@ -885,6 +863,94 @@ public class OnePassBytecodeGenerator {
     mv.visitEnd();
   }
 
+  /**
+   * Generates {@code matchFrom(String input, int startPos)} — runs the NFA from {@code startPos} in
+   * the original string (no substring allocation) and returns the first accepting end-position, or
+   * {@code -1} if no match. Used by {@code findFrom} to replace the O(n²) inner length loop.
+   *
+   * <p>Because ONEPASS_NFA guarantees at most one epsilon per state and disjoint character
+   * transitions, the NFA path is deterministic: we check acceptance after each epsilon chain (to
+   * catch the shortest match), then consume the next character or return -1 on no-transition.
+   *
+   * <p><b>Anchor assumption:</b> all anchor types reachable in ONEPASS_NFA patterns ({@code ^},
+   * {@code $}, {@code \A}, {@code \Z}, {@code \z}) are handled exclusively through epsilon-chain
+   * processing with {@code returnMinusOne=true} (see {@link #generateEpsilonChainProcessing}). A
+   * char-consuming path that reaches the accept state WITHOUT passing through an anchor epsilon
+   * state does not trigger an anchor check here; the epsilon chain fires on entry to each new state
+   * (before consuming the next character), which is where end-anchors like {@code $} sit in the
+   * ONEPASS NFA topology. PatternAnalyzer's SubsetConstructor routes patterns where anchors appear
+   * in char-consuming positions to strategies other than ONEPASS_NFA, so this assumption holds for
+   * all patterns that reach this code path. Verified by OnePassNfaAnchorFindTest.
+   */
+  public void generateMatchFromMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "matchFrom", "(Ljava/lang/String;I)I", null, null);
+    mv.visitCode();
+
+    // Slot 0 = this, slot 1 = input, slot 2 = startPos
+    LocalVarAllocator allocator = new LocalVarAllocator(3);
+    int stateVar = allocator.allocate(); // slot 3
+    int posVar = allocator.allocate(); // slot 4
+    int chVar = allocator.allocate(); // slot 5
+
+    // if (input == null) return -1;
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notNull);
+
+    // int state = startState.id;
+    pushInt(mv, nfa.getStartState().id);
+    mv.visitVarInsn(ISTORE, stateVar);
+
+    // int pos = startPos;
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    Label loopStart = new Label();
+    mv.visitLabel(loopStart);
+
+    // Process epsilon chain; anchor failures emit return -1
+    generateEpsilonChainProcessing(mv, stateVar, posVar, 1, null, null, true);
+
+    // If in accept state, return pos (first/shortest match end)
+    for (NFA.NFAState acceptState : nfa.getAcceptStates()) {
+      Label notAccept = new Label();
+      mv.visitVarInsn(ILOAD, stateVar);
+      pushInt(mv, acceptState.id);
+      mv.visitJumpInsn(IF_ICMPNE, notAccept);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(notAccept);
+    }
+
+    // if pos >= input.length(), out of input and not accepting
+    Label noMatch = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitJumpInsn(IF_ICMPGE, noMatch);
+
+    // char ch = input.charAt(pos); pos++;
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    mv.visitIincInsn(posVar, 1);
+
+    // Transition; on success → loopStart, on no-transition → noMatch
+    generateCharacterTransitions(mv, stateVar, chVar, loopStart, noMatch);
+
+    mv.visitLabel(noMatch);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
   public void generateFindFromMethod(ClassWriter cw, String className) {
     // Scan through input trying to match at each position
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
@@ -965,171 +1031,23 @@ public class OnePassBytecodeGenerator {
       mv.visitLabel(validPosition);
     }
 
-    // Try different match lengths at tryPos, starting from zero-length match
-    // int matchEnd = tryPos;
-    mv.visitVarInsn(ILOAD, 3);
-    // S: [tryPos] -> []
-    mv.visitVarInsn(ISTORE, 5); // matchEnd in var 5
-
-    Label lengthLoop = new Label();
-    Label lengthLoopEnd = new Label();
-
-    mv.visitLabel(lengthLoop);
-
-    // while (matchEnd <= len)
-    mv.visitVarInsn(ILOAD, 5);
-    mv.visitVarInsn(ILOAD, 4);
-    mv.visitJumpInsn(IF_ICMPGT, lengthLoopEnd);
-
-    // if (matchesInRange(input, tryPos, matchEnd)) return tryPos;
+    // Delegate to matchFrom for an O(n) single-pass match attempt at tryPos.
+    // matchFrom runs the NFA from tryPos in the original string (no substring allocation)
+    // and returns the end-position on match, or -1. End-anchor checks are handled inside
+    // the NFA's epsilon chain, so no separate validation is needed here.
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 3); // tryPos
-    mv.visitVarInsn(ILOAD, 5); // matchEnd
     mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "matchesInRange",
-        "(Ljava/lang/String;II)Z",
-        false);
+        INVOKEVIRTUAL, className.replace('.', '/'), "matchFrom", "(Ljava/lang/String;I)I", false);
 
-    Label noMatchThisLength = new Label();
-    mv.visitJumpInsn(IFEQ, noMatchThisLength);
-
-    // END ANCHOR VALIDATION: Check if matchEnd is at valid end position
-    if (hasStringEndAbsoluteAnchor) {
-      // \z: Only valid if matchEnd == len (most strict - absolute end only)
-      // if (matchEnd != len) goto noMatchThisLength;
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitVarInsn(ILOAD, 4); // len
-      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
-    } else if (hasEndAnchor) {
-      // Non-multiline $: Only valid if matchEnd == len
-      // if (matchEnd != len) goto noMatchThisLength;
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitVarInsn(ILOAD, 4); // len
-      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
-    } else if (hasStringEndAnchor) {
-      // \Z: matchEnd==len, or matchEnd==len-1 (lone \n CRLF guard, \r, NEL, LS, PS),
-      // or matchEnd==len-2 (\r\n pair)
-      Label validEndPosition = new Label();
-
-      // if (matchEnd == len) goto validEndPosition;
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitVarInsn(ILOAD, 4); // len
-      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
-
-      // matchEnd == len-1?
-      Label zCheckMinus2V = new Label();
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitVarInsn(ILOAD, 4); // len
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, zCheckMinus2V);
-
-      // charAt(matchEnd) == '\n'?
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd (== len-1)
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      Label zNotNewlineV = new Label();
-      mv.visitJumpInsn(IF_ICMPNE, zNotNewlineV);
-      // '\n': CRLF guard
-      Label zLoneNewlineV = new Label();
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitJumpInsn(IFEQ, zLoneNewlineV); // matchEnd == 0 → lone \n
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPEQ, noMatchThisLength); // CRLF tail
-      mv.visitLabel(zLoneNewlineV);
-      mv.visitJumpInsn(GOTO, validEndPosition);
-      mv.visitLabel(zNotNewlineV);
-      // '\r'?
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
-      // NEL?
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u0085');
-      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
-      // LS?
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u2028');
-      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
-      // PS?
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u2029');
-      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
-      mv.visitJumpInsn(GOTO, noMatchThisLength);
-
-      // matchEnd == len-2? '\r\n' pair
-      mv.visitLabel(zCheckMinus2V);
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitVarInsn(ILOAD, 4); // len
-      mv.visitInsn(ICONST_2);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd (== len-2)
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(IADD);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
-
-      mv.visitLabel(validEndPosition);
-    } else if (hasMultilineEnd) {
-      // Multiline $: Valid if matchEnd == len OR input.charAt(matchEnd) == '\n'
-      Label validEndPosition = new Label();
-
-      // if (matchEnd == len) goto validEndPosition;
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitVarInsn(ILOAD, 4); // len
-      mv.visitJumpInsn(IF_ICMPEQ, validEndPosition);
-
-      // if (matchEnd < len && input.charAt(matchEnd) == '\n') goto validEndPosition;
-      // First check matchEnd < len to avoid bounds exception
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitVarInsn(ILOAD, 4); // len
-      mv.visitJumpInsn(IF_ICMPGE, noMatchThisLength); // If matchEnd >= len, not valid
-
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, 5); // matchEnd
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPNE, noMatchThisLength);
-
-      mv.visitLabel(validEndPosition);
-    }
-
-    // Match found - return tryPos
-    mv.visitVarInsn(ILOAD, 3);
+    // if matchFrom returned >= 0, match found — return tryPos
+    Label noMatchHere = new Label();
+    mv.visitJumpInsn(IFLT, noMatchHere);
+    mv.visitVarInsn(ILOAD, 3); // tryPos
     mv.visitInsn(IRETURN);
 
-    mv.visitLabel(noMatchThisLength);
-    // matchEnd++
-    mv.visitIincInsn(5, 1);
-    mv.visitJumpInsn(GOTO, lengthLoop);
-
-    mv.visitLabel(lengthLoopEnd);
-
+    mv.visitLabel(noMatchHere);
     // No match at this position, try next
     mv.visitIincInsn(3, 1); // tryPos++
     mv.visitJumpInsn(GOTO, scanLoop);

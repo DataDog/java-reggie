@@ -149,4 +149,73 @@ class FallbackPatternDetectorTest {
         detect("(?:a)+(b+)\\1", PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF),
         "non-nullable child must not trigger B12-nullable");
   }
+
+  // ── B-SQG-1: inner quantifier min > 1 inside SPECIALIZED_QUANTIFIED_GROUP → fallback ──────
+
+  @Test
+  void bsqg1_innerQuantifierMinGreaterThanOne_needsFallback() throws Exception {
+    // (c{2})+: the per-char greedy loop generated for SPECIALIZED_QUANTIFIED_GROUP can't enforce
+    // the inner c{2}'s 2-chars-per-iteration minimum, so it must fall back.
+    String reason =
+        detect("(c{2})+", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP);
+    assertNotNull(reason, "expected fallback for inner quantifier min > 1");
+    assertTrue(
+        reason.contains("inner quantifier"), "reason should mention inner quantifier: " + reason);
+  }
+
+  @Test
+  void bsqg1_outerQuantifierWrapsNonGroup_noFallback() throws Exception {
+    // c+: the outer quantifier's child is a plain charset, not a group at all.
+    assertNull(detect("c+", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
+
+  @Test
+  void bsqg1_outerQuantifierWrapsNonCapturingGroup_noFallback() throws Exception {
+    // (?:c{2})+: the outer quantifier wraps a non-capturing group, so it's not the
+    // SPECIALIZED_QUANTIFIED_GROUP shape (which always quantifies a capturing group).
+    assertNull(detect("(?:c{2})+", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
+
+  @Test
+  void bsqg1_capturingGroupAloneHasNoOuterQuantifier_noFallback() throws Exception {
+    // (c+) alone (no repeating quantifier around it) is not the SPECIALIZED_QUANTIFIED_GROUP
+    // shape either: extractOuterQuantifierForFallback declines to look inside a capturing group.
+    assertNull(detect("(c+)", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
+
+  @Test
+  void bsqg1_nonCapturingWrapperRecursesToInnerQuantifier_noFallback() throws Exception {
+    // (?:c+): a non-capturing wrapper with no repeating quantifier around it; the extractor
+    // recurses into the wrapper and finds a plain charset quantifier, not a capturing group.
+    assertNull(detect("(?:c+)", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
+
+  @Test
+  void bsqg1_ambiguousMultipleQuantifiedGroupsInConcat_noFallback() throws Exception {
+    // (?:c+)(?:d+): two separate quantified non-capturing groups in the same concat make the
+    // "outer quantifier" ambiguous, so the extractor gives up rather than guessing.
+    assertNull(
+        detect("(?:c+)(?:d+)", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
+
+  @Test
+  void bsqg1_nonCapturingGroupWithAmbiguousInnerConcat_noFallback() throws Exception {
+    // ^(?:c+d+): the non-capturing group's own content (c+d+) is itself an ambiguous concat of
+    // two quantifiers, so the recursive extraction inside it fails and propagates null outward.
+    assertNull(detect("^(?:c+d+)", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
+
+  @Test
+  void bsqg1_literalPrefixBeforeQuantifierInConcat_noFallback() throws Exception {
+    // cd+: a plain literal 'c' preceding the quantifier is a concat element the extractor
+    // doesn't recognize (not an anchor, quantifier, or non-capturing group), so it gives up.
+    assertNull(detect("cd+", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
+
+  @Test
+  void bsqg1_alternationHasNoOuterQuantifier_noFallback() throws Exception {
+    // a|b: an alternation is none of QuantifierNode/GroupNode/ConcatNode, so the extractor's
+    // final catch-all returns no outer quantifier.
+    assertNull(detect("a|b", PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP));
+  }
 }

@@ -96,23 +96,23 @@ class OctalHexEscapeTest {
 
   @Test
   void testPatternWithCaptureGroupAndOctal() {
-    // (abc)\100 with 1 group: full number 100 > totalGroupCount(1), so \100 is octal '@' (codepoint
-    // 64).
-    // PCRE never attempts shorter prefixes.
-    ReggieMatcher rm = Reggie.compile("(abc)\\100");
+    // (abc)\100 with 1 group: JDK stops collecting digits when the running value exceeds
+    // totalGroupCount. \1 is a valid backref (group 1 = "abc"); the remaining "00" are literals.
+    // Pattern is effectively (abc)\100 = (abc) + backref(1) + "00".
+    ReggieMatcher rm = Reggie.compileAllowingFallback("(abc)\\100");
 
-    assertTrue(rm.matches("abc@"));
-    assertFalse(rm.matches("abcabc00"));
+    assertTrue(rm.matches("abcabc00"));
+    assertFalse(rm.matches("abc@"));
   }
 
   @Test
   void testPatternWithCaptureGroupAndOctalPlusDigit() {
-    // (abc)\1000 with 1 group: full number 100 > totalGroupCount(1), so \100 is octal '@'.
-    // The trailing '0' is a literal character.
-    ReggieMatcher rm = Reggie.compile("(abc)\\1000");
+    // (abc)\1000 with 1 group: JDK stop-early rule — \1 is a backref (group 1), "000" are literals.
+    // Pattern is effectively (abc) + backref(1) + "000".
+    ReggieMatcher rm = Reggie.compileAllowingFallback("(abc)\\1000");
 
-    assertTrue(rm.matches("abc@0"));
-    assertFalse(rm.matches("abcabc000"));
+    assertTrue(rm.matches("abcabc000"));
+    assertFalse(rm.matches("abc@0"));
   }
 
   @Test

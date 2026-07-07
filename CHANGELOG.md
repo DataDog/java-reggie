@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.0] - Unreleased
+
+### 1.0.0 pre-release checklist
+- [x] Fuzz divergence budget ≤ 30 (currently 28 — all remaining gaps are group-span on adversarial inputs)
+- [x] Zero boolean divergences (no false positives / false negatives on real-world patterns)
+- [x] `StrategyCorrectnessMetaTest` 0 mismatches
+- [x] PCRE conformance 100% (53/53)
+- [x] Thread-safety contract documented: `RuntimeCompiler` is thread-safe; matcher instances are not
+- [x] Thread-safety stress test for `RuntimeCompiler` concurrent compile/match (`RuntimeCompilerTest.testConcurrentCompilation`, `DfaMatcherConcurrencyTest`)
+
+### Changes since 0.3.0
+- fix: route B-CGG-1 (negated CharClass in SPECIALIZED_CONCAT_GREEDY_GROUP) to JDK fallback — eliminates false negatives for patterns like `[1]([^b]{2})`
+- fix: route B-SQG-1 (inner quantifier min>1 in SPECIALIZED_QUANTIFIED_GROUP) to JDK fallback — eliminates false positives for patterns like `(c{2}){1,}`
+- fix: fuzz divergence budget 34 → 28 (B-CGG-1 + B-SQG-1 guards)
+- fix: atomic groups and possessive quantifiers (#92)
+- fix: DFA_UNROLLED_WITH_GROUPS group-span divergences A1+A2 routed to PIKEVM_CAPTURE (#90)
+- fix: per-config backref NFA, cache collision fixes, CRLF anchors, fallback guards (#89)
+- fix: DFA assertion evaluation for sandwich lookaround and lookahead-in-quantifier (#87, #88)
+- fix: POSIX aliases, inline flag regression tests, backref digit disambiguation (#88)
+
 ## [Unreleased]
 
 - feat: ReggieOption/@RegexPattern fallback substrate + PIKEVM routing groundwork

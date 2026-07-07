@@ -31,6 +31,7 @@ import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -87,7 +88,16 @@ public final class FallbackPatternDetector {
     // these patterns correctly (as confirmed by targeted spike tests), so skip them when the
     // routing decision has already committed to PIKEVM_CAPTURE. Only B16 is a known PIKEVM_CAPTURE
     // defect.
-    if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+    // PIKEVM_CAPTURE is safe here only because PatternAnalyzer's hasLookaround routing precedes
+    // the lazy-quantifier PIKEVM_CAPTURE block, and !hasLookaround is an explicit guard in that
+    // block.
+    // BITSTATE_CAPTURE shares this exemption: PatternAnalyzer#isBitStateEligible declines any
+    // pattern with lookaround before ever recommending BITSTATE_CAPTURE, so B1/B1-narrow (both
+    // lookaround-only failure modes) can never trigger for it; B4 is an anchor-evaluation guard,
+    // and BitStateMatcher delegates anchor checks to the exact same PikeVMMatcher#checkAnchor used
+    // here, so it is equally safe.
+    if (strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        && strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
       // B1 — Lookahead inside a quantified group (issue #28).
       // Root cause (NEEDS-RND): Thompson/Pike NFA has no per-thread quantifier-iteration counter.
       // Multiple threads at the same NFA state after different iteration counts are merged in the
@@ -148,7 +158,8 @@ public final class FallbackPatternDetector {
     // alternative of an alternation but group N is defined in a DIFFERENT alternative of the same
     // alternation. Fix requires per-state group arrays (issue #38 Cat B).
     if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
-            || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT)
+            || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+            || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
         && hasCrossAlternativeBackref(ast)) {
       return "cross-alternative backref: group captured in one branch, used in another";
     }
@@ -159,7 +170,8 @@ public final class FallbackPatternDetector {
     // semantics plus the early-accept ensure correct results. Groups whose body can capture strings
     // of length > 1 (e.g. [0]?-*, a{0,2}) can produce contaminated groupLen > 1, causing spurious
     // bounds-check failures that the early-accept cannot prevent. Those cases still need fallback.
-    if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
+    if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
+            || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
         && hasAmbiguouslyNullableBackrefGroup(ast)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
@@ -180,7 +192,8 @@ public final class FallbackPatternDetector {
     // capture into nested group boundaries incorrectly, mismatching the expected position. Simple
     // top-level quantified backrefs like \1+ are handled correctly; only nested-inside-group uses
     // are affected. Fix requires per-frame capture state in the descent parser.
-    if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+    if ((strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+            || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
         && hasNullableBackrefInsideCapturingGroup(ast)) {
       return "backref to nullable group inside capturing group: "
           + "recursive descent parser mishandles zero-length capture in nested group context";
@@ -283,9 +296,16 @@ public final class FallbackPatternDetector {
     // When the group content is itself nullable (e.g. (0*-?){0,}), PIKEVM_CAPTURE also diverges
     // (wrong last-iteration spans), so these still fall back to JDK. The non-nullable-content
     // sub-case (e.g. (a)?) is handled by PatternAnalyzer routing to PIKEVM_CAPTURE.
+    // BITSTATE_CAPTURE is included here too: PatternAnalyzer#isBitStateEligible does not exclude
+    // this shape (its anchored-nullable-quantifier check requires a start anchor, which this
+    // pattern class does not have), and there is no evidence BitState's DFS+RESTORE capture model
+    // resolves the same last-iteration-span bug differently than PikeVM's — so patterns that
+    // PatternAnalyzer#routeBitState substituted PIKEVM_CAPTURE→BITSTATE_CAPTURE for must still hit
+    // this guard.
     if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
             || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+            || strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE)
         && hasNullableGroupContentWithNullableQuantifier(ast)) {
       return "capturing group with nullable content and nullable outer quantifier: "
           + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect";
@@ -316,6 +336,28 @@ public final class FallbackPatternDetector {
         && hasNullableAlternationBranchAnywhere(ast)) {
       return "nullable alternation branch: "
           + "find() first-alternative semantics incorrect for empty/nullable branch";
+    }
+
+    // B-CGG-1: SPECIALIZED_CONCAT_GREEDY_GROUP with a negated CharClassNode as the quantifier's
+    // child. The generator stores quantifierCharSet = charClass.chars (non-negated) and calls
+    // generateCharSetCheck with negated=false, so it checks if the char IS in the class instead
+    // of is NOT. For example [^b]{2} stored as charset={b} matches only 'b' chars, producing
+    // false negatives for any input that does not contain 'b'.
+    if (strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_CONCAT_GREEDY_GROUP
+        && hasConcatGreedyGroupWithNegatedCharClass(ast)) {
+      return "SPECIALIZED_CONCAT_GREEDY_GROUP: negated char class in group quantifier — "
+          + "generator passes non-negated charset without negation flag, producing wrong matches";
+    }
+
+    // B-SQG-1: SPECIALIZED_QUANTIFIED_GROUP with an inner QuantifierNode whose min > 1. The
+    // generator models the pattern as a per-character greedy loop over the charset; when the
+    // inner quantifier requires >= 2 chars per outer iteration (e.g. c{2} inside (c{2}){1,}),
+    // a single char satisfies the outer min=1 and the loop terminates early, producing false
+    // positives.
+    if (strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP
+        && hasQuantifiedGroupWithMultiCharInnerQuantifier(ast)) {
+      return "SPECIALIZED_QUANTIFIED_GROUP: inner quantifier min > 1 — "
+          + "per-char greedy loop cannot enforce multi-char per-iteration constraint";
     }
 
     if (strategy == PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV) {
@@ -1816,6 +1858,46 @@ public final class FallbackPatternDetector {
   }
 
   /**
+   * Returns true when any capturing group whose body can match the empty string appears directly
+   * inside a quantifier that can execute more than once ({@code max != 1}, including {@code *},
+   * {@code +}, {@code {2,}}, {@code {2,5}}, etc.).
+   *
+   * <p>PikeVM merges threads at the same NFA state after different quantifier iterations. When the
+   * group body is nullable, threads where the group captured empty and threads where it captured a
+   * character converge at the same state but carry different group spans. PikeVM's leftmost-first
+   * merge policy cannot always pick the correct last-iteration binding, producing wrong group
+   * spans. Use this guard to avoid routing such patterns to PIKEVM_CAPTURE.
+   */
+  public static boolean hasCapturingGroupWithNullableBodyInRepeatableQuantifier(RegexNode ast) {
+    if (ast instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) ast;
+      // PikeVM merges threads at the same NFA state across quantifier iterations. When the
+      // group body is nullable, threads from different iterations carry different group spans
+      // but the same state, and PikeVM cannot always pick the correct last-iteration binding.
+      // This applies regardless of greedy/lazy: even lazy repeatable quantifiers with nullable
+      // body produce wrong group spans in PikeVM.
+      if ((q.max == -1 || q.max > 1) && q.child instanceof GroupNode) {
+        GroupNode g = (GroupNode) q.child;
+        if (g.capturing && isNullable(g.child)) return true;
+      }
+      return hasCapturingGroupWithNullableBodyInRepeatableQuantifier(q.child);
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasCapturingGroupWithNullableBodyInRepeatableQuantifier(c)) return true;
+      }
+    }
+    if (ast instanceof GroupNode)
+      return hasCapturingGroupWithNullableBodyInRepeatableQuantifier(((GroupNode) ast).child);
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives) {
+        if (hasCapturingGroupWithNullableBodyInRepeatableQuantifier(a)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0.
    * Example: {@code (0*-?){0,}} has the group quantified by {@code {0,}} (min=0).
    */
@@ -2176,5 +2258,90 @@ public final class FallbackPatternDetector {
     public Void visitSubroutine(SubroutineNode node) {
       return null;
     }
+  }
+
+  /**
+   * Returns true when the pattern matches SPECIALIZED_CONCAT_GREEDY_GROUP structure and the
+   * quantifier's child inside the capturing group is a negated {@link CharClassNode}. The generator
+   * stores the non-negated charset without the negation flag, producing wrong character matches.
+   *
+   * <p><b>Depth restriction is intentional:</b> this method only inspects direct children of the
+   * top-level {@link ConcatNode} (or the root node itself if it is not a concat). This mirrors the
+   * exact depth that {@code PatternAnalyzer.detectConcatGreedyGroup} inspects — that method also
+   * only scans top-level concat children and returns {@code null} for patterns where the qualifying
+   * group is nested inside another group. Therefore any pattern matched by {@code
+   * SPECIALIZED_CONCAT_GREEDY_GROUP} has its capturing group at the top level of a concat, and this
+   * guard is complete for all patterns that strategy can be selected for.
+   */
+  private static boolean hasConcatGreedyGroupWithNegatedCharClass(RegexNode ast) {
+    List<RegexNode> nodes = new ArrayList<>();
+    if (ast instanceof ConcatNode) {
+      nodes.addAll(((ConcatNode) ast).children);
+    } else {
+      nodes.add(ast);
+    }
+    for (RegexNode node : nodes) {
+      if (node instanceof GroupNode) {
+        GroupNode g = (GroupNode) node;
+        if (g.capturing && g.child instanceof QuantifierNode) {
+          QuantifierNode q = (QuantifierNode) g.child;
+          if (q.greedy && q.child instanceof CharClassNode && ((CharClassNode) q.child).negated) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true when the pattern matches SPECIALIZED_QUANTIFIED_GROUP structure (outer quantifier
+   * wrapping a capturing group) and the group body is an inner {@link QuantifierNode} with {@code
+   * min > 1}. The generator's per-character greedy loop cannot enforce a minimum of more than one
+   * character per outer iteration.
+   */
+  private static boolean hasQuantifiedGroupWithMultiCharInnerQuantifier(RegexNode ast) {
+    QuantifierNode outerQuant = extractOuterQuantifierForFallback(ast);
+    if (outerQuant == null) return false;
+    if (!(outerQuant.child instanceof GroupNode)) return false;
+    GroupNode g = (GroupNode) outerQuant.child;
+    if (!g.capturing) return false;
+    if (!(g.child instanceof QuantifierNode)) return false;
+    return ((QuantifierNode) g.child).min > 1;
+  }
+
+  /**
+   * Extracts the outermost {@link QuantifierNode} from patterns that {@code
+   * detectQuantifiedCapturingGroup} would recognize: a bare quantifier, a non-capturing group
+   * wrapper, or a concat of anchors plus one quantifier.
+   */
+  private static QuantifierNode extractOuterQuantifierForFallback(RegexNode ast) {
+    if (ast instanceof QuantifierNode) return (QuantifierNode) ast;
+    if (ast instanceof GroupNode) {
+      GroupNode g = (GroupNode) ast;
+      return g.capturing ? null : extractOuterQuantifierForFallback(g.child);
+    }
+    if (ast instanceof ConcatNode) {
+      QuantifierNode found = null;
+      for (RegexNode child : ((ConcatNode) ast).children) {
+        if (child instanceof AnchorNode) continue;
+        if (child instanceof QuantifierNode) {
+          if (found != null) return null;
+          found = (QuantifierNode) child;
+        } else if (child instanceof GroupNode && !((GroupNode) child).capturing) {
+          QuantifierNode q = extractOuterQuantifierForFallback(child);
+          if (q != null) {
+            if (found != null) return null;
+            found = q;
+          } else {
+            return null;
+          }
+        } else {
+          return null;
+        }
+      }
+      return found;
+    }
+    return null;
   }
 }

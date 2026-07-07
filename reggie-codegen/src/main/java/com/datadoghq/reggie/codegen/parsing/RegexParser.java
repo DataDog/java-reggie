@@ -604,29 +604,26 @@ public class RegexParser {
       case '7':
       case '8':
       case '9':
-        // PCRE backref/octal semantics for \N where N starts with digit 1-9:
-        // 1. Greedily collect up to 3 digits total.
-        // 2. If the resulting number <= totalGroupCount, it is a backreference.
-        // 3. Otherwise, if the first digit is 1-7, interpret as octal escape (up to 3 octal
-        //    digits). Non-octal digits (8, 9) terminate the octal sequence.
-        // 4. If first digit is 8 or 9 and not a valid multi-group backref, treat as \8 or \9.
+        // JDK-compatible backref/octal semantics for \N where N starts with digit 1-9:
+        // JDK stops extending the digit sequence as soon as the running value exceeds the
+        // group count (java.util.regex.Pattern.ref()). This means \10 with groupCount=1 yields
+        // backref \1 + literal '0', NOT octal char(8) as PCRE would. We follow JDK here because
+        // the fuzz oracle cross-checks against java.util.regex.Pattern.
         {
           // pos is now one past the first digit (ch). posBeforeFirst points to the first digit.
           int posBeforeFirst = pos - 1;
           int firstDigit = ch - '0';
 
-          // Greedily collect up to 3 digits total (PCRE limits backref/octal to 3 digits)
+          // Collect digits only while the running value stays within the group count (JDK rule).
           int refNum = firstDigit;
-          int digitsConsumed = 1;
-          while (hasMore() && Character.isDigit(peek()) && digitsConsumed < 3) {
-            refNum = refNum * 10 + (peek() - '0');
+          while (hasMore() && Character.isDigit(peek())) {
+            int next = refNum * 10 + (peek() - '0');
+            if (next > totalGroupCount) break;
+            refNum = next;
             consume();
-            digitsConsumed++;
           }
 
-          // All-or-nothing: if the full collected number is a valid backref, use it.
-          // pos is already correctly positioned past all greedily-consumed digits.
-          if (refNum <= totalGroupCount && refNum > 0) {
+          if (refNum > 0 && refNum <= totalGroupCount) {
             return new BackreferenceNode(refNum);
           }
 
@@ -638,7 +635,6 @@ public class RegexParser {
           }
 
           // First digit is 8 or 9 and no valid backref: treat as literal character '8' or '9'.
-          // Consume only the first digit; any extra digits already consumed are left in stream.
           pos = posBeforeFirst + 1; // restore to position just after the first digit
           return new LiteralNode((char) ('0' + firstDigit));
         }

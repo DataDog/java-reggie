@@ -218,13 +218,13 @@ public class PatternRoutingPropertyTest {
             "(abc)", DFA_UNROLLED, "capturing group with literal (groups not tracked in DFA)"),
 
         // (a|b|c){50} and (a|b|c|d|e|f){100}: capturing group inside a repeating quantifier.
-        // PIKEVM_CAPTURE is chosen because DFA_SWITCH and OPTIMIZED_NFA cannot track
+        // BITSTATE_CAPTURE is chosen because DFA_SWITCH and OPTIMIZED_NFA cannot track
         // per-iteration group spans for such patterns.
         new PatternRoutingTestCase(
-            "(a|b|c){50}", PIKEVM_CAPTURE, "capturing alternation+quantifier (151 DFA states)"),
+            "(a|b|c){50}", BITSTATE_CAPTURE, "capturing alternation+quantifier (151 DFA states)"),
         new PatternRoutingTestCase(
             "(a|b|c|d|e|f){100}",
-            PIKEVM_CAPTURE,
+            BITSTATE_CAPTURE,
             "capturing alternation+quantifier (601 DFA states)"));
   }
 
@@ -247,5 +247,87 @@ public class PatternRoutingPropertyTest {
         new PatternRoutingTestCase("(?R)", RECURSIVE_DESCENT, "recursive subroutine"),
         // Group 1 must be defined before the conditional for the pattern to be valid
         new PatternRoutingTestCase("(a)?(?(1)yes|no)", RECURSIVE_DESCENT, "conditional pattern"));
+  }
+
+  // ============================================
+  // PINNED_BACKREFERENCE - structurally-pinned boundary detection
+  // ============================================
+
+  @Nested
+  @DisplayName("PinnedBackreference Positive Cases")
+  class PinnedBackreferencePositive {
+
+    @ParameterizedTest
+    @MethodSource(
+        "com.datadoghq.reggie.codegen.analysis.PatternRoutingPropertyTest#providePinnedBackrefPositiveExamples")
+    @DisplayName("Disjoint-boundary backref patterns route to PINNED_BACKREFERENCE")
+    void pinnedBackrefPositive(PatternRoutingTestCase testCase) throws Exception {
+      PatternAnalyzer.MatchingStrategyResult result = analyze(testCase.pattern);
+      assertEquals(testCase.expectedStrategy, result.strategy, () -> formatError(testCase, result));
+    }
+  }
+
+  static Stream<PatternRoutingTestCase> providePinnedBackrefPositiveExamples() {
+    return Stream.of(
+        // Repeated-word shape: \w+ content is disjoint from the \s+ separator.
+        new PatternRoutingTestCase(
+            "\\b(\\w+)\\s+\\1\\b",
+            PINNED_BACKREFERENCE,
+            "repeated-word shape: word charset disjoint from whitespace separator"));
+  }
+
+  @Nested
+  @DisplayName("PinnedBackreference Negative Cases")
+  class PinnedBackreferenceNegative {
+
+    @ParameterizedTest
+    @MethodSource(
+        "com.datadoghq.reggie.codegen.analysis.PatternRoutingPropertyTest#providePinnedBackrefNegativeExamples")
+    @DisplayName("Ambiguous-boundary patterns must NOT route to PINNED_BACKREFERENCE")
+    void pinnedBackrefNegative(PatternRoutingTestCase testCase) throws Exception {
+      PatternAnalyzer.MatchingStrategyResult result = analyze(testCase.pattern);
+      assertNotEquals(
+          PINNED_BACKREFERENCE,
+          result.strategy,
+          () ->
+              "False positive: '"
+                  + testCase.pattern
+                  + "' ("
+                  + testCase.description
+                  + ") must not route to PINNED_BACKREFERENCE, got: "
+                  + result.strategy);
+    }
+  }
+
+  static Stream<PatternRoutingTestCase> providePinnedBackrefNegativeExamples() {
+    return Stream.of(
+        // HTML tag-close shape: the "</" ... ">" separator spans multiple AST nodes, so the
+        // detector conservatively declines rather than approximate - stays on the existing
+        // hardcoded SPECIALIZED_BACKREFERENCE detector.
+        new PatternRoutingTestCase(
+            "<(\\w+)>.*</\\1>",
+            SPECIALIZED_BACKREFERENCE,
+            "tag-close shape: multi-node separator, must not be PINNED_BACKREFERENCE"),
+
+        // Overlapping-charset shape (backreferenced variant): [bc] overlaps with 'c' in
+        // (c+d), so the group's own closing boundary is genuinely ambiguous.
+        new PatternRoutingTestCase(
+            "([bc]+)(c+d)\\1",
+            OPTIMIZED_NFA_WITH_BACKREFS,
+            "overlapping charset: [bc] intersects (c+d)'s leading 'c', ambiguous boundary"),
+
+        // Quoted-string-with-escape shape: the quote delimiter can also appear escaped inside
+        // the body, so there is no single unambiguous closing quote.
+        new PatternRoutingTestCase(
+            "([\"'])(?:\\\\\\1|.)*?\\1",
+            OPTIMIZED_NFA_WITH_BACKREFS,
+            "quoted string with escaped delimiter: ambiguous closing boundary"),
+
+        // Undeterminable follow-set: a separator spanning multiple AST nodes (literal, second
+        // capturing group, literal) between the group's close and the backreference site.
+        new PatternRoutingTestCase(
+            "(\\w+),(\\w+),\\1",
+            OPTIMIZED_NFA_WITH_BACKREFS,
+            "multi-node separator: follow-set not representable by a single node"));
   }
 }

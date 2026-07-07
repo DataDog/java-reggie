@@ -295,4 +295,64 @@ public class MultilineAnchorAndStepClosureRegressionTest {
     assertEquals(0, all.get(0).start(), "first match must be at position 0");
     assertEquals(2, all.get(1).start(), "second match must be at position 2");
   }
+
+  // -------------------------------------------------------------------------
+  // Group D — findDfa correctness for (?m)^ patterns (T1.4 multiline extension)
+  // -------------------------------------------------------------------------
+
+  /** D1: find() must return true only when the input has a line start before the pattern. */
+  @Test
+  void d1_multilineFindDfa_matchAtLineStart() {
+    ReggieMatcher m = Reggie.compile("(?m)^foo");
+    assertTrue(m.find("foo"), "find() must return true when 'foo' is at start of input");
+    assertTrue(m.find("\nfoo"), "find() must return true after newline");
+    assertFalse(m.find("barfoo"), "find() must return false when 'foo' is not at a line start");
+    assertFalse(m.find("bar\nbazfoo"), "find() must return false when 'foo' follows non-^ chars");
+  }
+
+  /** D2: find() must handle multiple newlines — each line start is a valid anchor position. */
+  @Test
+  void d2_multilineFindDfa_multipleNewlines() {
+    ReggieMatcher m = Reggie.compile("(?m)^[0-9]+");
+    assertTrue(m.find("abc\n123\ndef"), "find() must return true when '123' is at a line start");
+    assertFalse(m.find("abc123\ndef"), "find() must return false when digits are mid-line");
+  }
+
+  /**
+   * D3: find() on a no-match input must return false (DFA must not cross START_MULTILINE mid-line).
+   */
+  @Test
+  void d3_multilineFindDfa_noMatchMidLine() {
+    ReggieMatcher m = Reggie.compile("(?m)^X");
+    assertFalse(m.find("abcXdef"), "X not at line start → find() must return false");
+    assertFalse(m.find("abc\ndefXghi"), "X not at line start → find() must return false");
+    assertTrue(m.find("abc\nX"), "X at line start after \\n → find() must return true");
+  }
+
+  /** D4: matches() must check the full input starting at pos 0; (?m)^ fires at pos 0 only. */
+  @Test
+  void d4_multilineMatchesDfa_fullInputStart() {
+    ReggieMatcher m = Reggie.compile("(?m)^foo");
+    assertTrue(m.matches("foo"), "matches() must return true when full input is 'foo'");
+    assertFalse(m.matches("\nfoo"), "matches() must return false — full input starts with \\n");
+    assertFalse(m.matches("barfoo"), "matches() must return false — full input starts with 'bar'");
+  }
+
+  /** D5: (?m)^a in find() must not fire between non-newline characters. */
+  @Test
+  void d5_multilineFindDfa_noFalseFiringMidLine() {
+    ReggieMatcher m = Reggie.compile("(?m)^a");
+    assertFalse(m.find("ba"), "find('ba') must be false — 'a' not at line start");
+    assertTrue(m.find("a"), "find('a') must be true — 'a' at input start");
+    assertTrue(m.find("\na"), "find('\\na') must be true — 'a' at line start after \\n");
+  }
+
+  /** D6: (?m)^a combined with dotall — DOTALL does not affect ^ semantics. */
+  @Test
+  void d6_dotallMultilineCaret_lineStartUnchanged() {
+    ReggieMatcher m = Reggie.compile("(?s)(?m)^[a-z]+");
+    assertTrue(m.find("abc"), "find() must match at start of input");
+    assertTrue(m.find("xyz\nabc"), "find() must match after newline");
+    assertFalse(m.find("123\n456"), "find() must return false — no lowercase after line start");
+  }
 }

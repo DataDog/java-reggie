@@ -290,4 +290,112 @@ class LazyDFACacheTest {
     LazyDFACache cache2 = new LazyDFACache(new int[] {0}, new int[] {2}, cap);
     assertEquals(2, cache2.findFrom("xxab", 0, TWO_STEP));
   }
+
+  // ── findEnd coverage ───────────────────────────────────────────────────────
+
+  @Test
+  void testFindEndMatchEndsBeforeLimit() {
+    // TWO_STEP: {0} +'a'→{1}, {1} +'b'→{2} (accept), anything else→dead.
+    // "ab" completes the match at pos 2; the trailing "zzzz" dies immediately,
+    // so findEnd must stop at the true end (2), not run to limit (6).
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
+    String input = "abzzzz";
+    assertEquals(2, cache.findEnd(input, 0, input.length(), TWO_STEP));
+  }
+
+  @Test
+  void testFindEndNonDyingTailReturnsLimit() {
+    // A step function representing a "(?s).*" tail style automaton that never dies:
+    // the single state loops on every char and is always accepting.
+    NfaStep nonDying = (states, c) -> new int[] {0};
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {0});
+    String input = "abcdefgh";
+    assertEquals(input.length(), cache.findEnd(input, 0, input.length(), nonDying));
+  }
+
+  @Test
+  void testFindEndStartStateAccepting() {
+    // Case A: start state accepts and nothing else can be consumed -> bound is exactly start.
+    LazyDFACache deadEnd = new LazyDFACache(new int[] {0}, new int[] {0});
+    NfaStep noTransitions = (states, c) -> new int[0];
+    assertEquals(3, deadEnd.findEnd("xxxx", 3, 4, noTransitions));
+
+    // Case B: start state accepts, and one more accepting state can be reached by
+    // consuming further input, before eventually dying -> bound extends past start.
+    // {0} (accept) +'a'→ {1} (accept) +'a'→ dead.
+    NfaStep extendOnce =
+        (states, c) -> {
+          if (states.length == 1 && states[0] == 0 && c == 'a') return new int[] {1};
+          return new int[0];
+        };
+    LazyDFACache extendCache = new LazyDFACache(new int[] {0}, new int[] {0, 1});
+    assertEquals(1, extendCache.findEnd("aa", 0, 2, extendOnce));
+  }
+
+  @Test
+  void testFindEndCacheFreezeDifferential() {
+    // cap=2 forces the cache to freeze after the start state plus one more, forcing
+    // the nfaFallbackFindEnd path; result must match an unfrozen cache on the same input.
+    NfaStep step =
+        (s, c) ->
+            s.length == 1 && s[0] == 0 && c == 'a'
+                ? new int[] {1}
+                : s.length == 1 && s[0] == 1 && c == 'a'
+                    ? new int[] {2}
+                    : s.length == 1 && s[0] == 2 && c == 'b' ? new int[] {3} : new int[0];
+    LazyDFACache frozenCache = new LazyDFACache(new int[] {0}, new int[] {2}, 2);
+    LazyDFACache unfrozenCache = new LazyDFACache(new int[] {0}, new int[] {2});
+
+    String input = "aaaab";
+    int frozenResult = frozenCache.findEnd(input, 0, input.length(), step);
+    int unfrozenResult = unfrozenCache.findEnd(input, 0, input.length(), step);
+    assertTrue(frozenCache.isFrozen());
+    assertEquals(unfrozenResult, frozenResult, "findEnd result should match unfrozen cache");
+    assertEquals(2, unfrozenResult); // sanity: "aa" reaches accepting state 2 at pos 2
+  }
+
+  @Test
+  void testFindEndNoAcceptingStateReturnsMinusOne() {
+    // No accepting state ever reached before DEAD; returns -1.
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {999}); // no accepting states
+    NfaStep dead = (s, c) -> new int[0];
+    assertEquals(-1, cache.findEnd("abc", 0, 3, dead));
+  }
+
+  @Test
+  void testFindEndNullInput() {
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {2});
+    assertEquals(-1, cache.findEnd(null, 0, 4, TWO_STEP));
+  }
+
+  @Test
+  void testFindEndFallbackNoFurtherAcceptFallsBackToPriorLastAccept() {
+    // {0} +'a'-> {1} (accepting), {1} +'a'-> {2} (not accepting, dead-ends on anything else).
+    // cap=2 freezes the moment {2} needs to be interned (right after reaching the accepting
+    // state {1}), so the fallback scan starting at {1} never sees another accepting state and
+    // must return -1, forcing findEnd to fall back to the lastAccept recorded before the freeze.
+    NfaStep step =
+        (s, c) -> {
+          if (s.length == 1 && s[0] == 0 && c == 'a') return new int[] {1};
+          if (s.length == 1 && s[0] == 1 && c == 'a') return new int[] {2};
+          return new int[0];
+        };
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {1}, 2);
+    assertEquals(1, cache.findEnd("aaa", 0, 3, step));
+    assertTrue(cache.isFrozen());
+  }
+
+  @Test
+  void testFindEndNonAsciiCharBypassesAsciiTable() {
+    AtomicInteger callCount = new AtomicInteger();
+    NfaStep tracker =
+        (states, c) -> {
+          callCount.incrementAndGet();
+          return new int[0];
+        };
+    LazyDFACache cache = new LazyDFACache(new int[] {0}, new int[] {1});
+    String withCode128 = "\u0080";
+    assertEquals(-1, cache.findEnd(withCode128, 0, 1, tracker));
+    assertEquals(1, callCount.get());
+  }
 }

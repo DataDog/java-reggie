@@ -28,12 +28,12 @@ import org.openjdk.jmh.annotations.*;
  *
  * <p>All patterns use find() semantics, matching how the tokenizers and obfuscator scan inputs.
  *
- * <p>Excluded (lazy quantifiers unsupported by Reggie):
+ * <p>Previously excluded (lazy quantifiers unsupported by Reggie): lazy quantifiers are now
+ * supported via PIKEVM_CAPTURE (ThompsonBuilder lazyAware=true). The LDAP tokenizer pattern {@code
+ * \(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\)} has been re-enabled.
  *
- * <ul>
- *   <li>LDAP tokenizer: {@code \(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\)}
- *   <li>SQL Oracle tokenizer: {@code q'<.*?>'} and similar q-quoted literal variants
- * </ul>
+ * <p>Still excluded: SQL Oracle tokenizer ({@code q'<.*?>'} and similar q-quoted literal variants)
+ * — these require additional work to enable in the benchmark.
  */
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
@@ -75,6 +75,10 @@ public class IastRegexpBenchmark {
           + "|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
           + "|\\$(?:[a-zA-Z_]\\w*)?\\$|'(?:''|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
 
+  // LdapRegexpTokenizer: matches LDAP filter attribute-value pairs with a lazy quantifier.
+  // Previously excluded because lazy quantifiers were unsupported; now routed to PIKEVM_CAPTURE.
+  private static final String LDAP_JDK = "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)";
+
   // QueryObfuscator: redacts credentials, tokens, and API keys in HTTP query strings.
   // Already has (?i) inline.
   private static final String QUERY_OBFUSCATOR =
@@ -98,6 +102,7 @@ public class IastRegexpBenchmark {
   private ReggieMatcher reggieSqlMysql;
   private ReggieMatcher reggieSqlPostgresql;
   private ReggieMatcher reggieQueryObfuscator;
+  private ReggieMatcher reggieLdap;
 
   // --- JDK patterns ---
   private Pattern jdkCommand;
@@ -106,6 +111,7 @@ public class IastRegexpBenchmark {
   private Pattern jdkSqlMysql;
   private Pattern jdkSqlPostgresql;
   private Pattern jdkQueryObfuscator;
+  private Pattern jdkLdap;
 
   // --- RE2J patterns ---
   private com.google.re2j.Pattern re2jCommand;
@@ -114,6 +120,7 @@ public class IastRegexpBenchmark {
   private com.google.re2j.Pattern re2jSqlMysql;
   private com.google.re2j.Pattern re2jSqlPostgresql;
   private com.google.re2j.Pattern re2jQueryObfuscator;
+  private com.google.re2j.Pattern re2jLdap;
 
   // --- Test inputs ---
 
@@ -145,6 +152,10 @@ public class IastRegexpBenchmark {
   private static final String QOBF_MATCH = "api_key=abc123def456&user=alice&action=view";
   private static final String QOBF_NO_MATCH = "user=alice&action=view&page=1&sort=asc";
 
+  // LDAP tokenizer: attribute-value pair (match) vs plain text (no match)
+  private static final String LDAP_MATCH = "(uid=jsmith)";
+  private static final String LDAP_NO_MATCH = "uid jsmith";
+
   @Setup
   public void setup() {
     reggieCommand = RuntimeCompiler.compile(COMMAND);
@@ -170,6 +181,10 @@ public class IastRegexpBenchmark {
     reggieQueryObfuscator = RuntimeCompiler.compile(QUERY_OBFUSCATOR);
     jdkQueryObfuscator = Pattern.compile(QUERY_OBFUSCATOR);
     re2jQueryObfuscator = com.google.re2j.Pattern.compile(QUERY_OBFUSCATOR);
+
+    reggieLdap = RuntimeCompiler.compile(LDAP_JDK);
+    jdkLdap = Pattern.compile(LDAP_JDK);
+    re2jLdap = com.google.re2j.Pattern.compile(LDAP_JDK);
   }
 
   // ===== Command =====
@@ -482,5 +497,37 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jQueryObfuscatorNoMatch() {
     return re2jQueryObfuscator.matcher(QOBF_NO_MATCH).find();
+  }
+
+  // ===== LDAP tokenizer =====
+
+  @Benchmark
+  public boolean reggieLdapFind() {
+    return reggieLdap.find(LDAP_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkLdapFind() {
+    return jdkLdap.matcher(LDAP_MATCH).find();
+  }
+
+  @Benchmark
+  public boolean re2jLdapFind() {
+    return re2jLdap.matcher(LDAP_MATCH).find();
+  }
+
+  @Benchmark
+  public boolean reggieLdapNoMatch() {
+    return reggieLdap.find(LDAP_NO_MATCH);
+  }
+
+  @Benchmark
+  public boolean jdkLdapNoMatch() {
+    return jdkLdap.matcher(LDAP_NO_MATCH).find();
+  }
+
+  @Benchmark
+  public boolean re2jLdapNoMatch() {
+    return re2jLdap.matcher(LDAP_NO_MATCH).find();
   }
 }

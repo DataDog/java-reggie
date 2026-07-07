@@ -243,25 +243,28 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testSpecializedBackrefRepeatedWord() throws Exception {
-    // Word boundaries cause this to be handled as VARIABLE_CAPTURE_BACKREF, not SPECIALIZED
+    // Word-charset content is disjoint from the whitespace separator, so this now routes to
+    // PINNED_BACKREFERENCE (single forward scan, no retry) instead of VARIABLE_CAPTURE_BACKREF.
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\b(\\w+)\\s+\\1\\b");
-    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
   }
 
   // ── VARIABLE_CAPTURE_BACKREF ─────────────────────────────────────────────
 
   @Test
   void testVariableCaptureBackrefWhitespace() throws Exception {
+    // Word-charset content is disjoint from the whitespace separator, so this now routes to
+    // PINNED_BACKREFERENCE (single forward scan, no retry) instead of VARIABLE_CAPTURE_BACKREF.
     PatternAnalyzer.MatchingStrategyResult result = analyze("(\\w+)\\s+\\1");
-    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
     if (result.patternInfo != null) assertNotNull(result.patternInfo.toString());
   }
 
   @Test
   void testVariableCaptureBackrefAnchored() throws Exception {
-    // Anchors set hasStartAnchor/hasEndAnchor in VariableCaptureBackrefInfo.toString()
+    // Anchors don't change the disjointness proof - still routes to PINNED_BACKREFERENCE.
     PatternAnalyzer.MatchingStrategyResult result = analyze("^(\\w+)\\s+\\1$");
-    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
     if (result.patternInfo != null) assertNotNull(result.patternInfo.toString());
   }
 
@@ -291,14 +294,16 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testRecursiveDescentNonGreedy() throws Exception {
+    // \d+? has no backrefs/lookaround/possessives — routes to BITSTATE_CAPTURE for lazy NFA
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\d+?");
-    assertEquals(PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE, result.strategy);
   }
 
   @Test
   void testRecursiveDescentNonGreedyStar() throws Exception {
+    // .*?end has no backrefs/lookaround/possessives — routes to BITSTATE_CAPTURE for lazy NFA
     PatternAnalyzer.MatchingStrategyResult result = analyze(".*?end");
-    assertEquals(PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE, result.strategy);
   }
 
   // ── DFA_UNROLLED ────────────────────────────────────────────────────────
@@ -441,5 +446,73 @@ class StrategySelectionExtendedTest {
     PatternAnalyzer.MatchingStrategyResult result = analyze("((\\w+)+)");
     assertNotNull(result.strategy);
     if (result.patternInfo != null) assertNotNull(result.patternInfo.toString());
+  }
+
+  // ── PINNED_BACKREFERENCE ─────────────────────────────────────────────────
+
+  @Test
+  void testPinnedBackrefRepeatedWordShape() throws Exception {
+    // \w+ content disjoint from \s+ separator - proven single forward-scan boundary.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("\\b(\\w+)\\s+\\1\\b");
+    assertEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
+  }
+
+  @Test
+  void testPinnedBackrefFixedRepetitionDisjointSuffixStaysOnNfa() throws Exception {
+    // (a)\1{8,}xyz has a disjoint suffix ("xyz" vs 'a'), but detectPinnedBackreference's
+    // group-quantifier shape check requires the *capturing group itself* to directly wrap an
+    // unbounded (max == -1) greedy quantifier - here the quantifier is on the backreference
+    // (\1{8,}), not on the group's own content, so this shape isn't recognized by the detector
+    // and correctly falls through to OPTIMIZED_NFA_WITH_BACKREFS rather than being misrouted.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("(a)\\1{8,}xyz");
+    assertEquals(PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS, result.strategy);
+  }
+
+  @Test
+  void testPinnedBackrefHtmlTagShapeStaysSpecialized() throws Exception {
+    // The tag-close separator ("</" ... ">") spans multiple AST nodes (LiteralNode "</", the
+    // ".*" body, LiteralNode ">"), which detectPinnedBackreference's separator check rejects
+    // (only a single separator AST node is supported) - this correctly stays on the existing
+    // hardcoded SPECIALIZED_BACKREFERENCE detector rather than PINNED_BACKREFERENCE.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("<(\\w+)>.*</\\1>");
+    assertEquals(PatternAnalyzer.MatchingStrategy.SPECIALIZED_BACKREFERENCE, result.strategy);
+  }
+
+  @Test
+  void testPinnedBackrefOverlappingCharsetNotEligible() throws Exception {
+    // ([bc]*) overlaps with the 'c' in (c+d), so the boundary is genuinely ambiguous - must
+    // not be misclassified as PINNED_BACKREFERENCE even though the pattern has no backref.
+    // Included here as the base disjointness-overlap shape referenced by the backref variant
+    // below; kept to document why the general predicate declines eagerly on any overlap.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("([bc]*)(c+d)");
+    assertNotEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
+  }
+
+  @Test
+  void testPinnedBackrefOverlappingCharsetWithBackrefNotEligible() throws Exception {
+    // Backreferenced variant of the overlapping-charset shape: [bc] overlaps 'c' in (c+d), so
+    // the group's own closing boundary is ambiguous - detectPinnedBackreference must decline
+    // rather than produce a false positive.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("([bc]+)(c+d)\\1");
+    assertNotEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
+  }
+
+  @Test
+  void testPinnedBackrefQuotedStringEscapeAmbiguityNotEligible() throws Exception {
+    // Quoted-string-with-escape shape: the quote delimiter can also appear escaped inside the
+    // body (\\1 inside (?:\\\1|.)*?), so the group's closing boundary is not structurally
+    // pinned - must not route to PINNED_BACKREFERENCE.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("([\"'])(?:\\\\\\1|.)*?\\1");
+    assertNotEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
+  }
+
+  @Test
+  void testPinnedBackrefUndeterminableFollowSetNotEligible() throws Exception {
+    // A multi-node separator between the group's close and the backreference site (comma
+    // literal, then a second capturing group, then a second comma before the backref) is
+    // exactly the "separator spans multiple AST nodes" case the detector rejects rather than
+    // approximates.
+    PatternAnalyzer.MatchingStrategyResult result = analyze("(\\w+),(\\w+),\\1");
+    assertNotEquals(PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE, result.strategy);
   }
 }

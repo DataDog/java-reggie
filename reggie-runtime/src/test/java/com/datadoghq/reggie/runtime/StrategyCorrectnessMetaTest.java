@@ -131,9 +131,12 @@ public class StrategyCorrectnessMetaTest {
         new Spec("(a)\\1{8,}", List.of("aaaaaaaaa", "xaaaaaaaaay", "aaaa", "", "aaaaaaaaaé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF,
-        new Spec(
-            "(\\w+)\\s+\\1",
-            List.of("hello hello", "x hello hello y", "hello world", "", "héllo héllo")));
+        // The group's charset (.) intersects the \d separator, so this stays ambiguous
+        // (unlike \s+ following \w+, which PINNED_BACKREFERENCE now intercepts as disjoint).
+        new Spec("(.+)\\d\\1", List.of("foo5foo", "x foo5foo y", "no match", "", "héllo5héllo")));
+    m.put(
+        PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE,
+        new Spec("(\\w+)#\\1", List.of("hi#hi", "x hi#hi y", "hi#lo", "", "héllo#héllo")));
     // OPTIONAL_GROUP_BACKREF: (a)?\1 now routes natively (fixed in Wave 4C).
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
@@ -239,6 +242,12 @@ public class StrategyCorrectnessMetaTest {
     // group spans correctly via PikeVM.
     m.put(
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
+    // BITSTATE_CAPTURE: eligible capture-ambiguous patterns are substituted in for PIKEVM_CAPTURE
+    // (see PatternAnalyzer#isBitStateEligible). (a)?b is the same shape as the PIKEVM_CAPTURE
+    // representative above and now routes here; BitStateMatcher gives correct per-iteration spans.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
 
     return m;

@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -221,6 +223,23 @@ public class RuntimeCompilerTest {
 
     ReggieMatcher matcher = RuntimeCompiler.compile("\\d+");
     assertEquals(1, RuntimeCompiler.cacheSize());
+  }
+
+  @Test
+  public void testPikeVmCaptureUsesLazyNfaForNonGreedyQuantifierWithNullableNestedCapture() {
+    String pattern = "(?<g>\\w+?)(?:(.*[_]*))+";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+
+    String input = "a_b";
+    assertTrue(matcher.matches(input));
+    assertEquals(jdk.matcher(input).matches(), matcher.matches(input));
+
+    MatchResult result = matcher.match(input);
+    assertNotNull(result);
+    Matcher jdkMatcher = jdk.matcher(input);
+    assertTrue(jdkMatcher.matches());
+    assertEquals(jdkMatcher.group("g"), result.group("g"));
   }
 
   // ==================== Error Handling Tests ====================

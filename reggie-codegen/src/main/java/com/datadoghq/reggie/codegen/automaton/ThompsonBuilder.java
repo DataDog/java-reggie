@@ -25,9 +25,17 @@ import java.util.*;
 public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment> {
 
   private int nextStateId = 0;
-  private int atomicGroupCounter = 0;
   private final List<NFA.NFAState> allStates = new ArrayList<>();
   private int nextAtomicId = 0;
+  private final boolean lazyAware;
+
+  public ThompsonBuilder() {
+    this.lazyAware = false;
+  }
+
+  public ThompsonBuilder(boolean lazyAware) {
+    this.lazyAware = lazyAware;
+  }
 
   /**
    * Temporary structure during NFA construction. Represents a partial NFA with entry state and
@@ -142,11 +150,30 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   public NFAFragment visitQuantifier(QuantifierNode node) {
     NFAFragment child = node.child.accept(this);
 
+    boolean lazy = lazyAware && !node.greedy && !node.possessive;
+
     if (node.min == 0 && node.max == 1) {
+      NFA.NFAState newEntry = createState();
+
+      if (lazy) {
+        // X? lazy: skip first (prefer zero-match), then try-match.
+        // A single skipFwd is created at newEntry (not per child exit): the skip decision
+        // is made at the single entry point (newEntry), not at each child exit.  This is
+        // semantically correct because there is exactly one epsilon source (newEntry), so
+        // per-exit forwarders would not add any dedup safety here.
+        // exits = {skipFwd} ∪ child.exits so concat wires both the skip path and the
+        // consumed-child path to the next fragment.  build() wires skipFwd → accept.
+        NFA.NFAState skipFwd = createState();
+        newEntry.addEpsilonTransition(skipFwd); // skip — build() wires skipFwd → accept
+        newEntry.addEpsilonTransition(child.entry); // try-match
+        Set<NFA.NFAState> exits = new HashSet<>(child.exits);
+        exits.add(skipFwd);
+        return new NFAFragment(newEntry, exits);
+      }
+
       // ? : greedy optional — try-match epsilon added first (higher priority than skip).
       // Skip path (newEntry itself in exits) gets its epsilon appended later by build().
       // This ordering is load-bearing for SubsetConstructor.orderedEpsilonClosure.
-      NFA.NFAState newEntry = createState();
       newEntry.addEpsilonTransition(child.entry);
 
       Set<NFA.NFAState> exits = new HashSet<>(child.exits);
@@ -155,9 +182,28 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       return new NFAFragment(newEntry, exits);
 
     } else if (node.min == 0 && node.max == -1) {
+      NFA.NFAState newEntry = createState();
+
+      if (lazy) {
+        // X* lazy: at newEntry — skip first (prefer zero-match), then try-match
+        NFA.NFAState newEntrySkip = createState();
+        newEntry.addEpsilonTransition(newEntrySkip); // skip — build() wires to accept
+        newEntry.addEpsilonTransition(child.entry); // try-match
+
+        // At each child exit: prefer accept (stop), then loop
+        Set<NFA.NFAState> exits = new HashSet<>();
+        exits.add(newEntrySkip);
+        for (NFA.NFAState exit : child.exits) {
+          NFA.NFAState acceptFwd = createState();
+          exit.addEpsilonTransition(acceptFwd); // stop — build() wires to accept
+          exit.addEpsilonTransition(child.entry); // loop
+          exits.add(acceptFwd);
+        }
+        return new NFAFragment(newEntry, exits);
+      }
+
       // * : greedy zero-or-more — try-match epsilon added first (higher priority than skip).
       // This ordering is load-bearing for SubsetConstructor.orderedEpsilonClosure.
-      NFA.NFAState newEntry = createState();
       newEntry.addEpsilonTransition(child.entry);
 
       // Loop back from exits to entry
@@ -171,6 +217,19 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       return new NFAFragment(newEntry, exits);
 
     } else if (node.min == 1 && node.max == -1) {
+      if (lazy) {
+        // X+ lazy: first iteration mandatory (no change at entry).
+        // At each child exit: prefer accept (stop), then loop.
+        Set<NFA.NFAState> exits = new HashSet<>();
+        for (NFA.NFAState exit : child.exits) {
+          NFA.NFAState acceptFwd = createState();
+          exit.addEpsilonTransition(acceptFwd); // stop — build() wires to accept
+          exit.addEpsilonTransition(child.entry); // loop
+          exits.add(acceptFwd);
+        }
+        return new NFAFragment(child.entry, exits);
+      }
+
       // + : one or more
       // Loop back from exits to entry
       for (NFA.NFAState exit : child.exits) {
@@ -181,11 +240,13 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
     } else {
       // {n}, {n,m} : counted quantifier
-      return buildCountedQuantifier(node.child, node.min, node.max);
+      return buildCountedQuantifier(node.child, node.min, node.max, node.greedy);
     }
   }
 
-  private NFAFragment buildCountedQuantifier(RegexNode child, int min, int max) {
+  private NFAFragment buildCountedQuantifier(RegexNode child, int min, int max, boolean greedy) {
+    boolean lazy = lazyAware && !greedy;
+
     // Build min required copies
     List<NFAFragment> fragments = new ArrayList<>();
     for (int i = 0; i < min; i++) {
@@ -196,10 +257,22 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       // {n,} : n or more
       // Add one more with loop back
       NFAFragment last = child.accept(this);
-      for (NFA.NFAState exit : last.exits) {
-        exit.addEpsilonTransition(last.entry); // loop
+      if (lazy) {
+        // Lazy tail loop: prefer accept (stop), then loop
+        Set<NFA.NFAState> lazyExits = new HashSet<>();
+        for (NFA.NFAState exit : last.exits) {
+          NFA.NFAState acceptFwd = createState();
+          exit.addEpsilonTransition(acceptFwd); // stop — build() wires to accept
+          exit.addEpsilonTransition(last.entry); // loop
+          lazyExits.add(acceptFwd);
+        }
+        fragments.add(new NFAFragment(last.entry, lazyExits));
+      } else {
+        for (NFA.NFAState exit : last.exits) {
+          exit.addEpsilonTransition(last.entry); // loop
+        }
+        fragments.add(last);
       }
-      fragments.add(last);
     } else if (max > min) {
       // {n,m} : between n and m
       // Add (max - min) optional copies
@@ -222,6 +295,27 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
       boolean isOptional = i >= min;
       if (isOptional) {
+        if (lazy) {
+          // Lazy optional: prefer skip (accept current position), then try-match next fragment.
+          // Create per-exit skip forwarders so build() wires them to accept.
+          NFA.NFAState choiceState = createState();
+          for (NFA.NFAState exit : result.exits) {
+            exit.addEpsilonTransition(choiceState);
+          }
+          // Single skip forwarder from choiceState (not per-exit): choiceState is the sole
+          // epsilon source here, so per-exit forwarders would produce dead states for multi-exit
+          // children (e.g., (a|b){2,4}?).
+          NFA.NFAState skipFwd = createState();
+          choiceState.addEpsilonTransition(skipFwd); // skip — build() wires to accept
+          choiceState.addEpsilonTransition(next.entry); // try-match
+          allExits.add(skipFwd);
+          result = new NFAFragment(result.entry, next.exits);
+          // Skip the greedy wiring block below (lines that connect result.exits → next.entry with
+          // a direct epsilon). For lazy optionals the choiceState already establishes the
+          // result→next connection via its try-match epsilon, so no additional direct exit-to-entry
+          // epsilon is needed or correct.
+          continue;
+        }
         // Can skip this fragment
         allExits.addAll(result.exits);
       }
@@ -237,6 +331,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     allExits.addAll(result.exits);
 
     if (min == 0) {
+      if (lazy) {
+        // Lazy {0,m} or {0,}: wrap in a fresh entry state.
+        // Skip (prefer zero-match) first, then try-match.
+        NFA.NFAState skipEntry = createState();
+        NFA.NFAState skipFwd = createState();
+        skipEntry.addEpsilonTransition(skipFwd); // skip-all first — build() wires to accept
+        skipEntry.addEpsilonTransition(result.entry); // try-match
+        allExits.add(skipFwd);
+        return new NFAFragment(skipEntry, allExits);
+      }
       // Wrap the whole quantifier in a fresh epsilon-only entry state — identical to the ?
       // operator pattern. The wrapper has two epsilons (added in this order):
       //   1. → result.entry  (try-match: higher priority)
@@ -276,24 +380,6 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     }
 
     NFAFragment child = node.child.accept(this);
-
-    if (node.atomic) {
-      int atomicId = atomicGroupCounter++;
-
-      NFA.NFAState entryState = createState();
-      entryState.atomicEntry = atomicId;
-      entryState.addEpsilonTransition(child.entry);
-
-      Set<NFA.NFAState> atomicExits = new HashSet<>();
-      for (NFA.NFAState childExit : child.exits) {
-        NFA.NFAState exitState = createState();
-        exitState.atomicExit = atomicId;
-        childExit.addEpsilonTransition(exitState);
-        atomicExits.add(exitState);
-      }
-
-      return new NFAFragment(entryState, atomicExits);
-    }
 
     if (node.capturing) {
       // Create intermediate epsilon states to avoid overwriting nested group markers

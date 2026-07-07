@@ -24,6 +24,7 @@ import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
 import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
+import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -46,6 +47,7 @@ import com.datadoghq.reggie.codegen.codegen.NFABytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.NestedQuantifiedGroupsBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
@@ -100,8 +102,19 @@ public class ReggieMatcherBytecodeGenerator {
     PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
     this.resolvedStrategy = result.strategy;
 
-    if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
-      String pikeVmFallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+    // BITSTATE_CAPTURE folds into the same branch as PIKEVM_CAPTURE: v1 intentionally does not add
+    // a BitState-backed codegen path for the annotation-processor (compile-time) pipeline, so a
+    // pattern that PatternAnalyzer#routeBitState substituted PIKEVM_CAPTURE→BITSTATE_CAPTURE for
+    // still runs on PikeVM at runtime via compilePikeVm — only the same pattern compiled
+    // dynamically via RuntimeCompiler.compile() gets the faster BitState engine. This is a known,
+    // intentional v1 asymmetry (doc/2026-07-03-bitstate-capture-engine-design.md).
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+      // Rebuild NFA with lazy-aware epsilon ordering for PikeVM correctness with lazy quantifiers.
+      nfa = new ThompsonBuilder(true).build(ast, groupCount);
+      String pikeVmFallbackReason =
+          FallbackPatternDetector.needsFallback(
+              ast, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
       if (pikeVmFallbackReason != null) {
         if (allowJdkFallback) {
           return Realization.DELEGATE_FALLBACK;
@@ -160,7 +173,13 @@ public class ReggieMatcherBytecodeGenerator {
     RegexNode ast = parser.parse(pattern);
     Map<String, Integer> nameMap = parser.getGroupNameMap();
 
-    // 2. Build NFA using Thompson construction
+    // 2. Build NFA using Thompson construction (greedy, lazyAware=false).
+    // This greedy NFA is used by PatternAnalyzer for strategy detection and by DFA/NFA-based
+    // bytecode generators. It is intentionally built before strategy selection because
+    // PatternAnalyzer needs an NFA regardless of strategy. For PIKEVM_CAPTURE patterns the greedy
+    // NFA is never used for matching — the throw at line 207 exits before any code generation —
+    // but building it here is simpler than deferring construction until after
+    // analyzeAndRecommend().
     ThompsonBuilder nfaBuilder = new ThompsonBuilder();
     // Count groups in pattern for group tracking
     int groupCount = countGroups(pattern);
@@ -202,12 +221,19 @@ public class ReggieMatcherBytecodeGenerator {
               + " bindings — the DFA cannot determine the correct group spans. Use"
               + " Reggie.compile() for runtime compilation with automatic fallback.");
     }
-    if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+    if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        || strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+      // PIKEVM_CAPTURE (and BITSTATE_CAPTURE, which folds into the same DELEGATE_PIKEVM
+      // realization — see resolveRealization) requires a lazy-aware NFA for correct
+      // shortest-match semantics. Bytecode generation is not supported at annotation-processing
+      // time; route to runtime. (No NFA rebuild needed here — the result is discarded immediately
+      // by the throw below.)
       throw new UnsupportedOperationException(
           "Pattern '"
               + pattern
-              + "' cannot be compiled at annotation-processing time: PIKEVM_CAPTURE requires a"
-              + " PikeVMMatcher instance at runtime. Use Reggie.compile() instead.");
+              + "' cannot be compiled at annotation-processing time: "
+              + strategy
+              + " requires a PikeVMMatcher instance at runtime. Use Reggie.compile() instead.");
     }
     String fallbackReason = FallbackPatternDetector.needsFallback(ast, strategy);
     if (fallbackReason != null) {
@@ -573,6 +599,7 @@ public class ReggieMatcherBytecodeGenerator {
       case ONEPASS_NFA:
         OnePassBytecodeGenerator onePass = new OnePassBytecodeGenerator(nfa);
         onePass.generateMatchesMethod(cw, getJavaClassName());
+        onePass.generateMatchFromMethod(cw, getJavaClassName());
         onePass.generateFindMethod(cw, getJavaClassName());
         onePass.generateFindFromMethod(cw, getJavaClassName());
         onePass.generateMatchMethod(cw, getJavaClassName());
@@ -632,6 +659,20 @@ public class ReggieMatcherBytecodeGenerator {
         fixedRepGen.generateMatchBoundedMethod(cw);
         fixedRepGen.generateFindMatchMethod(cw);
         fixedRepGen.generateFindMatchFromMethod(cw);
+        break;
+
+      case PINNED_BACKREFERENCE:
+        PinnedBackreferenceInfo pinnedBackrefInfo = (PinnedBackreferenceInfo) result.patternInfo;
+        PinnedBackreferenceBytecodeGenerator pinnedBackrefGen =
+            new PinnedBackreferenceBytecodeGenerator(pinnedBackrefInfo, getJavaClassName());
+        pinnedBackrefGen.generateMatchesMethod(cw);
+        pinnedBackrefGen.generateFindMethod(cw);
+        pinnedBackrefGen.generateFindFromMethod(cw);
+        pinnedBackrefGen.generateMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchFromMethod(cw);
+        pinnedBackrefGen.generateMatchesBoundedMethod(cw);
+        pinnedBackrefGen.generateMatchBoundedMethod(cw);
         break;
 
       case NESTED_QUANTIFIED_GROUPS:

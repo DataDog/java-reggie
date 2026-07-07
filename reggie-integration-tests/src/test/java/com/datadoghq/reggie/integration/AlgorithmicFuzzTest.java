@@ -57,9 +57,11 @@ public class AlgorithmicFuzzTest {
    * doc/fuzz/YYYY-MM-DD.md}, then update skip and this budget to match.
    *
    * <p>History: 18→78 (findAll group-span oracle) → 69→65→13→0 (B3a/B3b/B4/B5/B6, window 0–25k) →
-   * window advanced to 25k–50k → 34 (E1–E6 found; see {@code doc/fuzz/2026-06-29.md}).
+   * window advanced to 25k–50k → 34 (E1–E6 found; see {@code doc/fuzz/2026-06-29.md}) → 28 (B-CGG-1
+   * negated-CharClass in SPECIALIZED_CONCAT_GREEDY_GROUP, B-SQG-1 inner-min&gt;1 in
+   * SPECIALIZED_QUANTIFIED_GROUP routed to fallback).
    */
-  private static final int KNOWN_FINDINGS_BUDGET = 34;
+  private static final int KNOWN_FINDINGS_BUDGET = 28;
 
   @Test
   @Timeout(value = 300, unit = TimeUnit.SECONDS)

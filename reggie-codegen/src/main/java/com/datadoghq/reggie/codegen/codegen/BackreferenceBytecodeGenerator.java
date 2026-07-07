@@ -366,42 +366,48 @@ public class BackreferenceBytecodeGenerator {
     // pos++
     mv.visitIincInsn(posVar, 1);
 
-    // Search for closing tag using indexOf("</")
-    // while (pos < len) {
-    Label searchLoop = new Label();
-    Label searchEnd = new Label();
-    mv.visitLabel(searchLoop);
-    mv.visitVarInsn(ILOAD, posVar);
+    // matches() requires the whole input consumed, so the closing tag's position is not
+    // ambiguous and needs no search: the pattern's total length is fixed once group1Len is known
+    // (1 '<' + group1Len + 1 '>' + k gap chars + 2 "</" + group1Len backref + 1 '>' == len for
+    // some k >= 0), which pins the "</" start to exactly len - group1Len - 3. Check that single
+    // computed position directly instead of scanning forward through every "</" occurrence in
+    // the gap with indexOf+retry - a linear cost when, as here, the answer is a closed-form
+    // expression. (Verified against the fixed-repro cases in
+    // reggie-runtime/.../RepeatedWordPatternTest#htmlTagMatchesContinuesPastEarlierSameNamedClose.)
+    // int closeIdx = len - group1Len - 3;
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGE, searchEnd);
-
-    // int closeStart = input.indexOf("</", pos);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitLdcInsn("</");
-    mv.visitVarInsn(ILOAD, posVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/lang/String", "indexOf", "(Ljava/lang/String;I)I", false);
+    mv.visitVarInsn(ILOAD, group1LenVar);
+    mv.visitInsn(ISUB);
+    mv.visitInsn(ICONST_3);
+    mv.visitInsn(ISUB);
     mv.visitVarInsn(ISTORE, closeStartVar);
 
-    // if (closeStart < 0) break;
+    // if (closeIdx < pos) return false; // no room left for a closing tag
     mv.visitVarInsn(ILOAD, closeStartVar);
-    mv.visitJumpInsn(IFLT, searchEnd);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitJumpInsn(IF_ICMPLT, returnFalse);
 
-    // int backrefPos = closeStart + 2;
+    // if (input.charAt(closeIdx) != '<') return false;
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, closeStartVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitIntInsn(BIPUSH, '<');
+    mv.visitJumpInsn(IF_ICMPNE, returnFalse);
+
+    // if (input.charAt(closeIdx + 1) != '/') return false;
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, closeStartVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitIntInsn(BIPUSH, '/');
+    mv.visitJumpInsn(IF_ICMPNE, returnFalse);
+
+    // int backrefPos = closeIdx + 2;
     mv.visitVarInsn(ILOAD, closeStartVar);
     mv.visitInsn(ICONST_2);
     mv.visitInsn(IADD);
     mv.visitVarInsn(ISTORE, backrefPosVar);
-
-    // Check bounds: backrefPos + group1Len + 1 <= len
-    mv.visitVarInsn(ILOAD, backrefPosVar);
-    mv.visitVarInsn(ILOAD, group1LenVar);
-    mv.visitInsn(IADD);
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IADD);
-    mv.visitVarInsn(ILOAD, lenVar);
-    Label tryNext = new Label();
-    mv.visitJumpInsn(IF_ICMPGT, tryNext);
 
     // Check backreference: input.regionMatches(backrefPos, input, group1Start, group1Len)
     mv.visitVarInsn(ALOAD, 1);
@@ -411,40 +417,21 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, group1LenVar);
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-    mv.visitJumpInsn(IFEQ, tryNext);
+    mv.visitJumpInsn(IFEQ, returnFalse);
 
-    // Check closing '>': input.charAt(backrefPos + group1Len) == '>'
+    // Check closing '>': input.charAt(backrefPos + group1Len) == '>' (this is charAt(len - 1) by
+    // construction, checked explicitly rather than assumed for robustness).
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, backrefPosVar);
     mv.visitVarInsn(ILOAD, group1LenVar);
     mv.visitInsn(IADD);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitIntInsn(BIPUSH, '>');
-    mv.visitJumpInsn(IF_ICMPNE, tryNext);
-
-    // Found valid closing tag! For matches(), check if at end
-    // return (backrefPos + group1Len + 1) == len;
-    mv.visitVarInsn(ILOAD, backrefPosVar);
-    mv.visitVarInsn(ILOAD, group1LenVar);
-    mv.visitInsn(IADD);
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IADD);
-    mv.visitVarInsn(ILOAD, lenVar);
-    Label returnTrue = new Label();
     mv.visitJumpInsn(IF_ICMPNE, returnFalse);
-    mv.visitLabel(returnTrue);
+
     mv.visitInsn(ICONST_1);
     mv.visitInsn(IRETURN);
 
-    // Try next position
-    mv.visitLabel(tryNext);
-    mv.visitVarInsn(ILOAD, closeStartVar);
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IADD);
-    mv.visitVarInsn(ISTORE, posVar);
-    mv.visitJumpInsn(GOTO, searchLoop);
-
-    mv.visitLabel(searchEnd);
     mv.visitLabel(returnFalse);
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);

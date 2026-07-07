@@ -201,4 +201,77 @@ class StrategySelectionTest {
         result.strategy.name().contains("NFA") || result.strategy.name().contains("BACKREF"),
         "Backreference should use NFA-based strategy, got: " + result.strategy);
   }
+
+  // ==================== Lazy Quantifier Routing Tests ====================
+
+  @Test
+  void lazyQuantifierRoutesToPikeVm() throws Exception {
+    // Positive: plain lazy quantifiers must route to BITSTATE_CAPTURE (the eligible substitution
+    // target for PIKEVM_CAPTURE)
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("a*?b").strategy,
+        "a*?b should route to BITSTATE_CAPTURE");
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("a+?b").strategy,
+        "a+?b should route to BITSTATE_CAPTURE");
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("a??b").strategy,
+        "a??b should route to BITSTATE_CAPTURE");
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("a{2,4}?b").strategy,
+        "a{2,4}?b should route to BITSTATE_CAPTURE");
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("(a*?)b").strategy,
+        "(a*?)b should route to BITSTATE_CAPTURE");
+
+    // Negative: backreference blocks the lazy route
+    assertNotEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("(a+?)\\1").strategy,
+        "(a+?)\\1 has a backref — must not reach the lazy PIKEVM_CAPTURE/BITSTATE_CAPTURE block");
+
+    // Negative: lookaround blocks the lazy route
+    assertNotEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("a+?(?=b)").strategy,
+        "a+?(?=b) has lookahead — must not reach the lazy PIKEVM_CAPTURE/BITSTATE_CAPTURE block");
+
+    // Possessive quantifiers route to PIKEVM_CAPTURE via the hasAtomicGroups path (NOT the lazy
+    // block, and not eligible for the BITSTATE_CAPTURE substitution). The !hasPossessiveQuantifiers
+    // guard in the lazy block ensures they never arrive via the lazy path; hasAtomicGroups fires
+    // first because AtomicGroupDetector treats possessives as atomic. These assertions verify
+    // possessives still reach PIKEVM_CAPTURE (correct engine) while the guard prevents the wrong
+    // lazy-NFA construction from being triggered.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        analyze("a*+b").strategy,
+        "a*+b is possessive — must route to PIKEVM_CAPTURE via hasAtomicGroups, not lazy block");
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
+        analyze("a++b").strategy,
+        "a++b is possessive — must route to PIKEVM_CAPTURE via hasAtomicGroups, not lazy block");
+
+    // Negative: subroutine + lazy quantifier must route to RECURSIVE_DESCENT (not
+    // PIKEVM_CAPTURE/BITSTATE_CAPTURE)
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT,
+        analyze("(a+?)(?1)").strategy,
+        "(a+?)(?1) has a subroutine — must route to RECURSIVE_DESCENT, not the lazy"
+            + " PIKEVM_CAPTURE/BITSTATE_CAPTURE block");
+  }
+
+  @Test
+  void diagnoseRepros() throws Exception {
+    for (String pat :
+        new String[] {"(_{0}|.){4}[^_]+?c", "()c|\\10?", "(.{0}0{0}[0]{0}|a){2}|^[0-b]{1}"}) {
+      var result = analyze(pat);
+      System.out.println(
+          "PAT=[" + pat + "] strategy=" + result.strategy + " trace=" + result.guardTrace);
+    }
+  }
 }

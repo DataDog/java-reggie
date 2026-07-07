@@ -77,6 +77,7 @@ public class PatternRoutingPropertyBasedTest {
             LINEAR_BACKREFERENCE,
             SPECIALIZED_BACKREFERENCE,
             FIXED_REPETITION_BACKREF,
+            PINNED_BACKREFERENCE,
             VARIABLE_CAPTURE_BACKREF,
             OPTIONAL_GROUP_BACKREF,
             OPTIMIZED_NFA_WITH_BACKREFS,
@@ -129,17 +130,24 @@ public class PatternRoutingPropertyBasedTest {
     PatternAnalyzer.MatchingStrategyResult result = analyze(pattern);
 
     // The largeStateSpace() generator produces (a|b|...){N} — capturing alternation under a
-    // fixed quantifier. These currently route to PIKEVM_CAPTURE (correct per-iteration group
-    // spans). The remaining strategies are retained as valid in case routing evolves.
+    // fixed quantifier. These currently route to BITSTATE_CAPTURE (correct per-iteration group
+    // spans, substituted in for PIKEVM_CAPTURE where eligible). PIKEVM_CAPTURE is retained as
+    // valid for cases the substitution declines. The remaining strategies are retained as valid
+    // in case routing evolves.
     List<PatternAnalyzer.MatchingStrategy> validStrategies =
-        List.of(PIKEVM_CAPTURE, DFA_SWITCH, SPECIALIZED_QUANTIFIED_GROUP, OPTIMIZED_NFA);
+        List.of(
+            BITSTATE_CAPTURE,
+            PIKEVM_CAPTURE,
+            DFA_SWITCH,
+            SPECIALIZED_QUANTIFIED_GROUP,
+            OPTIMIZED_NFA);
 
     assertTrue(
         validStrategies.contains(result.strategy),
         () ->
             "Large state space pattern: '"
                 + pattern
-                + "' should use PIKEVM_CAPTURE/DFA_SWITCH/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA, got: "
+                + "' should use BITSTATE_CAPTURE/PIKEVM_CAPTURE/DFA_SWITCH/SPECIALIZED_QUANTIFIED_GROUP/OPTIMIZED_NFA, got: "
                 + result.strategy);
   }
 

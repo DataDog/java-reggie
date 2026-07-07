@@ -61,6 +61,48 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   }
 
   /**
+   * Returns true if this matcher embeds {@link #nameToIndex} into its {@link MatchResult} returns
+   * directly (i.e. named-group lookups already work on results it returns). {@code RuntimeCompiler}
+   * checks this to decide whether to wrap the matcher in a {@code NameEnrichingMatcher}: when
+   * {@code true}, wrapping is skipped so the name map is not applied twice. Subclasses that build
+   * their own {@link MatchResult}/{@link NamedMatchResultImpl} instances from {@link #nameToIndex}
+   * (as {@link #buildCaptureResult(String, int[], int)} does) must override this to return {@code
+   * true}.
+   */
+  boolean embedsNameMap() {
+    return false;
+  }
+
+  /**
+   * Builds a {@link MatchResult} from a completed match's capture-slot array. {@code caps} holds
+   * {@code 2 * (groupCount + 1)} entries: slot {@code 2*g} is the start and slot {@code 2*g+1} is
+   * the end of group {@code g} (group 0 is the whole match), with unmatched groups stored as {@code
+   * -1}. Uses this matcher's {@link #nameToIndex} to decide between a plain {@link MatchResultImpl}
+   * and a name-aware {@link NamedMatchResultImpl}.
+   *
+   * <p>Shared by NFA-simulation matchers (e.g. {@code PikeVMMatcher}, {@code BitStateMatcher}) that
+   * construct results directly from a capture-slot array rather than delegating to {@code
+   * java.util.regex}. Callers that override this construction path must also override {@link
+   * #embedsNameMap()} to return {@code true}.
+   *
+   * @param input the matched input string
+   * @param caps the capture-slot array, {@code 2 * (groupCount + 1)} entries long
+   * @param groupCount the number of capturing groups (excluding group 0)
+   */
+  protected final MatchResult buildCaptureResult(String input, int[] caps, int groupCount) {
+    int[] starts = new int[groupCount + 1];
+    int[] ends = new int[groupCount + 1];
+    for (int g = 0; g <= groupCount; g++) {
+      starts[g] = caps[2 * g];
+      ends[g] = caps[2 * g + 1];
+    }
+    if (!nameToIndex.isEmpty()) {
+      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    }
+    return new MatchResultImpl(input, starts, ends, groupCount, Collections.emptyMap());
+  }
+
+  /**
    * Marks this matcher as having been classified {@code NATIVE} by {@code StrategyJdkClassifier} —
    * its generator is expected to emit the full rich MatchResult API, so it must never build the JDK
    * delegate. Set by the compiler; if such a matcher ever reaches {@link #jdkRichDelegate()} the

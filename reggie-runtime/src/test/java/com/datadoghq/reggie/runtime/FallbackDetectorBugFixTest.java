@@ -350,9 +350,15 @@ public class FallbackDetectorBugFixTest {
     assertFalse(
         m instanceof JavaRegexFallbackMatcher,
         "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
+    // BITSTATE_CAPTURE is now substituted in for PIKEVM_CAPTURE where eligible (see
+    // PatternAnalyzer#isBitStateEligible); either native capture engine is correct here — the
+    // intent of this guard is "not the old JDK fallback", not "specifically PikeVMMatcher".
     assertTrue(
-        m instanceof PikeVMMatcher,
-        "Expected PikeVMMatcher for: " + pat + " but got: " + m.getClass().getSimpleName());
+        m instanceof PikeVMMatcher || m instanceof BitStateMatcher,
+        "Expected PikeVMMatcher or BitStateMatcher for: "
+            + pat
+            + " but got: "
+            + m.getClass().getSimpleName());
   }
 
   static Stream<Arguments> greedyPrefixNullableSiblingBackref() {

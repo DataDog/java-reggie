@@ -33,6 +33,7 @@ import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
+import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
@@ -62,6 +63,7 @@ import com.datadoghq.reggie.codegen.codegen.NFABytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.NestedQuantifiedGroupsBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.QuantifiedGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
@@ -119,7 +121,9 @@ public class RuntimeCompiler {
       }
       if (!nameMap.isEmpty()) {
         m.setNameToIndex(nameMap);
-        m = new NameEnrichingMatcher(m);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
       }
       return m;
     }
@@ -150,7 +154,9 @@ public class RuntimeCompiler {
       ReggieMatcher m = new PikeVMMatcher(nfa, pattern);
       if (!nameMap.isEmpty()) {
         m.setNameToIndex(nameMap);
-        m = new NameEnrichingMatcher(m);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
       }
       return m;
     }
@@ -160,6 +166,40 @@ public class RuntimeCompiler {
   // PikeVMMatcher carries mutable per-call buffers and must be freshly instantiated on every
   // compile() call; only the NFA (immutable after construction) and the name map are cached.
   private static final ConcurrentHashMap<String, PikeVMEntry> PIKEVM_NFA_CACHE =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Cached entry for BITSTATE_CAPTURE patterns: holds the immutable NFA and the compile-time name
+   * map so that every compile() call can produce a correctly-enriched fresh {@code BitStateMatcher}
+   * without re-parsing the pattern. Parallel to {@link PikeVMEntry} rather than a generalization of
+   * it (see doc/2026-07-03-bitstate-capture-engine-design.md, P1 decision: smaller diff, zero risk
+   * to existing PikeVM caching).
+   */
+  private static final class BitStateEntry {
+    final NFA nfa;
+    final Map<String, Integer> nameMap;
+
+    BitStateEntry(NFA nfa, Map<String, Integer> nameMap) {
+      this.nfa = nfa;
+      this.nameMap = nameMap;
+    }
+
+    ReggieMatcher newMatcher(String pattern) {
+      ReggieMatcher m = new BitStateMatcher(nfa, pattern);
+      if (!nameMap.isEmpty()) {
+        m.setNameToIndex(nameMap);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
+      }
+      return m;
+    }
+  }
+
+  // Level 1d: Pattern string → BitStateEntry for BITSTATE_CAPTURE patterns.
+  // BitStateMatcher carries mutable per-call buffers and must be freshly instantiated on every
+  // compile() call; only the NFA (immutable after construction) and the name map are cached.
+  private static final ConcurrentHashMap<String, BitStateEntry> BITSTATE_NFA_CACHE =
       new ConcurrentHashMap<>();
 
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
@@ -213,6 +253,13 @@ public class RuntimeCompiler {
       return pikevmEntry.newMatcher(pattern);
     }
 
+    // Fast path: BITSTATE_CAPTURE patterns are in BITSTATE_NFA_CACHE — return a fresh matcher.
+    // BitStateMatcher carries mutable per-call buffers and must not be shared across calls.
+    BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
+    if (bitStateEntry != null) {
+      return bitStateEntry.newMatcher(pattern);
+    }
+
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
     // NFA matchers mutate shared instance fields during matching and cannot be shared across
     // threads or calls; we cache a factory and instantiate per-call instead.
@@ -233,6 +280,14 @@ public class RuntimeCompiler {
     if (pikevmEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
       return pikevmEntry.newMatcher(pattern);
+    }
+
+    // Post-compilation fixup: if compileInternal registered this pattern as BITSTATE_CAPTURE,
+    // remove it from L1 and return a fresh matcher so callers never share mutable state.
+    bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
+    if (bitStateEntry != null) {
+      PATTERN_CACHE.remove(cacheKey, compiled);
+      return bitStateEntry.newMatcher(pattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
@@ -358,6 +413,7 @@ public class RuntimeCompiler {
     PATTERN_CACHE.clear();
     NFA_CLASS_CACHE.clear();
     PIKEVM_NFA_CACHE.clear();
+    BITSTATE_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
   }
 
@@ -462,8 +518,12 @@ public class RuntimeCompiler {
       // results for these patterns (e.g. dot matching newline, group-span bugs).
       // PIKEVM_CAPTURE evaluates anchors correctly at every search position; anchorConditionDiluted
       // on a PIKEVM result is only used by the hybrid pre-check (§4 below) to skip the DFA pass.
+      // BITSTATE_CAPTURE shares this guard: it is an NFA interpreter with identical anchor
+      // semantics to PIKEVM_CAPTURE (same NFA, same checkAnchor logic), just a different traversal
+      // strategy over it.
       if (result.anchorConditionDiluted
-          && result.strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE) {
+          && result.strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+          && result.strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
         return fallbackOrThrow(
             pattern, "anchor condition diluted in DFA construction", nameMap, options);
       }
@@ -496,8 +556,23 @@ public class RuntimeCompiler {
         if (pikeVmFallbackReason != null) {
           return fallbackOrThrow(pattern, pikeVmFallbackReason, nameMap, options);
         }
-        PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(nfa, nameMap));
+        NFA pikeVmNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
+        PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(pikeVmNfa, nameMap));
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+      }
+
+      // 3.7. BITSTATE_CAPTURE: same caching shape as 3.6 above, but into BITSTATE_NFA_CACHE and a
+      // BitStateMatcher. PatternAnalyzer only ever recommends BITSTATE_CAPTURE for patterns that
+      // would otherwise have been PIKEVM_CAPTURE (see PatternAnalyzer#routeBitState), so it needs
+      // the same FallbackPatternDetector guard.
+      if (result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+        String bitStateFallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+        if (bitStateFallbackReason != null) {
+          return fallbackOrThrow(pattern, bitStateFallbackReason, nameMap, options);
+        }
+        NFA bitStateNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
+        BITSTATE_NFA_CACHE.putIfAbsent(cacheKey, new BitStateEntry(bitStateNfa, nameMap));
+        return BITSTATE_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
       String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
@@ -596,7 +671,9 @@ public class RuntimeCompiler {
       // 9. Inject name map and wrap for named group support
       if (!nameMap.isEmpty()) {
         matcher.setNameToIndex(nameMap);
-        matcher = new NameEnrichingMatcher(matcher);
+        if (!matcher.embedsNameMap()) {
+          matcher = new NameEnrichingMatcher(matcher);
+        }
       }
 
       return matcher;
@@ -643,7 +720,7 @@ public class RuntimeCompiler {
     return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
         .filter(RuntimeCompiler::isRuntimeExecutableLinearTokenSequence)
         .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
-        .map(NameEnrichingMatcher::new)
+        .map(m -> m.embedsNameMap() ? m : new NameEnrichingMatcher(m))
         .orElse(null);
   }
 
@@ -824,6 +901,7 @@ public class RuntimeCompiler {
       case SPECIALIZED_MULTIPLE_LOOKAHEADS:
       case SPECIALIZED_LITERAL_LOOKAHEADS:
       case LAZY_DFA:
+      case BITSTATE_CAPTURE:
         return true;
       default:
         return false;
@@ -1004,6 +1082,7 @@ public class RuntimeCompiler {
         onePass.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        onePass.generateMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         onePass.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -1120,6 +1199,21 @@ public class RuntimeCompiler {
         fixedRepGen.generateFindMatchFromMethod(cw);
         fixedRepGen.generateMatchesBoundedMethod(cw);
         fixedRepGen.generateMatchBoundedMethod(cw);
+        break;
+
+      case PINNED_BACKREFERENCE:
+        PinnedBackreferenceInfo pinnedBackrefInfo = (PinnedBackreferenceInfo) result.patternInfo;
+        PinnedBackreferenceBytecodeGenerator pinnedBackrefGen =
+            new PinnedBackreferenceBytecodeGenerator(
+                pinnedBackrefInfo, "com/datadoghq/reggie/runtime/" + className);
+        pinnedBackrefGen.generateMatchesMethod(cw);
+        pinnedBackrefGen.generateFindMethod(cw);
+        pinnedBackrefGen.generateFindFromMethod(cw);
+        pinnedBackrefGen.generateMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchMethod(cw);
+        pinnedBackrefGen.generateFindMatchFromMethod(cw);
+        pinnedBackrefGen.generateMatchesBoundedMethod(cw);
+        pinnedBackrefGen.generateMatchBoundedMethod(cw);
         break;
 
       case VARIABLE_CAPTURE_BACKREF:

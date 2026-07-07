@@ -294,7 +294,37 @@ public class PatternAnalyzer {
     MatchingStrategyResult result = doAnalyze(ignoreGroupCount);
     result.guardTrace.addAll(guardTrace);
     result.hasAtomicGroups = hasAtomicGroups(ast);
-    return result;
+    return routeBitState(result);
+  }
+
+  /**
+   * Single post-processing funnel: every {@link MatchingStrategy#PIKEVM_CAPTURE} result produced by
+   * {@link #doAnalyze} passes through here before being returned. If the pattern is eligible for
+   * the BitState capture engine (see {@link #isBitStateEligible}), substitute {@link
+   * MatchingStrategy#BITSTATE_CAPTURE} in place of {@link MatchingStrategy#PIKEVM_CAPTURE}. {@code
+   * strategy} is final on {@link MatchingStrategyResult}, so a replacement is a new instance with
+   * every other field copied over unchanged.
+   */
+  private MatchingStrategyResult routeBitState(MatchingStrategyResult result) {
+    if (result.strategy != MatchingStrategy.PIKEVM_CAPTURE || !isBitStateEligible(ast)) {
+      return result;
+    }
+    MatchingStrategyResult replaced =
+        new MatchingStrategyResult(
+            MatchingStrategy.BITSTATE_CAPTURE,
+            result.dfa,
+            result.patternInfo,
+            result.useTaggedDFA,
+            result.requiredLiterals,
+            result.lookaheadGreedyInfo,
+            result.usePosixLastMatch);
+    replaced.alternationPriorityConflict = result.alternationPriorityConflict;
+    replaced.captureAmbiguous = result.captureAmbiguous;
+    replaced.anchorConditionDiluted = result.anchorConditionDiluted;
+    replaced.hasAtomicGroups = result.hasAtomicGroups;
+    replaced.lazyNfa = result.lazyNfa;
+    replaced.guardTrace.addAll(result.guardTrace);
+    return replaced;
   }
 
   private MatchingStrategyResult doAnalyze(boolean ignoreGroupCount) {
@@ -351,12 +381,44 @@ public class PatternAnalyzer {
       }
     }
 
+    // Patterns with lazy (non-greedy) quantifiers require PikeVM with lazy-aware NFA construction
+    // to produce shortest-match semantics. This block must run BEFORE requiresRecursiveDescentFlag
+    // so that safe lazy patterns are intercepted here and do not fall through to RECURSIVE_DESCENT.
+    // Guards:
+    //  - !hasBackrefs: backref routing below handles these correctly
+    //  - !hasLookaround: PikeVM traverses assertions as transparent epsilons (wrong for
+    //    lookahead/lookbehind)
+    //  - !hasPossessiveQuantifiers: possessive/atomic handled by hasAtomicGroups check below
+    //  - !hasSubroutines/!hasConditionals/!hasBranchReset: requiresRecursiveDescentFlag below
+    //  - !hasCapturingGroupWithNullableBodyInRepeatableQuantifier: PikeVM merges threads at the
+    //    same state across quantifier iterations; nullable-body groups under repeatable quantifiers
+    //    produce wrong last-iteration spans (generalisation of B16)
+    if (hasNonGreedyQuantifiers(ast)
+        && !hasBackrefs
+        && !hasLookaround(ast)
+        && !hasPossessiveQuantifiers(ast)
+        && !hasSubroutines(ast)
+        && !hasConditionals(ast)
+        && !hasBranchReset(ast)
+        && !FallbackPatternDetector.hasCapturingGroupWithNullableBodyInRepeatableQuantifier(ast)) {
+      addTrace("lazyQuantifierPikeVm", true);
+      MatchingStrategyResult lazyResult =
+          new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+      lazyResult.lazyNfa = true;
+      return lazyResult;
+    }
+
+    // Lazy patterns that did not qualify above (e.g. capturing group with nullable body under a
+    // repeated quantifier) fall through here. The hasNonGreedyQuantifiers condition in
+    // requiresRecursiveDescentFlag routes them to RECURSIVE_DESCENT, which then falls back to
+    // JDK via the lazy-quantifier guard in FallbackPatternDetector.
     boolean requiresRecursiveDescentFlag =
         hasSubroutines(ast)
             || hasConditionals(ast)
             || hasBranchReset(ast)
-            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs)
-            || hasQuantifiedBackrefs;
+            || hasQuantifiedBackrefs
+            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs);
     addTrace("requiresRecursiveDescent", requiresRecursiveDescentFlag);
     if (requiresRecursiveDescentFlag) {
       return new MatchingStrategyResult(
@@ -730,6 +792,15 @@ public class PatternAnalyzer {
             requiredLiterals);
       }
       // B6: if suffix is non-empty, fall through to OPTIMIZED_NFA_WITH_BACKREFS below.
+
+      // Try to detect a structurally-pinned backreference boundary: the group's content charset
+      // is disjoint from what follows it, so there is only one candidate boundary - no retry
+      // needed.
+      PinnedBackreferenceInfo pinnedInfo = detectPinnedBackreference(ast);
+      if (pinnedInfo != null) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.PINNED_BACKREFERENCE, null, pinnedInfo, false, requiredLiterals);
+      }
 
       // Try to detect variable-capture backreference patterns: (.*)\d+\1, (.+)=\1
       // These require backtracking from longest to shortest capture
@@ -2133,6 +2204,187 @@ public class PatternAnalyzer {
     return node.accept(detector);
   }
 
+  private boolean hasPossessiveQuantifiers(RegexNode node) {
+    PossessiveQuantifierDetector detector = new PossessiveQuantifierDetector();
+    return node.accept(detector);
+  }
+
+  /**
+   * AST-level eligibility check for {@link MatchingStrategy#BITSTATE_CAPTURE} (see
+   * doc/2026-07-03-bitstate-capture-engine-design.md §6). Declines the same non-goals PikeVM
+   * already handles correctly: backreferences, lookaround, atomic groups, possessive quantifiers,
+   * (§7.5) anchored quantifiers wrapping a nullable {@code ^}/{@code \A}/{@code (?m)^} body, where
+   * BitState's first-accept-wins DFS does not reproduce JDK's anchor-derived zero-length-loop
+   * suppression, and quantifiers (repeatable more than once) wrapping a nullable body that contains
+   * a nested capturing group: the {@code (stateId, pos)} visited set collapses the empty re-entry
+   * iteration before it reaches the inner group's exit write, so the reported group span reflects a
+   * stale earlier iteration instead of JDK's final (zero-width) one (e.g. {@code (?:(.*[_]*))+} on
+   * {@code "a_b"}: JDK reports group 1 as {@code [3,3)}, BitState's DFS reports {@code [0,3)}).
+   */
+  private boolean isBitStateEligible(RegexNode node) {
+    if (hasBackreferences(node)) return false;
+    if (hasLookaround(node)) return false;
+    if (hasAtomicGroups(node)) return false;
+    if (hasPossessiveQuantifiers(node)) return false;
+    if (hasAnchoredNullableQuantifierBody(node)) return false;
+    return !hasNullableQuantifierBodyWithNestedCapture(node);
+  }
+
+  /**
+   * Detects a quantifier capable of repeating more than once (max == -1, i.e. unbounded, or max
+   * &gt;= 2) whose body both can match the empty string and contains a nested capturing group. See
+   * {@link #isBitStateEligible} for why this shape is declined.
+   */
+  private boolean hasNullableQuantifierBodyWithNestedCapture(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode quantifier = (QuantifierNode) node;
+      boolean canRepeat = quantifier.max == -1 || quantifier.max >= 2;
+      if (canRepeat
+          && isZeroWidthNullable(quantifier.child)
+          && hasCapturingGroup(quantifier.child)) {
+        return true;
+      }
+      return hasNullableQuantifierBodyWithNestedCapture(quantifier.child);
+    }
+    if (node instanceof GroupNode) {
+      return hasNullableQuantifierBodyWithNestedCapture(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasNullableQuantifierBodyWithNestedCapture(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasNullableQuantifierBodyWithNestedCapture(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /** Returns true if {@code node} contains a capturing group anywhere within it. */
+  private boolean hasCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode group = (GroupNode) node;
+      if (group.capturing) return true;
+      return hasCapturingGroup(group.child);
+    }
+    if (node instanceof QuantifierNode) {
+      return hasCapturingGroup(((QuantifierNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasCapturingGroup(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasCapturingGroup(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Detects a quantifier capable of repeating more than once (max == -1, i.e. unbounded, or max
+   * &gt;= 2) whose body both contains a start-of-input anchor ({@code ^}, {@code \A}, or {@code
+   * (?m)^}) and can match the empty string. This is the {@code (^a?){3}} / {@code (?m)(^x?)+} /
+   * {@code \A{3}a} shape from doc/2026-07-03-bitstate-capture-engine-design.md §7.5: unrolling the
+   * quantifier produces distinct anchor-state copies that a {@code (stateId, pos)} visited set does
+   * not collapse, so a plain first-accept-wins DFS diverges from JDK's rule that a consuming path
+   * reached through multiple anchor firings must not override a zero-length match.
+   */
+  private boolean hasAnchoredNullableQuantifierBody(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode quantifier = (QuantifierNode) node;
+      boolean canRepeat = quantifier.max == -1 || quantifier.max >= 2;
+      if (canRepeat
+          && containsStartAnchor(quantifier.child)
+          && isZeroWidthNullable(quantifier.child)) {
+        return true;
+      }
+      return hasAnchoredNullableQuantifierBody(quantifier.child);
+    }
+    if (node instanceof GroupNode) {
+      return hasAnchoredNullableQuantifierBody(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (hasAnchoredNullableQuantifierBody(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (hasAnchoredNullableQuantifierBody(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /** Returns true if {@code node} contains a start-of-input anchor ({@code ^} or {@code \A}). */
+  private boolean containsStartAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) {
+      AnchorNode.Type type = ((AnchorNode) node).type;
+      return type == AnchorNode.Type.START || type == AnchorNode.Type.STRING_START;
+    }
+    if (node instanceof QuantifierNode) {
+      return containsStartAnchor(((QuantifierNode) node).child);
+    }
+    if (node instanceof GroupNode) {
+      return containsStartAnchor(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (containsStartAnchor(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (containsStartAnchor(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if {@code node} can match the empty string, treating anchors and lookaround as
+   * inherently zero-width (unlike {@link #isNullable}, which only tracks quantifier/alternation
+   * emptiness and is not used here for that reason).
+   */
+  private boolean isZeroWidthNullable(RegexNode node) {
+    if (node instanceof AnchorNode || node instanceof AssertionNode) {
+      return true;
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode quantifier = (QuantifierNode) node;
+      return quantifier.min == 0 || isZeroWidthNullable(quantifier.child);
+    }
+    if (node instanceof GroupNode) {
+      return isZeroWidthNullable(((GroupNode) node).child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode child : ((ConcatNode) node).children) {
+        if (!isZeroWidthNullable(child)) return false;
+      }
+      return true;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        if (isZeroWidthNullable(alt)) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
   /**
    * Check if pattern has start or end anchors (^, $). Word boundaries (\b) are not considered
    * anchors for this check.
@@ -3029,6 +3281,12 @@ public class PatternAnalyzer {
     // Backreference-specific strategies (require limited backtracking)
     FIXED_REPETITION_BACKREF, // Fixed-repetition backrefs: (a)\1{8,}, (abc|def)=(\1){2,3}
     VARIABLE_CAPTURE_BACKREF, // Variable-capture backrefs: ((.*))\\d+\\1, (a+)\1
+
+    /**
+     * Backreference whose group boundary is provably unambiguous (disjoint follow-set): single
+     * forward pass, no retry/backtracking.
+     */
+    PINNED_BACKREFERENCE,
     OPTIONAL_GROUP_BACKREF, // Optional group backrefs: (a)?\\1, (another)?(\1+)test
     NESTED_QUANTIFIED_GROUPS, // Nested quantified groups: ((a|bc)+)*, ((a+|b)*)?c
 
@@ -3052,6 +3310,14 @@ public class PatternAnalyzer {
     // Context-free strategies (for features beyond regular languages)
     RECURSIVE_DESCENT, // Subroutines, conditionals, branch reset - requires recursive descent
     // parser
+
+    /**
+     * Bounded-backtracking NFA-with-capture: same semantics as {@link #PIKEVM_CAPTURE} but without
+     * PikeVM's per-character thread-set bookkeeping and capture-array copying. Selected instead of
+     * {@link #PIKEVM_CAPTURE} by {@link PatternAnalyzer#isBitStateEligible} (see
+     * doc/2026-07-03-bitstate-capture-engine-design.md).
+     */
+    BITSTATE_CAPTURE,
 
     /** PikeVM NFA-with-capture: O(n·m) native group extraction, leftmost-greedy, ReDoS-safe. */
     PIKEVM_CAPTURE
@@ -3102,6 +3368,13 @@ public class PatternAnalyzer {
      * collide in the bytecode cache.
      */
     public boolean hasAtomicGroups;
+
+    /**
+     * True when the NFA must be built with {@code ThompsonBuilder(lazyAware=true)} to produce
+     * shortest-match (lazy) quantifier semantics. Set when the lazy-quantifier routing block
+     * selects {@link MatchingStrategy#PIKEVM_CAPTURE}.
+     */
+    public boolean lazyNfa;
 
     /** Per-guard routing trace populated by {@link PatternAnalyzer#analyzeAndRecommend}. */
     public final List<String> guardTrace = new ArrayList<>();
@@ -3247,6 +3520,111 @@ public class PatternAnalyzer {
         isSingleCharGroup,
         groupCharSet,
         literalChar);
+  }
+
+  /**
+   * Detect a structurally-pinned backreference boundary: a capturing group whose content charset is
+   * disjoint from whatever immediately follows it (and, if present, from any separator between the
+   * group's close and the backreference site). Because the group's closing boundary is therefore
+   * unambiguous, matching needs only a single forward scan - no retry/backtracking.
+   *
+   * <p>Reuses the group/backref-pairing loop shape from {@link #detectFixedRepetitionBackref}.
+   *
+   * @return a populated {@link PinnedBackreferenceInfo}, or {@code null} if the pattern isn't a
+   *     top-level concatenation containing a disjoint-boundary group/backreference pair.
+   */
+  private PinnedBackreferenceInfo detectPinnedBackreference(RegexNode ast) {
+    // Only handle ConcatNode at top level
+    if (!(ast instanceof ConcatNode)) {
+      return null;
+    }
+
+    ConcatNode concat = (ConcatNode) ast;
+    List<RegexNode> children = concat.children;
+
+    if (children.size() < 2) {
+      return null;
+    }
+
+    // Find the capturing group and its matching backreference (same pairing style as
+    // detectFixedRepetitionBackref).
+    int groupIndex = -1;
+    int backrefIndex = -1;
+    GroupNode capturingGroup = null;
+
+    for (int i = 0; i < children.size(); i++) {
+      RegexNode child = children.get(i);
+
+      if (child instanceof GroupNode) {
+        GroupNode group = (GroupNode) child;
+        if (group.capturing && groupIndex == -1) {
+          groupIndex = i;
+          capturingGroup = group;
+        }
+      }
+
+      if (child instanceof BackreferenceNode) {
+        BackreferenceNode backref = (BackreferenceNode) child;
+        if (capturingGroup != null && backref.groupNumber == capturingGroup.groupNumber) {
+          backrefIndex = i;
+        }
+      }
+    }
+
+    if (groupIndex == -1 || backrefIndex == -1 || groupIndex >= backrefIndex) {
+      return null;
+    }
+
+    // The codegen forward-scans the group's content as a single flat "one-or-more chars from
+    // groupCharSet" loop with no notion of an upper bound, so only an unbounded (max == -1),
+    // greedy, min >= 1 quantifier directly wrapping a charset-bearing child is safe - this
+    // excludes both fixed/bounded-repetition groups (e.g. \w{1,4}, whose codegen would ignore the
+    // max bound) and composite bodies (e.g. a ConcatNode with a trailing optional quantifier),
+    // whose charset isn't representative of the whole group content.
+    if (!(capturingGroup.child instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode groupQuant = (QuantifierNode) capturingGroup.child;
+    if (!groupQuant.greedy || groupQuant.min < 1 || groupQuant.max != -1) {
+      return null;
+    }
+    CharSet groupCharSet = getNodeCharSet(groupQuant.child);
+
+    // Charset of whatever immediately follows the group in the concat.
+    CharSet nextCharSet = getSuffixFirstCharSetSkippingNullable(concat, groupIndex + 1);
+
+    // Disjointness condition 1: group content vs. what follows it.
+    if (groupCharSet == null || nextCharSet == null || !groupCharSet.isDisjoint(nextCharSet)) {
+      return null;
+    }
+
+    // Separator (if any) between the group's close and the backreference site. The codegen scans
+    // the separator with the same flat "chars from separatorCharSet" loop, which is only sound
+    // for a single homogeneous node (e.g. \s+) - a separator spanning multiple AST nodes (as in
+    // the tag-close shape's literal+`.*`+literal delimiter, an intervening capturing group, or an
+    // earlier occurrence of the same backreference) is rejected rather than approximated.
+    RegexNode separator = null;
+    CharSet separatorCharSet = null;
+    if (backrefIndex > groupIndex + 1) {
+      List<RegexNode> sepNodes = children.subList(groupIndex + 1, backrefIndex);
+      if (sepNodes.size() != 1) {
+        return null;
+      }
+      separator = sepNodes.get(0);
+      separatorCharSet = getFirstCharSet(separator);
+
+      // Disjointness condition 2: separator vs. group content.
+      if (separatorCharSet == null || !groupCharSet.isDisjoint(separatorCharSet)) {
+        return null;
+      }
+    }
+
+    return new PinnedBackreferenceInfo(
+        capturingGroup.groupNumber,
+        capturingGroup.child,
+        groupCharSet,
+        separator,
+        separatorCharSet);
   }
 
   /** Check if a node represents a single character or character class. */
@@ -5193,8 +5571,12 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitQuantifier(QuantifierNode node) {
-      // Check if this quantifier is non-greedy
-      if (!node.greedy) {
+      // Check if this quantifier is non-greedy (possessive quantifiers are not lazy).
+      // Note: node.possessive is always false in parsed patterns — the parser converts X*+/X++/
+      // X?+/X{n,m}+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode rather than setting
+      // node.possessive=true. The !node.possessive guard is therefore purely defensive for
+      // hypothetical future parser changes and does not change current behavior.
+      if (!node.greedy && !node.possessive) {
         return true; // Found non-greedy quantifier!
       }
       return node.child.accept(this);
@@ -5218,6 +5600,90 @@ public class PatternAnalyzer {
     @Override
     public Boolean visitAssertion(AssertionNode node) {
       return node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      boolean hasThen = node.thenBranch.accept(this);
+      boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
+      return hasThen || hasElse;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+  }
+
+  /** Visitor to detect possessive quantifiers (X*+, X++, X?+, etc.) in AST. */
+  private static class PossessiveQuantifierDetector implements RegexVisitor<Boolean> {
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      return node.children.stream().anyMatch(child -> child.accept(this));
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      // Note: node.possessive is always false in parsed patterns. The parser converts X*+/X++/
+      // X?+/X{n,m}+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode rather than setting
+      // node.possessive=true. This check is therefore currently dead code, but is kept as a
+      // defensive guard for hypothetical future parser changes. visitGroup() also checks
+      // node.atomic for the current parser representation; both together make this detector
+      // redundant-safe regardless of whether the parser encodes possessives via node.possessive or
+      // GroupNode(atomic=true).
+      if (node.possessive) {
+        return true;
+      }
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      // Also return true for atomic groups (GroupNode.atomic == true), since the parser converts
+      // X*+/X++/X?+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode. This makes the
+      // detector redundant-safe: even if a future caller skips the hasAtomicGroups() check, the
+      // possessive/atomic construct is still caught here.
+      if (node.atomic) {
+        return true;
+      }
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      // node.subPattern is always non-null by design (final field set in constructor), but guard
+      // defensively for consistency with AtomicGroupDetector.visitAssertion.
+      return node.subPattern != null && node.subPattern.accept(this);
     }
 
     @Override
@@ -5997,6 +6463,9 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitQuantifier(QuantifierNode n) {
+      if (n.possessive) {
+        return true; // Possessive quantifiers require atomic-group commit semantics
+      }
       return n.child.accept(this);
     }
 

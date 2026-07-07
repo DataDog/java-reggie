@@ -51,12 +51,13 @@ public class BackrefDigitAmbiguityTest {
 
   @Test
   void backref1_followed_by_literal_2_with_1_group() {
-    // PCRE all-or-nothing: (a)\12 with 1 group → 12 > 1 → octal \012 = '\n'.
-    // JDK uses descending-prefix (\1 + literal '2'), but Reggie follows PCRE semantics.
+    // JDK stop-early rule: (a)\12 with 1 group — collecting '2' would give 12 > groupCount(1),
+    // so digit collection stops after '\1'. \1 is a backref to group 1; '2' is a literal.
+    // Pattern: (a) + backref(1) + '2'. Matches "aa2".
     String pat = "(a)\\12";
-    ReggieMatcher reg = Reggie.compile(pat);
-    assertNotNull(reg.match("a\n"), "PCRE: (a)\\12 = (a)\\n, matches 'a' + newline");
-    assertNull(reg.match("aa2"), "PCRE: (a)\\12 must not match 'aa2' (\\12 is octal, not \\1+2)");
+    ReggieMatcher reg = Reggie.compileAllowingFallback(pat);
+    assertNotNull(reg.match("aa2"), "(a)\\12 with 1 group = (a) + backref(1) + '2', matches 'aa2'");
+    assertNull(reg.match("a\n"), "(a)\\12 must not match 'a\\n' under JDK semantics");
   }
 
   @Test
@@ -72,13 +73,13 @@ public class BackrefDigitAmbiguityTest {
 
   @Test
   void backref1_followed_by_9_with_1_group() {
-    // PCRE all-or-nothing: (a)\19 with 1 group → 19 > 1 → octal; '9' is not octal,
-    // so only '1' is consumed as octal \001 (SOH), leaving '9' as a literal.
-    // Pattern becomes (a)\x019. JDK uses descending-prefix, Reggie follows PCRE.
+    // JDK stop-early rule: (a)\19 with 1 group — collecting '9' would give 19 > groupCount(1),
+    // so digit collection stops after '\1'. \1 is a backref to group 1; '9' is a literal.
+    // Pattern: (a) + backref(1) + '9'. Matches "aa9".
     String pat = "(a)\\19";
-    ReggieMatcher reg = Reggie.compile(pat);
-    assertNotNull(reg.match("a\0019"), "PCRE: (a)\\19 = (a)\\x019, matches 'a' + SOH + '9'");
-    assertNull(reg.match("aa9"), "PCRE: (a)\\19 must not match 'aa9' (\\19 is not \\1+9)");
+    ReggieMatcher reg = Reggie.compileAllowingFallback(pat);
+    assertNotNull(reg.match("aa9"), "(a)\\19 with 1 group = (a) + backref(1) + '9', matches 'aa9'");
+    assertNull(reg.match("a\0019"), "(a)\\19 must not match 'a+SOH+9' under JDK semantics");
   }
 
   @Test
@@ -101,5 +102,23 @@ public class BackrefDigitAmbiguityTest {
     assertTrue(jdk.matches(), "JDK should match");
     ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
     assertNotNull(reg.match(input), "Reggie should match canonical PCRE backref case");
+  }
+
+  /**
+   * {@code (\w+)#\1(a?)(\2)} is pinned-eligible ({@code \w+}'s charset is disjoint from the literal
+   * {@code #} separator between group 1 and backref {@code \1}), so it would route to {@code
+   * PINNED_BACKREFERENCE} if the B9 danger-condition guard did not also cover that strategy. Group
+   * 3 {@code (\2)} is a capturing group whose body is a backref to the nullable group 2 ({@code
+   * a?}), so {@code hasNullableBackrefInsideCapturingGroup} must still exclude it, routing to JDK
+   * fallback instead.
+   */
+  @Test
+  void pinnedEligibleNullableBackrefInsideCapturingGroup_routesToFallback_notPinnedBackreference() {
+    String pat = "(\\w+)#\\1(a?)(\\2)";
+    ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
+    assertTrue(
+        reg instanceof JavaRegexFallbackMatcher,
+        "(\\w+)#\\1(a?)(\\2) must fall back to JDK: pinned-eligible boundary but nullable "
+            + "backref inside capturing group (B9 guard) must still apply");
   }
 }

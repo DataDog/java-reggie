@@ -424,7 +424,7 @@ Unrolled Switch  Table
 Reggie uses a **pattern-first** approach: analyze the pattern structure and generate the simplest, most efficient bytecode possible. The strategy selection is hierarchical, checking for specialized patterns first before falling back to generic automaton-based approaches.
 
 > **Note**: The sections below describe the five core strategies that illustrate the fundamental approaches. The actual codebase includes 20+ additional specialized generators for specific pattern types:
-> - Backreference patterns (LINEAR_BACKREFERENCE, FIXED_REPETITION_BACKREF, VARIABLE_CAPTURE_BACKREF, etc.)
+> - Backreference patterns (LINEAR_BACKREFERENCE, FIXED_REPETITION_BACKREF, PINNED_BACKREFERENCE, VARIABLE_CAPTURE_BACKREF, etc.)
 > - Lookahead/lookbehind patterns (SPECIALIZED_MULTIPLE_LOOKAHEADS, HYBRID_DFA_LOOKAHEAD, etc.)
 > - Quantified groups (SPECIALIZED_QUANTIFIED_GROUP, NESTED_QUANTIFIED_GROUPS, etc.)
 > - Recursive patterns (RECURSIVE_DESCENT for subroutines and conditionals)

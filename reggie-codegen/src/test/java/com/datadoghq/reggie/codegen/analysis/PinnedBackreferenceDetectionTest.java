@@ -1,0 +1,94 @@
+/*
+ * Copyright 2026-Present Datadog, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.datadoghq.reggie.codegen.analysis;
+
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+import com.datadoghq.reggie.codegen.ast.RegexNode;
+import com.datadoghq.reggie.codegen.automaton.NFA;
+import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
+import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import java.lang.reflect.Method;
+import org.junit.jupiter.api.Test;
+
+/** Unit tests for {@code PatternAnalyzer#detectPinnedBackreference}, invoked via reflection. */
+class PinnedBackreferenceDetectionTest {
+
+  private PinnedBackreferenceInfo detect(String pattern) throws Exception {
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pattern);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    PatternAnalyzer analyzer;
+    try {
+      NFA nfa = builder.build(ast, countGroups(pattern));
+      analyzer = new PatternAnalyzer(ast, nfa);
+    } catch (UnsupportedOperationException e) {
+      analyzer = new PatternAnalyzer(ast, null);
+    }
+
+    Method method =
+        PatternAnalyzer.class.getDeclaredMethod("detectPinnedBackreference", RegexNode.class);
+    method.setAccessible(true);
+    return (PinnedBackreferenceInfo) method.invoke(analyzer, ast);
+  }
+
+  private int countGroups(String pattern) {
+    int count = 0;
+    boolean inEscape = false;
+    for (int i = 0; i < pattern.length(); i++) {
+      char ch = pattern.charAt(i);
+      if (inEscape) {
+        inEscape = false;
+        continue;
+      }
+      if (ch == '\\') {
+        inEscape = true;
+      } else if (ch == '(' && i + 1 < pattern.length()) {
+        if (i + 2 < pattern.length()
+            && pattern.charAt(i + 1) == '?'
+            && pattern.charAt(i + 2) == ':') {
+          continue;
+        }
+        count++;
+      }
+    }
+    return count;
+  }
+
+  @Test
+  void rejectsHtmlTagCloseShapeWithMultiNodeSeparator() throws Exception {
+    // The separator between the group's close and the backreference (">", ".*", "</") spans
+    // three AST nodes; the single-pass codegen can only soundly scan a homogeneous one-node
+    // separator (e.g. \s+), so this correctly stays on SPECIALIZED_BACKREFERENCE instead.
+    assertNull(detect("<(\\w+)>.*</\\1>"));
+  }
+
+  @Test
+  void detectsRepeatedWordShape() throws Exception {
+    assertNotNull(detect("\\b(\\w+)\\s+\\1\\b"));
+  }
+
+  @Test
+  void rejectsOverlappingGroupAndSuffixCharsets() throws Exception {
+    assertNull(detect("([bc]*)(c+d)"));
+  }
+
+  @Test
+  void rejectsAmbiguousQuotedStringWithEscape() throws Exception {
+    assertNull(detect("([\"'])(?:\\\\\\1|.)*?\\1"));
+  }
+}
