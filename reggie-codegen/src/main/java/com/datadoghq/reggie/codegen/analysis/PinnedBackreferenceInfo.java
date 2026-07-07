@@ -28,8 +28,11 @@ import java.util.Objects;
  * reduces to a single forward scan to that boundary, an optional separator scan, and one equality
  * check against the backreference site - no retry or backtracking is needed.
  *
- * <p>Examples: - {@code <(\w+)>.*</\1>} - tag body charset disjoint from the {@code </} delimiter -
- * {@code \b(\w+)\s+\1\b} - word charset disjoint from the whitespace separator
+ * <p>The group/backref pair must span the entire pattern (no prefix or suffix), since the generated
+ * matcher has no code path for anything outside that span.
+ *
+ * <p>Examples: - {@code (\w+)\s+\1} - word charset disjoint from the whitespace separator - {@code
+ * (\w+)(?:\s+)\1} - same, with the separator wrapped in a non-capturing group
  */
 public class PinnedBackreferenceInfo implements PatternInfo {
 

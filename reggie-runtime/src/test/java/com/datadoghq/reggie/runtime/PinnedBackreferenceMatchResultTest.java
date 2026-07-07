@@ -203,11 +203,16 @@ public class PinnedBackreferenceMatchResultTest {
         "matchBounded with a mismatched prefix in the bound should fail");
   }
 
-  // ---- \b(\w+)\s+\1\b : whitespace separator ----
+  // ---- (\w+)\s+\1 : whitespace separator ----
+  // Unlike \b(\w+)\s+\1\b (covered by
+  // testRepeatedWordWithBoundaryAnchorsDoesNotRouteToPinnedBackreference
+  // above), this pattern has no anchors outside the group/backref span, so it routes to
+  // PINNED_BACKREFERENCE - the \b anchors are zero-width, so removing them doesn't change the
+  // expected match boundaries below.
 
   @Test
   public void testRepeatedWord_match() {
-    ReggieMatcher matcher = RuntimeCompiler.compile("\\b(\\w+)\\s+\\1\\b");
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)\\s+\\1");
     MatchResult result = matcher.match("hello hello");
 
     assertNotNull(result, "match(\"hello hello\") should succeed");
@@ -217,7 +222,7 @@ public class PinnedBackreferenceMatchResultTest {
 
   @Test
   public void testRepeatedWord_findMatch() {
-    ReggieMatcher matcher = RuntimeCompiler.compile("\\b(\\w+)\\s+\\1\\b");
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)\\s+\\1");
     MatchResult result = matcher.findMatch("say hello hello now");
 
     assertNotNull(result, "findMatch should locate the repeated word");
@@ -228,7 +233,7 @@ public class PinnedBackreferenceMatchResultTest {
 
   @Test
   public void testRepeatedWord_notFound() {
-    ReggieMatcher matcher = RuntimeCompiler.compile("\\b(\\w+)\\s+\\1\\b");
+    ReggieMatcher matcher = RuntimeCompiler.compile("(\\w+)\\s+\\1");
     assertNull(matcher.findMatch("hello world foo"), "no repeated word should return null");
   }
 

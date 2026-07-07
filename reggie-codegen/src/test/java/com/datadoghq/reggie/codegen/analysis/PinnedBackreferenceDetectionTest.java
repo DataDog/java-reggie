@@ -99,4 +99,20 @@ class PinnedBackreferenceDetectionTest {
   void rejectsAmbiguousQuotedStringWithEscape() throws Exception {
     assertNull(detect("([\"'])(?:\\\\\\1|.)*?\\1"));
   }
+
+  @Test
+  void rejectsPatternWithPrefixEvenWhenBackrefIsLast() throws Exception {
+    // Exercises the groupIndex/backrefIndex span check with only one side violated: a prefix
+    // before the group, but the backreference is still the last child. Both conditions must
+    // independently be able to trigger the rejection, not just their conjunction.
+    assertNull(detect("x(\\w+)\\s+\\1"));
+  }
+
+  @Test
+  void rejectsZeroMinLengthSeparator() throws Exception {
+    // A separator quantifier with min == 0 (e.g. \s*) can match empty, making the group's
+    // closing boundary ambiguous - the scan can't tell where the group ends and the separator
+    // begins, so this must be rejected rather than accepted with a bogus zero-length separator.
+    assertNull(detect("(\\w+)\\s*\\1"));
+  }
 }

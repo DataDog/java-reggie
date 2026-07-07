@@ -3596,6 +3596,12 @@ public class PatternAnalyzer {
     if (!groupQuant.greedy || groupQuant.min < 1 || groupQuant.max != -1) {
       return null;
     }
+    // The generated matcher's group count is derived solely from the pinned group's own number;
+    // a capturing group nested inside its quantified body would be silently unaccounted for,
+    // making group(n) inaccessible or throwing for n beyond the pinned group's index.
+    if (hasCapturingGroup(groupQuant.child)) {
+      return null;
+    }
     CharSet groupCharSet = getNodeCharSet(groupQuant.child);
 
     // Charset of whatever immediately follows the group in the concat.
@@ -3621,6 +3627,9 @@ public class PatternAnalyzer {
         return null;
       }
       separator = sepNodes.get(0);
+      if (hasCapturingGroup(separator)) {
+        return null;
+      }
       separatorCharSet = getFirstCharSet(separator);
 
       // The scan can't backtrack, so it always consumes the longest run of separator-charset
@@ -3628,8 +3637,18 @@ public class PatternAnalyzer {
       // that run (min <= run) or don't cap it below that run (max == -1 or max >= run). Track the
       // bounds here so codegen can reject a candidate whose actual run falls outside them, instead
       // of accepting whatever length the greedy scan happens to consume.
-      if (separator instanceof QuantifierNode) {
-        QuantifierNode sepQuant = (QuantifierNode) separator;
+      // A non-capturing group (e.g. (?:\s+)) wraps its child without changing what's matched, so
+      // unwrap it before checking for a quantifier - otherwise a wrapped quantifier's bounds are
+      // silently replaced with "exactly one occurrence" below.
+      RegexNode sepQuantCandidate = separator;
+      if (sepQuantCandidate instanceof GroupNode) {
+        GroupNode sepGroup = (GroupNode) sepQuantCandidate;
+        if (!sepGroup.capturing && !sepGroup.atomic) {
+          sepQuantCandidate = sepGroup.child;
+        }
+      }
+      if (sepQuantCandidate instanceof QuantifierNode) {
+        QuantifierNode sepQuant = (QuantifierNode) sepQuantCandidate;
         if (!sepQuant.greedy) {
           return null;
         }

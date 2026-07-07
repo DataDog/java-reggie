@@ -105,7 +105,6 @@ class PinnedBackreferenceBytecodeGeneratorTest {
           gen.generateFindFromMethod(cw);
           gen.generateMatchMethod(cw);
           gen.generateMatchesBoundedMethod(cw);
-          gen.generateMatchBoundedMethod(cw);
           gen.generateFindMatchMethod(cw);
           gen.generateFindMatchFromMethod(cw);
           cw.visitEnd();
@@ -136,7 +135,6 @@ class PinnedBackreferenceBytecodeGeneratorTest {
           gen.generateFindFromMethod(cw);
           gen.generateMatchMethod(cw);
           gen.generateMatchesBoundedMethod(cw);
-          gen.generateMatchBoundedMethod(cw);
           gen.generateFindMatchMethod(cw);
           gen.generateFindMatchFromMethod(cw);
           cw.visitEnd();

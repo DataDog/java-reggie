@@ -151,13 +151,12 @@ public class PinnedBackreferenceBytecodeGenerator {
   }
 
   /**
-   * Minimum number of chars a match needs from a given start: 1+ for the group, 1+ for the
-   * separator (if present), plus groupLen more for the backreference - the last term is unknown
-   * until the group is scanned, so the static lower bound only covers the two known-nonempty pieces
-   * plus a single char for the (at-least-1-char) backreference echo.
+   * Minimum number of chars a match needs from a given start: {@code groupMinLength} for the group,
+   * {@code separatorMinLength} for the separator (if present), plus {@code groupMinLength} again
+   * for the backreference echo, which always matches the group's length.
    */
   private int minCandidateLength() {
-    return 2 + (info.hasSeparator() ? 1 : 0);
+    return 2 * info.groupMinLength + (info.hasSeparator() ? info.separatorMinLength : 0);
   }
 
   /** Generate the findFrom() method. */
@@ -396,135 +395,6 @@ public class PinnedBackreferenceBytecodeGenerator {
     mv.visitInsn(IRETURN);
 
     mv.visitMaxs(3, alloc.peek());
-    mv.visitEnd();
-  }
-
-  /**
-   * Generate matchBounded(CharSequence, int, int) - matches the bounded region, then shifts the
-   * result's spans by {@code start} so they're relative to the original CharSequence rather than
-   * the region substring, matching the contract established by {@code ReggieMatcher}'s default
-   * {@code matchBounded}/{@code shiftSpans}.
-   */
-  public void generateMatchBoundedMethod(ClassWriter cw) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-
-    // Local vars: 0=this, 1=input, 2=start, 3=end
-    LocalVarAllocator alloc = new LocalVarAllocator(4);
-    int subStringVar = alloc.allocate();
-    int resultVar = alloc.allocate();
-    int startsVar = alloc.allocate();
-    int endsVar = alloc.allocate();
-    int iVar = alloc.allocate();
-
-    // String sub = input.subSequence(start, end).toString();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitVarInsn(ASTORE, subStringVar);
-
-    // MatchResult inner = this.match(sub);
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, subStringVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className,
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitVarInsn(ASTORE, resultVar);
-
-    // if (inner == null) return null;
-    Label notNull = new Label();
-    mv.visitVarInsn(ALOAD, resultVar);
-    mv.visitJumpInsn(IFNONNULL, notNull);
-    mv.visitInsn(ACONST_NULL);
-    mv.visitInsn(ARETURN);
-    mv.visitLabel(notNull);
-
-    int totalSlots = totalGroupCount() + 1;
-    BytecodeUtil.pushInt(mv, totalSlots);
-    mv.visitIntInsn(NEWARRAY, T_INT);
-    mv.visitVarInsn(ASTORE, startsVar);
-
-    BytecodeUtil.pushInt(mv, totalSlots);
-    mv.visitIntInsn(NEWARRAY, T_INT);
-    mv.visitVarInsn(ASTORE, endsVar);
-
-    // for (int i = 0; i <= totalGroupCount; i++) { starts[i] = inner.start(i) + start; ... }
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iVar);
-
-    Label loopCond = new Label();
-    Label loopBody = new Label();
-    mv.visitJumpInsn(GOTO, loopCond);
-    mv.visitLabel(loopBody);
-
-    // starts[i] = inner.start(i) + start
-    mv.visitVarInsn(ALOAD, startsVar);
-    mv.visitVarInsn(ILOAD, iVar);
-    mv.visitVarInsn(ALOAD, resultVar);
-    mv.visitVarInsn(ILOAD, iVar);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "start", "(I)I", true);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitInsn(IADD);
-    mv.visitInsn(IASTORE);
-
-    // ends[i] = inner.end(i) + start
-    mv.visitVarInsn(ALOAD, endsVar);
-    mv.visitVarInsn(ILOAD, iVar);
-    mv.visitVarInsn(ALOAD, resultVar);
-    mv.visitVarInsn(ILOAD, iVar);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "end", "(I)I", true);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitInsn(IADD);
-    mv.visitInsn(IASTORE);
-
-    mv.visitIincInsn(iVar, 1);
-
-    mv.visitLabel(loopCond);
-    mv.visitVarInsn(ILOAD, iVar);
-    BytecodeUtil.pushInt(mv, totalGroupCount());
-    mv.visitJumpInsn(IF_ICMPLE, loopBody);
-
-    // return new MatchResultImpl(input.toString(), starts, ends, totalGroupCount)
-    int fullInputVar = alloc.allocate();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitVarInsn(ASTORE, fullInputVar);
-
-    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
-    mv.visitInsn(DUP);
-    mv.visitVarInsn(ALOAD, fullInputVar);
-    mv.visitVarInsn(ALOAD, startsVar);
-    mv.visitVarInsn(ALOAD, endsVar);
-    BytecodeUtil.pushInt(mv, totalGroupCount());
-    mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "com/datadoghq/reggie/runtime/MatchResultImpl",
-        "<init>",
-        "(Ljava/lang/String;[I[II)V",
-        false);
-    mv.visitInsn(ARETURN);
-
-    mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
   }
 

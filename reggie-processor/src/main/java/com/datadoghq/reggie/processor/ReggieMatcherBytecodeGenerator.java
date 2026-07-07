@@ -671,7 +671,6 @@ public class ReggieMatcherBytecodeGenerator {
         pinnedBackrefGen.generateFindMatchMethod(cw);
         pinnedBackrefGen.generateFindMatchFromMethod(cw);
         pinnedBackrefGen.generateMatchesBoundedMethod(cw);
-        pinnedBackrefGen.generateMatchBoundedMethod(cw);
         break;
 
       case NESTED_QUANTIFIED_GROUPS:
