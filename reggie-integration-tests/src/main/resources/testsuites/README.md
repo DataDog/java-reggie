@@ -17,9 +17,15 @@ The position format uses byte offsets (start-end) where:
 - Groups are numbered 1, 2, 3, etc.
 - Format: `startPosition-endPosition` (exclusive end)
 
+#### RE2 Basic Patterns (`re2/re2-basic.txt`)
+- **Source**: RE2 test suite patterns
+- **Tests extracted**: 95 basic match/no-match tests
+- **Format**: `pattern;input;should_match;features`
+- **Example**: `abc;abc;true;literal` - Pattern `abc` matches input `abc`
+
 #### PCRE Capturing Groups (`pcre/pcre-capturing-groups.txt`)
 - **Source**: PCRE2 test suite (testinput1/testoutput1)
-- **Tests extracted**: 399 tests with capturing groups (including backreferences)
+- **Tests extracted**: 386 tests with capturing groups (including backreferences)
 - **Format**: `pattern;input;group1Value;group2Value;...`
 - **Example**: `a(b*);abbbb;bbbb` - Pattern `a(b*)` on input `abbbb` captures "bbbb" in group 1
 
@@ -28,11 +34,34 @@ The value format directly includes the captured string:
 - Groups are numbered 1, 2, 3, etc.
 - Empty captures are represented as empty fields between semicolons
 
+### Basic Pattern Matching
+
+#### PCRE Patterns (`pcre/pcre-patterns.txt`)
+- **Source**: Hand-curated patterns focused on performance-relevant and common real-world use cases (emails, URLs, etc.)
+- **Tests extracted**: 55 basic match/no-match tests
+- **Format**: `pattern;input;should_match;features`
+- **Example**: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,};test@example.com;true;character_class,quantifier`
+
+#### Common Patterns (`common/patterns.json`)
+- **Source**: Hand-curated patterns shared across test suites
+- **Format**: JSON (not semicolon-delimited) — a top-level `patterns` array where each entry has `name`, `pattern`, `features`, and a nested `testCases` array of `{input, shouldMatch}` objects
+- **Example**:
+  ```json
+  {
+    "name": "email_simple",
+    "pattern": "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+    "features": ["character_class", "quantifier"],
+    "testCases": [
+      {"input": "test@example.com", "shouldMatch": true}
+    ]
+  }
+  ```
+
 ### Replacements
 
 #### PCRE Replacements (`pcre/pcre-replacements.txt`)
-- **Source**: PCRE2 test suite (testinput12)
-- **Tests extracted**: 129 replacement/substitution tests
+- **Source**: Hand-curated test cases covering common substitution patterns (not extracted from PCRE2 testinput12)
+- **Tests extracted**: 38 replacement/substitution tests
 - **Format**: `pattern;input;replacement;expectedOutput;global`
 - **Example**: `(?<=abc)(|def);123abcáyz;$0;;true` - Replace pattern with `$0` (matched text)
 
@@ -50,6 +79,10 @@ The test data was extracted using custom parsers:
 1. **RE2CaptureGroupParser**: Parses RE2's semicolon-delimited format with position ranges
 2. **PCRECaptureGroupParser**: Parses PCRE's input/output file pairs to extract pattern, input, and captured values
 3. **PCREReplacementParser**: Extracts replacement tests with the `replace=` modifier
+
+### Validation
+
+- **`pcre/validate_pcre_tests.pl`**: Perl script that validates `pcre-capturing-groups.txt`-style test cases against Perl's own regex engine, e.g. `perl validate_pcre_tests.pl < pcre-capturing-groups.txt`
 
 ### Filtering
 
@@ -73,7 +106,7 @@ Tests are filtered to include only those supported by Reggie:
 
 ## Test File Format
 
-All test files use semicolon-delimited format:
+Most test files use semicolon-delimited format; `common/patterns.json` uses a JSON structure instead:
 
 ```
 # Comment lines start with #
@@ -117,10 +150,10 @@ java -cp build/classes/java/main com.datadoghq.reggie.integration.testdata.TestD
 
 ## Statistics
 
-- **Total tests**: 620 tests extracted (including backreference tests)
+- **Total tests**: 516 tests extracted (including backreference tests)
   - RE2 capturing groups: 92 tests
-  - PCRE capturing groups: 399 tests
-  - PCRE replacements: 129 tests
+  - PCRE capturing groups: 386 tests
+  - PCRE replacements: 38 tests
 
 Tests filtered out: 66 tests using unsupported PCRE-specific features (verbs, atomic groups, etc.)
 

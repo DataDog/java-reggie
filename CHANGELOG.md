@@ -1,8 +1,8 @@
 # Changelog
 
-## [1.0.0] - Unreleased
+## [0.4.0] - Unreleased
 
-### 1.0.0 pre-release checklist
+### 1.0.0 readiness tracking (not yet released; tracked here for visibility)
 - [x] Fuzz divergence budget ≤ 30 (currently 28 — all remaining gaps are group-span on adversarial inputs)
 - [x] Zero boolean divergences (no false positives / false negatives on real-world patterns)
 - [x] `StrategyCorrectnessMetaTest` 0 mismatches
@@ -19,9 +19,6 @@
 - fix: per-config backref NFA, cache collision fixes, CRLF anchors, fallback guards (#89)
 - fix: DFA assertion evaluation for sandwich lookaround and lookahead-in-quantifier (#87, #88)
 - fix: POSIX aliases, inline flag regression tests, backref digit disambiguation (#88)
-
-## [Unreleased]
-
 - feat: ReggieOption/@RegexPattern fallback substrate + PIKEVM routing groundwork
 - feat: split oversized DFA-switch bytecode to avoid method-too-large failures
 - feat: enable zero-divergence fuzz gate permanently (divergence budget 18→78→69 as capture oracle expanded then Class A nullable-alternation ratcheted back)

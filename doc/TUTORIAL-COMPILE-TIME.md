@@ -25,7 +25,7 @@ Compile-time compilation means your regex patterns are:
 3. **Optimized aggressively** - JIT compiler can fully inline the generated code
 4. **Zero overhead** - No Pattern.compile() cost at runtime
 
-**PCRE Compatibility**: Reggie achieves 95.4% PCRE compatibility (329/345 evaluated tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences. See the [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for current status.
+**PCRE Compatibility**: Reggie achieves 98.1% PCRE compatibility (257/262 evaluated tests, from a 364-entry corpus), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences. See the [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for current status.
 
 ### Benefits
 
@@ -33,7 +33,7 @@ Compile-time compilation means your regex patterns are:
 |--------|-------|
 | **First-use latency** | **0ms** (already compiled) |
 | **Error detection** | **Compile time** (fail fast) |
-| **Performance** | **10-20x faster** than JDK Pattern |
+| **Performance** | Significantly faster than JDK Pattern (see [Performance](../README.md#performance)) |
 | **Type safety** | Patterns accessed via generated methods |
 | **Refactoring** | IDE refactoring works on pattern accessors |
 
@@ -245,11 +245,12 @@ Build your project:
 ./gradlew build
 ```
 
-The annotation processor runs automatically and generates:
+The annotation processor runs automatically and generates JVM bytecode classes directly (via ASM),
+writing `.class` files straight into the build output — there is no intermediate `.java` source to
+inspect:
 
-**Generated files** (in `build/generated/sources/annotationProcessor`):
-
-1. **`ValidationPatterns$Impl.java`** - Implementation of your pattern provider:
+1. **`ValidationPatterns$Impl`** - Implementation of your pattern provider, wiring each abstract
+   method to its generated matcher class. Conceptually equivalent to:
 
 ```java
 package com.example.patterns;
@@ -268,7 +269,7 @@ public class ValidationPatterns$Impl extends ValidationPatterns {
         if (phone == null) {
             synchronized (this) {
                 if (phone == null) {
-                    phone = new PhoneMatcher();
+                    phone = new ValidationPatterns_PhoneMatcher();
                 }
             }
         }
@@ -279,16 +280,18 @@ public class ValidationPatterns$Impl extends ValidationPatterns {
 }
 ```
 
-2. **Individual matcher classes** (e.g., `PhoneMatcher.java`):
+2. **Individual matcher classes** - one per `@RegexPattern` method, named
+   `<ProviderClassName>_<MethodName>Matcher` (capitalized), e.g. `ValidationPatterns_PhoneMatcher`
+   for a `phone()` method on `ValidationPatterns`. Conceptually equivalent to:
 
 ```java
 package com.example.patterns;
 
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 
-public final class PhoneMatcher extends ReggieMatcher {
+public final class ValidationPatterns_PhoneMatcher extends ReggieMatcher {
 
-    public PhoneMatcher() {
+    public ValidationPatterns_PhoneMatcher() {
         super("\\d{3}-\\d{3}-\\d{4}");
     }
 
@@ -889,17 +892,16 @@ public abstract ReggieMatcher digits();
 
 ### Generated Code Structure
 
-Understanding what gets generated helps with debugging:
+Understanding what gets generated helps with debugging. Reggie writes `.class` bytecode directly
+(there is no generated `.java` source), so the classes appear alongside your compiled sources:
 
 ```
-build/generated/sources/annotationProcessor/java/main/
-└── com/example/patterns/
-    ├── ValidationPatterns$Impl.java        # Implementation class
-    ├── PhoneMatcher.java                   # Individual matcher
-    ├── EmailMatcher.java
-    └── ... (one matcher per pattern)
-
 build/classes/java/main/
+└── com/example/patterns/
+    ├── ValidationPatterns$Impl.class            # Implementation class
+    ├── ValidationPatterns_PhoneMatcher.class    # Individual matcher (ProviderClass_MethodMatcher)
+    ├── ValidationPatterns_EmailMatcher.class
+    └── ... (one matcher per pattern)
 └── META-INF/services/
     └── com.example.patterns.ValidationPatterns  # ServiceLoader registration
 ```
@@ -910,10 +912,10 @@ Compile-time patterns have different performance than runtime:
 
 | Operation | Compile-Time | Runtime | Difference |
 |-----------|-------------|---------|------------|
-| First compilation | Build time | 5-10ms | Compile-time is free at runtime |
-| Pattern instance creation | <1ns (singleton) | <1ns (cached) | Same after warmup |
-| Matching | ~10-20x faster than JDK | ~10-20x faster than JDK | Same speed |
-| Memory footprint | +50-200KB (classes) | +500KB (ASM lib) | Compile-time lighter |
+| First compilation | Build time | ~5-10ms | Compile-time is free at runtime |
+| Pattern instance creation | Singleton (cached) | Singleton (cached) | Same after warmup |
+| Matching | Significantly faster than JDK | Significantly faster than JDK | Same speed |
+| Memory footprint | Generated classes only | Generated classes + ASM library | Compile-time lighter |
 
 ### GraalVM Native Image Support
 
@@ -933,9 +935,9 @@ Reggie chooses strategies based on pattern complexity:
 
 | Pattern Complexity | States | Strategy | Example |
 |-------------------|--------|----------|---------|
-| Simple | <50 | DFA Unrolled | `hello`, `\d{3}-\d{3}-\d{4}` |
-| Medium | 50-500 | DFA Switch | Complex email patterns |
-| Complex | >500 | NFA | Very long alternations |
+| Simple | <20 | DFA Unrolled | `hello`, `\d{3}-\d{3}-\d{4}` |
+| Medium | 20-300 | DFA Switch | Complex email patterns |
+| Complex | >300 | NFA | Very long alternations |
 | With assertions | Any | Hybrid DFA+NFA | `(?=.*[A-Z])...` |
 
 For best performance, keep patterns reasonably simple.

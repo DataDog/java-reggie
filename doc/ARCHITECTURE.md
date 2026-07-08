@@ -21,7 +21,7 @@
 
 ---
 
-> **Note**: This document focuses on the core compilation pipeline and five fundamental strategies. The actual codebase implements 20 specialized bytecode generators for different pattern types. The principles below apply across all strategies.
+> **Note**: This document focuses on the core compilation pipeline and five fundamental strategies. The actual codebase's `MatchingStrategy` enum defines 36 strategies in total (the 5 described here plus 31 additional specialized generators). The principles below apply across all strategies.
 
 ## Table of Contents
 1. [Overview](#overview)
@@ -62,7 +62,7 @@ Both paths share the same compilation pipeline:
 **Flow**:
 ```
 @RegexPattern("\\d+")
-→ ReggiProcessor (annotation processor)
+→ RegexPatternProcessor (annotation processor)
 → Shared compilation pipeline (reggie-codegen)
 → Generated .class file
 → ServiceLoader registration
@@ -141,7 +141,7 @@ This ensures:
 │                  ▼                                                   │
 │  ┌──────────────────────────────────────────┐                       │
 │  │   Annotation Processor                    │                       │
-│  │   (ReggiProcessor)                        │                       │
+│  │   (RegexPatternProcessor)                 │                       │
 │  └──────────────┬────────────────────────────┘                      │
 │                 │                                                    │
 │    ┌────────────┴─────────────┐                                     │
@@ -208,12 +208,12 @@ This ensures:
 │    │ State Count?           │        │                             │
 │    ├────────────┬───────────┤        │                             │
 │    │            │           │        │                             │
-│  <50          50-300      >300       │                             │
+│  <20          20-300      >300       │                             │
 │    │            │           │        │                             │
 │    ▼            ▼           ▼        ▼                             │
 │ ┌──────┐  ┌────────┐  ┌────────┐ ┌───────┐                       │
 │ │Unroll│  │Switch  │  │Table   │ │NFA    │                       │
-│ │Gen   │  │Gen     │  │Gen(TBD)│ │Gen    │                       │
+│ │Gen   │  │Gen     │  │Gen    │ │Gen    │                       │
 │ └──┬───┘  └───┬────┘  └───┬────┘ └───┬───┘                       │
 │    │          │            │          │                            │
 │    └──────────┴────────────┴──────────┘                           │
@@ -265,7 +265,7 @@ This ensures:
 
 ## Component Details
 
-### 1. Annotation Processor (ReggiProcessor)
+### 1. Annotation Processor (RegexPatternProcessor)
 
 **Purpose**: Scans source code for `@RegexPattern` annotations and triggers bytecode generation.
 
@@ -402,7 +402,7 @@ Start ─[a]→ State1 ─[b]→ Accept
             │
     ┌───────┼───────┐
     │       │       │
-  <50    50-300   >300
+  <20    20-300   >300
     │       │       │
     ▼       ▼       ▼
 Unrolled Switch  Table
@@ -411,8 +411,8 @@ Unrolled Switch  Table
 **Strategy Selection**:
 | States | Strategy | Reason |
 |--------|----------|--------|
-| <50 | DFA_UNROLLED | Maximum performance, acceptable code size |
-| 50-300 | DFA_SWITCH | Good balance of speed and compactness |
+| <20 | DFA_UNROLLED | Maximum performance, acceptable code size |
+| 20-300 | DFA_SWITCH | Good balance of speed and compactness |
 | >300 | DFA_TABLE | Memory-efficient for large DFAs |
 | Explosion | OPTIMIZED_NFA | Graceful fallback |
 | Backrefs | NFA_WITH_BACKREFS | Only NFA can handle |
@@ -423,7 +423,7 @@ Unrolled Switch  Table
 
 Reggie uses a **pattern-first** approach: analyze the pattern structure and generate the simplest, most efficient bytecode possible. The strategy selection is hierarchical, checking for specialized patterns first before falling back to generic automaton-based approaches.
 
-> **Note**: The sections below describe the five core strategies that illustrate the fundamental approaches. The actual codebase includes 20+ additional specialized generators for specific pattern types:
+> **Note**: The sections below describe the five core strategies that illustrate the fundamental approaches. The actual codebase's `MatchingStrategy` enum includes 31 additional specialized generators beyond these five, for specific pattern types:
 > - Backreference patterns (LINEAR_BACKREFERENCE, FIXED_REPETITION_BACKREF, PINNED_BACKREFERENCE, VARIABLE_CAPTURE_BACKREF, etc.)
 > - Lookahead/lookbehind patterns (SPECIALIZED_MULTIPLE_LOOKAHEADS, HYBRID_DFA_LOOKAHEAD, etc.)
 > - Quantified groups (SPECIALIZED_QUANTIFIED_GROUP, NESTED_QUANTIFIED_GROUPS, etc.)
@@ -563,7 +563,7 @@ public boolean matches(String input) {
 
 ---
 
-### Strategy 1: DFA Unrolled (< 50 states)
+### Strategy 1: DFA Unrolled (< 20 states)
 
 **Characteristics**:
 - Fully unrolled state machine
@@ -608,11 +608,11 @@ state_14:  // Final state
 
 **Cons**:
 - Large bytecode size
-- Not suitable for patterns >50 states
+- Not suitable for patterns >20 states
 
 ---
 
-### Strategy 2: DFA Switch (50-300 states)
+### Strategy 2: DFA Switch (20-300 states)
 
 **Characteristics**:
 - While loop with switch statement
@@ -824,15 +824,15 @@ Reggie DFA Unrolled:   ███████████████████
    - Multiple operations available: matches(), find(), findFrom(), match(), findMatch()
 
 5. **Feature Limitations**
-   - No Unicode properties (\p{L}, \p{N}, etc.)
    - ⚠️ Scoped inline flags not supported ((?i:...) syntax) - global flags work: (?i), (?m), (?s), (?x)
-   - No atomic groups ((?>...))
-   - No possessive quantifiers (*+, ++, ?+)
-   - ⚠️ Self-referencing backreferences limited ((a\1?){4})
+   - ✅ Unicode properties supported (\p{L}, \p{N}, etc.)
+   - ✅ Atomic groups supported ((?>...))
+   - ✅ Possessive quantifiers supported (*+, ++, ?+)
+   - ✅ Self-referencing backreferences supported ((a\1?){4})
    - ✅ Lookahead and lookbehind fully supported
    - ✅ Basic backreferences supported
    - ✅ Subroutines and conditionals supported (basic cases)
-   - See [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for detailed status (91.3% pass rate)
+   - See [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for detailed status (98.1% pass rate)
 
 6. **Learning Curve**
    - Different API from java.util.regex
@@ -851,7 +851,7 @@ Reggie DFA Unrolled:   ███████████████████
 
 #### Cons ❌
 - Large bytecode size
-- Only practical for <50 states
+- Only practical for <20 states
 - Can hit method size limits for very complex patterns
 
 ---

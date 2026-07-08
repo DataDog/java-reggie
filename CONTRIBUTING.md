@@ -77,7 +77,8 @@ Look for issues labeled `good-first-issue` or `help-wanted`. These are great sta
 
 **Areas Needing Help**:
 
-1. **PCRE Conformance** (Current: 94.3%, Target: 95%+)
+1. **PCRE Conformance** (Current: 98.1% of evaluable corpus entries; no fixed percentage target —
+   some gaps are permanent architectural ceilings, not goals to hit)
    - See `doc/plans/pcre-conformance-roadmap.md` for details
    - Pick a failing test from `reggie-integration-tests/`
 
@@ -490,7 +491,7 @@ Also, any contributions, even with the help of AI assistants, should be yours an
 ./gradlew :reggie-runtime:debugPattern -Ppattern="your-pattern"
 
 # Profile performance
-./gradlew :reggie-benchmark:jmh -Djmh.args="YourBenchmark -prof async:event=alloc"
+./gradlew :reggie-benchmark:jmh -Pjmh.args="YourBenchmark -prof async:event=alloc"
 
 # Compare with JDK
 Pattern jdk = Pattern.compile("pattern");

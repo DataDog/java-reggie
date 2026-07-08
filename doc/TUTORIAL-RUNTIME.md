@@ -29,7 +29,7 @@ Runtime compilation means regex patterns are:
 3. **Lazy bytecode generation** - Only compiled when actually used
 4. **Hidden classes** - Uses Java 21+ hidden classes for efficient memory use
 
-**PCRE Compatibility**: Reggie achieves 95.4% PCRE compatibility (329/345 evaluated tests), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences. See the [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for current status.
+**PCRE Compatibility**: Reggie achieves 98.1% PCRE compatibility (257/262 evaluated tests, from a 364-entry corpus), supporting most regex features including octal/hex escapes, whitespace in quantifiers, dotall mode, lookahead/lookbehind, and backreferences. See the [PCRE Conformance Roadmap](plans/pcre-conformance-roadmap.md) for current status.
 
 ### Benefits
 
@@ -161,14 +161,14 @@ public class BasicExample {
 
 #### Compilation Latency
 
-First compilation: ~5-10ms per pattern
-Subsequent uses: <1µs (cache lookup)
+First compilation incurs a one-time bytecode-generation cost; subsequent uses return the cached
+instance directly, with no recompilation.
 
 ```java
-// First use - compiles pattern (~5-10ms)
+// First use - compiles pattern
 ReggieMatcher first = Reggie.compile("\\d+");
 
-// Second use - returns cached instance (<1µs)
+// Second use - returns cached instance
 ReggieMatcher second = Reggie.compile("\\d+");
 
 assert first == second;  // Same instance!
@@ -890,7 +890,8 @@ For **maximum performance** in high-throughput scenarios, enable zero-copy strin
 
 #### Quick Setup
 
-Add this JVM argument for an additional **5-10% performance boost**:
+Add this JVM argument for an additional performance boost (magnitude depends on your JVM and
+patterns; run `:reggie-benchmark:benchmarkAndReport` for numbers on your hardware):
 ```
 --add-opens java.base/java.lang=ALL-UNNAMED
 ```
@@ -905,16 +906,14 @@ Reggie intelligently selects one of three string access strategies based on your
 // Pattern analysis determines optimal strategy:
 
 // Strategy 1: Zero-copy (with --add-opens)
-[0-9a-fA-F]+              // Direct byte array access, SIMD enabled
-                          // ~0.1ns per char, zero setup cost
+[0-9a-fA-F]+              // Direct byte array access, SIMD enabled, zero setup cost
 
 // Strategy 2: Copy-based (automatic fallback)
 .*error.*                 // Copy once, then fast access + SIMD
-                          // ~0.5ns setup per byte, then ~0.1ns per char
 
 // Strategy 3: charAt delegation
 ^[A-Z]{5}$                // Minimal setup, delegates to String.charAt()
-                          // Zero setup, ~1.5ns per char (but only checks 5 chars!)
+                          // (but only checks 5 chars!)
 ```
 
 **Key insight**: For most patterns, the library automatically chooses the optimal strategy without `--add-opens`.
@@ -981,8 +980,7 @@ The benefit depends on your workload:
 ReggieMatcher hexPattern = Reggie.compile("[0-9a-fA-F]+");
 String longHexString = "deadbeef".repeat(1000); // 8000 chars
 
-// Without --add-opens: ~2000ns per match
-// With --add-opens:    ~1800ns per match (~10% faster)
+// Run :reggie-benchmark:benchmarkAndReport to compare with/without --add-opens on your hardware.
 ```
 
 **Bottom line**: Add `--add-opens` if you're processing large volumes of text or running in performance-critical hot paths. Otherwise, the automatic fallback is excellent.

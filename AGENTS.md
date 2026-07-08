@@ -7,7 +7,7 @@
 
 Reggie is a Java 21+ regex library with dual compilation modes (compile-time via `@RegexPattern`,
 runtime via `Reggie.compile()`) that generates specialized bytecode per pattern:
-Pattern → AST → Thompson NFA → DFA → strategy selection → specialized bytecode (28+ strategies).
+Pattern → AST → Thompson NFA → DFA → strategy selection → specialized bytecode (36+ strategies).
 
 See `doc/ARCHITECTURE.md` for the full pipeline, module structure, and design patterns.
 
@@ -82,4 +82,4 @@ strategy: **`doc/RELEASING.md`**.
 - `doc/RELEASING.md` — release process
 - `doc/coverage-baseline.md` — coverage thresholds and analysis
 - `doc/plans/pcre-conformance-roadmap.md` — PCRE conformance tracking
-- `TUTORIAL-RUNTIME.md` / `TUTORIAL-COMPILE-TIME.md` — API usage guides
+- `doc/TUTORIAL-RUNTIME.md` / `doc/TUTORIAL-COMPILE-TIME.md` — API usage guides

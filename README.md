@@ -553,6 +553,7 @@ public final String pattern()
 @Target(ElementType.METHOD)
 public @interface RegexPattern {
     String value();  // The regex pattern
+    ReggieOption[] options() default {};  // Compilation flags (e.g. ALLOW_JDK_FALLBACK)
 }
 ```
 
@@ -572,8 +573,8 @@ Returns an instance of the generated implementation class.
 
 ## Supported Features
 
-**PCRE Compatibility: 97.5%** (115/118 test cases passing on a curated common-patterns suite —
-email/URL/IP/phone/JSON-style patterns; see `CorrectnessTest.testCommonPatterns`). On the full
+**PCRE Compatibility**: 115/123 test cases pass (3 fail, 5 error) on a curated common-patterns suite —
+email/URL/IP/phone/JSON-style patterns; see `CorrectnessTest.testCommonPatterns`. On the full
 364-entry PCRE conformance corpus
 (`CorrectnessTest.testPCRECapturingGroups`), Reggie passes **98.1%** of the 262 cases it can
 evaluate; the remaining 102 entries use PCRE features not yet implemented (see
@@ -853,9 +854,13 @@ cd java-reggie
 # Hello Matcher: PASSED
 #
 # === Performance Comparison ===
-# Reggie matcher: 17.09 ms
-# JDK Pattern:    190.72 ms
-# Speedup:        11.16x
+# Reggie matcher: <N> ms
+# JDK Pattern:    <N> ms
+# Speedup:        <N>x
+#
+# Actual timings and speedup vary by hardware and JVM; see the Performance
+# section above and run `./gradlew :reggie-benchmark:benchmarkAndReport` for
+# a current, trustworthy comparison.
 ```
 
 ## Research & References

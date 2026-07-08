@@ -49,9 +49,12 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | Lazy quantifier | `RECURSIVE_DESCENT`, `OPTIMIZED_NFA_WITH_BACKREFS` | `lazy quantifier: requires shortest-match semantics not supported by this strategy` |
 | Backref used in one branch whose capturing group is in a different branch | `RECURSIVE_DESCENT`, `OPTIMIZED_NFA_WITH_BACKREFS`, `PINNED_BACKREFERENCE` | `cross-alternative backref: group captured in one branch, used in another` |
 | Backref to an ambiguously nullable group (content can capture strings of length > 1, e.g. `([0]?-*)\1`) | `OPTIMIZED_NFA_WITH_BACKREFS`, `PINNED_BACKREFERENCE` | `backref to nullable group: parallel NFA simulation records wrong capture span` |
+| Backref to a nullable group | `FIXED_REPETITION_BACKREF` | `backref to nullable group: fixed-repetition backref loop does not handle empty capture` |
 | Backref to a nullable group inside a capturing group | `RECURSIVE_DESCENT`, `PINNED_BACKREFERENCE` | `backref to nullable group inside capturing group: recursive descent parser mishandles zero-length capture in nested group context` |
 | Lookahead assertion inside an alternation branch | `OPTIMIZED_NFA_WITH_LOOKAROUND` | `lookahead inside alternation branch: NFA thread scheduler does not correctly isolate assertions per branch` |
 | Non-anchor, non-handleable node before the capturing group (e.g. QuantifierNode prefix) | `VARIABLE_CAPTURE_BACKREF` | `variable-capture backref with unsupported prefix node type: generator only handles literal and char-class prefix nodes` |
+| Greedy unbounded prefix whose charset overlaps the backref capturing group's first charset (e.g. `a*(a+)\1`) | `VARIABLE_CAPTURE_BACKREF` | `variable-capture backref: greedy prefix charset overlaps capturing group — correct split requires backtracking` |
+| Nullable child in an unbounded prefix quantifier before the backref group (e.g. `(?:a*)*`) | `VARIABLE_CAPTURE_BACKREF` | `variable-capture backref: nullable child in unbounded prefix quantifier causes infinite loop` |
 | Outer quantifier wraps the entire capturing group (e.g. `(X)+\1`) | `VARIABLE_CAPTURE_BACKREF` | `quantified capturing group with backref: outer quantifier on group not supported by backref engine` |
 | Nullable or alternation-body group wrapped in outer quantifier | `OPTIONAL_GROUP_BACKREF` | `optional-group backref to unsupported capturing group: nullable or alternation-body group not handled by optional-group backref engine` |
 | Capturing group with nullable content under a nullable outer quantifier (e.g. `(0*-?){0,}`) | `DFA_UNROLLED_WITH_GROUPS`, `DFA_SWITCH_WITH_GROUPS`, `PIKEVM_CAPTURE` | `capturing group with nullable content and nullable outer quantifier: PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect` |
@@ -67,25 +70,21 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | Condition | Example | Reason string |
 |-----------|---------|---------------|
 | DFA construction diluted an anchor condition | patterns where DFA state merging loses `^`/`$` precision | `anchor condition diluted in DFA construction` |
-| Hybrid DFA build (group extraction path) diluted an anchor condition | patterns with groups where DFA merge loses anchor precision | `anchor condition diluted in hybrid DFA build` |
 | DFA longest-match conflicts with NFA first-alternative priority | `(a\|ab)` in find context | `alternation priority conflict: DFA longest-match vs NFA first-alternative` |
 | Capture-ambiguous group bindings requiring POSIX last-match semantics | `(a\|a)+` | `capture-ambiguous group bindings: group spans require java.util.regex semantics` |
 | Generated method exceeds JVM 64 KB method-size limit (large alternations) | large Grok patterns | `generated method too large: <class>.<method><desc> codeSize=<n>` |
 
-In addition to full fallback, two strategies use a **hybrid** approach: `SPECIALIZED_LITERAL_ALTERNATION`
-and `FIXED_REPETITION_BACKREF` generate native boolean methods (`matches`/`find`/`findFrom`) but
-delegate group-extraction (`match`/`findMatch`/`findMatchFrom`) to a lazily-compiled `java.util.regex`
-pattern. `Reggie.compile()` logs a one-time WARNING; `@RegexPattern` emits a `MANDATORY_WARNING`.
+`StrategyJdkClassifier.classifyJdkDependency()` is a single `switch` with no explicit cases — every
+`MatchingStrategy` falls through to `default: NATIVE`. Its javadoc states that currently no strategy
+is classified `RICH_API_HYBRID` or `FULL_FALLBACK`. `VARIABLE_CAPTURE_BACKREF`,
+`NESTED_QUANTIFIED_GROUPS`, `SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`,
+`SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`, and `HYBRID_DFA_LOOKAHEAD` were
+previously `FULL_FALLBACK` or `RICH_API_HYBRID`; all are now fixed to generate the full native rich
+API (`match`/`findMatch`/`findMatchFrom`) themselves (see the "no longer exist" list below).
 
-**FULL_FALLBACK strategies** (2): `VARIABLE_CAPTURE_BACKREF`, `NESTED_QUANTIFIED_GROUPS`
-(incomplete MatchResult API). `SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`,
-and `HYBRID_DFA_LOOKAHEAD` are no longer FULL_FALLBACK — their boolean-engine defects were fixed
-(see line 111 below); `StrategyJdkClassifier.classifyJdkDependency()` has no case for any
-lookahead strategy and falls through to `default: NATIVE`.
-
-`PINNED_BACKREFERENCE` (`PinnedBackreferenceBytecodeGenerator`) is `NATIVE`: like the lookahead
-strategies above, `StrategyJdkClassifier.classifyJdkDependency()` has no dedicated case for it and
-falls through to `default: NATIVE` because the generator emits the full rich API
+`PINNED_BACKREFERENCE` (`PinnedBackreferenceBytecodeGenerator`) is likewise `NATIVE`:
+`StrategyJdkClassifier.classifyJdkDependency()` has no dedicated case for it and falls through to
+`default: NATIVE` because the generator emits the full rich API
 (`match`/`matchBounded`/`findMatch`/`findMatchFrom`) itself, not just the booleans. The strategy
 only fires for a single top-level capturing group whose content is an unbounded greedy quantifier
 (`min >= 1`, `max == -1`) over a charset-reducible body, followed by either the backreference
@@ -93,8 +92,6 @@ directly or exactly one separator node, with the group's charset disjoint from b
 and whatever follows — e.g. `\b(\w+)\s+\1\b`. Multi-node separators (e.g. the tag-close shape
 `<(\w+)>.*</\1>`, whose separator is literal + `.*` + literal) are rejected and stay on
 `SPECIALIZED_BACKREFERENCE`.
-
-**RICH_API_HYBRID strategies** (2): `SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`.
 
 **`@RegexPattern` delegating-stub policy:**
 

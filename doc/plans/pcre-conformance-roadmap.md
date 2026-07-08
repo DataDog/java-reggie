@@ -142,7 +142,7 @@ wrong group-span logic).
 
 ---
 
-### Category 3: Recursive Patterns (9 tests)
+### Category 3: Recursive Patterns (5 tests)
 
 `RuntimeCompiler` distinguishes self-embedding (context-free) recursion from simple, non-embedding
 subroutine calls, so this category has two distinct root causes:
@@ -268,7 +268,7 @@ Medium-High pending individual triage.
 
 ---
 
-### Category 10: Unsupported PCRE Features (19 errors) — split by whether it's a ceiling or just unwritten
+### Category 10: Unsupported PCRE Features (13 errors) — split by whether it's a ceiling or just unwritten
 
 - **Backtracking control verbs**: `(*MARK:)`, `(*PRUNE:)`, `(*SKIP:)`, `(*THEN:)` — **architectural
   ceiling**. These are imperative directives to a backtracking interpreter's control flow; there is
@@ -445,10 +445,13 @@ Pattern → PatternAnalyzer.analyzeStrategy()
   ├─ Has backrefs + quantified? → OPTIONAL_GROUP_BACKREF / FIXED_REPETITION_BACKREF
   ├─ Has subroutines/conditionals? → RECURSIVE_DESCENT
   ├─ Has greedy + suffix? → GREEDY_BACKTRACK
-  ├─ Has lookaround? → DFA_WITH_ASSERTIONS / HYBRID
+  ├─ Has lookaround? → DFA_*_WITH_ASSERTIONS / HYBRID_DFA_LOOKAHEAD
   ├─ Simple with groups? → DFA_UNROLLED_WITH_GROUPS
-  └─ Complex? → OPTIMIZED_NFA / NFA_WITH_BACKREFS
+  └─ Complex? → OPTIMIZED_NFA / OPTIMIZED_NFA_WITH_BACKREFS
 ```
+(shorthand: `DFA_*_WITH_ASSERTIONS` stands for the real `MatchingStrategy` constants
+`DFA_UNROLLED_WITH_ASSERTIONS` / `DFA_SWITCH_WITH_ASSERTIONS`; the other names above are exact
+`MatchingStrategy` enum constants.)
 
 ### Common Fix Patterns
 
@@ -462,7 +465,6 @@ Pattern → PatternAnalyzer.analyzeStrategy()
 ## Notes for Future Sessions
 
 - Always run full `reggie-runtime:test` after changes to catch regressions
-- The 4 pre-existing failures in runtime tests are for self-referencing backrefs (Phase 4)
 - Consider splitting complex generators if they exceed ~1500 lines
 - Structural hash MUST include all distinguishing pattern characteristics for caching
 
@@ -535,15 +537,29 @@ Live output from `testPCRECapturingGroups`:
 
 The error list spans the two known permanent-ceiling categories (self-embedding recursion,
 backtracking verbs) and the known unwritten-syntax cases (relative backrefs, named branch-reset)
-documented above, plus three decline reasons not yet assigned to a category in this document:
+documented above. Live decline-reason counts from the 102-entry error list (`testPCRECapturingGroups`):
 
-- `capturing group with nullable content and nullable outer quantifier: PIKEVM_CAPTURE diverges;
-  TDFA POSIX last-match span also incorrect` — the single largest cluster in the error list.
-- `anchor condition diluted in DFA construction` — second-largest cluster.
-- `lookahead inside quantified group` — smaller cluster.
+| Decline reason | Count |
+|---|---|
+| `recursive subroutine requires intra-call backtracking` (context-free recursion, Category 3a) | 27 |
+| `lazy quantifier: requires shortest-match semantics not supported by this strategy` (Category 2a) | 17 |
+| `capturing group with nullable content and nullable outer quantifier: PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect` | 13 |
+| `alternation priority conflict: DFA longest-match vs NFA first-alternative` (Category 9) | 13 |
+| `anchor condition diluted in DFA construction` | 10 |
+| Backtracking-verb parse errors (`*MARK`/`*PRUNE`/`*SKIP`/`*THEN`, Category 10) | 9 |
+| `capture-ambiguous group bindings: group spans require java.util.regex semantics` (Category 9) | 5 |
+| `Duplicate group name` (named branch-reset, Category 10) | 3 |
+| `lookahead inside quantified group` | 2 |
+| `lookahead inside alternation branch: NFA thread scheduler does not correctly isolate assertions per branch` | 2 |
+| `Expected ':' or ')' after modifiers` (relative backref, Category 10) | 1 |
 
-These three have not yet been triaged into ceiling-vs-bug the way Categories 2, 3, and 9 were in
-this update. That triage is the next concrete step, not a number to guess at here.
+The largest clusters are context-free recursion (27) and the lazy-quantifier decline (17) — not
+the nullable-content divergence, which ties with alternation-priority-conflict at 13. Reasons not
+yet assigned to a category in this document: `nullable-content` (13), `anchor-dilution` (10),
+`lookahead-inside-quantified-group` (2), and `lookahead-inside-alternation-branch` (2). Category 9
+also currently names only one pattern for `capture-ambiguous group bindings`, but the reason occurs
+5 times in the corpus — the other 4 instances are not yet individually triaged either. That triage
+is the next concrete step, not a number to guess at here.
 
 ### Plan Forward
 
@@ -551,9 +567,11 @@ There is no fixed percentage target (see "Architectural Ceiling" above). The pla
 category-by-category, separating each remaining failure into "declined by design — leave it" vs.
 "compiles natively and is wrong — fix it," the same way Categories 2, 3, and 9 were split:
 
-1. Triage the three untriaged decline-reason clusters (nullable-content/PIKEVM divergence,
-   anchor-dilution in DFA construction, lookahead-inside-quantified-group) into ceiling-vs-bug,
-   using `debugPattern` on representative corpus entries from each cluster.
+1. Triage the untriaged decline-reason clusters (nullable-content/PIKEVM divergence,
+   anchor-dilution in DFA construction, lookahead-inside-quantified-group,
+   lookahead-inside-alternation-branch, and the remaining capture-ambiguous-group-bindings
+   instances beyond the one pattern already named in Category 9) into ceiling-vs-bug, using
+   `debugPattern` on representative corpus entries from each cluster.
 2. Check `^(ba|b*){1,2}?bc` and `(?i)^(ab|a(?i)[b-c](?m-i)d|x(?i)y|z)` (Category 9's two remaining
    unclassified patterns) against `debugPattern` and the corpus test's pass/fail/error lists.
 3. Fix the 5 confirmed real bugs listed under "Remaining Failures": the octal-escape parsing pair
@@ -562,7 +580,7 @@ category-by-category, separating each remaining failure into "declined by design
 4. For the two Category 9 architecture-tied patterns, prototype the PikeVM-routing fix (alternation
    priority) and the rich-API-hybrid extension (capture-ambiguous backref) — both reuse existing
    infrastructure rather than requiring new strategies.
-5. Once the three untriaged clusters are resolved, a meaningful percentage target becomes possible
+5. Once the untriaged clusters are resolved, a meaningful percentage target becomes possible
    — one that explicitly excludes the permanent-ceiling patterns from the denominator (see
    Architectural Ceiling), not 100% of the raw 364-entry corpus.
 
