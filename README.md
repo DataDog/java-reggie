@@ -11,7 +11,10 @@ Reggie is a high-performance Java regex library that provides **two complementar
 1. **Compile-Time Generation** - Zero runtime overhead via annotation processing
 2. **Runtime Compilation** - Lazy bytecode generation with automatic caching
 
-Both approaches use intelligent strategy selection (DFA/NFA) and generate optimized bytecode for **guaranteed linear-time matching** without ReDoS vulnerabilities.
+Both approaches analyze each pattern and route it to one of three strategy families —
+DFA-backed (deterministic, longest-match), NFA/PikeVM-backed (Thompson construction, leftmost-first),
+or bounded-backtracking bytecode (shape-restricted, still O(n)) — then generate specialized
+bytecode for **guaranteed linear-time matching** without ReDoS vulnerabilities.
 
 ## Table of Contents
 
@@ -130,59 +133,50 @@ public class Example {
 
 ## Performance
 
-Reggie achieves **21x speedup** over JDK's `Pattern` and **50x speedup** over RE2J across typical patterns.
+Reggie is faster than JDK's `Pattern` and RE2J on typical patterns because it compiles each pattern
+to specialized bytecode instead of interpreting a generic instruction stream. We don't publish
+specific speedup multipliers here: the only benchmark run on file predates the most recent
+performance work (`6841723`, `5db1866`) and is not committed to this repo, so it cannot be trusted
+as a current number. Run the command below to generate a report for your own JVM/hardware/patterns.
 
-### Benchmark Summary (322 benchmarks)
+### Full Report
 
-| Engine | Avg Throughput | vs JDK | vs RE2J |
-|--------|----------------|--------|---------|
-| **Reggie** | 351,917 ops/ms | — | — |
-| JDK | 16,745 ops/ms | baseline | 2.4x faster |
-| RE2J | 6,999 ops/ms | 2.4x slower | baseline |
-
-### Performance by Category
-
-Results from a May 2026 JMH benchmark run (not committed to this repo — regenerate with the
-command below to get current numbers for your JVM/hardware):
-
-| Category | vs JDK | vs RE2J | Notes |
-|----------|--------|---------|-------|
-| Match Operations | **13.7x** | **40.6x** | Phone, email, digits |
-| Find Operations | **7.9x** | **38.2x** | Pattern searching |
-| Group Extraction | **15.0x** | **257.5x** | Capturing groups |
-| State Explosion | **389x** | **59.1x** | Catastrophic backtracking patterns (ReDoS immunity) |
-| Backreferences (single) | **25.6x** | n/a | RE2J doesn't support backrefs |
-| Backreferences (multi, same group) | **51–58x** | n/a | Native since #27; previously fell back to JDK |
-| Assertions | **9.1x** | n/a | Lookahead/lookbehind (RE2J doesn't support) |
-| Split Operations | **1.6–6.3x** | **3.6–8.0x** | `split(input, limit)`; positive limit triggers early-termination path |
-
-*RE2J benchmarks excluded for patterns using backreferences and assertions (unsupported features).*
+Run `./gradlew :reggie-benchmark:benchmarkAndReport` to generate a detailed HTML report comparing
+Reggie, JDK `Pattern`, and RE2J across match/find/group-extraction/backreference/assertion/split
+categories.
 
 ### Why So Fast?
 
 1. **Zero initialization**: No `Pattern.compile()` overhead
-2. **Specialized bytecode**: Each pattern gets custom-generated code
+2. **Specialized bytecode**: Each pattern gets custom-generated code, not a generic interpreter loop
 3. **Maximum JIT optimization**: HotSpot can fully inline specialized matchers
 4. **No interpreter**: Direct execution, no generic pattern interpreter
-5. **Linear-time matching**: DFA-based approach eliminates backtracking
+5. **Linear-time matching**: strategy selection picks a DFA, NFA/PikeVM, or bounded-backtracking
+   bytecode strategy per pattern — each is O(n) by construction, so none can degrade into
+   unbounded backtracking
 
 ### Engine Comparison
 
 | Feature | Reggie | JDK Pattern | RE2J |
 |---------|--------|-------------|------|
-| Time Complexity | O(n) guaranteed | O(2^n) worst case | O(n) guaranteed |
+| Time Complexity | O(n) guaranteed¹ | O(2^n) worst case | O(n) guaranteed |
 | Implementation | JIT-compiled bytecode | Interpreted backtracking | NFA simulation |
-| ReDoS Safe | ✅ Yes | ❌ No | ✅ Yes |
+| ReDoS Safe | ✅ Yes¹ | ❌ No | ✅ Yes |
 | Backreferences | ✅ Yes | ✅ Yes | ❌ No |
 | Lookahead/Lookbehind | ✅ Yes | ✅ Yes | ❌ No |
 
-**Full Report**: Run `./gradlew :reggie-benchmark:benchmarkAndReport` to generate detailed HTML report
+¹ Applies to `Reggie.compile()` (default, native engine only — throws `UnsupportedPatternException`
+rather than silently degrading). Opting into `compileAllowingFallback()` /
+`ReggieOption.ALLOW_JDK_FALLBACK` delegates unsupported patterns to `java.util.regex`, which
+inherits JDK's backtracking worst case and is **not** ReDoS-safe. See
+[doc/agents-fallback-and-limitations.md](doc/agents-fallback-and-limitations.md).
 
 ## Performance Tuning
 
 ### Optional: Enable Zero-Copy String Access
 
-**TL;DR**: Add this JVM argument for an additional **5-10% performance boost**:
+**TL;DR**: Add this JVM argument for a modest additional performance boost (exact magnitude
+depends on your JVM/patterns — not independently benchmarked at current HEAD):
 ```
 --add-opens java.base/java.lang=ALL-UNNAMED
 ```
@@ -578,7 +572,11 @@ Returns an instance of the generated implementation class.
 
 ## Supported Features
 
-**PCRE Compatibility: 100.0%** (53/53 tests passing from PCRE test suite)
+**PCRE Compatibility: 100.0%** (54/54 tests passing on a curated common-patterns suite —
+email/URL/IP/phone/JSON-style patterns). On the full 364-entry PCRE conformance corpus
+(`CorrectnessTest.testPCRECapturingGroups`), Reggie passes **98.1%** of the 262 cases it can
+evaluate; the remaining 102 entries use PCRE features not yet implemented (see
+[PCRE Conformance Roadmap](doc/plans/pcre-conformance-roadmap.md)).
 
 ### ✅ Fully Supported
 
@@ -594,7 +592,9 @@ Returns an instance of the generated implementation class.
 - **Groups**:
   - Capturing: `(...)`
   - Non-capturing: `(?:...)`
-  - Named groups: `(?<name>...)` (in progress)
+  - Named groups: `(?<name>...)`, including extraction by name
+  - Non-capturing branch reset (numbered): `(?|(...)|(...))`
+  - Atomic groups: `(?>...)`
 - **Anchors**:
   - Line: `^`, `$`
   - String: `\A` (absolute start), `\Z` (end before optional newline)
@@ -606,7 +606,14 @@ Returns an instance of the generated implementation class.
   - Dotall mode: `(?s)` - `.` matches newlines
   - Multiline: `(?m)`
   - Extended: `(?x)` - ignore whitespace and comments
-- **Backreferences**: `\1`, `\2`, etc. (with limitations - see below)
+  - Scoped: `(?i:...)` - modifier applies only inside the group
+- **Quantifiers**: greedy, non-greedy (`*?`, `+?`, `??`), possessive (`*+`, `++`, `?+`)
+- **Unicode**: `\p{L}`, `\p{N}`, and their negations `\P{L}`, `\P{N}` (script-based forms like
+  `\p{Script=Greek}` are not yet supported)
+- **Backreferences**: `\1`, `\2`, etc., including self-referencing backrefs within a single group
+  (`(a\1?){4}`), with limitations - see below
+- **Subroutine calls**: `(?1)`, `(?R)` for non-self-embedding references (calls that don't recurse
+  into themselves); self-embedding/context-free recursion is a permanent limitation - see below
 
 ### 🚧 Partial Support / Limitations
 
@@ -619,25 +626,34 @@ Returns an instance of the generated implementation class.
   - Specialized patterns optimized: `<(\w+)>.*</\1>` (HTML tags)
 - **Non-greedy quantifiers**: `*?`, `+?`, `??`
   - Basic support, complex interactions with lookahead/backref limited
+- **Conditional patterns**: `(?(condition)yes|no)` - basic cases work; combining a conditional with
+  a backref inside a repeated group (`(a(?(1)\1)){4}`) is a known bug, not yet fixed
 
 ### ❌ Not Yet Supported
 
-- **Subroutine calls**: `(?1)`, `(?R)` - recursive pattern matching (PCRE extension)
-- **Conditional patterns**: `(?(condition)yes|no)` - partial support, edge cases remain
-- **Possessive quantifiers**: `*+`, `++`, `?+`
-- **Atomic groups**: `(?>...)`
-- **Unicode categories**: `\p{L}`, `\p{N}`, `\P{L}` (planned)
-- **Unicode properties**: `\p{Script=Greek}`, etc.
-- **Scoped inline modifiers**: `(?i:...)` (global modifiers work: `(?i)`)
+**Permanent limitation** (would require unbounded backtracking to support - see
+[PCRE Conformance Roadmap](doc/plans/pcre-conformance-roadmap.md#architectural-ceiling-100-is-not-the-target)):
 
-### Recent Improvements (January 2026)
+- **Self-embedding recursive subroutines**: `(?1)`/`(?R)` calls that recurse into their own group,
+  e.g. palindrome patterns like `^((.)(?1)\2|.?)$`
+- **Backtracking control verbs**: `(*MARK)`, `(*PRUNE)`, `(*SKIP)`, `(*THEN)`
+
+**Not yet implemented** (ordinary backlog, no architecture change needed):
+
+- **Branch reset groups with named captures**: `(?|(?'a'aaa)|(?'a'b))` - the numbered form works
+- **Relative backreferences**: `(?-2)`, `(?+1)`
+- **Unicode script/name properties**: `\p{Script=Greek}`, `\p{Name=...}`
+
+### Recent Improvements
 
 - ✅ Whitespace in quantifiers (PCRE compatible)
-- ✅ Octal escape sequences (`\100`, `\377`)
+- ✅ Octal escape sequences (`\100`, `\377`); note `(abc)\100` immediately after a captured group is
+  a known parsing bug (ambiguity with backreference `\1` followed by digits `00`)
 - ✅ Hex escape sequences (`\x40`, `\xFF`)
 - ✅ Dotall mode `(?s)` - dot matches newlines
 - ✅ Absolute string anchors `\A` and `\Z`
-- ✅ Greedy backtracking for complex patterns
+- ✅ Possessive quantifiers, atomic groups, Unicode `\p{L}`/`\p{N}`, scoped inline modifiers, named
+  group extraction, self-referencing backrefs
 
 See [PCRE Conformance Roadmap](doc/plans/pcre-conformance-roadmap.md) for detailed compatibility status.
 
@@ -861,7 +877,7 @@ Reggie is based on decades of regex engine research:
 
 - [PCRE (Perl Compatible Regular Expressions)](https://www.pcre.org/)
   - Industry-standard regex compatibility target
-  - Reggie achieves 100.0% compatibility (53/53 tests)
+  - Reggie passes 98.1% of the evaluable cases in the 364-entry PCRE conformance corpus
 
 ### Novel Contributions
 
@@ -871,27 +887,26 @@ Based on extensive research, Reggie's hybrid compile-time/runtime approach is **
 - Combines .NET's source generation concept with Java annotation processing
 - Unified codegen for both compile-time and runtime paths
 - Industry-proven hybrid DFA/NFA strategy
-- High PCRE compatibility (100.0%) with linear-time guarantees
+- High PCRE compatibility (98.1% of evaluable corpus cases) with linear-time guarantees
 
 ## Known Limitations
 
 ### Known correctness gaps on adversarial degenerate inputs
 
-The differential fuzzer (`AlgorithmicFuzzTest.divergenceGate`) tracks 69 pre-existing divergences
-between Reggie and JDK on adversarial degenerate inputs, classified into root-cause groups:
+The differential fuzzer (`AlgorithmicFuzzTest.divergenceGate`) tracks 28 pre-existing divergences
+between Reggie and JDK on adversarial degenerate inputs:
 
-- **Span-only** (group boundaries wrong, boolean match correct): `DFA_UNROLLED` capturing-group
-  span tracking (Class A, dominant cluster); `PIKEVM_CAPTURE` quantified-group last-iteration
-  semantics (Class F).
+- **Span-only** (group boundaries wrong, boolean match correct): group-span gaps in
+  `DFA_UNROLLED_WITH_GROUPS` and `SPECIALIZED_CONCAT_GREEDY_GROUP`.
 - **Boolean correctness** (false positives or false negatives on adversarial inputs):
-  `OPTIMIZED_NFA_WITH_BACKREFS` backref over-match (Class B); `RECURSIVE_DESCENT` false negatives
-  on optional/zero-width backrefs (Class C); `PIKEVM_CAPTURE` find() misses and empty-loop (Class
-  D); `\A`/`\z` anchor enforcement in `DFA_SWITCH` and `SPECIALIZED_MULTI_GROUP_GREEDY` (Class E).
-- **Non-reproducible** (shrinker artifacts, not engine bugs): Class G.
+  `OPTIMIZED_NFA_WITH_BACKREFS`; `\A` anchor enforcement in `DFA_SWITCH`; backref/anchor-combo
+  patterns.
 
 All affected patterns are O(n) / ReDoS-safe. These gaps affect adversarial or synthetically
 generated patterns; typical production patterns are unlikely to trigger them. The budget ratchets
-down as each root-cause class is fixed (`-Dreggie.fuzz.enforce=true` activates the gate in CI).
+down as each root-cause class is fixed (`-Dreggie.fuzz.maxFindings=N` overrides the gate; see
+[doc/agents-fallback-and-limitations.md](doc/agents-fallback-and-limitations.md) for the
+authoritative, currently-maintained breakdown).
 
 ## Contributing
 
