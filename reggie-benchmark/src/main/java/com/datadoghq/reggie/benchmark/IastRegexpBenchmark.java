@@ -141,7 +141,8 @@ public class IastRegexpBenchmark {
   // SQL MySQL: MySQL-flavored query with both quote styles
   private static final String MYSQL_MATCH =
       "SELECT id, `name` FROM users WHERE id = 1 AND email = 'user@example.com' AND active = 1";
-  private static final String MYSQL_NO_MATCH = "SELECT id, name FROM users LIMIT 10";
+  private static final String MYSQL_NO_MATCH =
+      "SELECT id, name FROM users WHERE active AND enabled";
 
   // SQL PostgreSQL: query with dollar-quoted literal
   private static final String POSTGRESQL_MATCH =

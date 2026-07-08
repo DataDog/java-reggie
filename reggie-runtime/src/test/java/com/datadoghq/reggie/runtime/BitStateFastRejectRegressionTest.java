@@ -35,10 +35,6 @@ import org.junit.jupiter.params.provider.MethodSource;
  * BitStateMatcher} once it's there — that's exactly how the SQL_ANSI/SQL_POSTGRESQL/LDAP/
  * QUERY_OBFUSCATOR/URL no-match cases regressed 15x->0.15x against JDK/RE2J while routing stayed
  * unchanged. This test fails fast, at the unit level, if that filter is ever dropped again.
- *
- * <p>{@code SQL_MYSQL} is intentionally excluded: {@code IastRegexpBenchmark.MYSQL_NO_MATCH} is a
- * mislabeled benchmark constant that actually contains a genuine match (see tracked follow-up
- * issue), so there is no confirmed-correct no-match input to pin here without duplicating that bug.
  */
 class BitStateFastRejectRegressionTest {
 
@@ -54,6 +50,11 @@ class BitStateFastRejectRegressionTest {
       "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|b'[0-9a-f]+'|0b[0-9a-f]+"
           + "|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
           + "|\\$(?:[a-zA-Z_]\\w*)?\\$|'(?:''|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
+
+  private static final String SQL_MYSQL =
+      "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|b'[0-9a-f]+'|0b[0-9a-f]+"
+          + "|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
+          + "|\"(?:\\\\\"|[^\"])*\"|'(?:\\\\'|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
 
   private static final String LDAP = "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)";
 
@@ -81,6 +82,9 @@ class BitStateFastRejectRegressionTest {
             "SELECT id, name FROM users WHERE active"), // no literals/numbers/comments
         org.junit.jupiter.params.provider.Arguments.of(
             "SQL_POSTGRESQL", SQL_POSTGRESQL, "SELECT id, name FROM users WHERE active"),
+        // Mirrors IastRegexpBenchmark.MYSQL_NO_MATCH's fixed value (issue #101).
+        org.junit.jupiter.params.provider.Arguments.of(
+            "SQL_MYSQL", SQL_MYSQL, "SELECT id, name FROM users WHERE active AND enabled"),
         org.junit.jupiter.params.provider.Arguments.of(
             "LDAP", LDAP, "no parentheses or comparison operators here at all"),
         org.junit.jupiter.params.provider.Arguments.of(
