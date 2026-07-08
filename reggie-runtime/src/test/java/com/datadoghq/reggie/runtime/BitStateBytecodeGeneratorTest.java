@@ -265,6 +265,100 @@ public class BitStateBytecodeGeneratorTest {
   }
 
   @Test
+  public void testNegativeOverlappingLeadingWsAndMandatoryCharSetsFallsBackWithoutCrashing() {
+    // Mirror of the separator-overlap case above, but the overlap is on leadingWsCharSet instead
+    // (separatorCharSet here is \s+, disjoint from mandatory [a-z]) - exercises the other half of
+    // the detector's disjointness OR-check.
+    String pattern = "^(?:[a-z]*(?:123|456)\\s+)?[a-z]{3,}(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "abc123 def");
+    assertMatchesLikeJdk(matcher, jdk, "abcdef");
+  }
+
+  @Test
+  public void testNegativeLazyOptionalPrefixFallsBackWithoutCrashing() {
+    // Lazy `??` on the optional prefix group: the detector must decline rather than treat it as
+    // greedy, since the generator always emits a maximal-match attempt for the prefix.
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s+)??\\b\\S+\\b\\s*(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo ls -la");
+    assertMatchesLikeJdk(matcher, jdk, "ls");
+  }
+
+  @Test
+  public void testNegativeLazySeparatorFallsBackWithoutCrashing() {
+    // Lazy `+?` on the separator quantifier.
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s+?)?\\b\\S+\\b\\s*(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo ls -la");
+    assertMatchesLikeJdk(matcher, jdk, "ls");
+  }
+
+  @Test
+  public void testNegativeLazyMandatoryScanFallsBackWithoutCrashing() {
+    // Lazy `+?` on the mandatory scan - the generator's maximal-scan assumption would silently
+    // over-match without this guard (this is the exact g-3 example from the review finding).
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+?\\b\\s*(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo ls -la");
+    assertMatchesLikeJdk(matcher, jdk, "hello world");
+  }
+
+  @Test
+  public void testNegativeLazyTrailingWhitespaceFallsBackWithoutCrashing() {
+    // Lazy `*?` on the trailing whitespace absorbed before the tail capture group.
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*?(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo   ls -la");
+    assertMatchesLikeJdk(matcher, jdk, "ls");
+  }
+
+  @Test
+  public void testNegativeLazyTailCaptureFallsBackWithoutCrashing() {
+    // Lazy `*?` on the tail capture group itself.
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.*?)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo ls -la");
+    assertMatchesLikeJdk(matcher, jdk, "ls");
+  }
+
+  @Test
+  public void testNegativeBoundedLeadingWhitespaceFallsBackWithoutCrashing() {
+    // Bounded max (`{0,3}`) on the leading-whitespace-trim quantifier ahead of the keyword.
+    String pattern = "^(?:\\s{0,3}(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "   sudo ls -la");
+    assertMatchesLikeJdk(matcher, jdk, "ls");
+  }
+
+  @Test
+  public void testNegativeBoundedTrailingWhitespaceFallsBackWithoutCrashing() {
+    // Bounded max (`{0,3}`) on the trailing whitespace absorbed before the tail capture group.
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s{0,3}(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo    ls -la");
+    assertMatchesLikeJdk(matcher, jdk, "ls");
+  }
+
+  @Test
+  public void testNegativeBoundedTailCaptureFallsBackWithoutCrashing() {
+    // Bounded max (`{0,5}`) on the tail capture group itself, not an unbounded `.*`.
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.{0,5})";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo ls");
+    assertMatchesLikeJdk(matcher, jdk, "ls abcdefgh");
+  }
+
+  @Test
   public void testNegativeNoTrailingCapturingGroupFallsBackWithoutCrashing() {
     // No capturing group around the tail at all; must not route to BITSTATE_BYTECODE. Compares
     // only matches()/group(0) since there is no group 1 to compare.
