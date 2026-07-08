@@ -665,6 +665,15 @@ Pattern Analysis Decision Tree:
 └─ Unsupported features? ─────────────────────► Compile-time error
 ```
 
+Beyond this top-level routing, some structural shapes get a dedicated fast path instead of a
+general-purpose engine. For example, `BITSTATE_BYTECODE` recognizes patterns of the form
+`^(?:leadingWs(kw1|kw2|...)separatorWs)?mandatoryCharSet+trailingWs*(tail)` (an optional
+prefix keyword plus a mandatory scan and tail — e.g. shell-command-style patterns) and
+compiles them to straight-line, non-backtracking bytecode rather than routing through the
+general `BITSTATE_CAPTURE` interpreter. See
+[doc/2026-07-08-bitstate-bytecode-generator-design.md](doc/2026-07-08-bitstate-bytecode-generator-design.md)
+for the design rationale.
+
 ### Generated Code Examples
 
 #### Literal Pattern (`hello`)
