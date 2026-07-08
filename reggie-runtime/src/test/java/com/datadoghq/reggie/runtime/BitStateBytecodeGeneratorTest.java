@@ -359,6 +359,25 @@ public class BitStateBytecodeGeneratorTest {
   }
 
   @Test
+  public void testNegativeBoundedSeparatorFallsBackWithoutCrashing() {
+    // The separator quantifier is `\s{1,3}` (bounded max), not `\s+`: the generator only stores
+    // separatorMin and emits an unbounded greedy scan, so allowing this shape would let the
+    // generated matcher consume past JDK's upper bound. On "sudo    ls" (four spaces), JDK cannot
+    // take the prefix beyond the 3-space limit and falls back to matching "sudo" as the mandatory
+    // token, while an ungated generator would consume all four spaces as the separator and match
+    // "ls" as the mandatory token instead - a different group 1. The detector must reject this
+    // shape rather than route to BITSTATE_BYTECODE. (Two keywords are required here so
+    // extractDisjointKeywords's alternation shape actually qualifies the pattern for the
+    // optional-prefix detection path in the first place.)
+    String pattern = "^(?:\\s*(?:sudo|doas)\\s{1,3})?\\b\\S+\\b\\s*(.*)";
+    ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+    Pattern jdk = Pattern.compile(pattern);
+    assertMatchesLikeJdk(matcher, jdk, "sudo    ls");
+    assertMatchesLikeJdk(matcher, jdk, "sudo ls");
+    assertMatchesLikeJdk(matcher, jdk, "ls");
+  }
+
+  @Test
   public void testNegativeNoTrailingCapturingGroupFallsBackWithoutCrashing() {
     // No capturing group around the tail at all; must not route to BITSTATE_BYTECODE. Compares
     // only matches()/group(0) since there is no group 1 to compare.

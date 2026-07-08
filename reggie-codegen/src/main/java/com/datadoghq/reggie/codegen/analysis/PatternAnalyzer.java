@@ -8762,7 +8762,14 @@ public class PatternAnalyzer {
             int sepMin = 0;
             if (lws != null && kws != null && innerChildren.get(2) instanceof QuantifierNode) {
               QuantifierNode sepQuant = (QuantifierNode) innerChildren.get(2);
-              if (sepQuant.min >= 1 && sepQuant.greedy && sepQuant.child instanceof CharClassNode) {
+              // max must be unbounded: the generator only stores separatorMin and emits an
+              // unbounded greedy scan, so a bounded separator (e.g. \s{1,3}) would let the
+              // generated matcher over-consume past JDK's upper bound, diverging on inputs like
+              // "sudo    ls" (four spaces) vs. the pattern's \s{1,3}.
+              if (sepQuant.min >= 1
+                  && sepQuant.max == -1
+                  && sepQuant.greedy
+                  && sepQuant.child instanceof CharClassNode) {
                 sep = effectiveCharSet((CharClassNode) sepQuant.child);
                 sepMin = sepQuant.min;
               }
