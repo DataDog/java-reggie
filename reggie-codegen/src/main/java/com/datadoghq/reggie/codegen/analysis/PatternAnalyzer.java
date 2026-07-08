@@ -324,6 +324,31 @@ public class PatternAnalyzer {
     replaced.hasAtomicGroups = result.hasAtomicGroups;
     replaced.lazyNfa = result.lazyNfa;
     replaced.guardTrace.addAll(result.guardTrace);
+
+    // Second substitution: narrower than BITSTATE_CAPTURE eligibility. Patterns matching the
+    // "prefix-guarded scan" structural family (see doc/2026-07-08-bitstate-bytecode-generator-
+    // design.md) can be compiled to pure straight-line, always-native bytecode instead of the
+    // BitState interpreter.
+    PrefixGuardedScanInfo prefixGuardedScanInfo = detectPrefixGuardedScan(ast);
+    if (prefixGuardedScanInfo != null) {
+      MatchingStrategyResult bytecodeResult =
+          new MatchingStrategyResult(
+              MatchingStrategy.BITSTATE_BYTECODE,
+              replaced.dfa,
+              prefixGuardedScanInfo,
+              replaced.useTaggedDFA,
+              replaced.requiredLiterals,
+              replaced.lookaheadGreedyInfo,
+              replaced.usePosixLastMatch);
+      bytecodeResult.alternationPriorityConflict = replaced.alternationPriorityConflict;
+      bytecodeResult.captureAmbiguous = replaced.captureAmbiguous;
+      bytecodeResult.anchorConditionDiluted = replaced.anchorConditionDiluted;
+      bytecodeResult.hasAtomicGroups = replaced.hasAtomicGroups;
+      bytecodeResult.lazyNfa = replaced.lazyNfa;
+      bytecodeResult.guardTrace.addAll(replaced.guardTrace);
+      return bytecodeResult;
+    }
+
     return replaced;
   }
 
@@ -3353,6 +3378,16 @@ public class PatternAnalyzer {
      * doc/2026-07-03-bitstate-capture-engine-design.md).
      */
     BITSTATE_CAPTURE,
+
+    /**
+     * Always-native, pure straight-line bytecode for the narrow "prefix-guarded scan" structural
+     * family recognized by {@link #detectPrefixGuardedScan}: an optional lookahead-disjoint
+     * literal-keyword prefix, a mandatory backtrack-free scan, and an unconstrained trailing {@code
+     * .*}-style capture. Selected instead of {@link #BITSTATE_CAPTURE} by {@link #routeBitState}
+     * when the pattern matches this shape (see
+     * doc/2026-07-08-bitstate-bytecode-generator-design.md).
+     */
+    BITSTATE_BYTECODE,
 
     /** PikeVM NFA-with-capture: O(n·m) native group extraction, leftmost-greedy, ReDoS-safe. */
     PIKEVM_CAPTURE
@@ -7048,6 +7083,103 @@ public class PatternAnalyzer {
   }
 
   /**
+   * Information about a "prefix-guarded scan" pattern recognized by {@link
+   * #detectPrefixGuardedScan}: {@code ^(?:leadingWs(?:keyword1|keyword2|...)separatorWs)?
+   * \b?mandatoryCharSet+\b?trailingWs*(tailCharSet*)}, e.g. the IAST {@code COMMAND} pattern {@code
+   * (?s)(?m)^(?:\s*(?:sudo|doas)\s+)?\b\S+\b\s*(.*)}. See
+   * doc/2026-07-08-bitstate-bytecode-generator-design.md.
+   */
+  public static class PrefixGuardedScanInfo implements PatternInfo {
+    // Optional prefix group fields (step 2 of the detector); all null/unset when the optional
+    // group is absent from the pattern.
+    public final CharSet leadingWsCharSet; // null if optional group absent
+    public final List<String> keywords; // null if optional group absent
+    public final CharSet separatorCharSet; // null if optional group absent
+    public final int separatorMin; // min repetitions of separatorCharSet; unset (0) if absent
+
+    // Mandatory backtrack-free scan (step 4); always present.
+    public final CharSet mandatoryCharSet;
+    public final int mandatoryMin;
+
+    // Whether steps 3/5's optional \b anchors (immediately before/after the mandatory scan) were
+    // present in the source pattern. These are NOT redundant with the mandatory scan's greedy
+    // stopping point in general (e.g. \S+ can stop on a non-word character, in which case a
+    // required trailing \b needs the generator to give back characters — see
+    // BitStateBytecodeGenerator's matchMandatory), so the generator must know whether to enforce
+    // them at all.
+    public final boolean leadingWordBoundary;
+    public final boolean trailingWordBoundary;
+
+    // Optional trailing whitespace (step 6); null if absent.
+    public final CharSet trailingCharSet;
+
+    // Trailing capturing group (step 7); always present.
+    public final CharSet tailCharSet;
+    public final int tailGroupNumber;
+
+    // Whether the leading ^ anchor (step 1) was declared multiline, i.e. (?m)^.
+    public final boolean multiline;
+
+    public PrefixGuardedScanInfo(
+        CharSet leadingWsCharSet,
+        List<String> keywords,
+        CharSet separatorCharSet,
+        int separatorMin,
+        CharSet mandatoryCharSet,
+        int mandatoryMin,
+        boolean leadingWordBoundary,
+        boolean trailingWordBoundary,
+        CharSet trailingCharSet,
+        CharSet tailCharSet,
+        int tailGroupNumber,
+        boolean multiline) {
+      this.leadingWsCharSet = leadingWsCharSet;
+      this.keywords = keywords;
+      this.separatorCharSet = separatorCharSet;
+      this.separatorMin = separatorMin;
+      this.mandatoryCharSet = mandatoryCharSet;
+      this.mandatoryMin = mandatoryMin;
+      this.leadingWordBoundary = leadingWordBoundary;
+      this.trailingWordBoundary = trailingWordBoundary;
+      this.trailingCharSet = trailingCharSet;
+      this.tailCharSet = tailCharSet;
+      this.tailGroupNumber = tailGroupNumber;
+      this.multiline = multiline;
+    }
+
+    /**
+     * True when the pattern has the optional {@code (?:leadingWs(?:kw1|kw2|...)separatorWs)?}
+     * prefix.
+     */
+    public boolean hasOptionalPrefix() {
+      return keywords != null;
+    }
+
+    @Override
+    public int structuralHashCode() {
+      int hash = getClass().getName().hashCode();
+      hash = 31 * hash + (leadingWsCharSet != null ? leadingWsCharSet.hashCode() : 0);
+      if (keywords != null) {
+        hash = 31 * hash + keywords.size();
+        for (String keyword : keywords) {
+          hash = 31 * hash + keyword.hashCode();
+        }
+      }
+      hash = 31 * hash + (separatorCharSet != null ? separatorCharSet.hashCode() : 0);
+      hash = 31 * hash + separatorMin;
+      hash = 31 * hash + mandatoryCharSet.hashCode();
+      hash = 31 * hash + mandatoryMin;
+      hash = 31 * hash + (leadingWordBoundary ? 1 : 0);
+      hash = 31 * hash + (trailingWordBoundary ? 1 : 0);
+      hash = 31 * hash + (trailingCharSet != null ? trailingCharSet.hashCode() : 0);
+      hash = 31 * hash + tailCharSet.hashCode();
+      hash = 31 * hash + tailGroupNumber;
+      hash = 31 * hash + (multiline ? 1 : 0);
+      return hash;
+    }
+  }
+
+  /**
    * Information about pure literal alternation patterns like keyword1|keyword2|...|keywordN. These
    * patterns can be optimized using trie-based matching instead of DFA state machines.
    */
@@ -8583,6 +8715,224 @@ public class PatternAnalyzer {
     }
 
     return new ConcatQuantifiedGroupsInfo(groups);
+  }
+
+  /**
+   * Detect the "prefix-guarded scan" structural family: {@code
+   * ^(?:leadingWs(?:keyword1|keyword2|...)separatorWs)?\b?mandatoryCharSet+\b?trailingWs*(tailCharSet*)}.
+   * See {@link PrefixGuardedScanInfo} and doc/2026-07-08-bitstate-bytecode-generator-design.md §4a
+   * for the exact shape and rationale. Returns {@code null} if {@code ast} does not match this
+   * shape exactly (any deviation declines eligibility rather than guessing).
+   */
+  private PrefixGuardedScanInfo detectPrefixGuardedScan(RegexNode ast) {
+    if (!(ast instanceof ConcatNode)) {
+      return null;
+    }
+    List<RegexNode> children = ((ConcatNode) ast).children;
+    int idx = 0;
+
+    // Step 1 (required): leading ^ anchor.
+    if (idx >= children.size() || !(children.get(idx) instanceof AnchorNode)) {
+      return null;
+    }
+    AnchorNode startAnchor = (AnchorNode) children.get(idx);
+    if (startAnchor.type != AnchorNode.Type.START) {
+      return null;
+    }
+    boolean multiline = startAnchor.multiline;
+    idx++;
+
+    // Step 2 (optional): (?:leadingWs(?:kw1|kw2|...)separatorWs)?
+    CharSet leadingWsCharSet = null;
+    List<String> keywords = null;
+    CharSet separatorCharSet = null;
+    int separatorMin = 0;
+    if (idx < children.size()
+        && children.get(idx) instanceof QuantifierNode
+        && ((QuantifierNode) children.get(idx)).greedy) {
+      QuantifierNode optQuant = (QuantifierNode) children.get(idx);
+      if (optQuant.min == 0 && optQuant.max == 1 && optQuant.child instanceof GroupNode) {
+        GroupNode optGroup = (GroupNode) optQuant.child;
+        if (!optGroup.capturing && optGroup.child instanceof ConcatNode) {
+          List<RegexNode> innerChildren = ((ConcatNode) optGroup.child).children;
+          if (innerChildren.size() == 3) {
+            CharSet lws = extractLeadingCharSet(innerChildren.get(0));
+            List<String> kws = lws != null ? extractDisjointKeywords(innerChildren.get(1)) : null;
+            CharSet sep = null;
+            int sepMin = 0;
+            if (lws != null && kws != null && innerChildren.get(2) instanceof QuantifierNode) {
+              QuantifierNode sepQuant = (QuantifierNode) innerChildren.get(2);
+              if (sepQuant.min >= 1 && sepQuant.greedy && sepQuant.child instanceof CharClassNode) {
+                sep = effectiveCharSet((CharClassNode) sepQuant.child);
+                sepMin = sepQuant.min;
+              }
+            }
+            if (lws != null && kws != null && sep != null) {
+              leadingWsCharSet = lws;
+              keywords = kws;
+              separatorCharSet = sep;
+              separatorMin = sepMin;
+              idx++; // consume the whole optional group — shape matched
+            }
+          }
+        }
+      }
+      // Shape didn't match: leave idx unchanged, the optional element is simply absent.
+    }
+
+    // Step 3 (optional): \b
+    int idxBeforeStep3 = idx;
+    idx = skipOptionalWordBoundary(children, idx);
+    boolean leadingWordBoundary = idx != idxBeforeStep3;
+
+    // Step 4 (required): mandatory backtrack-free scan charset+
+    if (idx >= children.size() || !(children.get(idx) instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode mandatoryQuant = (QuantifierNode) children.get(idx);
+    // max must be unbounded (+): the generator's greedy scan (and its bounded trailing-\b
+    // give-back correction) assumes there is no upper bound to respect while consuming.
+    if (mandatoryQuant.min < 1
+        || mandatoryQuant.max != -1
+        || !mandatoryQuant.greedy
+        || !(mandatoryQuant.child instanceof CharClassNode)) {
+      return null;
+    }
+    CharSet mandatoryCharSet = effectiveCharSet((CharClassNode) mandatoryQuant.child);
+    int mandatoryMin = mandatoryQuant.min;
+    idx++;
+
+    // The generator's optional prefix match is a straight-line, non-backtracking attempt: it
+    // either consumes the whole prefix (leadingWs + keyword + separator) or none of it. If
+    // leadingWs/separator can consume characters that mandatoryCharSet also accepts, the greedy
+    // separator scan can over-consume what the mandatory scan needs, with no way to give
+    // characters back except discarding the entire prefix (including the already-matched
+    // keyword) — a silent false negative vs. JDK. Decline rather than guess.
+    if (keywords != null
+        && (leadingWsCharSet.intersects(mandatoryCharSet)
+            || separatorCharSet.intersects(mandatoryCharSet))) {
+      return null;
+    }
+
+    // Step 5 (optional): \b
+    int idxBeforeStep5 = idx;
+    idx = skipOptionalWordBoundary(children, idx);
+    boolean trailingWordBoundary = idx != idxBeforeStep5;
+
+    // Step 6 (optional): trailing whitespace*
+    CharSet trailingCharSet = null;
+    if (idx < children.size() && children.get(idx) instanceof QuantifierNode) {
+      QuantifierNode trailingQuant = (QuantifierNode) children.get(idx);
+      if (trailingQuant.min == 0
+          && trailingQuant.max == -1
+          && trailingQuant.greedy
+          && trailingQuant.child instanceof CharClassNode) {
+        trailingCharSet = effectiveCharSet((CharClassNode) trailingQuant.child);
+        idx++;
+      }
+    }
+
+    // Step 7 (required): trailing capturing group must be the LAST child.
+    if (idx != children.size() - 1) {
+      return null;
+    }
+    RegexNode last = children.get(idx);
+    if (!(last instanceof GroupNode)) {
+      return null;
+    }
+    GroupNode tailGroup = (GroupNode) last;
+    if (!tailGroup.capturing || !(tailGroup.child instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode tailQuant = (QuantifierNode) tailGroup.child;
+    if (tailQuant.min != 0
+        || tailQuant.max != -1
+        || !tailQuant.greedy
+        || !(tailQuant.child instanceof CharClassNode)) {
+      return null;
+    }
+    CharSet tailCharSet = effectiveCharSet((CharClassNode) tailQuant.child);
+    if (!tailCharSet.equals(CharSet.ANY) && !tailCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE)) {
+      return null;
+    }
+
+    return new PrefixGuardedScanInfo(
+        leadingWsCharSet,
+        keywords,
+        separatorCharSet,
+        separatorMin,
+        mandatoryCharSet,
+        mandatoryMin,
+        leadingWordBoundary,
+        trailingWordBoundary,
+        trailingCharSet,
+        tailCharSet,
+        tailGroup.groupNumber,
+        multiline);
+  }
+
+  /** Resolves a {@link CharClassNode}'s effective runtime {@link CharSet}, applying negation. */
+  private CharSet effectiveCharSet(CharClassNode node) {
+    return node.negated ? node.chars.complement() : node.chars;
+  }
+
+  /** Step 2 element [0]: {@code QuantifierNode(min=0, CharClassNode)} — leading whitespace-trim. */
+  private CharSet extractLeadingCharSet(RegexNode node) {
+    if (!(node instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode quant = (QuantifierNode) node;
+    if (quant.min != 0
+        || quant.max != -1
+        || !quant.greedy
+        || !(quant.child instanceof CharClassNode)) {
+      return null;
+    }
+    return effectiveCharSet((CharClassNode) quant.child);
+  }
+
+  /**
+   * Step 2 element [1]: {@code GroupNode(non-capturing)} wrapping an {@link AlternationNode} whose
+   * alternatives are all pure literal keywords, pairwise distinct in their first character. This
+   * uniqueness lets {@link com.datadoghq.reggie.codegen.codegen.BitStateBytecodeGenerator} tell
+   * keywords apart from a single input character with no ambiguity, even though the generator
+   * currently implements the actual per-keyword check as a chain of full-literal comparisons rather
+   * than a first-character dispatch.
+   */
+  private List<String> extractDisjointKeywords(RegexNode node) {
+    if (!(node instanceof GroupNode)) {
+      return null;
+    }
+    GroupNode group = (GroupNode) node;
+    if (group.capturing || !(group.child instanceof AlternationNode)) {
+      return null;
+    }
+    List<String> keywords = new ArrayList<>();
+    Set<Character> firstChars = new HashSet<>();
+    for (RegexNode alternative : ((AlternationNode) group.child).alternatives) {
+      String keyword = extractLiteralString(alternative);
+      if (keyword == null || keyword.isEmpty()) {
+        return null;
+      }
+      if (!firstChars.add(keyword.charAt(0))) {
+        return null; // Two keywords share a first character — not first-char dispatchable.
+      }
+      keywords.add(keyword);
+    }
+    if (keywords.isEmpty()) {
+      return null;
+    }
+    return keywords;
+  }
+
+  /** Consumes an optional {@code \b} (word boundary) anchor at {@code idx}, if present. */
+  private int skipOptionalWordBoundary(List<RegexNode> children, int idx) {
+    if (idx < children.size()
+        && children.get(idx) instanceof AnchorNode
+        && ((AnchorNode) children.get(idx)).type == AnchorNode.Type.WORD_BOUNDARY) {
+      return idx + 1;
+    }
+    return idx;
   }
 
   /**

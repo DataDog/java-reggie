@@ -249,6 +249,15 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
+    // BITSTATE_BYTECODE: the prefix-guarded-scan family detected by
+    // PatternAnalyzer#detectPrefixGuardedScan, substituted in for BITSTATE_CAPTURE. "a!" exercises
+    // the bounded backward give-back scan for the required trailing \b after the greedy \S+ (see
+    // BitStateBytecodeGenerator#generateMatchMandatoryMethod).
+    m.put(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_BYTECODE,
+        new Spec(
+            "(?s)(?m)^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.*)",
+            List.of("sudo ls -la", "a!", "!!!", "", "héllo")));
 
     return m;
   }

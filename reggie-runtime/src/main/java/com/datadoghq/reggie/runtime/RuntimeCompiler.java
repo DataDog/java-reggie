@@ -44,6 +44,7 @@ import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.codegen.BackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.BitParallelGlushkovBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.BitStateBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatGreedyGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.ConcatQuantifiedGroupsBytecodeGenerator;
@@ -998,6 +999,14 @@ public class RuntimeCompiler {
         greedyGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         greedyGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         greedyGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case BITSTATE_BYTECODE:
+        PatternAnalyzer.PrefixGuardedScanInfo prefixGuardedInfo =
+            (PatternAnalyzer.PrefixGuardedScanInfo) result.patternInfo;
+        BitStateBytecodeGenerator bitStateGen =
+            new BitStateBytecodeGenerator(prefixGuardedInfo, nfa.getGroupCount());
+        bitStateGen.generateAll(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case SPECIALIZED_MULTI_GROUP_GREEDY:
