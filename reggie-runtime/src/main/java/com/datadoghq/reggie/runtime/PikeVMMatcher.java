@@ -566,7 +566,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * cannot begin a match (otherwise skipping never fires and the per-position check is pure
    * overhead).
    */
-  private static boolean computeFirstByteFilter(NFA nfa, boolean[] firstByteAscii) {
+  static boolean computeFirstByteFilter(NFA nfa, boolean[] firstByteAscii) {
     java.util.Set<Integer> seen = new java.util.HashSet<>();
     java.util.ArrayDeque<NFA.NFAState> q = new java.util.ArrayDeque<>();
     NFA.NFAState start = nfa.getStartState();
