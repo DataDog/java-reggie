@@ -354,6 +354,21 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
+  void testBitStateBytecodeStrategy() throws Exception {
+    // Prefix-guarded-scan shape recognized by PatternAnalyzer#detectPrefixGuardedScan; exercises
+    // the compile-time BITSTATE_BYTECODE dispatch case (com.datadoghq.reggie.codegen.codegen.
+    // BitStateBytecodeGenerator), separate from the runtime dispatch path covered by
+    // BitStateBytecodeGeneratorTest in reggie-runtime.
+    Object matcher =
+        compile("(?s)(?m)^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.*)", "CommandMatcher");
+    Method matches = matcher.getClass().getMethod("matches", String.class);
+    assertTrue((Boolean) matches.invoke(matcher, "ls -la"));
+    assertTrue((Boolean) matches.invoke(matcher, "sudo ls -la"));
+    assertTrue((Boolean) matches.invoke(matcher, "doas rm -rf /"));
+    assertFalse((Boolean) matches.invoke(matcher, "   "));
+  }
+
+  @Test
   void testSpecializedMultipleLookaheadsStrategyNative() throws Exception {
     // SPECIALIZED_MULTIPLE_LOOKAHEADS is now NATIVE (Wave 3 fixed the lookahead boolean engine).
     Object matcher = compile("(?=.*[A-Z])(?=.*\\d).{8,}", "MultipleLookaheadsMatcher");

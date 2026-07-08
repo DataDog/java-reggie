@@ -32,6 +32,7 @@ import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.codegen.BackreferenceBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.BitStateBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
@@ -344,6 +345,14 @@ public class ReggieMatcherBytecodeGenerator {
         multiGroupGen.generateMatchFromPositionMethod(cw, getJavaClassName());
         multiGroupGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         multiGroupGen.generateTryMatchBoundsFromPositionMethod(cw, getJavaClassName());
+        break;
+
+      case BITSTATE_BYTECODE:
+        PatternAnalyzer.PrefixGuardedScanInfo prefixGuardedInfo =
+            (PatternAnalyzer.PrefixGuardedScanInfo) result.patternInfo;
+        BitStateBytecodeGenerator bitStateGen =
+            new BitStateBytecodeGenerator(prefixGuardedInfo, nfa.getGroupCount());
+        bitStateGen.generateAll(cw, getJavaClassName());
         break;
 
       case SPECIALIZED_FIXED_SEQUENCE:

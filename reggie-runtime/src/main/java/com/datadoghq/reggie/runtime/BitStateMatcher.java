@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import java.util.Arrays;
 import java.util.Collections;
@@ -72,6 +73,14 @@ final class BitStateMatcher extends ReggieMatcher {
   private final NFA.NFAState[] statesById;
   private final boolean[] isAccept;
 
+  // Flattened per-state transition tables, built once here so the hot DFS loop never calls
+  // NFAState.getEpsilonTransitions()/getTransitions() (each allocates a fresh
+  // Collections.unmodifiableList wrapper per call). Indexed by state id, in the same Perl
+  // priority order as the underlying NFAState lists.
+  private final int[][] epsilonTargets;
+  private final CharSet[][] transitionCharSets;
+  private final int[][] transitionTargets;
+
   // Input-independent structures, preallocated once (design §5): live capture slots and the
   // winning snapshot. Sized 2 * (groupCount + 1): slot 2*g is group g's start, 2*g+1 its end.
   private final int[] caps;
@@ -111,6 +120,31 @@ final class BitStateMatcher extends ReggieMatcher {
     isAccept = new boolean[stateCount];
     for (NFA.NFAState s : nfa.getAcceptStates()) {
       isAccept[s.id] = true;
+    }
+
+    epsilonTargets = new int[stateCount][];
+    transitionCharSets = new CharSet[stateCount][];
+    transitionTargets = new int[stateCount][];
+    for (int i = 0; i < stateCount; i++) {
+      NFA.NFAState s = statesById[i];
+
+      List<NFA.NFAState> eps = s.getEpsilonTransitions();
+      int[] epsIds = new int[eps.size()];
+      for (int j = 0; j < epsIds.length; j++) {
+        epsIds[j] = eps.get(j).id;
+      }
+      epsilonTargets[i] = epsIds;
+
+      List<NFA.Transition> trans = s.getTransitions();
+      CharSet[] charSets = new CharSet[trans.size()];
+      int[] targets = new int[trans.size()];
+      for (int j = 0; j < charSets.length; j++) {
+        NFA.Transition t = trans.get(j);
+        charSets[j] = t.chars;
+        targets[j] = t.target.id;
+      }
+      transitionCharSets[i] = charSets;
+      transitionTargets[i] = targets;
     }
 
     int slotCount = 2 * (groupCount + 1);
@@ -322,7 +356,7 @@ final class BitStateMatcher extends ReggieMatcher {
         // find/findFrom semantics: ^/\A never fire at a findFrom(start>0) offset, only at true
         // input start.
         if (!PikeVMMatcher.checkAnchor(s.anchor, input, pos, 0, spanEnd)) continue;
-        pushEpsilonChildrenReversed(s, pos);
+        pushEpsilonChildrenReversed(sid, pos);
         continue;
       }
 
@@ -345,20 +379,20 @@ final class BitStateMatcher extends ReggieMatcher {
         return true;
       }
 
-      List<NFA.NFAState> epsilons = s.getEpsilonTransitions();
-      if (!epsilons.isEmpty()) {
-        pushEpsilonChildrenReversed(s, pos);
+      int[] eps = epsilonTargets[sid];
+      if (eps.length != 0) {
+        pushEpsilonChildrenReversed(sid, pos);
         continue;
       }
 
       // Consuming leaf.
       if (pos < spanEnd) {
         char ch = input.charAt(pos);
-        List<NFA.Transition> transitions = s.getTransitions();
-        for (int i = transitions.size() - 1; i >= 0; i--) {
-          NFA.Transition tr = transitions.get(i);
-          if (tr.chars.contains(ch)) {
-            pushExpand(tr.target.id, pos + 1);
+        CharSet[] charSets = transitionCharSets[sid];
+        int[] targets = transitionTargets[sid];
+        for (int i = charSets.length - 1; i >= 0; i--) {
+          if (charSets[i].contains(ch)) {
+            pushExpand(targets[i], pos + 1);
           }
         }
       }
@@ -366,11 +400,11 @@ final class BitStateMatcher extends ReggieMatcher {
     return false;
   }
 
-  /** Pushes {@code state}'s epsilon children in reverse priority order (highest pops first). */
-  private void pushEpsilonChildrenReversed(NFA.NFAState state, int pos) {
-    List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
-    for (int i = epsilons.size() - 1; i >= 0; i--) {
-      pushExpand(epsilons.get(i).id, pos);
+  /** Pushes {@code sid}'s epsilon children in reverse priority order (highest pops first). */
+  private void pushEpsilonChildrenReversed(int sid, int pos) {
+    int[] eps = epsilonTargets[sid];
+    for (int i = eps.length - 1; i >= 0; i--) {
+      pushExpand(eps[i], pos);
     }
   }
 
