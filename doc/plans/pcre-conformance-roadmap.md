@@ -119,13 +119,14 @@ When starting a new session to work on PCRE conformance:
 
 This category has two distinct root causes:
 
-**2a. Architectural ceiling — declined by design**:
+**2a. Real bug — declines to compile, fixable**:
 - `(|ab)*?d` on "abd" — `RECURSIVE_DESCENT` throws `UnsupportedPatternException`: *"lazy
   quantifier: requires shortest-match semantics not supported by this strategy"*. The
   zero-width-alternative + lazy-quantifier combination requires trying the shortest match first
-  and backing off, which this strategy family declines rather than mishandles. A fix would mean
-  routing this shape to a PikeVM-backed strategy instead (see Engine Architecture above); no fix
-  exists yet.
+  and backing off, which this strategy family declines rather than mishandles. This is a regular
+  pattern with lazy capture semantics — a fix would mean routing this shape to a PikeVM-backed
+  strategy instead (see Engine Architecture above); this stays in the backlog rather than being
+  reclassified as an architectural ceiling.
 
 **2b. Real bug — compiles natively, wrong result**:
 - `^[ab]{1,3}?(ab*?|b)` on "aabbbbb" — routes to `BITSTATE_CAPTURE`, compiles without error, but
@@ -135,10 +136,9 @@ This category has two distinct root causes:
 - `^[ab]{1,3}?(ab*|b)`, `(?i)(a+|b){0,1}?`, `(([a-c])b*?\2){3}` — routing and pass/fail status not
   yet classified.
 
-**Difficulty**: 2a — not applicable (declined by design). 2b — Medium (existing strategy, wrong
-group-span logic).
-**Impact**: 2a's pattern belongs outside the pass-rate denominator (permanently declined); 2b's
-patterns are real +N candidates once classified.
+**Difficulty**: 2a — Medium (route to PikeVM-backed strategy). 2b — Medium (existing strategy,
+wrong group-span logic).
+**Impact**: both 2a's and 2b's patterns are real +N candidates, not permanently declined.
 
 ---
 
@@ -149,11 +149,13 @@ subroutine calls, so this category has two distinct root causes:
 
 **3a. Architectural ceiling — self-embedding recursion, declined by design**:
 - `^((.)(?1)\2|.?)$` (palindrome), `^(.|(.)(?1)\2)$`, `^(.|(.)(?1)?\2)$` — all three throw
-  `UnsupportedPatternException`: *"recursive subroutine requires intra-call backtracking: pattern
-  is context-free, not regular — use compileAllowingFallback() for JDK delegation"*. These
-  patterns describe balanced/palindromic structures — provably not regular languages.
-  `compileAllowingFallback()` is the correct and only answer for users who need this; no native fix
-  is possible without dropping the O(n) guarantee.
+  `UnsupportedPatternException`. These patterns describe balanced/palindromic structures —
+  provably not regular languages — so no native fix is possible without dropping the O(n)
+  guarantee. `compileAllowingFallback()` is *not* a usable workaround here: the fallback delegates
+  to `java.util.regex.Pattern`, which cannot parse PCRE subroutine syntax either (see
+  `NonLinearPatternRoutingTest.palindromeWithAllowFallback_propagatesJdkPatternSyntaxException`,
+  which asserts the fallback itself throws `PatternSyntaxException`). These patterns are simply
+  unsupported.
 
 **3b. Real bug — compiles natively**:
 - `^(a?)+b(?1)a`, `^(a?)b(?1)a` — both route to `RECURSIVE_DESCENT` without error (a simple,
@@ -516,7 +518,6 @@ ceiling and unwritten-but-writable syntax (see split above and below).
 |---------|--------|-------|
 | Branch reset groups (named) | ⚠️ Partial | `(?|(?'a'aaa)|(?'a'b))` — numbered form works via `RECURSIVE_DESCENT`; named-capture variant currently rejected at parse time with "Duplicate group name" (the parser's duplicate-name check runs before branch-reset dedup logic) |
 | Relative backrefs | ❌ unwritten | `(?-2)` — parser currently reports "Expected ':' or ')' after modifiers", i.e. it isn't recognized as a backref form at all yet; syntax sugar over absolute-index backrefs, which already work |
-| Scoped inline flags | ❌ unwritten | `(?i:...)` — global flags only |
 
 ### Remaining Failures (5 patterns compile natively, wrong result)
 

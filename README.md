@@ -572,8 +572,9 @@ Returns an instance of the generated implementation class.
 
 ## Supported Features
 
-**PCRE Compatibility: 100.0%** (54/54 tests passing on a curated common-patterns suite —
-email/URL/IP/phone/JSON-style patterns). On the full 364-entry PCRE conformance corpus
+**PCRE Compatibility: 97.5%** (115/118 test cases passing on a curated common-patterns suite —
+email/URL/IP/phone/JSON-style patterns; see `CorrectnessTest.testCommonPatterns`). On the full
+364-entry PCRE conformance corpus
 (`CorrectnessTest.testPCRECapturingGroups`), Reggie passes **98.1%** of the 262 cases it can
 evaluate; the remaining 102 entries use PCRE features not yet implemented (see
 [PCRE Conformance Roadmap](doc/plans/pcre-conformance-roadmap.md)).
