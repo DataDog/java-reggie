@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -22,6 +23,7 @@ import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -120,6 +122,44 @@ class BitStateFastRejectRegressionTest {
         name + ": test fixture bug — noMatchInput actually matches per java.util.regex");
 
     assertFalse(matcher.find(noMatchInput), name + ": BitStateMatcher.find() false positive");
+  }
+
+  @Test
+  void hasFastReject_isFalse_whenNeitherFilterApplies() throws Exception {
+    // (a|b)\1: a backreference means RejectDfaFactory.build() declines (see
+    // RejectDfaFactoryTest.returnsNull_whenNfaHasBackreference), and two distinct leading
+    // characters ('a' and 'b') mean the single-char indexOf prefilter doesn't apply either
+    // (PikeVMMatcher.computeFirstByteFilter requires exactly one qualifying byte) — the one
+    // combination where hasFastReject() must report false.
+    //
+    // No functional (find()) sanity check here: patterns with backreferences or assertions never
+    // reach BitStateMatcher through real routing (RejectDfaFactory's own assertion/backref guard
+    // exists precisely because this class's search() doesn't enforce either — confirmed directly:
+    // constructing one this way and calling find() produces JDK-diverging results, e.g. "(a|b)\1"
+    // wrongly matches "ab"). This test exists solely to exercise hasFastReject()'s false branch.
+    BitStateMatcher matcher = build("(a|b)\\1");
+    assertFalse(
+        matcher.hasFastReject(),
+        "expected neither the single-char prefilter nor the reject-DFA to apply");
+
+    // Also exercises findFrom()'s rejectDfa-null short-circuit (not exercised by
+    // findFrom_rejectsNoMatchSuffix_viaGeneralRejectDfa below, which needs rejectDfa non-null).
+    // Return value intentionally unchecked — see the comment above on why correctness isn't
+    // asserted for this pattern shape; this call only needs to not throw.
+    matcher.findFrom("xxaaxx", 0);
+  }
+
+  @Test
+  void findFrom_rejectsNoMatchSuffix_viaGeneralRejectDfa() throws Exception {
+    // cat|dog: two leading characters (no single-char prefilter), so any rejection here can only
+    // come from the general reject-DFA path in findFrom() — the branch this test targets.
+    BitStateMatcher matcher = build("cat|dog");
+    assertTrue(matcher.hasFastReject());
+
+    String input = "catxxxxxxx"; // "cat" only at [0,3); nothing after position 3 matches either
+    // branch.
+    assertEquals(0, matcher.findFrom(input, 0));
+    assertEquals(-1, matcher.findFrom(input, 3));
   }
 
   // Verbatim copy of BitStateMatcherTest's countGroups (kept in sync manually; both files build
