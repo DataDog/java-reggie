@@ -206,4 +206,33 @@ class OptionalGroupBackrefBugFixTest {
     assertEquals(-1, m.findFrom("aax", 0), "must NOT find a match — trailing 'x' violates $");
     assertEquals(0, m.findFrom("aa", 0));
   }
+
+  // --- Group-count cap (bytecode-size safety valve for the Bug 1 backtracking tree) ----------
+
+  @Test
+  void withinCap_routesToOptionalGroupBackref() throws Exception {
+    // Exactly 4 optional groups: at the cap, still accepted.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
+        routedStrategy("(a)?(b)?(c)?(d)?\\1\\2\\3\\4"));
+  }
+
+  @Test
+  void exceedsCap_isNotRoutedToOptionalGroupBackref_butStillMatchesCorrectlyWithFallback()
+      throws Exception {
+    // 5 optional groups: over the cap (generateGroupBacktrackTree is O(2^N) per pattern), so the
+    // detector rejects it. No other strategy currently handles this exact shape either, so it
+    // needs allowJdkFallback() — confirmed this is a loud UnsupportedOperationException without
+    // it, not a silent wrong answer.
+    String pattern = "(a)?(b)?(c)?(d)?(e)?\\1\\2\\3\\4\\5";
+    assertFalse(
+        routedStrategy(pattern) == PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
+        "5 optional groups must exceed the cap and be rejected");
+
+    ReggieMatcher m = Reggie.compile(pattern, WITH_FALLBACK);
+    Pattern jdk = Pattern.compile(pattern);
+    for (String in : new String[] {"abcdeabcde", "abcde", "aabb"}) {
+      assertEquals(jdk.matcher(in).matches(), m.matches(in), "\"" + in + "\"");
+    }
+  }
 }

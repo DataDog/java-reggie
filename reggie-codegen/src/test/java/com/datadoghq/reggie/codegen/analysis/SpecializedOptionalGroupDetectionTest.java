@@ -86,6 +86,17 @@ class SpecializedOptionalGroupDetectionTest {
   }
 
   @Test
+  void toStringIncludesKeyFields() throws Exception {
+    SpecializedOptionalGroupInfo info = detect("^(a)?b$");
+    String s = info.toString();
+    assertTrue(s.contains("groupNumber=1"), s);
+    assertTrue(s.contains("groupChar='a'"), s);
+    assertTrue(s.contains("suffixChar='b'"), s);
+    assertTrue(s.contains("hasStartAnchor=true"), s);
+    assertTrue(s.contains("hasEndAnchor=true"), s);
+  }
+
+  @Test
   void detectsStartAnchor() throws Exception {
     SpecializedOptionalGroupInfo info = detect("^(a)?b");
     assertNotNull(info);
@@ -183,5 +194,16 @@ class SpecializedOptionalGroupDetectionTest {
     // the group's 'a' and the suffix 'b') parses into a CharClassNode rather than a LiteralNode
     // (breaking the detector's LiteralNode-only content checks) - see the detector's javadoc.
     assertNull(detect("(?i)(a)?b"));
+  }
+
+  @Test
+  void rejectsStringEndNotAbsolute() throws Exception {
+    // \Z (STRING_END: end of string OR before a final line terminator) is deliberately not
+    // accepted as an end anchor here — only $ (END) and \z (STRING_END_ABSOLUTE) are, since \Z's
+    // "before a final newline" semantics differ from a hard end-of-string check. The trailing
+    // AnchorNode is then left unconsumed, so the detector's final idx==n check rejects the whole
+    // pattern (confirmed against JDK: "(a)?b\Z" matches "ab" but not "ab\n" — a hard end check
+    // would wrongly match neither the same way).
+    assertNull(detect("(a)?b\\Z"));
   }
 }
