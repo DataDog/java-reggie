@@ -778,6 +778,23 @@ public class PatternAnalyzer {
           requiredLiterals);
     }
 
+    // Check for the narrow "optional single-char group + single-char suffix" shape:
+    // (a)?b, ^(a)?b$, (?<x>a)?b. Backreference-free by construction (hasBackrefs guard below
+    // handles OPTIONAL_GROUP_BACKREF's overlapping-looking shape separately) - independent of
+    // detectOptionalGroupBackref, no shared parsing helper.
+    if (!hasBackrefs) {
+      SpecializedOptionalGroupInfo specOptGroupInfo = detectSpecializedOptionalGroup(ast);
+      if (specOptGroupInfo != null) {
+        addTrace("SPECIALIZED_OPTIONAL_GROUP", true);
+        return new MatchingStrategyResult(
+            MatchingStrategy.SPECIALIZED_OPTIONAL_GROUP,
+            null,
+            specOptGroupInfo,
+            false,
+            requiredLiterals);
+      }
+    }
+
     // Check for features requiring special handling
     if (hasBackrefs) {
       // Try to detect optional group backreference patterns: (a)?\1, ^(a)?(b)?\1\2$
@@ -3325,6 +3342,8 @@ public class PatternAnalyzer {
     SPECIALIZED_FIXED_SEQUENCE, // Fixed-length sequences: \d{3}-\d{3}-\d{4}, \d{4}-\d{2}-\d{2}
     SPECIALIZED_BOUNDED_QUANTIFIERS, // Bounded quantifier sequences:
     // \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3} (IPv4)
+    SPECIALIZED_OPTIONAL_GROUP, // Single-literal optional group + single-literal suffix,
+    // optional ^/$ anchors: (a)?b, ^(a)?b$
     LINEAR_BACKREFERENCE, // Linear patterns with backreferences (no alternation): (\w+)\s+\1,
     // (a+)b\1
     SPECIALIZED_BACKREFERENCE, // Hardcoded backreference patterns: <(\w+)>.*</\1>, \b(\w+)\s+\1\b
@@ -7458,6 +7477,88 @@ public class PatternAnalyzer {
     }
 
     return new BoundedQuantifierInfo(elements, minLen, maxLen, groupCounter[0]);
+  }
+
+  /**
+   * Detect the narrow {@code (anchor-start)? (optional-group) (suffix-literal-char) (anchor-end)?}
+   * shape: exactly one optional (min=0,max=1) capturing group whose entire content is a single
+   * literal char, immediately followed by a single literal char suffix, with no other content in
+   * the pattern. See {@code doc/2026-07-09-specialized-optional-group-fresh-implementation-plan.md}
+   * for the full scope rationale.
+   *
+   * <p>Returns {@code null} for anything outside this exact shape (no prefix, no char-class/string
+   * content, no more than one optional group, no backreferences) so the pattern falls through to
+   * whatever strategy already handles it correctly.
+   *
+   * <p>{@code CASE_INSENSITIVE} is excluded implicitly, not by an explicit flag check: {@link
+   * com.datadoghq.reggie.codegen.parsing.RegexParser} converts a case-varying literal letter into a
+   * {@link CharClassNode} (not a {@link LiteralNode}) whenever the modifier is active, so this
+   * method's {@code LiteralNode}-only checks below already reject those patterns structurally.
+   */
+  private SpecializedOptionalGroupInfo detectSpecializedOptionalGroup(RegexNode ast) {
+    if (hasBackreferences(ast)) {
+      return null;
+    }
+    if (!(ast instanceof ConcatNode)) {
+      return null;
+    }
+    List<RegexNode> children = ((ConcatNode) ast).children;
+    int idx = 0;
+    int n = children.size();
+
+    boolean hasStartAnchor = false;
+    if (idx < n && children.get(idx) instanceof AnchorNode) {
+      AnchorNode anchor = (AnchorNode) children.get(idx);
+      if (anchor.type == AnchorNode.Type.START || anchor.type == AnchorNode.Type.STRING_START) {
+        hasStartAnchor = true;
+        idx++;
+      }
+    }
+
+    if (idx >= n || !(children.get(idx) instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode quant = (QuantifierNode) children.get(idx);
+    if (quant.min != 0 || quant.max != 1) {
+      return null;
+    }
+    if (!(quant.child instanceof GroupNode)) {
+      return null;
+    }
+    GroupNode group = (GroupNode) quant.child;
+    if (!group.capturing) {
+      return null;
+    }
+    if (!(group.child instanceof LiteralNode)) {
+      return null;
+    }
+    int groupNumber = group.groupNumber;
+    char groupChar = ((LiteralNode) group.child).ch;
+    idx++;
+
+    if (idx >= n || !(children.get(idx) instanceof LiteralNode)) {
+      return null;
+    }
+    char suffixChar = ((LiteralNode) children.get(idx)).ch;
+    idx++;
+
+    boolean hasEndAnchor = false;
+    if (idx < n && children.get(idx) instanceof AnchorNode) {
+      AnchorNode anchor = (AnchorNode) children.get(idx);
+      if (anchor.type == AnchorNode.Type.END
+          || anchor.type == AnchorNode.Type.STRING_END_ABSOLUTE) {
+        hasEndAnchor = true;
+        idx++;
+      }
+    }
+
+    if (idx != n) {
+      // Unconsumed children (e.g. a prefix, a second optional group) - out of v1 scope.
+      return null;
+    }
+
+    return new SpecializedOptionalGroupInfo(
+        groupNumber, groupChar, suffixChar, hasStartAnchor, hasEndAnchor);
   }
 
   /**

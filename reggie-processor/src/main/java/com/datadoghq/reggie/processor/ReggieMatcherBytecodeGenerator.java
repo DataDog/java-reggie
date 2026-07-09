@@ -25,6 +25,7 @@ import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
+import com.datadoghq.reggie.codegen.analysis.SpecializedOptionalGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -50,6 +51,7 @@ import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
@@ -680,6 +682,19 @@ public class ReggieMatcherBytecodeGenerator {
         pinnedBackrefGen.generateFindMatchMethod(cw);
         pinnedBackrefGen.generateFindMatchFromMethod(cw);
         pinnedBackrefGen.generateMatchesBoundedMethod(cw);
+        break;
+
+      case SPECIALIZED_OPTIONAL_GROUP:
+        SpecializedOptionalGroupInfo specOptGroupInfo =
+            (SpecializedOptionalGroupInfo) result.patternInfo;
+        SpecializedOptionalGroupBytecodeGenerator specOptGroupGen =
+            new SpecializedOptionalGroupBytecodeGenerator(specOptGroupInfo, getJavaClassName());
+        specOptGroupGen.generateMatchesMethod(cw);
+        specOptGroupGen.generateFindMethod(cw);
+        specOptGroupGen.generateFindFromMethod(cw);
+        specOptGroupGen.generateMatchMethod(cw);
+        specOptGroupGen.generateFindMatchMethod(cw);
+        specOptGroupGen.generateFindMatchFromMethod(cw);
         break;
 
       case NESTED_QUANTIFIED_GROUPS:
