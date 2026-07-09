@@ -231,38 +231,6 @@ public class OptionalGroupBackrefBytecodeGenerator {
     }
 
     /**
-     * Generate stub for matchesBounded(CharSequence, int, int).
-     */
-    private void generateMatchesBoundedStubMethod(ClassWriter cw) {
-        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matchesBounded",
-            "(Ljava/lang/CharSequence;II)Z", null, null);
-        mv.visitCode();
-        mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-        mv.visitInsn(DUP);
-        mv.visitLdcInsn("matchesBounded() not yet implemented for OPTIONAL_GROUP_BACKREF strategy");
-        mv.visitMethodInsn(INVOKESPECIAL, "java/lang/UnsupportedOperationException", "<init>", "(Ljava/lang/String;)V", false);
-        mv.visitInsn(ATHROW);
-        mv.visitMaxs(3, 4);
-        mv.visitEnd();
-    }
-
-    /**
-     * Generate stub for matchBounded(CharSequence, int, int).
-     */
-    private void generateMatchBoundedStubMethod(ClassWriter cw) {
-        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;", null, null);
-        mv.visitCode();
-        mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-        mv.visitInsn(DUP);
-        mv.visitLdcInsn("matchBounded() not yet implemented for OPTIONAL_GROUP_BACKREF strategy");
-        mv.visitMethodInsn(INVOKESPECIAL, "java/lang/UnsupportedOperationException", "<init>", "(Ljava/lang/String;)V", false);
-        mv.visitInsn(ATHROW);
-        mv.visitMaxs(3, 4);
-        mv.visitEnd();
-    }
-
-    /**
      * Generate findMatch(String) that finds a match and returns MatchResult.
      *
      * For patterns with start anchor, this is equivalent to match().
@@ -521,9 +489,12 @@ public class OptionalGroupBackrefBytecodeGenerator {
             mv.visitVarInsn(ILOAD, posVar);
             mv.visitInsn(IASTORE);
         } else {
-            // No supported content form (shouldn't happen — detector only emits the two forms
-            // above): treat as always-absent.
-            mv.visitJumpInsn(GOTO, absentBranch);
+            // Unreachable: detectOptionalGroupBackref rejects any OptionalGroupEntry that is
+            // neither (isSingleChar && literalChar >= 0) nor literalString != null (Bug 4 fix),
+            // so every entry reaching codegen satisfies one of the two branches above.
+            throw new IllegalStateException(
+                "OptionalGroupEntry for group " + entry.groupNumber
+                    + " has neither a literal char nor a literal string — detector invariant violated");
         }
 
         // Present branch: content matched. Recurse; any downstream failure falls back to this
@@ -581,8 +552,11 @@ public class OptionalGroupBackrefBytecodeGenerator {
         for (BackrefEntry entry : info.backrefEntries) {
             Label backrefEnd = new Label();
             Label groupNotMatched = new Label();
+            // detectOptionalGroupBackref requires every backref to reference one of the
+            // optional groups ("All backrefs must reference optional groups"), so groupEntry is
+            // never null here.
             OptionalGroupEntry groupEntry = info.getGroupEntry(entry.groupNumber);
-            boolean alwaysCaptures = groupEntry != null && groupEntry.alwaysCaptures;
+            boolean alwaysCaptures = groupEntry.alwaysCaptures;
 
             // starts[groupNum] < 0 means group did not participate
             mv.visitVarInsn(ALOAD, startsVar);
@@ -760,22 +734,6 @@ public class OptionalGroupBackrefBytecodeGenerator {
         generateGroupBacktrackTree(mv, alloc, 0, lenVar, posVar, startsVar, endsVar, countVar,
             grpLenVar, info.hasEndAnchor, success, failLabel);
         mv.visitLabel(success);
-    }
-
-    /**
-     * Generate stub for findMatchFrom(String, int).
-     */
-    private void generateFindMatchFromStubMethod(ClassWriter cw) {
-        MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findMatchFrom",
-            "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;", null, null);
-        mv.visitCode();
-        mv.visitTypeInsn(NEW, "java/lang/UnsupportedOperationException");
-        mv.visitInsn(DUP);
-        mv.visitLdcInsn("findMatchFrom() not yet implemented for OPTIONAL_GROUP_BACKREF strategy");
-        mv.visitMethodInsn(INVOKESPECIAL, "java/lang/UnsupportedOperationException", "<init>", "(Ljava/lang/String;)V", false);
-        mv.visitInsn(ATHROW);
-        mv.visitMaxs(3, 3);
-        mv.visitEnd();
     }
 
     /**

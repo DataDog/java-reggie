@@ -4415,6 +4415,16 @@ public class PatternAnalyzer {
             int literalChar = extractLiteralChar(group.child);
             String literalString = extractLiteralString(group.child);
 
+            // Bug fix (Bug 4, discovered validating the backtracking fix): the generator only
+            // supports a single literal char or a literal string as group content — a
+            // character class (e.g. ([ab])?\1) has isSingleChar=true but literalChar<0, which
+            // the generator was silently treating as "group never participates", producing
+            // false negatives (confirmed against JDK: "([ab])?\1" incorrectly failed to match
+            // "aa"/"bb"). Reject rather than silently mismatch.
+            if (!(isSingleChar && literalChar >= 0) && literalString == null) {
+              return null;
+            }
+
             optionalGroups.add(
                 new OptionalGroupBackrefInfo.OptionalGroupEntry(
                     group.groupNumber,
@@ -4442,6 +4452,11 @@ public class PatternAnalyzer {
             boolean isSingleChar = isSingleCharOrCharClass(nonEmptyContent);
             int literalChar = extractLiteralChar(nonEmptyContent);
             String literalString = extractLiteralString(nonEmptyContent);
+
+            // Bug fix (Bug 4): same character-class rejection as the (X)? form above.
+            if (!(isSingleChar && literalChar >= 0) && literalString == null) {
+              return null;
+            }
 
             optionalGroups.add(
                 new OptionalGroupBackrefInfo.OptionalGroupEntry(

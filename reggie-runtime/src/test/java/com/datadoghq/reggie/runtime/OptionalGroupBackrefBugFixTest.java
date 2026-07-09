@@ -122,6 +122,31 @@ class OptionalGroupBackrefBugFixTest {
     }
   }
 
+  // --- Bug 4: character-class group content now rejected (falls back to a correct strategy) --
+
+  @Test
+  void charClassGroupPattern_isNotRoutedToOptionalGroupBackref_butStillMatchesCorrectly()
+      throws Exception {
+    // ([ab])?\1: group content is a character class, not a literal char/string. The generator
+    // has no support for matching charclass content — before this fix, isSingleChar was true
+    // (isSingleCharOrCharClass accepts CharClassNode) but literalChar was -1, so the generator's
+    // "no supported content form" fallback silently treated the group as permanently absent,
+    // producing false negatives (JDK matches "aa"/"bb"; Reggie always returned false).
+    String pattern = "([ab])?\\1";
+    assertFalse(
+        routedStrategy(pattern) == PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
+        "character-class group content must not use OPTIONAL_GROUP_BACKREF (unsupported)");
+
+    ReggieMatcher m = Reggie.compile(pattern, WITH_FALLBACK);
+    Pattern jdk = Pattern.compile(pattern);
+
+    for (String in : new String[] {"aa", "bb", "ab", ""}) {
+      assertEquals(jdk.matcher(in).matches(), m.matches(in), "\"" + in + "\"");
+    }
+    assertTrue(m.matches("aa"));
+    assertTrue(m.matches("bb"));
+  }
+
   // --- Bug 2: prefix/middle now rejected (falls back to a correct strategy) ------------------
 
   @Test
