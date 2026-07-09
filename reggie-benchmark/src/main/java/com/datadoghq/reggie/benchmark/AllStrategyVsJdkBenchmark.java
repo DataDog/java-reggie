@@ -78,9 +78,10 @@ import org.openjdk.jmh.annotations.Warmup;
  *   <li>DFA_SWITCH: {@code a.*b.*c.*d.*e.*f}
  *   <li>DFA_SWITCH_WITH_GROUPS: {@code (a|b|c|d|e|f|g)(h|i|j|k|l|m)(n|o|p|q|r)(s|t|u|v)}
  *   <li>DFA_TABLE: {@code (?:abc){N}}
- *   <li>OPTIMIZED_NFA: {@code (?<x>a)?b}
+ *   <li>OPTIMIZED_NFA (historical name; now routes to SPECIALIZED_OPTIONAL_GROUP): {@code
+ *       (?<x>a)?b}
  *   <li>LAZY_DFA: {@code (?:a+b+|b+a+){N}}
- *   <li>PIKEVM_CAPTURE: {@code (a)?b}
+ *   <li>PIKEVM_CAPTURE (historical name; now routes to SPECIALIZED_OPTIONAL_GROUP): {@code (a)?b}
  *   <li>ONEPASS_NFA: {@code (foo)(bar)}
  * </ul>
  */
@@ -206,7 +207,7 @@ public class AllStrategyVsJdkBenchmark {
   private ReggieMatcher reggieDfaTable;
   private Pattern jdkDfaTable;
 
-  // ── OPTIMIZED_NFA ─────────────────────────────────────────────────────────────
+  // ── OPTIMIZED_NFA (historical name; now routes to SPECIALIZED_OPTIONAL_GROUP) ──────────────
   // Pattern: (?<x>a)?b   Matched-region growth (grows the near-miss 'a' run before the match,
   // forcing repeated failed optional-group attempts).
   private static final String OPTIMIZED_NFA_PAT = "(?<x>a)?b";
@@ -222,9 +223,8 @@ public class AllStrategyVsJdkBenchmark {
   private ReggieMatcher reggieLazyDfa;
   private Pattern jdkLazyDfa;
 
-  // ── PIKEVM_CAPTURE ────────────────────────────────────────────────────────────
+  // ── PIKEVM_CAPTURE (historical name; now routes to SPECIALIZED_OPTIONAL_GROUP) ─────────────
   // Pattern: (a)?b   Matched-region growth, same rationale as OPTIMIZED_NFA above.
-  // Note: routes to OPTIMIZED_NFA at runtime (capture-ambiguous interception).
   private static final String PIKEVM_CAPTURE_PAT = "(a)?b";
 
   private String pikevmCaptureIn;

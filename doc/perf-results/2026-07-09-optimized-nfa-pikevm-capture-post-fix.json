@@ -1,0 +1,628 @@
+[
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.optimizedNfa_jdk",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "SHORT"
+        },
+        "primaryMetric" : {
+            "score" : 38665.79041354849,
+            "scoreError" : 1887.0966744015113,
+            "scoreConfidence" : [
+                36778.693739146984,
+                40552.88708795
+            ],
+            "scorePercentiles" : {
+                "0.0" : 38546.62416685024,
+                "50.0" : 38718.37337208476,
+                "90.0" : 38732.37370171047,
+                "95.0" : 38732.37370171047,
+                "99.0" : 38732.37370171047,
+                "99.9" : 38732.37370171047,
+                "99.99" : 38732.37370171047,
+                "99.999" : 38732.37370171047,
+                "99.9999" : 38732.37370171047,
+                "100.0" : 38732.37370171047
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    38718.37337208476,
+                    38546.62416685024,
+                    38732.37370171047
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.optimizedNfa_jdk",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "MEDIUM"
+        },
+        "primaryMetric" : {
+            "score" : 528.0260087610519,
+            "scoreError" : 44.79299236375253,
+            "scoreConfidence" : [
+                483.23301639729937,
+                572.8190011248045
+            ],
+            "scorePercentiles" : {
+                "0.0" : 525.3491210891985,
+                "50.0" : 528.5557612484486,
+                "90.0" : 530.173143945509,
+                "95.0" : 530.173143945509,
+                "99.0" : 530.173143945509,
+                "99.9" : 530.173143945509,
+                "99.99" : 530.173143945509,
+                "99.999" : 530.173143945509,
+                "99.9999" : 530.173143945509,
+                "100.0" : 530.173143945509
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    525.3491210891985,
+                    528.5557612484486,
+                    530.173143945509
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.optimizedNfa_jdk",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "LONG"
+        },
+        "primaryMetric" : {
+            "score" : 24.899915696892847,
+            "scoreError" : 10.188289044605245,
+            "scoreConfidence" : [
+                14.711626652287602,
+                35.08820474149809
+            ],
+            "scorePercentiles" : {
+                "0.0" : 24.339757657302137,
+                "50.0" : 24.90333850743388,
+                "90.0" : 25.456650925942526,
+                "95.0" : 25.456650925942526,
+                "99.0" : 25.456650925942526,
+                "99.9" : 25.456650925942526,
+                "99.99" : 25.456650925942526,
+                "99.999" : 25.456650925942526,
+                "99.9999" : 25.456650925942526,
+                "100.0" : 25.456650925942526
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    24.90333850743388,
+                    25.456650925942526,
+                    24.339757657302137
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.optimizedNfa_reggie",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "SHORT"
+        },
+        "primaryMetric" : {
+            "score" : 398194.12027671095,
+            "scoreError" : 167923.4265401042,
+            "scoreConfidence" : [
+                230270.69373660674,
+                566117.5468168152
+            ],
+            "scorePercentiles" : {
+                "0.0" : 388475.47883589246,
+                "50.0" : 399327.4646686624,
+                "90.0" : 406779.41732557793,
+                "95.0" : 406779.41732557793,
+                "99.0" : 406779.41732557793,
+                "99.9" : 406779.41732557793,
+                "99.99" : 406779.41732557793,
+                "99.999" : 406779.41732557793,
+                "99.9999" : 406779.41732557793,
+                "100.0" : 406779.41732557793
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    399327.4646686624,
+                    388475.47883589246,
+                    406779.41732557793
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.optimizedNfa_reggie",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "MEDIUM"
+        },
+        "primaryMetric" : {
+            "score" : 4327.822443883172,
+            "scoreError" : 3878.652452733833,
+            "scoreConfidence" : [
+                449.16999114933924,
+                8206.474896617005
+            ],
+            "scorePercentiles" : {
+                "0.0" : 4090.7684776313995,
+                "50.0" : 4391.089265147415,
+                "90.0" : 4501.6095888707005,
+                "95.0" : 4501.6095888707005,
+                "99.0" : 4501.6095888707005,
+                "99.9" : 4501.6095888707005,
+                "99.99" : 4501.6095888707005,
+                "99.999" : 4501.6095888707005,
+                "99.9999" : 4501.6095888707005,
+                "100.0" : 4501.6095888707005
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    4090.7684776313995,
+                    4501.6095888707005,
+                    4391.089265147415
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.optimizedNfa_reggie",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "LONG"
+        },
+        "primaryMetric" : {
+            "score" : 181.04917175312946,
+            "scoreError" : 109.69671436349665,
+            "scoreConfidence" : [
+                71.3524573896328,
+                290.74588611662614
+            ],
+            "scorePercentiles" : {
+                "0.0" : 174.12380869465326,
+                "50.0" : 184.08308789270674,
+                "90.0" : 184.94061867202834,
+                "95.0" : 184.94061867202834,
+                "99.0" : 184.94061867202834,
+                "99.9" : 184.94061867202834,
+                "99.99" : 184.94061867202834,
+                "99.999" : 184.94061867202834,
+                "99.9999" : 184.94061867202834,
+                "100.0" : 184.94061867202834
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    174.12380869465326,
+                    184.94061867202834,
+                    184.08308789270674
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.pikevmCapture_jdk",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "SHORT"
+        },
+        "primaryMetric" : {
+            "score" : 36256.867044634004,
+            "scoreError" : 6048.081071200284,
+            "scoreConfidence" : [
+                30208.785973433718,
+                42304.94811583429
+            ],
+            "scorePercentiles" : {
+                "0.0" : 35879.0503235139,
+                "50.0" : 36392.45022920518,
+                "90.0" : 36499.10058118294,
+                "95.0" : 36499.10058118294,
+                "99.0" : 36499.10058118294,
+                "99.9" : 36499.10058118294,
+                "99.99" : 36499.10058118294,
+                "99.999" : 36499.10058118294,
+                "99.9999" : 36499.10058118294,
+                "100.0" : 36499.10058118294
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    35879.0503235139,
+                    36392.45022920518,
+                    36499.10058118294
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.pikevmCapture_jdk",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "MEDIUM"
+        },
+        "primaryMetric" : {
+            "score" : 523.189241642398,
+            "scoreError" : 50.64897672971004,
+            "scoreConfidence" : [
+                472.5402649126879,
+                573.838218372108
+            ],
+            "scorePercentiles" : {
+                "0.0" : 521.495858956834,
+                "50.0" : 521.6786342795749,
+                "90.0" : 526.3932316907849,
+                "95.0" : 526.3932316907849,
+                "99.0" : 526.3932316907849,
+                "99.9" : 526.3932316907849,
+                "99.99" : 526.3932316907849,
+                "99.999" : 526.3932316907849,
+                "99.9999" : 526.3932316907849,
+                "100.0" : 526.3932316907849
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    521.6786342795749,
+                    526.3932316907849,
+                    521.495858956834
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.pikevmCapture_jdk",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "LONG"
+        },
+        "primaryMetric" : {
+            "score" : 24.42537143345753,
+            "scoreError" : 4.579698298393824,
+            "scoreConfidence" : [
+                19.845673135063706,
+                29.005069731851357
+            ],
+            "scorePercentiles" : {
+                "0.0" : 24.136662337340038,
+                "50.0" : 24.547349425910564,
+                "90.0" : 24.59210253712199,
+                "95.0" : 24.59210253712199,
+                "99.0" : 24.59210253712199,
+                "99.9" : 24.59210253712199,
+                "99.99" : 24.59210253712199,
+                "99.999" : 24.59210253712199,
+                "99.9999" : 24.59210253712199,
+                "100.0" : 24.59210253712199
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    24.547349425910564,
+                    24.59210253712199,
+                    24.136662337340038
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.pikevmCapture_reggie",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "SHORT"
+        },
+        "primaryMetric" : {
+            "score" : 430200.1778782288,
+            "scoreError" : 426099.8203697002,
+            "scoreConfidence" : [
+                4100.35750852857,
+                856299.9982479289
+            ],
+            "scorePercentiles" : {
+                "0.0" : 403232.0390090308,
+                "50.0" : 443482.0081182997,
+                "90.0" : 443886.4865073558,
+                "95.0" : 443886.4865073558,
+                "99.0" : 443886.4865073558,
+                "99.9" : 443886.4865073558,
+                "99.99" : 443886.4865073558,
+                "99.999" : 443886.4865073558,
+                "99.9999" : 443886.4865073558,
+                "100.0" : 443886.4865073558
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    403232.0390090308,
+                    443482.0081182997,
+                    443886.4865073558
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.pikevmCapture_reggie",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "MEDIUM"
+        },
+        "primaryMetric" : {
+            "score" : 4488.398361466631,
+            "scoreError" : 3631.443576616068,
+            "scoreConfidence" : [
+                856.9547848505631,
+                8119.8419380827
+            ],
+            "scorePercentiles" : {
+                "0.0" : 4261.645998908495,
+                "50.0" : 4569.23081292706,
+                "90.0" : 4634.318272564337,
+                "95.0" : 4634.318272564337,
+                "99.0" : 4634.318272564337,
+                "99.9" : 4634.318272564337,
+                "99.99" : 4634.318272564337,
+                "99.999" : 4634.318272564337,
+                "99.9999" : 4634.318272564337,
+                "100.0" : 4634.318272564337
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    4569.23081292706,
+                    4634.318272564337,
+                    4261.645998908495
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    },
+    {
+        "jmhVersion" : "1.37",
+        "benchmark" : "com.datadoghq.reggie.benchmark.AllStrategyVsJdkBenchmark.pikevmCapture_reggie",
+        "mode" : "thrpt",
+        "threads" : 1,
+        "forks" : 1,
+        "jvm" : "/Users/jaroslav.bachorik/.sdkman/candidates/java/21.0.10-zulu/zulu-21.jdk/Contents/Home/bin/java",
+        "jvmArgs" : [
+        ],
+        "jdkVersion" : "21.0.10",
+        "vmName" : "OpenJDK 64-Bit Server VM",
+        "vmVersion" : "21.0.10+7-LTS",
+        "warmupIterations" : 2,
+        "warmupTime" : "1 s",
+        "warmupBatchSize" : 1,
+        "measurementIterations" : 3,
+        "measurementTime" : "1 s",
+        "measurementBatchSize" : 1,
+        "params" : {
+            "scale" : "LONG"
+        },
+        "primaryMetric" : {
+            "score" : 183.7852265916235,
+            "scoreError" : 16.556315753668155,
+            "scoreConfidence" : [
+                167.22891083795537,
+                200.34154234529166
+            ],
+            "scorePercentiles" : {
+                "0.0" : 182.9840860589479,
+                "50.0" : 183.60081796255355,
+                "90.0" : 184.77077575336907,
+                "95.0" : 184.77077575336907,
+                "99.0" : 184.77077575336907,
+                "99.9" : 184.77077575336907,
+                "99.99" : 184.77077575336907,
+                "99.999" : 184.77077575336907,
+                "99.9999" : 184.77077575336907,
+                "100.0" : 184.77077575336907
+            },
+            "scoreUnit" : "ops/ms",
+            "rawData" : [
+                [
+                    184.77077575336907,
+                    183.60081796255355,
+                    182.9840860589479
+                ]
+            ]
+        },
+        "secondaryMetrics" : {
+        }
+    }
+]
+
+

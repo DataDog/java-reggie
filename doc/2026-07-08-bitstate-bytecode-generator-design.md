@@ -1,9 +1,10 @@
 # Design: BitState bytecode generator (revisiting "interpreter, not codegen")
 
 Date: 2026-07-08
-Status: narrowed and in implementation. See §4a for the scope-narrowing decision made
-during implementation (general NFA-splitting deferred; first cut recognizes a specific
-structural family directly).
+Status: implemented and merged (PR #99, commit b9cf582). See §4a for the scope-narrowing
+decision made during implementation (general NFA-splitting deferred; first cut recognizes a
+specific structural family directly), and §2a for post-implementation measurements
+confirming the regression is fixed.
 
 ## 1. Why this doc exists
 
@@ -48,6 +49,27 @@ the mandatory prefix, one optional-group backtrack point, then a dotall tail) wi
 asymptotic advantage, the gap is attributable to interpreter overhead: `CharSet` object
 dispatch per character, `int[]` job-stack push/pop per state transition, and NFA-state
 array indirection per step.
+
+## 2a. Result: regression fixed and measured post-implementation
+
+`debugPattern` on the `COMMAND` pattern confirms it now routes to `BITSTATE_BYTECODE`
+(`PrefixGuardedScanInfo`) instead of `BITSTATE_CAPTURE`. Re-running the same
+`IastRegexpBenchmark` COMMAND methods (`:reggie-benchmark:jmh`, JDK 21.0.10) across two
+independent runs (varying fork/iteration counts) gave:
+
+| engine | find (ops/ms) | capture (ops/ms) |
+|---|---:|---:|
+| Reggie `BITSTATE_BYTECODE` (this doc's fix) | ~59,000–69,000 | ~26,000–33,000 |
+| JDK `Pattern` | ~11,000–22,000 | ~14,000–21,000 |
+| RE2J | ~460–700 | ~150–340 |
+| *(pre-fix)* Reggie `BITSTATE_CAPTURE` (§2 baseline) | 1,809 | 1,668 |
+
+The JDK/RE2J columns show run-to-run spread (single-machine JMH runs, no isolation
+controls) wide enough that the exact figures shouldn't be treated as stable benchmark
+baselines — but the headline result is unambiguous and consistent across both runs: the
+~11-12x regression against JDK documented in §2 is gone. Reggie now beats JDK by roughly
+3-5x on find and 1.3-1.9x on capture, and is two orders of magnitude ahead of the
+interpreter it replaced.
 
 **Caveat (load-bearing for the scope decision in §4):** this pattern's backtracking is
 shallow — exactly one optional-group fallback, no nested or combinatorial choice points.

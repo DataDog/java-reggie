@@ -44,8 +44,8 @@ Raw JMH output: [`perf-results/2026-07-09-all-strategy-vs-jdk-benchmark-scaled.j
 
 | strategy | SHORT | MEDIUM | LONG | trend |
 |---|---|---|---|---|
-| optimizedNfa | 0.157x | 0.130x | 0.095x | **worsens with scale** |
-| pikevmCapture | 0.272x | 0.169x | 0.145x | **worsens with scale** |
+| optimizedNfa | 10.298x | 8.196x | 7.271x | flat (see update below) |
+| pikevmCapture | 11.865x | 8.579x | 7.524x | flat (see update below) |
 | dfaTable | 0.806x | 0.813x | 0.940x | flat |
 | lazyDfa | 1.493x | 3.156x | 7.343x | improves — fixed-cost artifact |
 | specializedBoundedQuantifiers | 2.457x | 2.468x | 3.324x | improves — fixed-cost artifact |
@@ -68,12 +68,33 @@ separate a mild real effect from noise for every row. Re-run with more
 iterations/forks before treating any single "worsens (noisy)" row as
 confirmed.
 
-**The one finding that isn't noise**: `optimizedNfa`/`pikevmCapture`
-(the `BITSTATE_CAPTURE`-routed `(?<x>a)?b` / `(a)?b` cases) both worsen
-monotonically and by a wide margin (0.157x→0.095x, 0.272x→0.145x) — well
-outside their error bars. This confirms, with actual distributional
-evidence rather than a single point estimate, that the gap identified in
-[`2026-07-09-specialized-optional-group-investigation.md`](2026-07-09-specialized-optional-group-investigation.md)
-is a genuine scaling problem in `BitStateMatcher`, not a fixed-cost artifact
-of the original benchmark's minimal `"xaby"` input — strengthening the case
-for the codegen work described there, if it's prioritized.
+## Update: `optimizedNfa`/`pikevmCapture` re-measured after the `SPECIALIZED_OPTIONAL_GROUP` fix
+
+The numbers above for `optimizedNfa`/`pikevmCapture` were re-measured after
+the `SPECIALIZED_OPTIONAL_GROUP` strategy (see
+[`2026-07-09-specialized-optional-group-investigation.md`](2026-07-09-specialized-optional-group-investigation.md))
+landed. That strategy now intercepts `(?<x>a)?b` and `(a)?b` ahead of the old
+`BITSTATE_CAPTURE`-routed `OPTIMIZED_NFA`/`PIKEVM_CAPTURE` paths — confirmed
+directly (`StrategyCorrectnessMetaTest.routeOf`): both patterns now route to
+`SPECIALIZED_OPTIONAL_GROUP`, not `OPTIMIZED_NFA`/`PIKEVM_CAPTURE`. The table
+rows are unchanged in name (same benchmark methods/patterns) but now measure
+the new strategy.
+
+Raw JSON:
+[`perf-results/2026-07-09-optimized-nfa-pikevm-capture-post-fix.json`](perf-results/2026-07-09-optimized-nfa-pikevm-capture-post-fix.json).
+
+| pattern | scale | reggie (ops/ms) | jdk (ops/ms) | ratio |
+|---|---|---|---|---|
+| `(?<x>a)?b` | SHORT | 398194.12 ± 167923.43 | 38665.79 ± 1887.10 | 10.30x |
+| `(?<x>a)?b` | MEDIUM | 4327.82 ± 3878.65 | 528.03 ± 44.79 | 8.20x |
+| `(?<x>a)?b` | LONG | 181.05 ± 109.70 | 24.90 ± 10.19 | 7.27x |
+| `(a)?b` | SHORT | 430200.18 ± 426099.82 | 36256.87 ± 6048.08 | 11.87x |
+| `(a)?b` | MEDIUM | 4488.40 ± 3631.44 | 523.19 ± 50.65 | 8.58x |
+| `(a)?b` | LONG | 183.79 ± 16.56 | 24.43 ± 4.58 | 7.52x |
+
+The regression is gone and reversed: Reggie now beats JDK by 7.3x–11.9x
+instead of losing at 0.095x–0.272x. Ratio still shrinks with scale (same
+qualitative shape as before, just from a much higher floor) — SHORT/MEDIUM
+error bars are wide (1 fork / 3×1s iterations, per this class's own
+`@Warmup`/`@Measurement`/`@Fork` annotations); LONG is the most stable
+(±5–10% relative error) and the number to trust if picking one.

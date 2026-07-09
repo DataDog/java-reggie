@@ -98,7 +98,7 @@ Closing it requires either a new bytecode-generation path that avoids
 above), or a different runtime for exactly the `min<=1` optional-group case —
 neither was scoped in this session.
 
-## Verified, unrelated fixes from the same investigation (uncommitted)
+## Verified, unrelated fixes from the same investigation
 
 - `CountingGlushkovRuntime.java`: added `minCharsPerRep` pruning to
   `findFrom`/`findBoundsFrom`, fixing a genuine O(n²) restart pathology
@@ -112,10 +112,24 @@ neither was scoped in this session.
   measured perf-neutral (see profiling above) — kept for the reduced
   redundant capacity checks, not as a fix for the `pikevmCapture` gap.
 
-## Conclusion
+## Conclusion (resolved)
 
-Generalizing `SPECIALIZED_QUANTIFIED_GROUP` (or building a new dedicated
-strategy) for `(a)?b`-shaped patterns is architecturally sound and would
-plausibly close the gap, but is multi-hour scoped work (detector changes in
-two places + ~9 code paths of new bytecode emission), not a quick win. Not
-started this session; flagging for a dedicated follow-up if prioritized.
+A new, from-scratch strategy — `SPECIALIZED_OPTIONAL_GROUP` — was built and
+shipped (see
+[`2026-07-09-specialized-optional-group-fresh-implementation-plan.md`](2026-07-09-specialized-optional-group-fresh-implementation-plan.md)
+for the design). It intercepts `(a)?b`/`(?<x>a)?b`-shaped patterns ahead of
+the `BITSTATE_CAPTURE`/`OPTIMIZED_NFA`/`PIKEVM_CAPTURE` routing this document
+diagnosed, closing the gap rather than tuning `BitStateMatcher` itself.
+
+Re-measured with `AllStrategyVsJdkBenchmark` (same class, same patterns,
+`@Warmup`/`@Measurement`/`@Fork` unchanged; raw JSON:
+[`perf-results/2026-07-09-optimized-nfa-pikevm-capture-post-fix.json`](perf-results/2026-07-09-optimized-nfa-pikevm-capture-post-fix.json)):
+
+| pattern | SHORT | MEDIUM | LONG |
+|---|---|---|---|
+| `(?<x>a)?b` | 10.30x | 8.20x | 7.27x |
+| `(a)?b` | 11.87x | 8.58x | 7.52x |
+
+Previously 0.157x→0.095x and 0.272x→0.145x (losing to JDK, worsening with
+scale). Reggie now wins by 7.3x–11.9x across all three scales — the
+regression is gone and reversed, not just flattened.
