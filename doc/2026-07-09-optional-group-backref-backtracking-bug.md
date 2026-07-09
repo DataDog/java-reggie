@@ -1,6 +1,6 @@
 # `OptionalGroupBackrefBytecodeGenerator` correctness bugs
 
-Status: **confirmed, not fixed**. Found while evaluating whether
+Status: **fixed**. Found while evaluating whether
 `OPTIONAL_GROUP_BACKREF`'s matching core could be reused for a new
 backref-free strategy (see the now-abandoned
 [`2026-07-09-specialized-optional-group-implementation-plan.md`](2026-07-09-specialized-optional-group-implementation-plan.md)).
@@ -72,16 +72,45 @@ matching and prefix/anchor handling shared by the whole detector+generator
 pair. Any future reuse of this code (backref-free or otherwise) inherits all
 three unless fixed first.
 
-## Suggested fix ordering (not started)
+## How each bug was fixed
 
-1. Bug 1 first — it's the correctness-load-bearing one and blocks trusting
-   this generator for anything else. Fix requires the group-match branch to
-   retry the skip-group path on suffix failure (real backtracking, not a
-   single greedy attempt), and to clear stale capture state on that retry.
-2. Bug 2 — straightforward once fixed: prefix is a fixed-width (today,
-   single-literal-char/string) match before the optional group; add it to
-   both generated methods' scan.
-3. Bug 3 — straightforward: add a `pos == len` check when `hasEndAnchor` is
-   true, mirroring the existing `hasStartAnchor` handling.
+1. **Bug 1**: `OptionalGroupBackrefBytecodeGenerator` now generates a
+   recursive group/absent decision tree (`generateGroupBacktrackTree`) shared
+   by all four entry points (`matches()`, `match()`, `find()`/`findFrom()`,
+   `findMatch()`). Each optional group's content-present branch is tried
+   first; on any downstream failure it falls back to that group's
+   absent/empty branch, restoring `pos` and resetting `starts[]`/`ends[]` to
+   `-1` so no stale capture survives a backtracked attempt. Backtrack order
+   matches PCRE/Java (last-decided group retried first). Bytecode size is
+   O(2^N) in the number of optional groups (the backref/suffix/completion
+   tail is duplicated once per leaf), so `detectOptionalGroupBackref` now
+   caps N at 4 to keep generated methods well under the JVM's per-method size
+   limit.
 
-No code changes made in this document.
+   A related bug surfaced while validating this fix against JDK: a quantified
+   backref with `minCount == 0` (e.g. `\1{0,3}`) must be satisfiable by zero
+   repetitions even when the referenced group did not participate — Java
+   never needs to evaluate `\1` to satisfy a `min=0` quantifier. The
+   generator previously failed unconditionally whenever a `(X)?`-form group
+   didn't participate, regardless of `minCount`; fixed by gating that failure
+   on `minCount > 0` (confirmed against JDK: `(a)?\1{0,3}a` matches `"a"`
+   with group 1 unmatched).
+
+2. **Bug 2**: rather than teach the generator to match prefix/middle content,
+   `detectOptionalGroupBackref` now rejects any pattern with non-empty prefix
+   or middle, so such patterns fall back to a correct strategy (or, if none
+   applies, throw `UnsupportedPatternException` unless JDK fallback is
+   enabled) instead of silently matching wrong.
+
+3. **Bug 3**: `hasEndAnchor` is now threaded through as
+   `requireFullConsumption` on the shared backref/suffix/completion tail —
+   `true` unconditionally for `matches()`/`match()`, `info.hasEndAnchor` for
+   `find()`/`findMatch()`/`findFrom()`.
+
+Regression coverage: `OptionalGroupBackrefBugFixTest` (reggie-runtime),
+covering all three bugs plus the `minCount == 0` case, verified against
+`java.util.regex.Pattern` directly. Full existing OGB test corpus
+(`OptionalGroupBackrefTest`, `TestEmptyAlternationBackref`,
+`TestEmptyAlternationPatterns`, `NullableBackrefTest`,
+`BackrefBacktrackMatcherTest`, `StrategyCorrectnessMetaTest`,
+`TestOptionalGroupBackrefGroupExtraction`) still passes.
