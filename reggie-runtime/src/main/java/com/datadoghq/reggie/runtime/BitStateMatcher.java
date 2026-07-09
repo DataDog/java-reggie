@@ -454,9 +454,23 @@ final class BitStateMatcher extends ReggieMatcher {
         char ch = input.charAt(pos);
         CharSet[] charSets = transitionCharSets[sid];
         int[] targets = transitionTargets[sid];
-        for (int i = charSets.length - 1; i >= 0; i--) {
-          if (charSets[i].contains(ch)) {
-            pushExpand(targets[i], pos + 1);
+        int n = charSets.length;
+        if (n != 0) {
+          // Reserve room for the worst case (all n transitions matching) once, up front, instead
+          // of checking capacity once per individual push -- async-profiler on this class's DFS
+          // loop showed pushEpsilonChildrenReversed/ensureStackCapacity together accounting for a
+          // large share of self time relative to how little actual work these trivial-capture
+          // patterns do, so batching the capacity check per fan-out removes a redundant bounds
+          // check + method-call layer per pushed child.
+          ensureStackCapacity(n);
+          int nextPos = pos + 1;
+          for (int i = n - 1; i >= 0; i--) {
+            if (charSets[i].contains(ch)) {
+              stackA[stackTop] = targets[i];
+              stackB[stackTop] = nextPos;
+              stackC[stackTop] = 0;
+              stackTop++;
+            }
           }
         }
       }
@@ -467,22 +481,22 @@ final class BitStateMatcher extends ReggieMatcher {
   /** Pushes {@code sid}'s epsilon children in reverse priority order (highest pops first). */
   private void pushEpsilonChildrenReversed(int sid, int pos) {
     int[] eps = epsilonTargets[sid];
-    for (int i = eps.length - 1; i >= 0; i--) {
-      pushExpand(eps[i], pos);
+    int n = eps.length;
+    if (n == 0) {
+      return;
+    }
+    ensureStackCapacity(n);
+    for (int i = n - 1; i >= 0; i--) {
+      stackA[stackTop] = eps[i];
+      stackB[stackTop] = pos;
+      stackC[stackTop] = 0;
+      stackTop++;
     }
   }
 
   // -------------------------------------------------------------------------
   // Job stack (design §3.1)
   // -------------------------------------------------------------------------
-
-  private void pushExpand(int stateId, int pos) {
-    ensureStackCapacity();
-    stackA[stackTop] = stateId;
-    stackB[stackTop] = pos;
-    stackC[stackTop] = 0;
-    stackTop++;
-  }
 
   /**
    * Pushes an EXPAND(startStateId, pos) job tagged as a genuine new-match-attempt seed (see the
@@ -513,8 +527,17 @@ final class BitStateMatcher extends ReggieMatcher {
   }
 
   private void ensureStackCapacity() {
-    if (stackTop == stackA.length) {
+    ensureStackCapacity(1);
+  }
+
+  /** Grows the job stack, if needed, to fit {@code extra} more pushes beyond {@link #stackTop}. */
+  private void ensureStackCapacity(int extra) {
+    int need = stackTop + extra;
+    if (need > stackA.length) {
       int newCap = stackA.length * 2;
+      while (newCap < need) {
+        newCap *= 2;
+      }
       stackA = Arrays.copyOf(stackA, newCap);
       stackB = Arrays.copyOf(stackB, newCap);
       stackC = Arrays.copyOf(stackC, newCap);
