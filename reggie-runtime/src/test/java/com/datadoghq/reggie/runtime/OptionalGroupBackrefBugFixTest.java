@@ -94,6 +94,34 @@ class OptionalGroupBackrefBugFixTest {
     assertNull(r.group(1));
   }
 
+  @Test
+  void backtracksFromGroupPresentToAbsent_forMultiCharLiteralGroup() throws Exception {
+    // (cow|)\1{2}c: empty-alt form with multi-char literal content ("cow"), exercising the
+    // generateGroupBacktrackTree branch for entry.literalString != null (as opposed to the
+    // single-char branch exercised by the other Bug 1 tests above). Present branch matches
+    // "cow", leaving no room for the mandatory 2 backref repetitions, so it backtracks to the
+    // empty-alt's always-captures-empty absent branch, where the single-char suffix 'c' then
+    // matches at position 0.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF, routedStrategy("(cow|)\\1{2}c"));
+
+    ReggieMatcher m = Reggie.compile("(cow|)\\1{2}c");
+    Pattern jdk = Pattern.compile("(cow|)\\1{2}c");
+
+    for (String in : new String[] {"cowc", "xcowcy"}) {
+      Matcher jm = jdk.matcher(in);
+      boolean jdkFound = jm.find();
+      MatchResult r = m.findMatch(in);
+      assertEquals(jdkFound, r != null, "findMatch on \"" + in + "\"");
+      if (jdkFound) {
+        assertEquals(jm.start(), r.start(), "start on \"" + in + "\"");
+        assertEquals(jm.end(), r.end(), "end on \"" + in + "\"");
+        assertEquals(jm.start(1), r.start(1), "group1 start on \"" + in + "\"");
+        assertEquals(jm.end(1), r.end(1), "group1 end on \"" + in + "\"");
+      }
+    }
+  }
+
   // --- Bug 2: prefix/middle now rejected (falls back to a correct strategy) ------------------
 
   @Test
