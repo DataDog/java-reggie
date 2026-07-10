@@ -81,6 +81,14 @@ final class BitStateMatcher extends ReggieMatcher {
   private final CharSet[][] transitionCharSets;
   private final int[][] transitionTargets;
 
+  // Flattened per-state anchor/group metadata, indexed by state id, so the hot DFS loop never
+  // dereferences the heavyweight NFA.NFAState object (statesById[sid]) just to read these 3
+  // fields on every pop -- async-profiler showed that pointer-chase as the single largest DFS
+  // leaf-frame cost. null / -1 sentinels replace NFAState's null AnchorType / boxed Integer.
+  private final NFA.AnchorType[] anchorBySid;
+  private final int[] enterGroupBySid;
+  private final int[] exitGroupBySid;
+
   // Input-independent structures, preallocated once (design §5): live capture slots and the
   // winning snapshot. Sized 2 * (groupCount + 1): slot 2*g is group g's start, 2*g+1 its end.
   private final int[] caps;
@@ -139,8 +147,15 @@ final class BitStateMatcher extends ReggieMatcher {
     epsilonTargets = new int[stateCount][];
     transitionCharSets = new CharSet[stateCount][];
     transitionTargets = new int[stateCount][];
+    anchorBySid = new NFA.AnchorType[stateCount];
+    enterGroupBySid = new int[stateCount];
+    exitGroupBySid = new int[stateCount];
     for (int i = 0; i < stateCount; i++) {
       NFA.NFAState s = statesById[i];
+
+      anchorBySid[i] = s.anchor;
+      enterGroupBySid[i] = s.enterGroup == null ? -1 : s.enterGroup;
+      exitGroupBySid[i] = s.exitGroup == null ? -1 : s.exitGroup;
 
       List<NFA.NFAState> eps = s.getEpsilonTransitions();
       int[] epsIds = new int[eps.size()];
@@ -413,26 +428,27 @@ final class BitStateMatcher extends ReggieMatcher {
         caps[0] = pos;
       }
 
-      NFA.NFAState s = statesById[sid];
-
-      if (s.anchor != null) {
+      NFA.AnchorType anchor = anchorBySid[sid];
+      if (anchor != null) {
         // Anchor origin is pinned to absolute 0 (regionStart argument), matching PikeVMMatcher's
         // find/findFrom semantics: ^/\A never fire at a findFrom(start>0) offset, only at true
         // input start.
-        if (!PikeVMMatcher.checkAnchor(s.anchor, input, pos, 0, spanEnd)) continue;
+        if (!PikeVMMatcher.checkAnchor(anchor, input, pos, 0, spanEnd)) continue;
         pushEpsilonChildrenReversed(sid, pos);
         continue;
       }
 
       // Group-entry/-exit capture writes, with undo (design §3.3). Pushed before this state's
       // children so the RESTORE pops only after the whole subtree below this state is done.
-      if (s.enterGroup != null) {
-        int slot = 2 * s.enterGroup;
+      int enterGroup = enterGroupBySid[sid];
+      if (enterGroup >= 0) {
+        int slot = 2 * enterGroup;
         pushRestore(slot, caps[slot]);
         caps[slot] = pos;
       }
-      if (s.exitGroup != null) {
-        int slot = 2 * s.exitGroup + 1;
+      int exitGroup = exitGroupBySid[sid];
+      if (exitGroup >= 0) {
+        int slot = 2 * exitGroup + 1;
         pushRestore(slot, caps[slot]);
         caps[slot] = pos;
       }
@@ -530,18 +546,32 @@ final class BitStateMatcher extends ReggieMatcher {
     ensureStackCapacity(1);
   }
 
-  /** Grows the job stack, if needed, to fit {@code extra} more pushes beyond {@link #stackTop}. */
+  /**
+   * Grows the job stack, if needed, to fit {@code extra} more pushes beyond {@link #stackTop}.
+   *
+   * <p>Deliberately just the size check: profiling showed this method costing real self-time on the
+   * DFS hot path even though it almost never actually grows the stack (typical patterns never
+   * exceed their initial, stateCount-derived capacity) -- keeping the common case a single compare,
+   * with the doubling loop and array copies split into the separate, rarely-invoked {@link
+   * #growStack}, lets the JIT inline this trivial check at every call site instead of paying a real
+   * method-call for a branch that's almost always not taken.
+   */
   private void ensureStackCapacity(int extra) {
     int need = stackTop + extra;
     if (need > stackA.length) {
-      int newCap = stackA.length * 2;
-      while (newCap < need) {
-        newCap *= 2;
-      }
-      stackA = Arrays.copyOf(stackA, newCap);
-      stackB = Arrays.copyOf(stackB, newCap);
-      stackC = Arrays.copyOf(stackC, newCap);
+      growStack(need);
     }
+  }
+
+  /** Cold path for {@link #ensureStackCapacity(int)}: doubles the job stack to fit {@code need}. */
+  private void growStack(int need) {
+    int newCap = stackA.length * 2;
+    while (newCap < need) {
+      newCap *= 2;
+    }
+    stackA = Arrays.copyOf(stackA, newCap);
+    stackB = Arrays.copyOf(stackB, newCap);
+    stackC = Arrays.copyOf(stackC, newCap);
   }
 
   // -------------------------------------------------------------------------
