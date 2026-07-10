@@ -127,6 +127,11 @@ final class BitStateMatcher extends ReggieMatcher {
   private final LazyDFACache rejectDfa;
   private final NfaStep rejectStep;
 
+  // Scratch output for localizeForFind(), reused across calls to avoid a two-int allocation per
+  // find()/findFrom()/findMatchFrom() call — safe because a single matcher instance is never
+  // shared across threads or concurrent calls (see class-level thread-safety contract).
+  private final int[] localizeScratch = new int[2];
+
   BitStateMatcher(NFA nfa, String pattern) {
     super(pattern);
     this.nfa = nfa;
@@ -230,7 +235,7 @@ final class BitStateMatcher extends ReggieMatcher {
       fallbackCount++;
       return fallback().matches(input);
     }
-    return search(input, 0, input.length(), false, true);
+    return search(input, 0, input.length(), input.length(), false, true);
   }
 
   @Override
@@ -239,14 +244,17 @@ final class BitStateMatcher extends ReggieMatcher {
     if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii) < 0) {
       return false;
     }
-    if (rejectDfa != null && rejectDfa.findFrom(input, 0, rejectStep) < 0) {
+    int regionEnd = input.length();
+    if (!localizeForFind(input, 0, regionEnd)) {
       return false;
     }
-    if (exceedsBudget(input.length())) {
+    int scanStart = localizeScratch[0];
+    int spanEnd = localizeScratch[1];
+    if (exceedsBudget(spanEnd - scanStart)) {
       fallbackCount++;
       return fallback().find(input);
     }
-    return search(input, 0, input.length(), true, false);
+    return search(input, scanStart, spanEnd, regionEnd, true, false);
   }
 
   @Override
@@ -256,14 +264,17 @@ final class BitStateMatcher extends ReggieMatcher {
     if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii, clamped) < 0) {
       return -1;
     }
-    if (rejectDfa != null && rejectDfa.findFrom(input, clamped, rejectStep) < 0) {
+    int regionEnd = input.length();
+    if (!localizeForFind(input, clamped, regionEnd)) {
       return -1;
     }
-    if (exceedsBudget(input.length() - clamped)) {
+    int scanStart = localizeScratch[0];
+    int spanEnd = localizeScratch[1];
+    if (exceedsBudget(spanEnd - scanStart)) {
       fallbackCount++;
       return fallback().findFrom(input, start);
     }
-    boolean won = search(input, clamped, input.length(), true, false);
+    boolean won = search(input, scanStart, spanEnd, regionEnd, true, false);
     return won ? winCaptures[0] : -1;
   }
 
@@ -273,7 +284,7 @@ final class BitStateMatcher extends ReggieMatcher {
       fallbackCount++;
       return fallback().match(input);
     }
-    boolean won = search(input, 0, input.length(), false, true);
+    boolean won = search(input, 0, input.length(), input.length(), false, true);
     return won ? buildCaptureResult(input, winCaptures, groupCount) : null;
   }
 
@@ -289,14 +300,17 @@ final class BitStateMatcher extends ReggieMatcher {
     if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii, clamped) < 0) {
       return null;
     }
-    if (rejectDfa != null && rejectDfa.findFrom(input, clamped, rejectStep) < 0) {
+    int regionEnd = input.length();
+    if (!localizeForFind(input, clamped, regionEnd)) {
       return null;
     }
-    if (exceedsBudget(input.length() - clamped)) {
+    int scanStart = localizeScratch[0];
+    int spanEnd = localizeScratch[1];
+    if (exceedsBudget(spanEnd - scanStart)) {
       fallbackCount++;
       return fallback().findMatchFrom(input, start);
     }
-    boolean won = search(input, clamped, input.length(), true, false);
+    boolean won = search(input, scanStart, spanEnd, regionEnd, true, false);
     return won ? buildCaptureResult(input, winCaptures, groupCount) : null;
   }
 
@@ -307,7 +321,7 @@ final class BitStateMatcher extends ReggieMatcher {
       return fallback().matchesBounded(input, start, end);
     }
     String region = input.subSequence(start, end).toString();
-    return search(region, 0, region.length(), false, true);
+    return search(region, 0, region.length(), region.length(), false, true);
   }
 
   @Override
@@ -317,11 +331,57 @@ final class BitStateMatcher extends ReggieMatcher {
       return fallback().matchBounded(input, start, end);
     }
     String region = input.subSequence(start, end).toString();
-    boolean won = search(region, 0, region.length(), false, true);
+    boolean won = search(region, 0, region.length(), region.length(), false, true);
     if (!won) return null;
     MatchResult r = buildCaptureResult(region, winCaptures, groupCount);
     if (start == 0) return r;
     return shiftResult(r, start, input.toString());
+  }
+
+  /**
+   * Computes localized {@code (scanStart, spanEnd)} search bounds for an unanchored find-family
+   * call over {@code input[from, regionEnd)}, using {@link #rejectDfa}'s sound bounds to avoid
+   * paying the full-region {@link #fallback()} cost when only a narrow sub-region can possibly
+   * contain a match.
+   *
+   * <p>{@link LazyDFACache#findFrom} returns the leftmost position where the reject-DFA's
+   * over-approximating language matches, at or after {@code from}. Because the real pattern's
+   * language is a subset of the over-approximation's (soundness), no real match can start before
+   * that position — so it is a sound lower bound on the real leftmost match start, and every
+   * position in {@code [from, scanStart)} can be skipped entirely, independent of whether the
+   * budget is exceeded. This alone often keeps a search under budget that the raw {@code [from,
+   * regionEnd)} span would have exceeded.
+   *
+   * <p>If the narrowed span still exceeds budget, {@link LazyDFACache#findEnd} additionally bounds
+   * how far any match beginning at/after {@code scanStart} can extend (same soundness argument,
+   * upper-bound direction — see its javadoc) — narrowing {@code spanEnd} accordingly. This mirrors
+   * {@code PikeVMMatcher.findPosFrom}'s identical use of {@code findEnd} to tighten its own scan
+   * loop without touching the true region end used for anchor checks (see {@link #search}'s {@code
+   * regionEnd} parameter doc).
+   *
+   * @return {@code false} if {@link #rejectDfa} proves no match exists in {@code [from, regionEnd)}
+   *     (caller should return its own no-match result immediately, no search needed); {@code true}
+   *     otherwise, with the bounds to search written to {@link #localizeScratch} (which may still
+   *     exceed budget — the caller must still check {@link #exceedsBudget})
+   */
+  private boolean localizeForFind(String input, int from, int regionEnd) {
+    int scanStart = from;
+    if (rejectDfa != null) {
+      scanStart = rejectDfa.findFrom(input, from, rejectStep);
+      if (scanStart < 0) {
+        return false;
+      }
+    }
+    int spanEnd = regionEnd;
+    if (rejectDfa != null && exceedsBudget(spanEnd - scanStart)) {
+      int hi = rejectDfa.findEnd(input, scanStart, regionEnd, rejectStep);
+      if (hi >= scanStart && !exceedsBudget(hi - scanStart)) {
+        spanEnd = hi;
+      }
+    }
+    localizeScratch[0] = scanStart;
+    localizeScratch[1] = spanEnd;
+    return true;
   }
 
   // findAll / findMatchInto are inherited from ReggieMatcher's default implementations, built on
@@ -368,11 +428,26 @@ final class BitStateMatcher extends ReggieMatcher {
    * PikeVMMatcher.runMatches} only accepting when {@code pos == regionEnd}); the DFS simply
    * backtracks and keeps exploring other continuations.
    *
+   * <p>{@code regionEnd} is the TRUE end of the caller's region — always {@code input.length()} for
+   * {@code find}/{@code findFrom}/{@code findMatchFrom}, even when {@code spanEnd} has been
+   * narrowed below it (see {@link #localizeForFind}). It is used only for {@code $}/{@code \z}/
+   * {@code \b}/end-multiline anchor checks, which must see the real end of input regardless of how
+   * far the DFS itself has been bounded to scan — mirrors {@code PikeVMMatcher.findPosFrom}'s
+   * separation of its narrowed {@code scanLimit} from the unnarrowed {@code regionEnd} it still
+   * threads through every anchor call, for the identical reason. {@code spanEnd} is the actual
+   * scan/consume bound: the seed-reinjection loop and the consuming-leaf transition both stop
+   * there. For every caller except the find family, {@code regionEnd == spanEnd}.
+   *
    * <p>On success, {@link #winCaptures} holds the winning capture snapshot (slot 0/1 = the whole
    * match span) and this method returns {@code true}.
    */
   private boolean search(
-      String input, int scanStart, int spanEnd, boolean unanchored, boolean requireFullMatch) {
+      String input,
+      int scanStart,
+      int spanEnd,
+      int regionEnd,
+      boolean unanchored,
+      boolean requireFullMatch) {
     int spanLen = spanEnd - scanStart;
     ensureVisitedCapacity((long) stateCount * (spanLen + 1));
     visitedGeneration++;
@@ -433,7 +508,7 @@ final class BitStateMatcher extends ReggieMatcher {
         // Anchor origin is pinned to absolute 0 (regionStart argument), matching PikeVMMatcher's
         // find/findFrom semantics: ^/\A never fire at a findFrom(start>0) offset, only at true
         // input start.
-        if (!PikeVMMatcher.checkAnchor(anchor, input, pos, 0, spanEnd)) continue;
+        if (!PikeVMMatcher.checkAnchor(anchor, input, pos, 0, regionEnd)) continue;
         pushEpsilonChildrenReversed(sid, pos);
         continue;
       }
