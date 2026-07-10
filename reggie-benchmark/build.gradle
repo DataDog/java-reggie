@@ -9,6 +9,7 @@ repositories {
 
 dependencies {
     implementation project(':reggie-runtime')
+    implementation project(':reggie-codegen')
     annotationProcessor project(':reggie-processor')
 
     // Integration tests for benchmark patterns
