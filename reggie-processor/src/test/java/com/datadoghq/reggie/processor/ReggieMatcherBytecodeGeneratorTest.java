@@ -239,6 +239,23 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
+  void testSpecializedOptionalGroupStrategy() throws Exception {
+    // (a)?b-shaped pattern; exercises the compile-time (@RegexPattern annotation processor)
+    // dispatch path for SPECIALIZED_OPTIONAL_GROUP, which is otherwise only covered via the
+    // runtime path (RuntimeCompiler) in reggie-runtime's tests.
+    Object matcher = compile("(a)?b", "SpecializedOptionalGroupMatcher");
+    Method matches = matcher.getClass().getMethod("matches", String.class);
+    Method find = matcher.getClass().getMethod("find", String.class);
+    assertTrue((Boolean) matches.invoke(matcher, "ab"));
+    assertTrue((Boolean) matches.invoke(matcher, "b"));
+    assertFalse((Boolean) matches.invoke(matcher, "aab"));
+    assertFalse((Boolean) matches.invoke(matcher, "a"));
+    assertTrue((Boolean) find.invoke(matcher, "xaby"));
+    assertTrue((Boolean) find.invoke(matcher, "xby"));
+    assertFalse((Boolean) find.invoke(matcher, "xay"));
+  }
+
+  @Test
   void testMultiRangeAlpha() throws Exception {
     // CharSet sorts ranges by start char, so [A-Z] comes before [a-z]; the general fallback
     // path in MultiRangeOptimization uses only the first range [A-Z] for find-next scanning.

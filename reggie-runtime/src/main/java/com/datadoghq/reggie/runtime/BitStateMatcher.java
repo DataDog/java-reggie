@@ -105,6 +105,20 @@ final class BitStateMatcher extends ReggieMatcher {
   private PikeVMMatcher fallback;
   private long fallbackCount;
 
+  // Single-char SIMD fast-reject (mirrors PikeVMMatcher.singleFirstCharAscii): when exactly one
+  // ASCII char can begin a match, String.indexOf() gives a SIMD-accelerated scan that rejects
+  // no-match inputs without running the DFS at every position. -1 when zero or multiple chars
+  // qualify, or when the pattern can match the empty string.
+  private final int singleFirstCharAscii;
+
+  // General multi-prefix fast-reject (mirrors PikeVMMatcher.rejectDfa/rejectStep, built by the
+  // shared RejectDfaFactory): a self-anchoring, over-approximating DFA over the same NFA. Unlike
+  // singleFirstCharAscii, this also rejects no-match inputs for patterns with several possible
+  // leading characters (e.g. SQL/URL/query-obfuscator alternations). Null when the NFA has
+  // assertions/backrefs or the over-approximation can match empty (see RejectDfaFactory).
+  private final LazyDFACache rejectDfa;
+  private final NfaStep rejectStep;
+
   BitStateMatcher(NFA nfa, String pattern) {
     super(pattern);
     this.nfa = nfa;
@@ -156,7 +170,39 @@ final class BitStateMatcher extends ReggieMatcher {
     stackB = new int[initialStackCap];
     stackC = new int[initialStackCap];
 
+    boolean[] firstByteAscii = new boolean[128];
+    boolean prefilterUsable = PikeVMMatcher.computeFirstByteFilter(nfa, firstByteAscii);
+    int singleChar = -1;
+    if (prefilterUsable) {
+      int count = 0;
+      for (int c = 0; c < firstByteAscii.length; c++) {
+        if (firstByteAscii[c]) {
+          count++;
+          singleChar = c;
+        }
+      }
+      if (count != 1) {
+        singleChar = -1;
+      }
+    }
+    this.singleFirstCharAscii = singleChar;
+
+    RejectDfaFactory.Bundle rejectBundle = RejectDfaFactory.build(nfa);
+    this.rejectDfa = rejectBundle == null ? null : rejectBundle.dfa;
+    this.rejectStep = rejectBundle == null ? null : rejectBundle.step;
+
     markNativeRichApi();
+  }
+
+  /**
+   * Test-only: whether {@link #find}/{@link #findFrom}/{@link #findMatchFrom} carry either
+   * fast-reject filter (single-char {@code indexOf} prefilter or the general reject-DFA). Used to
+   * pin the presence of these optimizations against silent regression (see {@code
+   * IastPatternRoutingTest}'s sibling fast-reject test) — routing alone doesn't guarantee the
+   * filter is still wired once a pattern reaches {@code BitStateMatcher}.
+   */
+  boolean hasFastReject() {
+    return singleFirstCharAscii >= 0 || rejectDfa != null;
   }
 
   // -------------------------------------------------------------------------
@@ -175,6 +221,12 @@ final class BitStateMatcher extends ReggieMatcher {
   @Override
   public boolean find(String input) {
     if (input == null) throw new NullPointerException("input");
+    if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii) < 0) {
+      return false;
+    }
+    if (rejectDfa != null && rejectDfa.findFrom(input, 0, rejectStep) < 0) {
+      return false;
+    }
     if (exceedsBudget(input.length())) {
       fallbackCount++;
       return fallback().find(input);
@@ -186,6 +238,12 @@ final class BitStateMatcher extends ReggieMatcher {
   public int findFrom(String input, int start) {
     int clamped = Math.max(0, start);
     if (clamped > input.length()) return -1;
+    if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii, clamped) < 0) {
+      return -1;
+    }
+    if (rejectDfa != null && rejectDfa.findFrom(input, clamped, rejectStep) < 0) {
+      return -1;
+    }
     if (exceedsBudget(input.length() - clamped)) {
       fallbackCount++;
       return fallback().findFrom(input, start);
@@ -213,6 +271,12 @@ final class BitStateMatcher extends ReggieMatcher {
   public MatchResult findMatchFrom(String input, int start) {
     int clamped = Math.max(0, start);
     if (clamped > input.length()) return null;
+    if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii, clamped) < 0) {
+      return null;
+    }
+    if (rejectDfa != null && rejectDfa.findFrom(input, clamped, rejectStep) < 0) {
+      return null;
+    }
     if (exceedsBudget(input.length() - clamped)) {
       fallbackCount++;
       return fallback().findMatchFrom(input, start);
@@ -390,9 +454,23 @@ final class BitStateMatcher extends ReggieMatcher {
         char ch = input.charAt(pos);
         CharSet[] charSets = transitionCharSets[sid];
         int[] targets = transitionTargets[sid];
-        for (int i = charSets.length - 1; i >= 0; i--) {
-          if (charSets[i].contains(ch)) {
-            pushExpand(targets[i], pos + 1);
+        int n = charSets.length;
+        if (n != 0) {
+          // Reserve room for the worst case (all n transitions matching) once, up front, instead
+          // of checking capacity once per individual push -- async-profiler on this class's DFS
+          // loop showed pushEpsilonChildrenReversed/ensureStackCapacity together accounting for a
+          // large share of self time relative to how little actual work these trivial-capture
+          // patterns do, so batching the capacity check per fan-out removes a redundant bounds
+          // check + method-call layer per pushed child.
+          ensureStackCapacity(n);
+          int nextPos = pos + 1;
+          for (int i = n - 1; i >= 0; i--) {
+            if (charSets[i].contains(ch)) {
+              stackA[stackTop] = targets[i];
+              stackB[stackTop] = nextPos;
+              stackC[stackTop] = 0;
+              stackTop++;
+            }
           }
         }
       }
@@ -403,22 +481,22 @@ final class BitStateMatcher extends ReggieMatcher {
   /** Pushes {@code sid}'s epsilon children in reverse priority order (highest pops first). */
   private void pushEpsilonChildrenReversed(int sid, int pos) {
     int[] eps = epsilonTargets[sid];
-    for (int i = eps.length - 1; i >= 0; i--) {
-      pushExpand(eps[i], pos);
+    int n = eps.length;
+    if (n == 0) {
+      return;
+    }
+    ensureStackCapacity(n);
+    for (int i = n - 1; i >= 0; i--) {
+      stackA[stackTop] = eps[i];
+      stackB[stackTop] = pos;
+      stackC[stackTop] = 0;
+      stackTop++;
     }
   }
 
   // -------------------------------------------------------------------------
   // Job stack (design §3.1)
   // -------------------------------------------------------------------------
-
-  private void pushExpand(int stateId, int pos) {
-    ensureStackCapacity();
-    stackA[stackTop] = stateId;
-    stackB[stackTop] = pos;
-    stackC[stackTop] = 0;
-    stackTop++;
-  }
 
   /**
    * Pushes an EXPAND(startStateId, pos) job tagged as a genuine new-match-attempt seed (see the
@@ -449,8 +527,17 @@ final class BitStateMatcher extends ReggieMatcher {
   }
 
   private void ensureStackCapacity() {
-    if (stackTop == stackA.length) {
+    ensureStackCapacity(1);
+  }
+
+  /** Grows the job stack, if needed, to fit {@code extra} more pushes beyond {@link #stackTop}. */
+  private void ensureStackCapacity(int extra) {
+    int need = stackTop + extra;
+    if (need > stackA.length) {
       int newCap = stackA.length * 2;
+      while (newCap < need) {
+        newCap *= 2;
+      }
       stackA = Arrays.copyOf(stackA, newCap);
       stackB = Arrays.copyOf(stackB, newCap);
       stackC = Arrays.copyOf(stackC, newCap);

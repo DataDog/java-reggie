@@ -100,6 +100,9 @@ public class StrategyCorrectnessMetaTest {
             "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}",
             List.of("192.168.0.1", "ip=192.168.0.1!", "192.168.0", "", "1.2.3.４")));
     m.put(
+        PatternAnalyzer.MatchingStrategy.SPECIALIZED_OPTIONAL_GROUP,
+        new Spec("(a)?b", List.of("ab", "xaby", "ac", "", "abé")));
+    m.put(
         PatternAnalyzer.MatchingStrategy.LINEAR_BACKREFERENCE,
         new Spec("(a)(b)\\1\\2", List.of("abab", "xababy", "abba", "", "ababé")));
     m.put(
@@ -244,11 +247,13 @@ public class StrategyCorrectnessMetaTest {
         PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE,
         new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
     // BITSTATE_CAPTURE: eligible capture-ambiguous patterns are substituted in for PIKEVM_CAPTURE
-    // (see PatternAnalyzer#isBitStateEligible). (a)?b is the same shape as the PIKEVM_CAPTURE
-    // representative above and now routes here; BitStateMatcher gives correct per-iteration spans.
+    // (see PatternAnalyzer#isBitStateEligible). Uses a 2-char literal suffix ("bc") rather than
+    // the single-char suffix ("(a)?b", used above for PIKEVM_CAPTURE) because the latter is now
+    // intercepted earlier by SPECIALIZED_OPTIONAL_GROUP (single-literal-char group + single-
+    // literal-char suffix); BitStateMatcher gives correct per-iteration spans for this shape.
     m.put(
         PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
-        new Spec("(a)?b", List.of("b", "xaby", "ab", "", "bé")));
+        new Spec("(a)?bc", List.of("bc", "xabcy", "abd", "", "bcé")));
     // BITSTATE_BYTECODE: the prefix-guarded-scan family detected by
     // PatternAnalyzer#detectPrefixGuardedScan, substituted in for BITSTATE_CAPTURE. "a!" exercises
     // the bounded backward give-back scan for the required trailing \b after the greedy \S+ (see

@@ -122,6 +122,22 @@ public class PatternDebugger {
             "Pinned backreference — disjoint group boundary, single forward pass, no"
                 + " retry/backtracking");
         break;
+
+      case SPECIALIZED_OPTIONAL_GROUP:
+        if (result.patternInfo instanceof SpecializedOptionalGroupInfo info) {
+          System.out.println(
+              "Specialized optional group — group "
+                  + info.groupNumber
+                  + " ('"
+                  + info.groupChar
+                  + "') then suffix '"
+                  + info.suffixChar
+                  + "', hasStartAnchor="
+                  + info.hasStartAnchor
+                  + ", hasEndAnchor="
+                  + info.hasEndAnchor);
+        }
+        break;
     }
   }
 }

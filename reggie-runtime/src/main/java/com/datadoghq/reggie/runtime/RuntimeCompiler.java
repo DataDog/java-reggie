@@ -35,6 +35,7 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
+import com.datadoghq.reggie.codegen.analysis.SpecializedOptionalGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
@@ -66,6 +67,7 @@ import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.QuantifiedGroupBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
@@ -1221,6 +1223,20 @@ public class RuntimeCompiler {
         pinnedBackrefGen.generateFindMatchMethod(cw);
         pinnedBackrefGen.generateFindMatchFromMethod(cw);
         pinnedBackrefGen.generateMatchesBoundedMethod(cw);
+        break;
+
+      case SPECIALIZED_OPTIONAL_GROUP:
+        SpecializedOptionalGroupInfo specOptGroupInfo =
+            (SpecializedOptionalGroupInfo) result.patternInfo;
+        SpecializedOptionalGroupBytecodeGenerator specOptGroupGen =
+            new SpecializedOptionalGroupBytecodeGenerator(
+                specOptGroupInfo, "com/datadoghq/reggie/runtime/" + className);
+        specOptGroupGen.generateMatchesMethod(cw);
+        specOptGroupGen.generateFindMethod(cw);
+        specOptGroupGen.generateFindFromMethod(cw);
+        specOptGroupGen.generateMatchMethod(cw);
+        specOptGroupGen.generateFindMatchMethod(cw);
+        specOptGroupGen.generateFindMatchFromMethod(cw);
         break;
 
       case VARIABLE_CAPTURE_BACKREF:

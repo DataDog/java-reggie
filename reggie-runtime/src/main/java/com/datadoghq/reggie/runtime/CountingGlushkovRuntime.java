@@ -219,7 +219,17 @@ public final class CountingGlushkovRuntime {
       return -1;
     }
     int len = input.length();
+    long minCharsNeeded = (long) counterMin * minCharsPerRep(nullable, initial, accept, follow);
     for (int start = Math.max(0, from); start <= len; start++) {
+      if (minCharsNeeded > len - start) {
+        // Not enough input remains from this start to ever reach counterMin repetitions (see
+        // minCharsPerRep) -- skip the O(span) longestEndFrom scan rather than re-discovering the
+        // same impossibility one character at a time.
+        if (start == len) {
+          break;
+        }
+        continue;
+      }
       int end =
           longestEndFrom(
               input,
@@ -270,7 +280,15 @@ public final class CountingGlushkovRuntime {
       return false;
     }
     int len = input.length();
+    long minCharsNeeded = (long) counterMin * minCharsPerRep(nullable, initial, accept, follow);
     for (int start = Math.max(0, from); start <= len; start++) {
+      if (minCharsNeeded > len - start) {
+        // See findFrom: not enough input remains to ever satisfy counterMin repetitions.
+        if (start == len) {
+          break;
+        }
+        continue;
+      }
       int end =
           longestEndFrom(
               input,
@@ -297,6 +315,45 @@ public final class CountingGlushkovRuntime {
       }
     }
     return false;
+  }
+
+  /**
+   * Structural (character-independent) lower bound on how many input characters a single body
+   * repetition must consume, computed once per {@link #findFrom}/{@link #findBoundsFrom} call and
+   * used to skip candidate start positions that mathematically cannot reach {@code counterMin}
+   * repetitions before running out of input -- avoiding an O(span) {@link #longestEndFrom} scan
+   * that would otherwise re-discover the same impossibility character by character at every
+   * candidate start.
+   *
+   * <p>Performs a BFS over the {@code follow} relation from {@code initial} to {@code accept},
+   * ignoring character-class compatibility entirely. Ignoring character constraints can only
+   * <em>overestimate</em> which positions are reachable in a given number of steps (never
+   * underestimate), so the returned step count is always {@code <=} the true minimum -- an
+   * admissible lower bound safe to multiply by {@code counterMin} for a "definitely impossible"
+   * pruning check. Returns {@code 0} when the body is nullable (a repetition may consume zero
+   * characters, so no positive bound holds) and {@code 1} as a safe (non-pruning) fallback if the
+   * BFS cannot establish a tighter bound within the 64-position budget.
+   */
+  static int minCharsPerRep(boolean nullable, long initial, long accept, long[] follow) {
+    if (nullable) {
+      return 0;
+    }
+    if ((initial & accept) != 0L) {
+      return 1;
+    }
+    long visited = initial;
+    long frontier = initial;
+    for (int steps = 1; steps <= 64; steps++) {
+      frontier = expand(frontier, follow) & ~visited;
+      if (frontier == 0L) {
+        return 1;
+      }
+      if ((frontier & accept) != 0L) {
+        return steps + 1;
+      }
+      visited |= frontier;
+    }
+    return 1;
   }
 
   /** Expand the active set along the follow relation (union of follow[p] over set bits p). */

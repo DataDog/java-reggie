@@ -29,12 +29,16 @@ class PikeVMRoutingTest {
 
   @Test
   void captureAmbiguousRoutes_toPikevmCapture() throws Exception {
-    // (a)?b has a nullable outer quantifier on a capturing group (B16): BITSTATE_CAPTURE gives
+    // (a)?bc has a nullable outer quantifier on a capturing group (B16): BITSTATE_CAPTURE gives
     // correct per-iteration spans; DFA_UNROLLED_WITH_GROUPS POSIX last-match span is wrong.
+    // Uses a 2-char suffix ("bc") rather than a single char ("(a)?b") because the single-literal-
+    // char-group + single-literal-char-suffix shape is now intercepted earlier by
+    // SPECIALIZED_OPTIONAL_GROUP (see
+    // SpecializedOptionalGroupTest.routesToSpecializedOptionalGroup).
     assertEquals(
         PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
-        StrategyCorrectnessMetaTest.routeOf("(a)?b"),
-        "(a)?b must route to BITSTATE_CAPTURE");
+        StrategyCorrectnessMetaTest.routeOf("(a)?bc"),
+        "(a)?bc must route to BITSTATE_CAPTURE");
   }
 
   @Test

@@ -31,6 +31,10 @@ ignore:
   - "**/debug/**"
   - "**/*Test.java"
   - "**/*Benchmark.java"
+  # Debug-only diagnostic printer (every case is a System.out.println), already excluded from
+  # our own jacocoVerify/jacocoAggregateReport gates (see build.gradle) — not meant to be
+  # unit-tested.
+  - "**/PatternDebugger.java"
 
 github_checks:
   annotations: true
