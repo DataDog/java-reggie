@@ -524,7 +524,11 @@ final class BitStateMatcher extends ReggieMatcher {
         // Anchor origin is pinned to absolute 0 (regionStart argument), matching PikeVMMatcher's
         // find/findFrom semantics: ^/\A never fire at a findFrom(start>0) offset, only at true
         // input start.
+<<<<<<< HEAD
         if (!PikeVMMatcher.checkAnchor(anchor, input, pos, 0, regionEnd)) continue;
+=======
+        if (!PikeVMMatcher.checkAnchor(anchor, input, pos, 0, spanEnd)) continue;
+>>>>>>> origin/main
         pushEpsilonChildrenReversed(sid, pos);
         continue;
       }
