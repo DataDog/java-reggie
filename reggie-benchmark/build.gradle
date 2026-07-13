@@ -9,6 +9,10 @@ repositories {
 
 dependencies {
     implementation project(':reggie-runtime')
+
+    // NFA/ThompsonBuilder/RegexParser for LaurikariPhase0Benchmark's test-only driver.
+    // reggie-runtime declares this as 'implementation' (not 'api'), so it is not exposed
+    // transitively and must be declared explicitly here.
     implementation project(':reggie-codegen')
     annotationProcessor project(':reggie-processor')
 

@@ -163,6 +163,26 @@ final class LaurikariDFACache {
     return -1;
   }
 
+  /**
+   * O(1) cached transition lookup, falling back to {@link #lookupOrCompute} only on a genuine cache
+   * miss — the same ASCII-table-then-fallback check {@link #findLeftmostStart} inlines at the top
+   * of its per-character loop, factored out so callers that need the full register vector (rather
+   * than {@link #findLeftmostStart}'s Phase-0-specific single-age recovery) don't have to pay for a
+   * closure recomputation (via {@link LaurikariNfaStep#apply}) and a hashed state-set lookup on
+   * every character.
+   */
+  int step(int state, int c, LaurikariNfaStep nfaStep) {
+    int[] table =
+        NEEDS_INT_ARRAY_ACQUIRE
+            ? (int[]) TABLES_VH.getAcquire(asciiTables, state)
+            : asciiTables[state];
+    int next =
+        (table != null && c < 128)
+            ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
+            : UNCACHED;
+    return next == UNCACHED ? lookupOrCompute(state, c, nfaStep) : next;
+  }
+
   int lookupOrCompute(int state, int c, LaurikariNfaStep step) {
     LaurikariStepResult result = step.apply(nfaStateSets[state], regs[state], c);
     if (result.states.length == 0) {

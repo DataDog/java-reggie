@@ -66,7 +66,7 @@ import org.openjdk.jmh.annotations.Warmup;
 @Fork(1)
 public class LaurikariPhase0Benchmark {
 
-  // --- SQL_ANSI/MYSQL/POSTGRESQL, mirrored verbatim from IastRegexpBenchmark.java:101-116 -------
+  // --- SQL_ANSI/MYSQL/POSTGRESQL, mirrored verbatim from IastRegexpBenchmark.java:118-133 -------
   private static final String SQL_ANSI =
       "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|b'[0-9a-f]+'|0b[0-9a-f]+"
           + "|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
@@ -85,15 +85,15 @@ public class LaurikariPhase0Benchmark {
   // -----------
   private static final String SQL_MATCH_LONG =
       "SELECT * FROM users WHERE "
-          + "col_x = col_y AND ".repeat(2000)
+          + "col_x = col_y AND ".repeat(100)
           + "id = 42 AND name = 'Alice' AND balance = 1234.56";
   private static final String MYSQL_MATCH_LONG =
       "SELECT id, `name` FROM users WHERE "
-          + "col_x = col_y AND ".repeat(2000)
+          + "col_x = col_y AND ".repeat(100)
           + "id = 1 AND email = 'user@example.com' AND active = 1";
   private static final String POSTGRESQL_MATCH_LONG =
       "SELECT * FROM docs WHERE "
-          + "col_x = col_y AND ".repeat(2000)
+          + "col_x = col_y AND ".repeat(100)
           + "body = $$hello world$$ AND revision = 3";
 
   // --- Test-only LaurikariNfaStep driver, duplicated verbatim from LaurikariDFACacheTest ---------
