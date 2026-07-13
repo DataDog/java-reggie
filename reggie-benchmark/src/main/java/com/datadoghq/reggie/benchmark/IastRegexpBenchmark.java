@@ -58,8 +58,6 @@ import org.openjdk.jmh.annotations.*;
  *       find()'s scan/prefilter cost rather than the match itself.
  * </ul>
  *
-<<<<<<< HEAD
-=======
  * <p>Scan-prefix filler for the SQL dialects and QueryObfuscator is capped well below {@code
  * BitStateMatcher}'s fallback budget ({@code stateCount * (input.length() + 1) <= 1 << 18}): those
  * patterns are pinned to {@code BITSTATE_CAPTURE} and have large NFAs (roughly 100 states for the
@@ -68,7 +66,6 @@ import org.openjdk.jmh.annotations.*;
  * reggieQueryObfuscator*} silently delegate to the PikeVM fallback and report its throughput
  * instead of BitState's.
  *
->>>>>>> origin/main
  * <p>Patterns are compiled once per trial in {@link #setup()} and never inside a {@code @Benchmark}
  * method, so compilation cost is excluded from measurements.
  */
@@ -80,19 +77,6 @@ import org.openjdk.jmh.annotations.*;
 @Fork(1)
 public class IastRegexpBenchmark {
 
-<<<<<<< HEAD
-  @Param({"SHORT", "MEDIUM", "LONG"})
-  public String scale;
-
-  private static String pick(String scale, String shortV, String mediumV, String longV) {
-    switch (scale) {
-      case "SHORT":
-        return shortV;
-      case "MEDIUM":
-        return mediumV;
-      default:
-        return longV;
-=======
   /** Input scale for a benchmark trial; see the class doc for what each scale stresses. */
   public enum Scale {
     SHORT,
@@ -113,7 +97,6 @@ public class IastRegexpBenchmark {
         return longV;
       default:
         throw new IllegalArgumentException("Unhandled scale: " + scale);
->>>>>>> origin/main
     }
   }
 
@@ -280,11 +263,7 @@ public class IastRegexpBenchmark {
                 + "col_x = col_y AND ".repeat(20)
                 + "id = 42 AND name = 'Alice' AND balance = 1234.56",
             "SELECT * FROM users WHERE "
-<<<<<<< HEAD
-                + "col_x = col_y AND ".repeat(2000)
-=======
                 + "col_x = col_y AND ".repeat(100)
->>>>>>> origin/main
                 + "id = 42 AND name = 'Alice' AND balance = 1234.56");
     sqlNoMatch =
         pick(
@@ -294,11 +273,7 @@ public class IastRegexpBenchmark {
                 + "col_x = col_y AND ".repeat(20)
                 + "id = id ORDER BY id",
             "SELECT id, name, email FROM users WHERE "
-<<<<<<< HEAD
-                + "col_x = col_y AND ".repeat(2000)
-=======
                 + "col_x = col_y AND ".repeat(100)
->>>>>>> origin/main
                 + "id = id ORDER BY id");
     reggieSqlAnsi = RuntimeCompiler.compile(SQL_ANSI);
     jdkSqlAnsi = Pattern.compile(SQL_ANSI);
@@ -312,11 +287,7 @@ public class IastRegexpBenchmark {
                 + "col_x = col_y AND ".repeat(20)
                 + "id = 1 AND email = 'user@example.com' AND active = 1",
             "SELECT id, `name` FROM users WHERE "
-<<<<<<< HEAD
-                + "col_x = col_y AND ".repeat(2000)
-=======
                 + "col_x = col_y AND ".repeat(100)
->>>>>>> origin/main
                 + "id = 1 AND email = 'user@example.com' AND active = 1");
     mysqlNoMatch =
         pick(
@@ -326,11 +297,7 @@ public class IastRegexpBenchmark {
                 + "col_x = col_y AND ".repeat(20)
                 + "active AND enabled",
             "SELECT id, name FROM users WHERE "
-<<<<<<< HEAD
-                + "col_x = col_y AND ".repeat(2000)
-=======
                 + "col_x = col_y AND ".repeat(100)
->>>>>>> origin/main
                 + "active AND enabled");
     reggieSqlMysql = RuntimeCompiler.compile(SQL_MYSQL);
     jdkSqlMysql = Pattern.compile(SQL_MYSQL);
@@ -344,22 +311,14 @@ public class IastRegexpBenchmark {
                 + "col_x = col_y AND ".repeat(20)
                 + "body = $$hello world$$ AND revision = 3",
             "SELECT * FROM docs WHERE "
-<<<<<<< HEAD
-                + "col_x = col_y AND ".repeat(2000)
-=======
                 + "col_x = col_y AND ".repeat(100)
->>>>>>> origin/main
                 + "body = $$hello world$$ AND revision = 3");
     postgresqlNoMatch =
         pick(
             scale,
             "SELECT id, title FROM docs ORDER BY id",
             "SELECT id, title FROM docs WHERE " + "col_x = col_y AND ".repeat(20) + "id = id",
-<<<<<<< HEAD
-            "SELECT id, title FROM docs WHERE " + "col_x = col_y AND ".repeat(2000) + "id = id");
-=======
             "SELECT id, title FROM docs WHERE " + "col_x = col_y AND ".repeat(100) + "id = id");
->>>>>>> origin/main
     reggieSqlPostgresql = RuntimeCompiler.compile(SQL_POSTGRESQL);
     jdkSqlPostgresql = Pattern.compile(SQL_POSTGRESQL);
     re2jSqlPostgresql = com.google.re2j.Pattern.compile(SQL_POSTGRESQL);
@@ -368,24 +327,14 @@ public class IastRegexpBenchmark {
         pick(
             scale,
             "api_key=abc123def456&user=alice&action=view",
-<<<<<<< HEAD
-            "region=us&locale=en&".repeat(20) + "api_key=abc123def456&user=alice&action=view",
-            "region=us&locale=en&".repeat(2000) + "api_key=abc123def456&user=alice&action=view");
-=======
             "region=us&locale=en&".repeat(1) + "api_key=abc123def456&user=alice&action=view",
             "region=us&locale=en&".repeat(2) + "api_key=abc123def456&user=alice&action=view");
->>>>>>> origin/main
     qobfNoMatch =
         pick(
             scale,
             "user=alice&action=view&page=1&sort=asc",
-<<<<<<< HEAD
-            "user=alice&action=view&page=1&sort=asc&" + "region=us&locale=en&".repeat(20),
-            "user=alice&action=view&page=1&sort=asc&" + "region=us&locale=en&".repeat(2000));
-=======
             "user=alice&action=view&page=1&sort=asc&" + "region=us&locale=en&".repeat(1),
             "user=alice&action=view&page=1&sort=asc&" + "region=us&locale=en&".repeat(2));
->>>>>>> origin/main
     reggieQueryObfuscator = RuntimeCompiler.compile(QUERY_OBFUSCATOR);
     jdkQueryObfuscator = Pattern.compile(QUERY_OBFUSCATOR);
     re2jQueryObfuscator = com.google.re2j.Pattern.compile(QUERY_OBFUSCATOR);
