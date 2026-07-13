@@ -252,7 +252,7 @@ final class BitStateMatcher extends ReggieMatcher {
     int spanEnd = localizeScratch[1];
     if (exceedsBudget(spanEnd - scanStart)) {
       fallbackCount++;
-      return fallback().find(input);
+      return fallback().findFrom(input, scanStart) >= 0;
     }
     return search(input, scanStart, spanEnd, regionEnd, true, false);
   }
@@ -272,7 +272,7 @@ final class BitStateMatcher extends ReggieMatcher {
     int spanEnd = localizeScratch[1];
     if (exceedsBudget(spanEnd - scanStart)) {
       fallbackCount++;
-      return fallback().findFrom(input, start);
+      return fallback().findFrom(input, scanStart);
     }
     boolean won = search(input, scanStart, spanEnd, regionEnd, true, false);
     return won ? winCaptures[0] : -1;
@@ -308,7 +308,7 @@ final class BitStateMatcher extends ReggieMatcher {
     int spanEnd = localizeScratch[1];
     if (exceedsBudget(spanEnd - scanStart)) {
       fallbackCount++;
-      return fallback().findMatchFrom(input, start);
+      return fallback().findMatchFrom(input, scanStart);
     }
     boolean won = search(input, scanStart, spanEnd, regionEnd, true, false);
     return won ? buildCaptureResult(input, winCaptures, groupCount) : null;
