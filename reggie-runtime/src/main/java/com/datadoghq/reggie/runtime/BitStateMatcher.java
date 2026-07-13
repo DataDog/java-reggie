@@ -357,7 +357,10 @@ final class BitStateMatcher extends ReggieMatcher {
    * upper-bound direction — see its javadoc) — narrowing {@code spanEnd} accordingly. This mirrors
    * {@code PikeVMMatcher.findPosFrom}'s identical use of {@code findEnd} to tighten its own scan
    * loop without touching the true region end used for anchor checks (see {@link #search}'s {@code
-   * regionEnd} parameter doc).
+   * regionEnd} parameter doc). The probe itself is capped at {@code scanStart +
+   * maxBudgetableSpan()}: scanning any further can only produce an {@code hi} that still exceeds
+   * budget, so probing past that point would just pay for a scan whose result gets discarded — this
+   * way the probe never costs more than the search it is trying to avoid.
    *
    * @return {@code false} if {@link #rejectDfa} proves no match exists in {@code [from, regionEnd)}
    *     (caller should return its own no-match result immediately, no search needed); {@code true}
@@ -374,9 +377,12 @@ final class BitStateMatcher extends ReggieMatcher {
     }
     int spanEnd = regionEnd;
     if (rejectDfa != null && exceedsBudget(spanEnd - scanStart)) {
-      int hi = rejectDfa.findEnd(input, scanStart, regionEnd, rejectStep);
-      if (hi >= scanStart && !exceedsBudget(hi - scanStart)) {
-        spanEnd = hi;
+      int probeLimit = Math.min(regionEnd, scanStart + maxBudgetableSpan());
+      if (probeLimit > scanStart) {
+        int hi = rejectDfa.findEnd(input, scanStart, probeLimit, rejectStep);
+        if (hi >= scanStart && !exceedsBudget(hi - scanStart)) {
+          spanEnd = hi;
+        }
       }
     }
     localizeScratch[0] = scanStart;
@@ -402,6 +408,16 @@ final class BitStateMatcher extends ReggieMatcher {
 
   private boolean exceedsBudget(int spanLen) {
     return (long) stateCount * (spanLen + 1) > BUDGET_CELLS;
+  }
+
+  /**
+   * Largest {@code spanLen} for which {@link #exceedsBudget} is false, i.e. the widest span a
+   * {@link #search} call could still afford. Used by {@link #localizeForFind} to cap its {@link
+   * LazyDFACache#findEnd} probe: any {@code hi} beyond {@code scanStart + maxBudgetableSpan()}
+   * would exceed budget anyway, so the probe never needs to scan past it.
+   */
+  private int maxBudgetableSpan() {
+    return (int) Math.max(0, BUDGET_CELLS / stateCount - 1);
   }
 
   private PikeVMMatcher fallback() {
