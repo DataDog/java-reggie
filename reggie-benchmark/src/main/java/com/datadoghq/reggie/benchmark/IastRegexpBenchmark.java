@@ -69,17 +69,26 @@ import org.openjdk.jmh.annotations.*;
 @Fork(1)
 public class IastRegexpBenchmark {
 
-  @Param({"SHORT", "MEDIUM", "LONG"})
-  public String scale;
+  /** Input scale for a benchmark trial; see the class doc for what each scale stresses. */
+  public enum Scale {
+    SHORT,
+    MEDIUM,
+    LONG
+  }
 
-  private static String pick(String scale, String shortV, String mediumV, String longV) {
+  @Param({"SHORT", "MEDIUM", "LONG"})
+  public Scale scale;
+
+  private static String pick(Scale scale, String shortV, String mediumV, String longV) {
     switch (scale) {
-      case "SHORT":
+      case SHORT:
         return shortV;
-      case "MEDIUM":
+      case MEDIUM:
         return mediumV;
-      default:
+      case LONG:
         return longV;
+      default:
+        throw new IllegalArgumentException("Unhandled scale: " + scale);
     }
   }
 
