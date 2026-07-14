@@ -217,6 +217,56 @@ class LaurikariDfaMatcherTest {
     assertEquals(0, laurikari.fallbackCount());
   }
 
+  // --- anchor-boundary cases: regionEnd/scan-bound separation for start anchors --------------
+  // (design doc §"Task 1.5": the same bug class already fixed once in BitStateMatcher.search --
+  // confusing where a scan is allowed to *start* re-checking an anchor with where the scan's
+  // *content window* begins/ends. LaurikariDfaMatcher's analog is startDfaStateFor/
+  // reinjectDfaState/reinjectAfterNlDfaState: ^ must only ever fire at absolute position 0, and
+  // (?m)^ only at absolute 0 or immediately after a '\n', regardless of what offset findFrom is
+  // called with -- pinned here across multiple offsets against the PikeVMMatcher oracle.
+
+  @Test
+  void leadingStartAnchor_findFromOffsets_matchesOracle() throws Exception {
+    String pattern = "^(a+)";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    String input = "aaa\naaa";
+    for (int start : new int[] {0, 1, 3, 4, 6, input.length()}) {
+      assertEquals(
+          oracle.findFrom(input, start),
+          laurikari.findFrom(input, start),
+          "findFrom(" + start + ") diverged");
+      MatchResult expected = oracle.findMatchFrom(input, start);
+      MatchResult actual = laurikari.findMatchFrom(input, start);
+      assertMatchEquals(expected, actual, groupCount, input + "@" + start);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void multilineStartAnchor_findFromAcrossNewlines_matchesOracle() throws Exception {
+    String pattern = "(?m)^(a+)";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    // '\n' at indices 2 and 6 -- (?m)^ is live at absolute 0 and immediately after each of those,
+    // i.e. positions 0, 3, 7; every other offset must have the anchor blocked.
+    String input = "xa\naaa\nxx";
+    for (int start : new int[] {0, 1, 2, 3, 4, 6, 7, 8, input.length()}) {
+      assertEquals(
+          oracle.findFrom(input, start),
+          laurikari.findFrom(input, start),
+          "findFrom(" + start + ") diverged");
+      MatchResult expected = oracle.findMatchFrom(input, start);
+      MatchResult actual = laurikari.findMatchFrom(input, start);
+      assertMatchEquals(expected, actual, groupCount, input + "@" + start);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
   @Test
   void captureSpans_pinnedAgainstOracleExactly() throws Exception {
     String pattern = "(a+)(b+)";
