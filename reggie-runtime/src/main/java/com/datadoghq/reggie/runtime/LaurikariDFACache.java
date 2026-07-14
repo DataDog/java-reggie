@@ -118,6 +118,16 @@ final class LaurikariDFACache {
    * always calls {@link #lookupOrCompute} directly. Always all-false when {@code
    * anchorBearingStates} is {@code null} (every pre-extension caller), so behavior for those
    * callers is byte-identical to before this field existed.
+   *
+   * <p>{@link #lookupOrCompute}'s caching gate additionally checks this flag on the
+   * <em>destination</em> state of a transition, not just the source: a source state with no
+   * anchor-bearing member of its own can still transition into a destination whose subset newly
+   * touches one (e.g. entering the first repetition of a one-or-more loop that feeds a trailing
+   * anchor). {@code addClosure} adds an anchor-bearing NFA state to a closure unconditionally the
+   * moment it becomes epsilon-reachable, so this is a purely structural, position-independent check
+   * — see issue #108, where checking only the source let a live, position-specific {@code
+   * checkAnchor} outcome get memoized under {@code (state, c)} and wrongly replayed at a later
+   * position.
    */
   final boolean[] anchorSensitive;
 
@@ -284,7 +294,18 @@ final class LaurikariDFACache {
     LaurikariStepResult result =
         step.apply(nfaStateSets[state], regs[state], c, input, pos, regionEnd);
     int id = intern(result.states, result.regs);
-    if (id != FALLBACK && !anchorSensitive[state]) cacheEntry(state, c, id);
+    // Gating on anchorSensitive[state] alone is not enough: a source state whose OWN subset
+    // has no anchor-bearing member can still transition into a destination whose subset newly
+    // touches one (e.g. the first repetition of a one-or-more loop feeding a trailing anchor).
+    // addClosure adds an anchor-bearing NFA state to a closure unconditionally the moment it is
+    // epsilon-reachable, so anchorSensitive[id] is a structural (position-independent) signal
+    // that THIS transition's closure build evaluated a live, position-specific checkAnchor call
+    // -- caching it under (state, c) alone would silently replay that one call's outcome at a
+    // different position later (issue #108).
+    boolean destinationAnchorSensitive = id >= 0 && anchorSensitive[id];
+    if (id != FALLBACK && !anchorSensitive[state] && !destinationAnchorSensitive) {
+      cacheEntry(state, c, id);
+    }
     return id;
   }
 

@@ -239,11 +239,8 @@ class LaurikariAnchorLookaheadFuzzTest {
 
   @Test
   void wordBoundaryDigits_variousPositions() throws Exception {
-    // Each input gets a FRESH matcher pair: reusing one findCache-backed LaurikariDfaMatcher
-    // across many distinct inputs runs into the separately-documented pre-existing within-call
-    // cache-pollution bug (see anchorCachePollutionWithinSingleFindCall_knownPreExistingBug
-    // below), which is orthogonal to what this test verifies -- correctness of the single-call
-    // anchor fan-out.
+    // Each input gets a FRESH matcher pair to isolate this test's target -- correctness of the
+    // single-call anchor fan-out -- from any cross-input cache-reuse effects.
     String pattern = "\\b\\d+";
     int groupCount = 0;
 
@@ -319,11 +316,7 @@ class LaurikariAnchorLookaheadFuzzTest {
     // regionEnd-2.
     String[] inputs = {
       "", "1", "12", "123", "a", "a1", "a12", "a123", "1a", // digit not at true end -> no match
-      "12a",
-      // NOTE: "a1a1" is deliberately excluded here -- it trips the pre-existing, unrelated
-      // within-call anchor-cache-pollution bug documented and reproduced in
-      // anchorCachePollutionWithinSingleFindCall_knownPreExistingBug() below, which is not a
-      // regression from the fan-out fix under test in this method.
+      "12a", "a1a1",
     };
     for (String input : inputs) {
       LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
@@ -450,42 +443,32 @@ class LaurikariAnchorLookaheadFuzzTest {
   }
 
   // ==============================================================================================
-  // KNOWN, PRE-EXISTING BUG (not introduced by the uncommitted lookahead-class fan-out fix; the
-  // caching-decision gate below is untouched by that diff and traces back to commit 274488d):
-  // position-scoped cache pollution in LaurikariDFACache's findCache.
+  // FIXED (issue #108): position-scoped cache pollution in LaurikariDFACache's findCache.
   //
-  // Root cause: LaurikariDFACache.isAnchorSensitive(int[] states) only checks whether an
-  // anchor-bearing NFA state is already a MEMBER of a DFA state's own subset. It does not check
-  // whether an anchor-bearing state becomes reachable one step later via a single consuming
-  // transition + epsilon-closure. So a transition out of a state that is NOT flagged
-  // anchorSensitive can, on its first evaluation, resolve through a live checkAnchor(...) call
-  // that is specific to that call's (pos, regionEnd) -- and LaurikariDFACache.lookupOrCompute's
-  // caching gate (`if (id != FALLBACK && !anchorSensitive[state]) cacheEntry(state, c, id);`)
-  // unconditionally memoizes that position-specific outcome, keyed only on (state, c).
+  // Root cause: LaurikariDFACache.lookupOrCompute's caching gate used to check only whether the
+  // SOURCE state of a transition was anchorSensitive. It did not check whether the transition's
+  // DESTINATION subset newly touches an anchor-bearing state one step later via a single
+  // consuming transition + epsilon-closure. So a transition out of a state that was NOT flagged
+  // anchorSensitive could, on its first evaluation, resolve through a live checkAnchor(...) call
+  // that is specific to that call's (pos, regionEnd) -- and the caching gate unconditionally
+  // memoized that position-specific outcome, keyed only on (state, c).
   //
-  // This is more severe than "reuse the matcher across two find() calls": LaurikariDfaMatcher's
-  // self-anchoring find() ALREADY sweeps every start position within ONE call, reinjecting start
+  // This was more severe than "reuse the matcher across two find() calls": LaurikariDfaMatcher's
+  // self-anchoring find() already sweeps every start position within ONE call, reinjecting start
   // threads into the SAME findCache instance at each position. So a single find() call over a
-  // multi-character input can self-pollute: an anchor outcome computed live at an early position
-  // gets cached under (state, c) and then wrongly reused at a later position with a different
-  // pos/regionEnd, even though no second find() call or matcher reuse was involved.
+  // multi-character input could self-pollute: an anchor outcome computed live at an early
+  // position got cached under (state, c) and then wrongly reused at a later position with a
+  // different pos/regionEnd, even though no second find() call or matcher reuse was involved.
   //
-  // Minimal repro (single find() call, brand-new matcher, no reuse across calls): pattern
-  // "\d+$", input "a1a1". Oracle (PikeVMMatcher, and java.util.regex) correctly finds a match --
-  // the trailing "1" at index 3 satisfies \d+$. A fresh LaurikariDfaMatcher's find("a1a1")
-  // incorrectly returns false, because computing the earlier "1" at index 1 (followed by "a",
-  // which fails the END anchor) caches an outcome that gets wrongly reused when the scan later
-  // reaches the trailing "1" at index 3.
-  //
-  // This predates today's fix and is orthogonal to it -- every other test in this file
-  // deliberately uses a fresh LaurikariDfaMatcher per input, but that only isolates ACROSS calls;
-  // it cannot isolate the within-a-single-call self-pollution this repro demonstrates. Per task
-  // instructions this bug is described here, not fixed; LaurikariDFACache.java is not modified by
-  // this change.
+  // Fix: lookupOrCompute's caching gate additionally checks anchorSensitive[id] (the destination
+  // state), not just anchorSensitive[state] (the source) -- see LaurikariDFACache.lookupOrCompute
+  // and the anchorSensitive field javadoc for the correctness argument (addClosure adds an
+  // anchor-bearing NFA state to a closure unconditionally the moment it becomes epsilon-reachable,
+  // so this is a purely structural, position-independent check).
   // ==============================================================================================
 
   @Test
-  void anchorCachePollutionWithinSingleFindCall_knownPreExistingBug() throws Exception {
+  void anchorCachePollutionWithinSingleFindCall() throws Exception {
     String pattern = "\\d+$";
     int groupCount = 0;
     LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
@@ -495,16 +478,9 @@ class LaurikariAnchorLookaheadFuzzTest {
     // oracle correctly matches the trailing digit "1" at index 3.
     assertTrue(oracle.find("a1a1"), "sanity: oracle must find \\d+$ in \"a1a1\" (trailing '1')");
 
-    // Documents today's ACTUAL (buggy) behavior: the Laurikari engine wrongly reports no match,
-    // because the live END-anchor check performed while scanning position 1 ("1" followed by
-    // "a") gets cached under (state, 'a') and is wrongly replayed when the scan reaches position
-    // 3 ("1" followed by end-of-input). If this assertion ever starts failing because the bug
-    // got fixed, update/remove this test rather than reintroducing the workaround.
-    assertEquals(
-        false,
+    assertTrue(
         laurikari.find("a1a1"),
-        "documents current buggy behavior: single find() call wrongly misses the trailing digit"
-            + " match in \"a1a1\" due to within-call anchor-cache pollution (oracle-correct"
-            + " answer is true)");
+        "single find() call must find the trailing digit match in \"a1a1\" (issue #108"
+            + " regression)");
   }
 }
