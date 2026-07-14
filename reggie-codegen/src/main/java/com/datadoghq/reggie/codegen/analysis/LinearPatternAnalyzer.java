@@ -148,11 +148,18 @@ public class LinearPatternAnalyzer implements RegexVisitor<Void> {
 
     // Handle word boundaries separately from line anchors
     if (node.type == AnchorNode.Type.WORD_BOUNDARY) {
-      // Word boundary check: \b (always positive, \B not yet supported)
       operations.add(
           new LinearPatternInfo.LinearOperation(
               LinearPatternInfo.LinearOperation.Type.CHECK_WORD_BOUNDARY,
               true // true = \b (positive word boundary)
+              ));
+      return null;
+    }
+    if (node.type == AnchorNode.Type.NON_WORD_BOUNDARY) {
+      operations.add(
+          new LinearPatternInfo.LinearOperation(
+              LinearPatternInfo.LinearOperation.Type.CHECK_WORD_BOUNDARY,
+              false // false = \B (negative word boundary)
               ));
       return null;
     }

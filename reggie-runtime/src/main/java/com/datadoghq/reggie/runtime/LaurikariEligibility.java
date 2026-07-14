@@ -34,12 +34,13 @@ import java.util.Set;
  * START}-family ({@code START}/{@code STRING_START}/{@code START_MULTILINE}) via the
  * build-time-precomputed anchor-blocked closures {@link LaurikariCaptureNfaStep} always used, and
  * {@code END}/{@code STRING_END}/{@code STRING_END_ABSOLUTE}/{@code END_MULTILINE}/{@code
- * WORD_BOUNDARY} via a live per-occurrence {@code PikeVMMatcher.checkAnchor} call inside {@code
- * addClosure} (see that class). Only the {@code START}-family needs the "leading-only" structural
- * restriction below — an anchor inside a loop can fire across empty iterations, which the
- * subset/register model here cannot represent for anchors baked into precomputed closures — the 5
- * new types are evaluated fresh on every occurrence, so no equivalent restriction applies to them
- * (worked through adversarial pattern shapes; see the TDFA Phase 2 plan).
+ * WORD_BOUNDARY}/{@code NON_WORD_BOUNDARY} via a live per-occurrence {@code
+ * PikeVMMatcher.checkAnchor} call inside {@code addClosure} (see that class). Only the {@code
+ * START}-family needs the "leading-only" structural restriction below — an anchor inside a loop can
+ * fire across empty iterations, which the subset/register model here cannot represent for anchors
+ * baked into precomputed closures — the 6 new types are evaluated fresh on every occurrence, so no
+ * equivalent restriction applies to them (worked through adversarial pattern shapes; see the TDFA
+ * Phase 2 plan).
  */
 final class LaurikariEligibility {
 

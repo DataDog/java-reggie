@@ -73,7 +73,7 @@ final class LaurikariDFACache {
 
   /**
    * Number of {@link #lookaheadClass} buckets. See that method's javadoc for why exactly these 3
-   * suffice to make every one of the 5 new anchor types' {@code checkAnchor} outcome a pure
+   * suffice to make every one of the 6 new anchor types' {@code checkAnchor} outcome a pure
    * function of {@code (consumed char, lookahead class)} away from {@code regionEnd}.
    */
   private static final int LOOKAHEAD_CLASSES = 3;
@@ -108,16 +108,17 @@ final class LaurikariDFACache {
 
   /**
    * {@code anchorSensitive[id]} is true when DFA state {@code id}'s NFA subset touches at least one
-   * of the 5 position-dependent anchor types ({@code END}, {@code STRING_END}, {@code
-   * STRING_END_ABSOLUTE}, {@code END_MULTILINE}, {@code WORD_BOUNDARY}) — see the TDFA Phase 2
-   * end-anchor/{@code \b} extension design. Such states' outgoing transitions must never be
-   * memoized in {@link #asciiTables} keyed on the consumed char alone (the cached result would
-   * silently apply one call's anchor outcome to a different position/call); {@link #step} instead
-   * memoizes them in {@link #anchorLookaheadTables}, additionally keyed on {@link #lookaheadClass},
-   * except within {@link #ANCHOR_LOOKAHEAD_LIVE_MARGIN} characters of {@code regionEnd}, where it
-   * always calls {@link #lookupOrCompute} directly. Always all-false when {@code
-   * anchorBearingStates} is {@code null} (every pre-extension caller), so behavior for those
-   * callers is byte-identical to before this field existed.
+   * of the 6 position-dependent anchor types ({@code END}, {@code STRING_END}, {@code
+   * STRING_END_ABSOLUTE}, {@code END_MULTILINE}, {@code WORD_BOUNDARY}, {@code NON_WORD_BOUNDARY})
+   * — see the TDFA Phase 2 end-anchor/{@code \b} extension design. Such states' outgoing
+   * transitions must never be memoized in {@link #asciiTables} keyed on the consumed char alone
+   * (the cached result would silently apply one call's anchor outcome to a different
+   * position/call); {@link #step} instead memoizes them in {@link #anchorLookaheadTables},
+   * additionally keyed on {@link #lookaheadClass}, except within {@link
+   * #ANCHOR_LOOKAHEAD_LIVE_MARGIN} characters of {@code regionEnd}, where it always calls {@link
+   * #lookupOrCompute} directly. Always all-false when {@code anchorBearingStates} is {@code null}
+   * (every pre-extension caller), so behavior for those callers is byte-identical to before this
+   * field existed.
    *
    * <p>{@link #lookupOrCompute}'s caching gate additionally checks this flag on the
    * <em>destination</em> state of a transition, not just the source: a source state with no
@@ -133,7 +134,7 @@ final class LaurikariDFACache {
 
   /**
    * Parallel to {@link LaurikariCaptureNfaStep#statesById}: {@code anchorBearingStates[nfaId]} is
-   * true if that NFA state carries one of the 5 new anchor types. {@code null} for callers with no
+   * true if that NFA state carries one of the 6 new anchor types. {@code null} for callers with no
    * anchor-sensitive states (every Phase 0/0.5 driver, and any {@code hasNewAnchor == false}
    * pattern) — then {@link #anchorSensitive} stays all-false without needing to consult this array.
    */
@@ -359,7 +360,7 @@ final class LaurikariDFACache {
   /**
    * Classifies the not-yet-consumed character at {@code input.charAt(pos)} into one of {@link
    * #LOOKAHEAD_CLASSES} buckets, sufficient (together with the already-consumed char {@code c},
-   * which is a separate cache dimension) to determine every one of the 5 new anchor types' {@code
+   * which is a separate cache dimension) to determine every one of the 6 new anchor types' {@code
    * PikeVMMatcher.checkAnchor} outcome, <b>provided</b> the caller has already excluded positions
    * within {@link #ANCHOR_LOOKAHEAD_LIVE_MARGIN} of {@code regionEnd} (guaranteed by {@link
    * #step}):
@@ -373,6 +374,9 @@ final class LaurikariDFACache {
    *       pos))}. The first operand is {@code isLetterOrDigit((char) c)} (already a cache
    *       dimension); the second is true iff {@link #LOOKAHEAD_WORD} (a newline is never a word
    *       char, so {@link #LOOKAHEAD_NEWLINE} and {@link #LOOKAHEAD_WORD} are mutually exclusive).
+   *   <li>{@code NON_WORD_BOUNDARY}: the negation of {@code WORD_BOUNDARY}'s equation above — same
+   *       two operands, {@code ==} instead of {@code !=} — so it depends on this class exactly the
+   *       same way.
    * </ul>
    */
   private static int lookaheadClass(String input, int pos) {

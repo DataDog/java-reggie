@@ -98,6 +98,12 @@ public class PatternAnalyzer {
       return false;
     }
 
+    // \b/\B: OnePassBytecodeGenerator has no word-boundary check at all (silently a no-op);
+    // PIKEVM_CAPTURE evaluates checkAnchor correctly at each position instead.
+    if (nfa.hasWordBoundaryAnchor()) {
+      return false;
+    }
+
     // Check each state for ambiguity
     for (NFA.NFAState state : nfa.getStates()) {
       // Check for overlapping character transitions
@@ -1257,6 +1263,19 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // \b/\B: DFA subset construction silently drops per-position boundary context
+            // (SubsetConstructor.isPositionAnchor excludes WORD_BOUNDARY/NON_WORD_BOUNDARY);
+            // PIKEVM_CAPTURE evaluates checkAnchor correctly at each position instead.
+            if (nfa.hasWordBoundaryAnchor()) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
             addTrace(
@@ -1389,6 +1408,20 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
+        // \b/\B: DFA subset construction silently drops per-position boundary context
+        // (SubsetConstructor.isPositionAnchor excludes WORD_BOUNDARY/NON_WORD_BOUNDARY);
+        // PIKEVM_CAPTURE evaluates checkAnchor correctly at each position instead. OPTIMIZED_NFA
+        // (the state-count fallback below) has the same latent bug, so it must be excluded too.
+        if (nfa.hasWordBoundaryAnchor()) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
         int stateCount = dfa.getStateCount();
         if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
           return new MatchingStrategyResult(
@@ -1498,6 +1531,15 @@ public class PatternAnalyzer {
 
       if (FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
         // DFA cannot track per-iteration spans; PIKEVM_CAPTURE handles capturing groups correctly.
+        return new MatchingStrategyResult(
+            MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+      }
+      // \b/\B: DFA subset construction silently drops per-position boundary context
+      // (SubsetConstructor.isPositionAnchor excludes WORD_BOUNDARY/NON_WORD_BOUNDARY);
+      // PIKEVM_CAPTURE evaluates checkAnchor correctly at each position instead. OPTIMIZED_NFA/
+      // BITPARALLEL_GLUSHKOV/DFA_TABLE (the state-count fallbacks below) share the same latent
+      // bug, so this must precede the whole state-count branch, not just DFA_UNROLLED/DFA_SWITCH.
+      if (nfa.hasWordBoundaryAnchor()) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }

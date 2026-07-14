@@ -102,18 +102,19 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
   private final int[][] reinjectAfterNlRegs;
 
   /**
-   * True if any NFA state carries one of the 5 position-dependent anchor types ({@code END}, {@code
-   * STRING_END}, {@code STRING_END_ABSOLUTE}, {@code END_MULTILINE}, {@code WORD_BOUNDARY}) that
-   * must be evaluated live against the real input/position via {@link PikeVMMatcher#checkAnchor} —
-   * see the TDFA Phase 2 end-anchor/{@code \b} extension design. {@code false} for every pattern
-   * this class handled before that extension, in which case every closure accessor below returns
-   * its constructor-precomputed field unchanged (byte-identical to pre-extension behavior).
+   * True if any NFA state carries one of the 6 position-dependent anchor types ({@code END}, {@code
+   * STRING_END}, {@code STRING_END_ABSOLUTE}, {@code END_MULTILINE}, {@code WORD_BOUNDARY}, {@code
+   * NON_WORD_BOUNDARY}) that must be evaluated live against the real input/position via {@link
+   * PikeVMMatcher#checkAnchor} — see the TDFA Phase 2 end-anchor/{@code \b} extension design.
+   * {@code false} for every pattern this class handled before that extension, in which case every
+   * closure accessor below returns its constructor-precomputed field unchanged (byte-identical to
+   * pre-extension behavior).
    */
   final boolean hasNewAnchor;
 
   /**
    * Parallel to {@link #statesById}: {@code anchorBearingStates[id]} is true if that NFA state
-   * carries one of the 5 new anchor types. Exposed via {@link #anchorBearingStates()} so {@link
+   * carries one of the 6 new anchor types. Exposed via {@link #anchorBearingStates()} so {@link
    * LaurikariDFACache} can flag which of its interned DFA states must never have their outgoing
    * transitions memoized (see that class's {@code anchorSensitive} field).
    */
@@ -159,7 +160,8 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
         || a == NFA.AnchorType.STRING_END
         || a == NFA.AnchorType.STRING_END_ABSOLUTE
         || a == NFA.AnchorType.END_MULTILINE
-        || a == NFA.AnchorType.WORD_BOUNDARY;
+        || a == NFA.AnchorType.WORD_BOUNDARY
+        || a == NFA.AnchorType.NON_WORD_BOUNDARY;
   }
 
   private static boolean[] anchorBearingStates(NFA.NFAState[] statesById) {

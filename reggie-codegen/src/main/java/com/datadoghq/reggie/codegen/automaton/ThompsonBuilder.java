@@ -418,6 +418,9 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       case WORD_BOUNDARY:
         state.anchor = NFA.AnchorType.WORD_BOUNDARY;
         break;
+      case NON_WORD_BOUNDARY:
+        state.anchor = NFA.AnchorType.NON_WORD_BOUNDARY;
+        break;
       case STRING_START:
         state.anchor = NFA.AnchorType.STRING_START;
         break;

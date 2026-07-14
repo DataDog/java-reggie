@@ -572,6 +572,8 @@ public class RegexParser {
         return new CharClassNode(CharSet.WHITESPACE, true);
       case 'b':
         return new AnchorNode(AnchorNode.Type.WORD_BOUNDARY);
+      case 'B':
+        return new AnchorNode(AnchorNode.Type.NON_WORD_BOUNDARY);
       case 'A':
         return new AnchorNode(AnchorNode.Type.STRING_START);
       case 'Z':

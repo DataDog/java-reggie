@@ -1342,6 +1342,12 @@ public final class PikeVMMatcher extends ReggieMatcher {
           boolean afterWord = pos < regionEnd && Character.isLetterOrDigit(input.charAt(pos));
           return beforeWord != afterWord;
         }
+      case NON_WORD_BOUNDARY:
+        {
+          boolean beforeWord = pos > 0 && Character.isLetterOrDigit(input.charAt(pos - 1));
+          boolean afterWord = pos < regionEnd && Character.isLetterOrDigit(input.charAt(pos));
+          return beforeWord == afterWord;
+        }
       case RESET_MATCH:
         return true;
       default:
