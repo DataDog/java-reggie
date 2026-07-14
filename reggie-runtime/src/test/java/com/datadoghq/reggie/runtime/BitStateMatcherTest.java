@@ -17,10 +17,12 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import java.util.Collections;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -447,6 +449,62 @@ class BitStateMatcherTest {
     assertTrue(bitState.find(oversizedInput()));
     assertEquals(0L, bitState.laurikariCount());
     assertEquals(1L, bitState.fallbackCount());
+  }
+
+  // -------------------------------------------------------------------------
+  // Named-group resolution across the fallback/laurikari paths (issue #106)
+  // -------------------------------------------------------------------------
+
+  @Test
+  void oversizedMatchWithNamedGroupResolvesGroupNameViaPikeVmFallback() throws Exception {
+    RegexParser parser = new RegexParser();
+    String pat = "(?<num>a)(b)*c";
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat);
+    bitState.setNameToIndex(Collections.singletonMap("num", 1));
+
+    assertEquals(0L, bitState.fallbackCount());
+    MatchResult result = bitState.match(oversizedInput());
+    assertNotNull(result);
+    assertEquals(1L, bitState.fallbackCount());
+    assertEquals(0, result.start("num"));
+    assertEquals(1, result.end("num"));
+  }
+
+  @Test
+  void oversizedMatchWithNamedGroupResolvesGroupNameViaLaurikari() throws Exception {
+    String pat = "(?<num>a)(b)*c";
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    ReggieMatcher laurikari =
+        LaurikariDfaSupport.tryCreate(nfa, pat, countGroups(pat), /* usePosixLastMatch= */ false);
+    assertNotNull(laurikari, pat + " expected to be LaurikariEligibility-eligible");
+    laurikari.setNameToIndex(Collections.singletonMap("num", 1));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat, laurikari);
+    bitState.setNameToIndex(Collections.singletonMap("num", 1));
+
+    assertEquals(0L, bitState.laurikariCount());
+    MatchResult result = bitState.match(oversizedInput());
+    assertNotNull(result);
+    assertEquals(1L, bitState.laurikariCount());
+    assertEquals(0, result.start("num"));
+    assertEquals(1, result.end("num"));
+  }
+
+  @Test
+  void oversizedMatchWithNamedGroupResolvesGroupNameEndToEndViaRuntimeCompiler() throws Exception {
+    ReggieMatcher m =
+        (ReggieMatcher)
+            RuntimeCompiler.compile(
+                "(?<num>a)(b)*c", ReggieOptions.builder().allowJdkFallback().build());
+    MatchResult result = m.match(oversizedInput());
+    assertNotNull(result);
+    assertEquals(0, result.start("num"));
+    assertEquals(1, result.end("num"));
   }
 
   @Test

@@ -197,6 +197,9 @@ public class RuntimeCompiler {
           LaurikariDfaSupport.tryCreate(nfa, pattern, nfa.getGroupCount(), usePosixLastMatch);
       ReggieMatcher m = new BitStateMatcher(nfa, pattern, laurikari);
       if (!nameMap.isEmpty()) {
+        if (laurikari != null) {
+          laurikari.setNameToIndex(nameMap);
+        }
         m.setNameToIndex(nameMap);
         if (!m.embedsNameMap()) {
           m = new NameEnrichingMatcher(m);

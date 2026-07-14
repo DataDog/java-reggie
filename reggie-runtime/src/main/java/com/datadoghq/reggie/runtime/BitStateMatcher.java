@@ -467,6 +467,7 @@ final class BitStateMatcher extends ReggieMatcher {
   private PikeVMMatcher fallback() {
     if (fallback == null) {
       fallback = new PikeVMMatcher(nfa, patternText);
+      fallback.setNameToIndex(nameToIndex);
     }
     return fallback;
   }
