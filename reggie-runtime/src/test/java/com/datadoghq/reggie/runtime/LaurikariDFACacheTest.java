@@ -392,6 +392,9 @@ class LaurikariDFACacheTest {
     assertNotNull(
         cache.asciiTables[anchorFreeState],
         "anchor-free sibling state must populate asciiTables on its first step");
+    assertNull(
+        cache.anchorLookaheadTables[anchorFreeState],
+        "anchor-free state must never allocate anchorLookaheadTables, however often it's stepped");
   }
 
   // --- (f) TDFA Phase 2 follow-up: anchor-lookahead fan-out caching -----------------------------
