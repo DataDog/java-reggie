@@ -46,8 +46,35 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
   private final String patternText;
   private final int groupCount;
   private final LaurikariCaptureNfaStep step;
+
+  /**
+   * Adapter binding {@link LaurikariDFACache#step}'s single {@code LaurikariNfaStep.apply} call to
+   * {@link LaurikariCaptureNfaStep#applyFind} instead of the ordinary {@link
+   * LaurikariCaptureNfaStep#apply}: {@code LaurikariNfaStep} is a functional interface, so passing
+   * {@link #step} itself to {@code findCache} would silently invoke its plain, non-reinjecting
+   * {@code apply} override — this field exists so {@code findCache} actually drives the
+   * self-anchoring closure the class javadoc says it does.
+   */
+  private final LaurikariNfaStep findStep;
+
   private final LaurikariDFACache anchoredCache;
   private final LaurikariDFACache findCache;
+
+  /**
+   * {@code findCache} state to seed a {@code findFrom(input, start)} scan from when {@code start >
+   * 0} — the anchor-blocked closure ({@link LaurikariCaptureNfaStep#reinjectClosure}), never state
+   * 0 (the anchor-<em>satisfied</em> initial closure, valid only when the scan truly begins at
+   * absolute position 0). Mirrors {@code PikeVMMatcher.checkAnchor}'s absolute-0 pinning: {@code
+   * ^}/{@code \A} must never fire at a {@code findFrom(start > 0)} offset.
+   */
+  private final int reinjectDfaState;
+
+  /**
+   * {@link #reinjectDfaState}'s "previous character was '\n'" variant (crosses {@code (?m)^}), or
+   * {@code -1} if the pattern has no {@code START_MULTILINE} anchor (then {@link #reinjectDfaState}
+   * covers every case).
+   */
+  private final int reinjectAfterNlDfaState;
 
   private PikeVMMatcher fallback;
   private long fallbackCount;
@@ -58,10 +85,20 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     this.patternText = pattern;
     this.groupCount = groupCount;
     this.step = new LaurikariCaptureNfaStep(nfa, groupCount);
-    LaurikariStepResult initial = LaurikariCaptureNfaStep.initial(nfa, step);
+    this.findStep = step::applyFind;
+    LaurikariStepResult initial = step.initialClosure();
+    LaurikariStepResult truncatedInitial = step.truncatedInitialClosure();
     int[] acceptIds = acceptStateIds(nfa);
     this.anchoredCache = new LaurikariDFACache(initial.states, initial.regs, acceptIds);
-    this.findCache = new LaurikariDFACache(initial.states, initial.regs, acceptIds);
+    this.findCache =
+        new LaurikariDFACache(truncatedInitial.states, truncatedInitial.regs, acceptIds);
+    LaurikariStepResult reinject = step.reinjectClosure();
+    this.reinjectDfaState = findCache.intern(reinject.states, reinject.regs);
+    LaurikariStepResult reinjectAfterNl = step.reinjectAfterNlClosure();
+    this.reinjectAfterNlDfaState =
+        reinjectAfterNl == null
+            ? -1
+            : findCache.intern(reinjectAfterNl.states, reinjectAfterNl.regs);
     markNativeRichApi();
   }
 
@@ -170,12 +207,21 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
    *
    * <p>Reaching an accepting state does not end the scan: {@code LaurikariCaptureNfaStep}'s
    * priority-kill truncation already dropped every candidate strictly lower-priority than the
-   * accept just observed, but a strictly higher-priority candidate (e.g. a greedy loop's "keep
-   * going" branch) may still be alive and could still reach its own, preferred accept later —
-   * mirroring {@code PikeVMMatcher}'s "last write wins: each surviving override comes from a
-   * strictly higher-priority thread" comment. So: keep scanning while the subset is non-empty,
-   * remembering the most recent accept snapshot, and only return once every candidate has died or
-   * the input ends.
+   * accept just observed <em>within that step</em>, but a strictly higher-priority candidate (e.g.
+   * a greedy loop's "keep going" branch) may still be alive and could still reach its own,
+   * preferred accept later — mirroring {@code PikeVMMatcher}'s "last write wins: each surviving
+   * override comes from a strictly higher-priority thread" comment. So: keep scanning while the
+   * subset is non-empty, remembering the most recent accept snapshot, and only return once every
+   * candidate has died or the input ends.
+   *
+   * <p>That "last write wins" rule holds only <em>within</em> one still-alive thread's lineage: it
+   * does not license a later step's accept to overwrite an earlier, already-recorded {@code best}
+   * when the later accept comes from a freshly reinjected (necessarily later-starting, lowest-
+   * priority) candidate rather than a surviving continuation of the same or an earlier start — e.g.
+   * {@code a*} on {@code "b"} must report the empty match at position 0, not the empty match {@code
+   * applyFind}'s position-1 reinject also (correctly, for its own start) reaches. Guarded by
+   * comparing each candidate accept's own start (tag 0's absolute position): only a same-or-
+   * earlier start may overwrite {@code best}.
    *
    * @return absolute tag positions for the leftmost match at or after {@code start}, or {@code
    *     null} if none exists
@@ -184,34 +230,61 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     int clamped = Math.max(0, start);
     int len = input.length();
     if (clamped > len) return null;
-    int dfaState = 0;
+    int dfaState = startDfaStateFor(input, clamped);
+    if (dfaState == LaurikariDFACache.DEAD) {
+      // reinjectDfaState (or its after-'\n' variant) collapsed to DEAD when the anchor-blocked
+      // closure has no live states (e.g. a wholly start-anchored pattern reinjected at clamped >
+      // 0) -- no candidate can ever reach an accept, so indexing accepting[]/interning further is
+      // both unnecessary and unsafe (DEAD is a negative sentinel, not a real array index).
+      return null;
+    }
     int[] best = null;
     if (findCache.accepting[dfaState]) {
       // Zero-length match at the very start of the scan: no characters consumed yet.
       best = shiftByClamped(step.absolutePositions(findCache.acceptRegs(dfaState), 0), clamped);
     }
     for (int i = clamped; i < len; i++) {
-      int next = findCache.step(dfaState, input.charAt(i), step);
+      int next = findCache.step(dfaState, input.charAt(i), findStep);
       if (next == LaurikariDFACache.FALLBACK) {
         fallbackCount++;
         return best == null ? fallbackFind(input, i) : best;
       }
       if (next == LaurikariDFACache.DEAD) {
-        if (best != null) return best;
-        // No candidate has matched yet: a fresh one is reinjected at the very next character (see
-        // LaurikariCaptureNfaStep's applyFind), so resume scanning from a clean state.
-        dfaState = 0;
-        continue;
+        // Every applyFind() call reinjects a fresh (anchor-blocked) start candidate (see
+        // LaurikariCaptureNfaStep), so an empty result here means no candidate -- carried-forward
+        // or freshly reinjected -- can ever reach an accept from this point on; no restart needed.
+        return best;
       }
       dfaState = next;
       if (findCache.accepting[dfaState]) {
         // Ages are relative to this scan's own step count (i - clamped + 1 apply() calls so far),
         // not the input's absolute indexing -- shift back to absolute positions afterward.
         int[] acceptRegs = findCache.acceptRegs(dfaState);
-        best = shiftByClamped(step.absolutePositions(acceptRegs, i + 1 - clamped), clamped);
+        int[] candidate =
+            shiftByClamped(step.absolutePositions(acceptRegs, i + 1 - clamped), clamped);
+        // Only a same-or-earlier start may override an already-recorded match -- see this method's
+        // javadoc. A later start can only arise from a lower-priority reinjected candidate, never
+        // from a legitimate extension of the leftmost thread.
+        if (best == null || candidate[0] <= best[0]) {
+          best = candidate;
+        }
       }
     }
     return best;
+  }
+
+  /**
+   * @return the {@code findCache} state to begin a {@code findFrom(input, clamped)} scan from:
+   *     state 0 (anchor-satisfied) only when {@code clamped == 0}; otherwise the anchor-blocked
+   *     {@link #reinjectDfaState}, or its after-{@code '\n'} variant when the character immediately
+   *     before {@code clamped} is {@code '\n'} — see {@link #reinjectDfaState}'s javadoc.
+   */
+  private int startDfaStateFor(String input, int clamped) {
+    if (clamped == 0) return 0;
+    if (reinjectAfterNlDfaState >= 0 && input.charAt(clamped - 1) == '\n') {
+      return reinjectAfterNlDfaState;
+    }
+    return reinjectDfaState;
   }
 
   /** Adds {@code clamped} to every set ({@code >= 0}) entry of {@code relative}, in place. */

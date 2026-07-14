@@ -41,8 +41,18 @@ class LaurikariDfaMatcherTest {
     return new ThompsonBuilder().build(ast, groupCount);
   }
 
+  private static NFA lazyAwareNfa(String pattern, int groupCount) throws Exception {
+    RegexNode ast = new RegexParser().parse(pattern);
+    return new ThompsonBuilder(true).build(ast, groupCount);
+  }
+
   private static LaurikariDfaMatcher laurikari(String pattern, int groupCount) throws Exception {
     return new LaurikariDfaMatcher(nfa(pattern, groupCount), pattern, groupCount);
+  }
+
+  private static LaurikariDfaMatcher laurikariLazyAware(String pattern, int groupCount)
+      throws Exception {
+    return new LaurikariDfaMatcher(lazyAwareNfa(pattern, groupCount), pattern, groupCount);
   }
 
   private static PikeVMMatcher pikeVm(String pattern, int groupCount) throws Exception {
@@ -232,5 +242,24 @@ class LaurikariDfaMatcherTest {
   @Test
   void fallbackCountStaysZero_acrossAllSmallPatterns() throws Exception {
     assertTrue(laurikari("(a+)(b+)", 2).fallbackCount() == 0);
+  }
+
+  // --- lazy-quantifier regressions surfaced by LaurikariAlgorithmicFuzzTest ------------------
+  // Reproduces residual JDK-oracle findings directly against LaurikariDfaMatcher (built with
+  // ThompsonBuilder(true), same as the fuzz harness) to determine whether they are a genuine
+  // engine bug or an artifact of the fuzz test's own NFA construction.
+
+  @Test
+  void lazyPlusQuantifier_matchesJdk() throws Exception {
+    String pattern = ".+?";
+    LaurikariDfaMatcher laurikari = laurikariLazyAware(pattern, 0);
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pattern);
+
+    for (String input : new String[] {"0a011a-", "_111-bc", "10a", "bb0-"}) {
+      assertEquals(
+          jdk.matcher(input).matches(),
+          laurikari.matches(input),
+          "matches() diverged for " + input);
+    }
   }
 }

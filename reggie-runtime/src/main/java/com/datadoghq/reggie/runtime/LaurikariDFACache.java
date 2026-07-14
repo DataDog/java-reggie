@@ -185,14 +185,22 @@ final class LaurikariDFACache {
 
   int lookupOrCompute(int state, int c, LaurikariNfaStep step) {
     LaurikariStepResult result = step.apply(nfaStateSets[state], regs[state], c);
-    if (result.states.length == 0) {
-      cacheEntry(state, c, DEAD);
-      return DEAD;
-    }
+    int id = intern(result.states, result.regs);
+    if (id != FALLBACK) cacheEntry(state, c, id);
+    return id;
+  }
 
-    LaurikariStateSetKey key = new LaurikariStateSetKey(result.states, result.regs);
+  /**
+   * Interns an arbitrary (states, regs) closure as a DFA state, reusing an existing entry if an
+   * equal one is already cached. Unlike {@link #lookupOrCompute}, this has no {@code (state, c)}
+   * transition to cache the result under — used by {@link LaurikariDfaMatcher} to seed a {@code
+   * findFrom(start > 0)} scan directly from a precomputed closure (state 0 is only valid when the
+   * scan begins at absolute position 0).
+   */
+  int intern(int[] states, int[][] stateRegs) {
+    if (states.length == 0) return DEAD;
+    LaurikariStateSetKey key = new LaurikariStateSetKey(states, stateRegs);
     Integer id = stateIndex.get(key);
-
     if (id == null && !frozen) {
       id =
           stateIndex.computeIfAbsent(
@@ -212,10 +220,7 @@ final class LaurikariDFACache {
         return FALLBACK;
       }
     }
-    if (id == null) return FALLBACK;
-
-    cacheEntry(state, c, id);
-    return id;
+    return id == null ? FALLBACK : id;
   }
 
   void cacheEntry(int state, int c, int value) {

@@ -58,31 +58,80 @@ import java.util.List;
  * {@code PikeVMMatcher}'s thread-list reinjection at the tail of {@code clist}/{@code nlist} (an
  * implicit lowest-priority {@code .*?} prefix). {@link #apply} and {@link #applyFind} share the
  * same closure machinery via a private {@code apply(..., boolean reinject)}: when {@code reinject}
- * is true, the epsilon-closure of the start state (tag 0 = age 0, computed once in the constructor
- * and cached as {@link #initialStates}/{@link #initialRegs}) is scanned for {@code c}-consuming
- * transitions too, appended AFTER every existing candidate's seeds — i.e. at the lowest priority —
- * so an already-visited target from an older (more leftmost) start is left untouched by {@code
- * visited}'s first-visit-wins rule. The existing {@code totalConsumed - age} formula in {@link
- * #absolutePositions} needs no special-casing for reinjected candidates: age is still "characters
- * consumed since tag 0 was set," regardless of when within the scan that set happened.
+ * is true, a fresh <em>un-consumed</em>, already-closed start candidate (tag 0 = age 0) is appended
+ * directly into this step's output — AFTER every existing candidate's closure — mirroring {@code
+ * PikeVMMatcher.findStepClosure}'s {@code sortedUnion(tc, reinjectClosureIds)} exactly: {@code
+ * reinjectClosureIds} is itself a closure of the raw start state that is unioned into the result
+ * un-transitioned, ready to consume the next character on a later step, not transitioned on this
+ * step's {@code c} directly. Getting this right matters because the reinjected candidate must be
+ * <b>anchor-blocked</b> ({@link #reinjectStates}/{@link #reinjectRegs}, built by closing over the
+ * start state with {@code blockStartAnchor=true}): {@code ^}/{@code \A} must never re-fire from any
+ * position other than the true start of input, exactly as {@code PikeVMMatcher.reinjectClosureIds}
+ * excludes those branches. {@code (?m)^} additionally depends on whether the character just
+ * consumed by <em>this</em> step was {@code '\n'} — see {@link #reinjectAfterNlStates}/{@link
+ * #reinjectAfterNlRegs} and {@code PikeVMMatcher.reinjectAfterNlClosureIds}'s identical split. The
+ * existing {@code totalConsumed - age} formula in {@link #absolutePositions} needs no
+ * special-casing for reinjected candidates: age is still "characters consumed since tag 0 was set,"
+ * regardless of when within the scan that set happened.
  */
 final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
 
   private final NFA.NFAState[] statesById;
   private final int[] tagOfState;
   private final boolean[] isAccept;
+  private final int startStateId;
   private final int[] initialStates;
   private final int[][] initialRegs;
+
+  /**
+   * Anchor-blocked closure of the start state, for reinjection mid-scan (blocks every start anchor,
+   * including {@code (?m)^} — safe to use unconditionally when the pattern has no multiline anchor,
+   * and as the "previous char wasn't '\n'" case when it does.
+   */
+  private final int[] reinjectStates;
+
+  private final int[][] reinjectRegs;
+
+  /**
+   * Reinjection closure for the "previous consumed char was '\n'" case: crosses {@code (?m)^}
+   * (which fires at every line start) but still blocks {@code ^}/{@code \A}. {@code null} when the
+   * pattern has no {@code START_MULTILINE} anchor (then {@link #reinjectStates} covers every case).
+   */
+  private final int[] reinjectAfterNlStates;
+
+  private final int[][] reinjectAfterNlRegs;
+
   final int tagCount;
 
   LaurikariCaptureNfaStep(NFA nfa, int groupCount) {
     this.statesById = statesById(nfa);
     this.tagOfState = LaurikariTagNumbering.tagOfState(nfa);
     this.isAccept = isAccept(nfa, statesById.length);
+    this.startStateId = nfa.getStartState().id;
     this.tagCount = LaurikariTagNumbering.tagCount(groupCount);
-    LaurikariStepResult initial = initial(nfa, this);
+    LaurikariStepResult initial = closureFromStart(false, false);
     this.initialStates = initial.states;
     this.initialRegs = initial.regs;
+
+    boolean hasMultiline = hasMultilineAnchor(nfa);
+    LaurikariStepResult reinject = closureFromStart(true, true);
+    this.reinjectStates = reinject.states;
+    this.reinjectRegs = reinject.regs;
+    if (hasMultiline) {
+      LaurikariStepResult afterNl = closureFromStart(true, false);
+      this.reinjectAfterNlStates = afterNl.states;
+      this.reinjectAfterNlRegs = afterNl.regs;
+    } else {
+      this.reinjectAfterNlStates = null;
+      this.reinjectAfterNlRegs = null;
+    }
+  }
+
+  private static boolean hasMultilineAnchor(NFA nfa) {
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.anchor == NFA.AnchorType.START_MULTILINE) return true;
+    }
+    return false;
   }
 
   private static boolean[] isAccept(NFA nfa, int stateCount) {
@@ -102,20 +151,37 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
   }
 
   /**
-   * @return the initial (states, regs) pair for an anchored match attempt starting at the current
-   *     position: the epsilon-closure of {@code nfa.getStartState()}, with tag 0 (group 0's open —
-   *     never carried by any NFA state, see {@link LaurikariTagNumbering}) seeded to age 0 and
-   *     every other tag unset ({@code -1}).
+   * @return the (states, regs) pair for a fresh match attempt anchored at some position: the
+   *     epsilon-closure of the start state, with tag 0 (group 0's open — never carried by any NFA
+   *     state, see {@link LaurikariTagNumbering}) seeded to age 0 and every other tag unset ({@code
+   *     -1}). {@code blockStartAnchor}/{@code blockMultilineAnchor} select which anchors this
+   *     particular fresh attempt is allowed to cross — see {@link #reinjectStates}'s javadoc.
    */
-  static LaurikariStepResult initial(NFA nfa, LaurikariCaptureNfaStep step) {
-    int[] allUnset = new int[step.tagCount];
+  private LaurikariStepResult closureFromStart(
+      boolean blockStartAnchor, boolean blockMultilineAnchor) {
+    int[] allUnset = new int[tagCount];
     Arrays.fill(allUnset, -1);
     allUnset[0] = 0; // group 0 opens here, age 0
-    boolean[] visited = new boolean[step.statesById.length];
+    boolean[] visited = new boolean[statesById.length];
     List<Integer> outIds = new ArrayList<>();
     List<int[]> outRegs = new ArrayList<>();
-    step.addClosure(visited, outIds, outRegs, nfa.getStartState().id, allUnset);
-    return step.truncateAtFirstAccept(outIds, outRegs);
+    addClosure(
+        visited, outIds, outRegs, startStateId, allUnset, blockStartAnchor, blockMultilineAnchor);
+    // Unblocked (blockStartAnchor=false) is initialClosure(), seeding the anchored matches()/
+    // match() path: never truncate, mirroring PikeVMMatcher.runMatches/runMatchResult, which keep
+    // lower-priority threads alive after a mid-string accept since they may still be needed to
+    // satisfy a full-input match (see truncateAtFirstAccept's javadoc on why that cut is only
+    // valid for find()-style leftmost-first semantics). Blocked variants seed the find()-family
+    // reinject closures, where truncation is correct.
+    return blockStartAnchor
+        ? truncateAtFirstAccept(outIds, outRegs)
+        : new LaurikariStepResult(toArray(outIds), outRegs.toArray(new int[0][]));
+  }
+
+  private static int[] toArray(List<Integer> ids) {
+    int[] out = new int[ids.size()];
+    for (int i = 0; i < out.length; i++) out[i] = ids.get(i);
+    return out;
   }
 
   /**
@@ -140,9 +206,24 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
    * terms), and a target NFA state already visited by a higher-priority arrival discards this
    * arrival's entire register vector (step 3's whole-mapping discard) since {@code visited[id]}
    * short-circuits before this state's mapping is ever recorded.
+   *
+   * <p>{@code blockStartAnchor}/{@code blockMultilineAnchor}, when set, stop the DFS from crossing
+   * through a {@code START}/{@code STRING_START} or {@code START_MULTILINE} anchor state
+   * (respectively) — mirroring {@code PikeVMMatcher.sortedEpsilonClosure}'s identical skip. The
+   * anchor state itself is still recorded (harmless: it carries no tag and has no consuming
+   * transitions of its own), only its onward epsilon edges are pruned. Ordinary mid-scan closures
+   * (every call site except the reinject-closure construction) pass both flags {@code false}: the
+   * eligibility gate ({@code LaurikariEligibility}) already guarantees no anchor is reachable after
+   * a consuming transition, so blocking never triggers there anyway.
    */
   private void addClosure(
-      boolean[] visited, List<Integer> outIds, List<int[]> outRegs, int id, int[] regs) {
+      boolean[] visited,
+      List<Integer> outIds,
+      List<int[]> outRegs,
+      int id,
+      int[] regs,
+      boolean blockStartAnchor,
+      boolean blockMultilineAnchor) {
     if (visited[id]) return;
     visited[id] = true;
     int tag = tagOfState[id];
@@ -153,9 +234,62 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
     }
     outIds.add(id);
     outRegs.add(r);
-    for (NFA.NFAState e : statesById[id].getEpsilonTransitions()) {
-      addClosure(visited, outIds, outRegs, e.id, r);
+    NFA.AnchorType a = statesById[id].anchor;
+    if (a != null) {
+      if (blockStartAnchor && (a == NFA.AnchorType.START || a == NFA.AnchorType.STRING_START)) {
+        return;
+      }
+      if (blockMultilineAnchor && a == NFA.AnchorType.START_MULTILINE) return;
     }
+    for (NFA.NFAState e : statesById[id].getEpsilonTransitions()) {
+      addClosure(visited, outIds, outRegs, e.id, r, blockStartAnchor, blockMultilineAnchor);
+    }
+  }
+
+  /**
+   * @return the (states, regs) pair for an anchored match attempt starting at the true beginning of
+   *     the scan (every start anchor satisfied) — the seed {@link LaurikariDfaMatcher} uses to
+   *     construct its DFA caches' start state.
+   */
+  LaurikariStepResult initialClosure() {
+    return new LaurikariStepResult(initialStates, initialRegs);
+  }
+
+  /**
+   * @return {@link #initialClosure}, truncated at its first accept — the seed {@code
+   *     LaurikariDfaMatcher} uses for {@code findCache}'s state 0 (a {@code find()}-family scan
+   *     that happens to start at absolute position 0). Unlike {@link #initialClosure} itself (used
+   *     for the anchored {@code matches()}/{@code match()} cache, which must never truncate — see
+   *     {@link #truncateAtFirstAccept}'s javadoc), a {@code find()}-family scan starting at
+   *     position 0 needs the same leftmost-first truncation every other {@code find()} start
+   *     position gets.
+   */
+  LaurikariStepResult truncatedInitialClosure() {
+    List<Integer> ids = new ArrayList<>(initialStates.length);
+    for (int id : initialStates) ids.add(id);
+    return truncateAtFirstAccept(ids, new ArrayList<>(Arrays.asList(initialRegs)));
+  }
+
+  /**
+   * @return the anchor-blocked closure {@link LaurikariDfaMatcher} seeds a {@code findFrom(input,
+   *     start)} scan from when {@code start > 0} — {@link #initialClosure} is only valid when the
+   *     scan truly begins at absolute position 0 ({@code ^}/{@code \A} satisfied); starting mid-
+   *     string must never let those anchors fire (see {@code PikeVMMatcher.checkAnchor}'s identical
+   *     absolute-0 pinning).
+   */
+  LaurikariStepResult reinjectClosure() {
+    return new LaurikariStepResult(reinjectStates, reinjectRegs);
+  }
+
+  /**
+   * @return {@link #reinjectClosure}'s "previous character was '\n'" variant (crosses {@code
+   *     (?m)^}), or {@code null} if the pattern has no {@code START_MULTILINE} anchor (then {@link
+   *     #reinjectClosure} covers every case).
+   */
+  LaurikariStepResult reinjectAfterNlClosure() {
+    return reinjectAfterNlStates == null
+        ? null
+        : new LaurikariStepResult(reinjectAfterNlStates, reinjectAfterNlRegs);
   }
 
   @Override
@@ -182,12 +316,6 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
     List<Integer> seedIds = new ArrayList<>();
     List<int[]> seedRegs = new ArrayList<>();
     collectConsumingSeeds(curStates, curRegs, c, seenTarget, seedIds, seedRegs);
-    if (reinject) {
-      // Lowest priority: appended after every existing candidate's seeds, so an already-visited
-      // target from an older (more leftmost) start is left untouched by addClosure's
-      // first-visit-wins rule below.
-      collectConsumingSeeds(initialStates, initialRegs, c, seenTarget, seedIds, seedRegs);
-    }
     // Step 2/3: epsilon-close each seed in the same priority order, applying each transition's
     // register ops (copy for pass-through tags, set-to-current-pos -- age 0 -- for the tag(s)
     // matching that transition's enterGroup/exitGroup) via addClosure, and discarding a
@@ -196,10 +324,37 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
     List<Integer> outIds = new ArrayList<>();
     List<int[]> outRegs = new ArrayList<>();
     for (int i = 0; i < seedIds.size(); i++) {
-      addClosure(visited, outIds, outRegs, seedIds.get(i), seedRegs.get(i));
+      addClosure(visited, outIds, outRegs, seedIds.get(i), seedRegs.get(i), false, false);
+    }
+    if (reinject) {
+      // Lowest priority: a fresh, already-closed, anchor-blocked start candidate appended straight
+      // into this step's output -- un-transitioned, ready to consume the *next* character -- so it
+      // never displaces a higher-priority (more leftmost) candidate already present. Mirrors
+      // PikeVMMatcher.findStepClosure's sortedUnion(tc, reinjectClosureIds) exactly; see the class
+      // javadoc for why this must be un-transitioned rather than fed through collectConsumingSeeds.
+      int[] rStates =
+          (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlStates : reinjectStates;
+      int[][] rRegs =
+          (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlRegs : reinjectRegs;
+      for (int i = 0; i < rStates.length; i++) {
+        int id = rStates[i];
+        if (!visited[id]) {
+          visited[id] = true;
+          outIds.add(id);
+          outRegs.add(rRegs[i]);
+        }
+      }
     }
     // Step 4: the caller (LaurikariDFACache) interns (states, regs) via LaurikariStateSetKey.
-    return truncateAtFirstAccept(outIds, outRegs);
+    // Only truncate for applyFind()'s find()-family semantics (reinject=true): a mid-string
+    // accept there is already the leftmost, highest-priority match, so lower-priority threads
+    // can never win (mirrors PikeVMMatcher.findPosFrom's clistSize = t cut). apply()'s
+    // matches()/match() semantics (reinject=false) must keep lower-priority threads alive past a
+    // mid-string accept, since the whole input still needs to match (mirrors
+    // PikeVMMatcher.runMatches/runMatchResult, which never truncate on clistFirstAccept).
+    return reinject
+        ? truncateAtFirstAccept(outIds, outRegs)
+        : new LaurikariStepResult(toArray(outIds), outRegs.toArray(new int[0][]));
   }
 
   /**

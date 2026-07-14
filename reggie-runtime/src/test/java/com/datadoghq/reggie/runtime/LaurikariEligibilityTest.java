@@ -84,6 +84,15 @@ class LaurikariEligibilityTest {
     assertFalse(LaurikariEligibility.isEligible(n, true));
   }
 
+  @Test
+  void allOptionalLoopBodyFollowedByMoreContent_rejected() throws Exception {
+    // Bug class: a quantified capturing group whose body can match zero-width, looped via an
+    // epsilon-only cycle, followed by more pattern content -- LaurikariCaptureNfaStep.addClosure's
+    // visited-on-first-arrival DFS can't propagate the fresher register vector from an extra
+    // zero-width loop iteration to that downstream content (see LaurikariEligibility javadoc).
+    assertFalse(eligible("([b1-ba]?.*0??)+1", 1));
+  }
+
   // --- positive cases --------------------------------------------------------------------------
 
   @Test

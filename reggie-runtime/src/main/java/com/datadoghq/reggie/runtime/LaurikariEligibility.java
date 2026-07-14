@@ -17,7 +17,11 @@ package com.datadoghq.reggie.runtime;
 
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Deque;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -63,6 +67,16 @@ final class LaurikariEligibility {
           && a != NFA.AnchorType.START_MULTILINE) return false;
       if (a != null) hasStartAnchor = true;
     }
+
+    // A capturing group's enter/exit marker sitting on an epsilon-only cycle (a loop body that can
+    // match zero-width, looping back to itself entirely via epsilon transitions) is not DFA-safe:
+    // LaurikariCaptureNfaStep.addClosure's DFS marks a state visited on first arrival, so a cyclic
+    // re-arrival at the same state with a fresher (later) register vector — the extra zero-width
+    // loop iteration JDK/PCRE backtracking takes whenever it lets downstream content match — never
+    // propagates past that already-visited state. Conservative: rejects only patterns containing
+    // such a cycle, never admits anything not already eligible.
+    if (hasTaggedEpsilonCycle(nfa, LaurikariTagNumbering.tagOfState(nfa))) return false;
+
     if (!hasStartAnchor) return true; // anchor-free: always eligible
 
     // Anchored: sound only when every start anchor is leading — i.e. NOT reachable after
@@ -85,6 +99,152 @@ final class LaurikariEligibility {
       }
       for (NFA.NFAState e : s.getEpsilonTransitions()) {
         if (reached.add(e.id)) q.add(e);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * @return {@code true} if the epsilon-only subgraph of {@code nfa} contains a cycle passing
+   *     through a real capturing-group marker state (tag {@code >= 2} — excludes tag {@code 0}/
+   *     {@code 1}, group 0's implicit whole-match open/close) whose enclosing loop construct is
+   *     <b>not</b> in tail position — i.e. more pattern content (a consuming transition) follows
+   *     the loop, which is exactly the shape where JDK/PCRE's extra zero-width loop iteration
+   *     (taken whenever it lets that downstream content match) is observable. A tagged epsilon
+   *     cycle with nothing but accept states downstream (e.g. {@code ((a)|())*} at the end of a
+   *     pattern) is unaffected — no downstream content means no observable difference in which
+   *     iteration's tag value wins.
+   *     <p>The "enclosing loop construct" is the epsilon cycle's full strongly-connected component
+   *     over ALL transitions (epsilon and consuming) — this also pulls in sibling loop-body
+   *     branches that consume characters before looping back (e.g. {@code (a)} in {@code
+   *     ((a)|())*}, which does loop back to the same states via a consuming transition, just not
+   *     within a single epsilon-only closure step), so a normal consuming branch of the same loop
+   *     isn't mistaken for downstream content.
+   */
+  private static boolean hasTaggedEpsilonCycle(NFA nfa, int[] tagOfState) {
+    int[] color = new int[tagOfState.length]; // 0 = white, 1 = gray (on stack), 2 = black (done)
+    List<Integer> stack = new ArrayList<>();
+    List<Set<Integer>> taggedCycles = new ArrayList<>();
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (color[s.id] == 0) collectTaggedEpsilonCycles(s, color, stack, tagOfState, taggedCycles);
+    }
+    if (taggedCycles.isEmpty()) return false;
+
+    int[] sccOf = computeSccs(nfa);
+    for (Set<Integer> cycle : taggedCycles) {
+      int scc = sccOf[cycle.iterator().next()];
+      Set<Integer> sccMembers = new HashSet<>();
+      for (NFA.NFAState s : nfa.getStates()) {
+        if (sccOf[s.id] == scc) sccMembers.add(s.id);
+      }
+      if (!tailPositionOnly(nfa, sccMembers)) return true;
+    }
+    return false;
+  }
+
+  /** Tarjan's algorithm over both epsilon and consuming transitions. */
+  private static int[] computeSccs(NFA nfa) {
+    int n = nfa.getStates().size();
+    int[] index = new int[n];
+    int[] lowlink = new int[n];
+    int[] sccOf = new int[n];
+    boolean[] onStack = new boolean[n];
+    Arrays.fill(index, -1);
+    Deque<Integer> stack = new ArrayDeque<>();
+    int[] counter = {0};
+    int[] sccCounter = {0};
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (index[s.id] == -1) {
+        tarjan(s, index, lowlink, onStack, stack, counter, sccCounter, sccOf);
+      }
+    }
+    return sccOf;
+  }
+
+  private static void tarjan(
+      NFA.NFAState v,
+      int[] index,
+      int[] lowlink,
+      boolean[] onStack,
+      Deque<Integer> stack,
+      int[] counter,
+      int[] sccCounter,
+      int[] sccOf) {
+    index[v.id] = counter[0];
+    lowlink[v.id] = counter[0];
+    counter[0]++;
+    stack.push(v.id);
+    onStack[v.id] = true;
+
+    List<NFA.NFAState> successors = new ArrayList<>(v.getEpsilonTransitions());
+    for (NFA.Transition t : v.getTransitions()) successors.add(t.target);
+
+    for (NFA.NFAState w : successors) {
+      if (index[w.id] == -1) {
+        tarjan(w, index, lowlink, onStack, stack, counter, sccCounter, sccOf);
+        lowlink[v.id] = Math.min(lowlink[v.id], lowlink[w.id]);
+      } else if (onStack[w.id]) {
+        lowlink[v.id] = Math.min(lowlink[v.id], index[w.id]);
+      }
+    }
+
+    if (lowlink[v.id] == index[v.id]) {
+      int scc = sccCounter[0]++;
+      int w;
+      do {
+        w = stack.pop();
+        onStack[w] = false;
+        sccOf[w] = scc;
+      } while (w != v.id);
+    }
+  }
+
+  private static void collectTaggedEpsilonCycles(
+      NFA.NFAState s, int[] color, List<Integer> stack, int[] tagOfState, List<Set<Integer>> out) {
+    color[s.id] = 1;
+    stack.add(s.id);
+    for (NFA.NFAState e : s.getEpsilonTransitions()) {
+      if (color[e.id] == 1) {
+        int idx = stack.indexOf(e.id); // back edge -> cycle is stack[idx..top]
+        Set<Integer> members = new HashSet<>();
+        boolean tagged = false;
+        for (int i = idx; i < stack.size(); i++) {
+          int id = stack.get(i);
+          members.add(id);
+          if (tagOfState[id] >= 2) tagged = true;
+        }
+        if (tagged) out.add(members);
+      } else if (color[e.id] == 0) {
+        collectTaggedEpsilonCycles(e, color, stack, tagOfState, out);
+      }
+    }
+    stack.remove(stack.size() - 1);
+    color[s.id] = 2;
+  }
+
+  /**
+   * @return {@code true} if nothing reachable from {@code sccMembers} (directly, or via epsilon
+   *     transitions leaving the SCC) has a consuming transition — i.e. the loop construct sits at
+   *     the tail of the pattern, so no downstream content's outcome can depend on which loop
+   *     iteration's register vector the cyclic closure kept.
+   */
+  private static boolean tailPositionOnly(NFA nfa, Set<Integer> sccMembers) {
+    Set<Integer> visited = new HashSet<>(sccMembers);
+    ArrayDeque<NFA.NFAState> queue = new ArrayDeque<>();
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (!sccMembers.contains(s.id)) continue;
+      for (NFA.Transition t : s.getTransitions()) {
+        if (!sccMembers.contains(t.target.id)) return false; // consuming exit -> downstream content
+      }
+      for (NFA.NFAState e : s.getEpsilonTransitions()) {
+        if (!sccMembers.contains(e.id) && visited.add(e.id)) queue.add(e);
+      }
+    }
+    while (!queue.isEmpty()) {
+      NFA.NFAState s = queue.poll();
+      if (!s.getTransitions().isEmpty()) return false;
+      for (NFA.NFAState e : s.getEpsilonTransitions()) {
+        if (visited.add(e.id)) queue.add(e);
       }
     }
     return true;

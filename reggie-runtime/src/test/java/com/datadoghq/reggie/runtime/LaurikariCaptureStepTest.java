@@ -62,7 +62,7 @@ class LaurikariCaptureStepTest {
   private static Built build(String pattern, int groupCount) throws Exception {
     NFA nfa = nfa(pattern, groupCount);
     LaurikariCaptureNfaStep step = new LaurikariCaptureNfaStep(nfa, groupCount);
-    LaurikariStepResult initial = LaurikariCaptureNfaStep.initial(nfa, step);
+    LaurikariStepResult initial = step.initialClosure();
     int acceptId = nfa.getAcceptStates().iterator().next().id;
     LaurikariDFACache cache =
         new LaurikariDFACache(initial.states, initial.regs, new int[] {acceptId});
