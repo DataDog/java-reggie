@@ -312,4 +312,211 @@ class LaurikariDfaMatcherTest {
           "matches() diverged for " + input);
     }
   }
+
+  // --- FALLBACK-sentinel find() regression (Phase 2 discovery) -------------------------------
+  // runFind's DFA-cache-overflow branch used to restart PikeVMMatcher from the frozen scan
+  // position instead of the scan's original start, silently losing any already-consumed prefix
+  // of a still-in-progress match (see LaurikariDfaMatcher.runFind's FALLBACK branch). Only
+  // observable once findCache's 4096-state cap is exceeded, which requires a long, high-variety
+  // input -- Phase 1's fuzz coverage never drove find()-family calls this long.
+
+  @Test
+  void findSurvivesDfaCacheOverflowMidMatch() throws Exception {
+    String pattern = "(a)(b)*c";
+    LaurikariDfaMatcher m = laurikari(pattern, 2);
+    PikeVMMatcher oracle = pikeVm(pattern, 2);
+
+    StringBuilder sb = new StringBuilder("a");
+    for (int i = 0; i < 10_000; i++) sb.append('b');
+    sb.append('c');
+    String input = sb.toString();
+
+    assertTrue(oracle.find(input), "oracle sanity check");
+    assertTrue(m.find(input), "find() must not lose the match's prefix on cache overflow");
+    assertTrue(m.fallbackCount() > 0, "this input is expected to overflow findCache's state cap");
+    assertMatchEquals(oracle.findMatch(input), m.findMatch(input), 2, input);
+  }
+
+  // --- TDFA Phase 2 end-anchor/\b extension: the 5 new anchor types --------------------------
+  // Direct-construction differential coverage against the PikeVMMatcher oracle, mirroring the
+  // existing anchor-boundary section above but for END/STRING_END/STRING_END_ABSOLUTE/
+  // END_MULTILINE/WORD_BOUNDARY instead of the START-family.
+
+  @Test
+  void wordBoundary_leadingAndTrailing_matchesOracle() throws Exception {
+    String pattern = "\\b(\\w+)\\b";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    for (String input : new String[] {"foo", " foo ", "foo bar", "123", "", " ", "a1_2"}) {
+      assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void endAnchor_trailingWithLineTerminators_matchesOracle() throws Exception {
+    String pattern = "(a+)$";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    for (String input :
+        new String[] {"aaa", "aaa\n", "aaa\r", "aaa\r\n", "aaa\n\n", "aaab", "", "aaa ", "aaa"}) {
+      assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void stringEndAnchor_matchesOracle() throws Exception {
+    String pattern = "(a+)\\Z";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    for (String input : new String[] {"aaa", "aaa\n", "aaa\r\n", "aaab", ""}) {
+      assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void stringEndAbsoluteAnchor_matchesOracle() throws Exception {
+    String pattern = "(a+)\\z";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    for (String input : new String[] {"aaa", "aaa\n", "aaa\r\n", "aaab", ""}) {
+      assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void endMultilineAnchor_matchesOracleAcrossLines() throws Exception {
+    String pattern = "(?m)(a+)$";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    for (String input : new String[] {"aaa", "aaa\nbbb", "xxx\naaa\nyyy", "aaa\r\naaa", ""}) {
+      assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void endAnchorInsideNonTailBranch_matchesOracle() throws Exception {
+    // Adversarial shape from the TDFA Phase 2 plan: the end anchor sits inside one alternation
+    // branch, with more pattern content (the 'c') following. No structural "leading/trailing-
+    // only" restriction is needed here -- checkAnchor is evaluated live per-occurrence.
+    String pattern = "(a$|b)c";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    for (String input : new String[] {"bc", "ac", "bcx", ""}) {
+      assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void wordBoundary_findFromNonZeroOffset_matchesOracle() throws Exception {
+    // Cache-soundness regression (design doc's top-named risk): drives the SAME
+    // LaurikariDfaMatcher instance/caches across multiple findFrom offsets on the same input, so
+    // the same (subset, char) transition recurs at different absolute positions -- if \b's
+    // outcome were ever memoized instead of recomputed live, this would surface the divergence.
+    String pattern = "\\b(\\w+)\\b";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    String input = "foo bar baz";
+    for (int start = 0; start <= input.length(); start++) {
+      assertEquals(
+          oracle.findFrom(input, start),
+          laurikari.findFrom(input, start),
+          "findFrom(" + start + ") diverged");
+      assertMatchEquals(
+          oracle.findMatchFrom(input, start),
+          laurikari.findMatchFrom(input, start),
+          groupCount,
+          input + "@" + start);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
+  void endAnchor_sameSubsetRecursAtDifferentPositions_matchesOracle() throws Exception {
+    // Direct regression for the cache-soundness risk named in the design doc: a single instance
+    // is matched() against several inputs, some where the trailing 'a' run sits at true
+    // end-of-string and some where it doesn't -- if the DFA cache ever memoized an anchor-
+    // sensitive transition, a later call with a different regionEnd would read the wrong answer.
+    String pattern = "(a+)$";
+    int groupCount = 1;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    for (String input : new String[] {"aaa", "aaab", "aaa", "aa", "aaab", "aaa"}) {
+      assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  // --- SQL tokenizer regression (IastRegexpBenchmark) -----------------------------------------
+  // The three SQL dialect patterns whose \b\d+/(?m)...--.*$ anchors were the original motivation
+  // for this eligibility extension -- confirms they're now eligible and route through
+  // LaurikariDfaMatcher with zero fallbacks.
+
+  private static final String SQL_ANSI =
+      "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|b'[0-9a-f]+'|0b[0-9a-f]+"
+          + "|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
+          + "|'(?:''|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
+
+  private static final String SQL_MYSQL =
+      "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|b'[0-9a-f]+'|0b[0-9a-f]+"
+          + "|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
+          + "|\"(?:\\\\\"|[^\"])*\"|'(?:\\\\'|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
+
+  private static final String SQL_POSTGRESQL =
+      "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|b'[0-9a-f]+'|0b[0-9a-f]+"
+          + "|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
+          + "|\\$(?:[a-zA-Z_]\\w*)?\\$|'(?:''|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
+
+  private static final String SQL_INPUT =
+      "SELECT id, name FROM users -- fetch all users\nWHERE age > 0x1F AND salary = 1234.56\n"
+          + "/* block comment\n spanning lines */\n"
+          + "AND note = 'it''s fine' OR flag = b'101'";
+
+  private static void assertSqlRoutesThroughLaurikari(String pattern) throws Exception {
+    NFA nfa = nfa(pattern, 0);
+    assertTrue(
+        LaurikariEligibility.isEligible(nfa, false),
+        pattern + " must now be Laurikari-eligible (was rejected pre-Phase-2-extension)");
+
+    LaurikariDfaMatcher laurikari = laurikari(pattern, 0);
+    PikeVMMatcher oracle = pikeVm(pattern, 0);
+
+    assertAllApisMatchOracle(laurikari, oracle, 0, SQL_INPUT);
+    assertEquals(0, laurikari.fallbackCount(), pattern + " must not fall back to PikeVMMatcher");
+  }
+
+  @Test
+  void sqlAnsiTokenizer_routesThroughLaurikari() throws Exception {
+    assertSqlRoutesThroughLaurikari(SQL_ANSI);
+  }
+
+  @Test
+  void sqlMysqlTokenizer_routesThroughLaurikari() throws Exception {
+    assertSqlRoutesThroughLaurikari(SQL_MYSQL);
+  }
+
+  @Test
+  void sqlPostgresqlTokenizer_routesThroughLaurikari() throws Exception {
+    assertSqlRoutesThroughLaurikari(SQL_POSTGRESQL);
+  }
 }

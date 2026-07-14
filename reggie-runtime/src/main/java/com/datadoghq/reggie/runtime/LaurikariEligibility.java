@@ -29,14 +29,17 @@ import java.util.Set;
  * {@link LaurikariDfaMatcher}, deciding whether an NFA is safe to route through the Laurikari
  * tagged-DFA capture engine rather than {@link PikeVMMatcher}'s thread simulation.
  *
- * <p><b>Scope note (deliberate narrowing, not an oversight):</b> anchor eligibility here mirrors
- * {@code PikeVMMatcher.findDfaEligible} exactly — only {@code START}/{@code STRING_START}/{@code
- * START_MULTILINE} are handleable, everything else ({@code \b}, {@code $}, {@code \Z}, {@code \z},
- * {@code (?m)$}) is rejected. Design doc §5 sketches a fuller per-step/per-accept {@code regionEnd}
- * check for end anchors and {@code \b}; that is deferred to a follow-up. This narrowing is strictly
- * conservative — it only shrinks the eligible set, never admits a pattern that wasn't already safe
- * — so patterns like {@code SQL_ANSI} (which uses {@code \b} and {@code $}) simply stay on {@code
- * PikeVMMatcher} exactly as they do today.
+ * <p><b>Anchor scope (TDFA Phase 2 end-anchor/{@code \b} extension):</b> every {@link
+ * NFA.AnchorType} except {@code RESET_MATCH} (untouched, always-passing) is handleable: the {@code
+ * START}-family ({@code START}/{@code STRING_START}/{@code START_MULTILINE}) via the
+ * build-time-precomputed anchor-blocked closures {@link LaurikariCaptureNfaStep} always used, and
+ * {@code END}/{@code STRING_END}/{@code STRING_END_ABSOLUTE}/{@code END_MULTILINE}/{@code
+ * WORD_BOUNDARY} via a live per-occurrence {@code PikeVMMatcher.checkAnchor} call inside {@code
+ * addClosure} (see that class). Only the {@code START}-family needs the "leading-only" structural
+ * restriction below — an anchor inside a loop can fire across empty iterations, which the
+ * subset/register model here cannot represent for anchors baked into precomputed closures — the 5
+ * new types are evaluated fresh on every occurrence, so no equivalent restriction applies to them
+ * (worked through adversarial pattern shapes; see the TDFA Phase 2 plan).
  */
 final class LaurikariEligibility {
 
@@ -58,14 +61,14 @@ final class LaurikariEligibility {
     for (NFA.NFAState s : nfa.getStates()) {
       if (s.assertionType != null || s.backrefCheck != null) return false;
       if (s.atomicEntry >= 0 || s.atomicExit >= 0) return false; // atomic groups not DFA-safe
-      // Handleable anchors: START (^), STRING_START (\A), START_MULTILINE ((?m)^).
-      // Everything else (\b, $, end-class) needs char/end context this engine doesn't supply yet.
+      // RESET_MATCH (\K) is the only anchor type with no explicit gate: PikeVMMatcher.checkAnchor
+      // always passes it, and LaurikariCaptureNfaStep.addClosure never special-cases it either.
       NFA.AnchorType a = s.anchor;
-      if (a != null
-          && a != NFA.AnchorType.START
-          && a != NFA.AnchorType.STRING_START
-          && a != NFA.AnchorType.START_MULTILINE) return false;
-      if (a != null) hasStartAnchor = true;
+      if (a == NFA.AnchorType.START
+          || a == NFA.AnchorType.STRING_START
+          || a == NFA.AnchorType.START_MULTILINE) {
+        hasStartAnchor = true;
+      }
     }
 
     // A capturing group's enter/exit marker sitting on an epsilon-only cycle (a loop body that can

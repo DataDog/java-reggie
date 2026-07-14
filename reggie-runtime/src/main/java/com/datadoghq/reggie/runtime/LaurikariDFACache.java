@@ -77,29 +77,77 @@ final class LaurikariDFACache {
       nfaStateSets; // nfaStateSets[id] = NFA state IDs, order per the driving step's convention
   final int[][][] regs; // regs[id][i] = register vector for nfaStateSets[id][i]
   final boolean[] accepting;
+
+  /**
+   * {@code anchorSensitive[id]} is true when DFA state {@code id}'s NFA subset touches at least one
+   * of the 5 position-dependent anchor types ({@code END}, {@code STRING_END}, {@code
+   * STRING_END_ABSOLUTE}, {@code END_MULTILINE}, {@code WORD_BOUNDARY}) — see the TDFA Phase 2
+   * end-anchor/{@code \b} extension design. Such states' outgoing transitions must never be
+   * memoized in {@link #asciiTables} (the cached result would silently apply one call's anchor
+   * outcome to a different position/call); {@link #step}/{@link #lookupOrCompute} check this flag
+   * to bypass caching for exactly (and only) these states. Always all-false when {@code
+   * anchorBearingStates} is {@code null} (every pre-extension caller), so behavior for those
+   * callers is byte-identical to before this field existed.
+   */
+  final boolean[] anchorSensitive;
+
+  /**
+   * Parallel to {@link LaurikariCaptureNfaStep#statesById}: {@code anchorBearingStates[nfaId]} is
+   * true if that NFA state carries one of the 5 new anchor types. {@code null} for callers with no
+   * anchor-sensitive states (every Phase 0/0.5 driver, and any {@code hasNewAnchor == false}
+   * pattern) — then {@link #anchorSensitive} stays all-false without needing to consult this array.
+   */
+  private final boolean[] anchorBearingStates;
+
   private final int[] acceptStateIds;
   private final AtomicInteger nextId;
   private volatile boolean frozen;
   private final int cap;
 
   LaurikariDFACache(int[] startStateSet, int[][] startRegs, int[] acceptStateIds) {
-    this(startStateSet, startRegs, acceptStateIds, DEFAULT_CAP);
+    this(startStateSet, startRegs, acceptStateIds, null, DEFAULT_CAP);
+  }
+
+  LaurikariDFACache(
+      int[] startStateSet, int[][] startRegs, int[] acceptStateIds, boolean[] anchorBearingStates) {
+    this(startStateSet, startRegs, acceptStateIds, anchorBearingStates, DEFAULT_CAP);
   }
 
   // package-private for tests
   LaurikariDFACache(int[] startStateSet, int[][] startRegs, int[] acceptStateIds, int cap) {
+    this(startStateSet, startRegs, acceptStateIds, null, cap);
+  }
+
+  // package-private for tests
+  LaurikariDFACache(
+      int[] startStateSet,
+      int[][] startRegs,
+      int[] acceptStateIds,
+      boolean[] anchorBearingStates,
+      int cap) {
     this.cap = cap;
     this.acceptStateIds = acceptStateIds;
+    this.anchorBearingStates = anchorBearingStates;
     this.stateIndex = new ConcurrentHashMap<>();
     this.asciiTables = new int[cap][];
     this.nfaStateSets = new int[cap][];
     this.regs = new int[cap][][];
     this.accepting = new boolean[cap];
+    this.anchorSensitive = new boolean[cap];
     this.nextId = new AtomicInteger(1); // 0 = start state
     nfaStateSets[0] = startStateSet;
     regs[0] = startRegs;
     accepting[0] = firstAcceptIndex(startStateSet) >= 0;
+    anchorSensitive[0] = isAnchorSensitive(startStateSet);
     stateIndex.put(new LaurikariStateSetKey(startStateSet, startRegs), 0);
+  }
+
+  private boolean isAnchorSensitive(int[] states) {
+    if (anchorBearingStates == null) return false;
+    for (int s : states) {
+      if (anchorBearingStates[s]) return true;
+    }
+    return false;
   }
 
   /**
@@ -127,17 +175,7 @@ final class LaurikariDFACache {
     int dfaState = 0;
     for (int pos = scanFrom; pos < len; pos++) {
       int c = input.charAt(pos);
-      int[] table =
-          NEEDS_INT_ARRAY_ACQUIRE
-              ? (int[]) TABLES_VH.getAcquire(asciiTables, dfaState)
-              : asciiTables[dfaState];
-      int next =
-          (table != null && c < 128)
-              ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
-              : UNCACHED;
-      if (next == UNCACHED) {
-        next = lookupOrCompute(dfaState, c, step);
-      }
+      int next = step(dfaState, c, step, input, pos + 1, len);
       if (next == FALLBACK) {
         // Cache is frozen; delegate the remaining scan to a plain (uncached) NFA-level
         // re-simulation that tracks ages the same way the cached transitions do. This does NOT
@@ -172,6 +210,13 @@ final class LaurikariDFACache {
    * every character.
    */
   int step(int state, int c, LaurikariNfaStep nfaStep) {
+    return step(state, c, nfaStep, "", 0, 0);
+  }
+
+  int step(int state, int c, LaurikariNfaStep nfaStep, String input, int pos, int regionEnd) {
+    if (anchorSensitive[state]) {
+      return lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
+    }
     int[] table =
         NEEDS_INT_ARRAY_ACQUIRE
             ? (int[]) TABLES_VH.getAcquire(asciiTables, state)
@@ -180,13 +225,19 @@ final class LaurikariDFACache {
         (table != null && c < 128)
             ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
             : UNCACHED;
-    return next == UNCACHED ? lookupOrCompute(state, c, nfaStep) : next;
+    return next == UNCACHED ? lookupOrCompute(state, c, nfaStep, input, pos, regionEnd) : next;
   }
 
   int lookupOrCompute(int state, int c, LaurikariNfaStep step) {
-    LaurikariStepResult result = step.apply(nfaStateSets[state], regs[state], c);
+    return lookupOrCompute(state, c, step, "", 0, 0);
+  }
+
+  int lookupOrCompute(
+      int state, int c, LaurikariNfaStep step, String input, int pos, int regionEnd) {
+    LaurikariStepResult result =
+        step.apply(nfaStateSets[state], regs[state], c, input, pos, regionEnd);
     int id = intern(result.states, result.regs);
-    if (id != FALLBACK) cacheEntry(state, c, id);
+    if (id != FALLBACK && !anchorSensitive[state]) cacheEntry(state, c, id);
     return id;
   }
 
@@ -211,6 +262,7 @@ final class LaurikariDFACache {
                   nfaStateSets[newId] = k.getStates();
                   regs[newId] = k.getRegs();
                   accepting[newId] = firstAcceptIndex(k.getStates()) >= 0;
+                  anchorSensitive[newId] = isAnchorSensitive(k.getStates());
                   return newId;
                 }
                 return null; // over cap: don't insert, keeps map bounded at cap entries
@@ -253,7 +305,7 @@ final class LaurikariDFACache {
     int[] states = nfaStates;
     int[][] r = nfaRegs;
     for (int pos = frozenPos; pos < len; pos++) {
-      LaurikariStepResult result = step.apply(states, r, input.charAt(pos));
+      LaurikariStepResult result = step.apply(states, r, input.charAt(pos), input, pos + 1, len);
       states = result.states;
       r = result.regs;
       if (states.length == 0) {

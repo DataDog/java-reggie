@@ -63,16 +63,6 @@ class LaurikariEligibilityTest {
   }
 
   @Test
-  void wordBoundary_rejected() throws Exception {
-    assertFalse(eligible("\\bfoo", 0));
-  }
-
-  @Test
-  void endAnchor_rejected() throws Exception {
-    assertFalse(eligible("foo$", 0));
-  }
-
-  @Test
   void anchorInsideLoop_rejected() throws Exception {
     // Start anchor reachable after consuming a character -> not "leading-only".
     assertFalse(eligible("(^a|b)+", 0));
@@ -118,6 +108,49 @@ class LaurikariEligibilityTest {
   @Test
   void multilineStartAnchor_eligible() throws Exception {
     assertTrue(eligible("(?m)^(a+)", 1));
+  }
+
+  @Test
+  void wordBoundary_leading_eligible() throws Exception {
+    assertTrue(eligible("\\b(a+)", 1));
+  }
+
+  @Test
+  void wordBoundary_trailing_eligible() throws Exception {
+    assertTrue(eligible("(a+)\\b", 1));
+  }
+
+  @Test
+  void wordBoundary_midPattern_eligible() throws Exception {
+    assertTrue(eligible("(a+)\\b(b+)", 2));
+  }
+
+  @Test
+  void endAnchor_trailing_eligible() throws Exception {
+    assertTrue(eligible("(a+)$", 1));
+  }
+
+  @Test
+  void stringEndAnchor_eligible() throws Exception {
+    assertTrue(eligible("(a+)\\Z", 1));
+  }
+
+  @Test
+  void stringEndAbsoluteAnchor_eligible() throws Exception {
+    assertTrue(eligible("(a+)\\z", 1));
+  }
+
+  @Test
+  void endMultilineAnchor_eligible() throws Exception {
+    assertTrue(eligible("(?m)(a+)$", 1));
+  }
+
+  @Test
+  void endAnchorInsideNonTailLoop_eligible() throws Exception {
+    // Unlike the START-family, the 5 new anchor types are checked live per-occurrence (not baked
+    // into a build-time-precomputed closure), so no "leading/trailing-only" structural restriction
+    // is needed even when the anchor sits inside a repeating construct followed by more content.
+    assertTrue(eligible("(a$|b)c", 0));
   }
 
   @Test

@@ -388,6 +388,67 @@ class BitStateMatcherTest {
     assertEquals(1L, bitState.fallbackCount());
   }
 
+  // -------------------------------------------------------------------------
+  // Laurikari wiring (Phase 2 Task 2.1, Option A, doc/2026-07-10-tdfa-capture-engine-impl-plan.md)
+  // -------------------------------------------------------------------------
+
+  private static BitStateMatcher buildWithLaurikari(String pat) throws Exception {
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    ReggieMatcher laurikari =
+        LaurikariDfaSupport.tryCreate(nfa, pat, countGroups(pat), /* usePosixLastMatch= */ false);
+    assertNotNull(laurikari, pat + " expected to be LaurikariEligibility-eligible");
+    return new BitStateMatcher(nfa, pat, laurikari);
+  }
+
+  @Test
+  void oversizedSearchWithEligiblePatternRoutesToLaurikariNotPikeVm() throws Exception {
+    String pat = "(a)(b)*c";
+    BitStateMatcher bitState = buildWithLaurikari(pat);
+    java.util.regex.Matcher oracle = jdkMatch(pat, oversizedInput());
+
+    assertEquals(0L, bitState.laurikariCount());
+    assertEquals(0L, bitState.fallbackCount());
+    MatchResult actual = bitState.match(oversizedInput());
+    assertNotNull(oracle);
+    assertNotNull(actual);
+    assertEquals(oracle.start(0), actual.start(0));
+    assertEquals(oracle.end(0), actual.end(0));
+    assertEquals(1L, bitState.laurikariCount());
+    assertEquals(0L, bitState.fallbackCount());
+  }
+
+  @Test
+  void findOversizedInputWithEligiblePatternRoutesToLaurikariNotPikeVm() throws Exception {
+    String pat = "(a)(b)*c";
+    BitStateMatcher bitState = buildWithLaurikari(pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.laurikariCount());
+    assertTrue(bitState.find(input));
+    assertEquals(1L, bitState.laurikariCount());
+    assertEquals(0L, bitState.fallbackCount());
+  }
+
+  @Test
+  void nullLaurikariPreservesExistingFallbackBehavior() throws Exception {
+    // The 2-arg constructor (used by every pre-Phase-2 call site) must behave identically to
+    // before: laurikari is always null, so BUDGET_CELLS overflow always goes straight to
+    // PikeVMMatcher, never LaurikariDfaMatcher.
+    RegexParser parser = new RegexParser();
+    String pat = "(a)(b)*c";
+    RegexNode ast = parser.parse(pat);
+    ThompsonBuilder builder = new ThompsonBuilder();
+    NFA nfa = builder.build(ast, countGroups(pat));
+    BitStateMatcher bitState = new BitStateMatcher(nfa, pat);
+
+    assertTrue(bitState.find(oversizedInput()));
+    assertEquals(0L, bitState.laurikariCount());
+    assertEquals(1L, bitState.fallbackCount());
+  }
+
   @Test
   void matchesBoundedOversizedRegionDelegatesToPikeVmAndIncrementsFallbackCounter()
       throws Exception {

@@ -57,6 +57,14 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
    */
   private final LaurikariNfaStep findStep;
 
+  /**
+   * True when {@code step} has at least one end-anchor/{@code \b}-bearing NFA state — the seed
+   * closures ({@code anchoredCache}/{@code findCache} state 0, {@link #reinjectDfaState}) were then
+   * constructed against an empty placeholder input and must be recomputed live from the real input
+   * at the top of every {@link #runAnchored}/{@link #runFind} call.
+   */
+  private final boolean hasNewAnchor;
+
   private final LaurikariDFACache anchoredCache;
   private final LaurikariDFACache findCache;
 
@@ -86,12 +94,19 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     this.groupCount = groupCount;
     this.step = new LaurikariCaptureNfaStep(nfa, groupCount);
     this.findStep = step::applyFind;
+    this.hasNewAnchor = step.hasNewAnchor;
+    // When hasNewAnchor, initial/truncatedInitial/reinject closures below are just placeholder
+    // empty-input seeds to satisfy constructor plumbing -- runAnchored/runFind recompute the true
+    // seed live against the real input at the top of every call (see below).
     LaurikariStepResult initial = step.initialClosure();
     LaurikariStepResult truncatedInitial = step.truncatedInitialClosure();
     int[] acceptIds = acceptStateIds(nfa);
-    this.anchoredCache = new LaurikariDFACache(initial.states, initial.regs, acceptIds);
+    boolean[] anchorBearingStates = step.anchorBearingStates();
+    this.anchoredCache =
+        new LaurikariDFACache(initial.states, initial.regs, acceptIds, anchorBearingStates);
     this.findCache =
-        new LaurikariDFACache(truncatedInitial.states, truncatedInitial.regs, acceptIds);
+        new LaurikariDFACache(
+            truncatedInitial.states, truncatedInitial.regs, acceptIds, anchorBearingStates);
     LaurikariStepResult reinject = step.reinjectClosure();
     this.reinjectDfaState = findCache.intern(reinject.states, reinject.regs);
     LaurikariStepResult reinjectAfterNl = step.reinjectAfterNlClosure();
@@ -152,8 +167,17 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
   private int[] runAnchored(String input) {
     int len = input.length();
     int dfaState = 0;
+    if (hasNewAnchor) {
+      LaurikariStepResult seed = step.initialClosure(input, len);
+      dfaState = anchoredCache.intern(seed.states, seed.regs);
+      if (dfaState == LaurikariDFACache.DEAD) return null;
+      if (dfaState == LaurikariDFACache.FALLBACK) {
+        fallbackCount++;
+        return fallbackAnchored(input);
+      }
+    }
     for (int i = 0; i < len; i++) {
-      int next = anchoredCache.step(dfaState, input.charAt(i), step);
+      int next = anchoredCache.step(dfaState, input.charAt(i), step, input, i + 1, len);
       if (next == LaurikariDFACache.DEAD) return null;
       if (next == LaurikariDFACache.FALLBACK) {
         fallbackCount++;
@@ -230,7 +254,7 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     int clamped = Math.max(0, start);
     int len = input.length();
     if (clamped > len) return null;
-    int dfaState = startDfaStateFor(input, clamped);
+    int dfaState = startDfaStateFor(input, clamped, len);
     if (dfaState == LaurikariDFACache.DEAD) {
       // reinjectDfaState (or its after-'\n' variant) collapsed to DEAD when the anchor-blocked
       // closure has no live states (e.g. a wholly start-anchored pattern reinjected at clamped >
@@ -238,16 +262,24 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
       // both unnecessary and unsafe (DEAD is a negative sentinel, not a real array index).
       return null;
     }
+    if (dfaState == LaurikariDFACache.FALLBACK) {
+      fallbackCount++;
+      return fallbackFind(input, clamped);
+    }
     int[] best = null;
     if (findCache.accepting[dfaState]) {
       // Zero-length match at the very start of the scan: no characters consumed yet.
       best = shiftByClamped(step.absolutePositions(findCache.acceptRegs(dfaState), 0), clamped);
     }
     for (int i = clamped; i < len; i++) {
-      int next = findCache.step(dfaState, input.charAt(i), findStep);
+      int next = findCache.step(dfaState, input.charAt(i), findStep, input, i + 1, len);
       if (next == LaurikariDFACache.FALLBACK) {
         fallbackCount++;
-        return best == null ? fallbackFind(input, i) : best;
+        // The whole call is redone from the scan's original start (clamped), not the frozen
+        // position i: a match may have started anywhere in [clamped, i) and not yet reached an
+        // accept, and restarting PikeVMMatcher at i would silently lose that prefix (see class
+        // javadoc -- this is meant to be a whole-call delegation, not a tail continuation).
+        return best == null ? fallbackFind(input, clamped) : best;
       }
       if (next == LaurikariDFACache.DEAD) {
         // Every applyFind() call reinjects a fresh (anchor-blocked) start candidate (see
@@ -279,7 +311,19 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
    *     {@link #reinjectDfaState}, or its after-{@code '\n'} variant when the character immediately
    *     before {@code clamped} is {@code '\n'} — see {@link #reinjectDfaState}'s javadoc.
    */
-  private int startDfaStateFor(String input, int clamped) {
+  private int startDfaStateFor(String input, int clamped, int len) {
+    if (hasNewAnchor) {
+      LaurikariStepResult liveSeed;
+      if (clamped == 0) {
+        liveSeed = step.truncatedInitialClosure(input, len);
+      } else if (input.charAt(clamped - 1) == '\n') {
+        LaurikariStepResult afterNl = step.reinjectAfterNlClosure(input, clamped, len);
+        liveSeed = afterNl != null ? afterNl : step.reinjectClosure(input, clamped, len);
+      } else {
+        liveSeed = step.reinjectClosure(input, clamped, len);
+      }
+      return findCache.intern(liveSeed.states, liveSeed.regs);
+    }
     if (clamped == 0) return 0;
     if (reinjectAfterNlDfaState >= 0 && input.charAt(clamped - 1) == '\n') {
       return reinjectAfterNlDfaState;
@@ -297,8 +341,8 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     return relative;
   }
 
-  private int[] fallbackFind(String input, int frozenPos) {
-    MatchResult r = fallback().findMatchFrom(input, frozenPos);
+  private int[] fallbackFind(String input, int start) {
+    MatchResult r = fallback().findMatchFrom(input, start);
     if (r == null) return null;
     return toAbsolute(r);
   }

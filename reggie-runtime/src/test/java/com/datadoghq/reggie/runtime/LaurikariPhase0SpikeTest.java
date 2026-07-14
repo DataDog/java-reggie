@@ -126,7 +126,7 @@ class LaurikariPhase0SpikeTest {
     NFA.NFAState[] statesById = statesById(nfa);
     int stateCount = statesById.length;
     int startId = nfa.getStartState().id;
-    return (curStates, curRegs, c) -> {
+    return (curStates, curRegs, c, input, pos, regionEnd) -> {
       int[] rawAges = new int[stateCount];
       Arrays.fill(rawAges, -1);
       for (int i = 0; i < curStates.length; i++) {

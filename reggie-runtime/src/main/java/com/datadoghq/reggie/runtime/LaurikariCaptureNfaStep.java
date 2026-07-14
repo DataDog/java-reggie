@@ -101,6 +101,24 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
 
   private final int[][] reinjectAfterNlRegs;
 
+  /**
+   * True if any NFA state carries one of the 5 position-dependent anchor types ({@code END}, {@code
+   * STRING_END}, {@code STRING_END_ABSOLUTE}, {@code END_MULTILINE}, {@code WORD_BOUNDARY}) that
+   * must be evaluated live against the real input/position via {@link PikeVMMatcher#checkAnchor} —
+   * see the TDFA Phase 2 end-anchor/{@code \b} extension design. {@code false} for every pattern
+   * this class handled before that extension, in which case every closure accessor below returns
+   * its constructor-precomputed field unchanged (byte-identical to pre-extension behavior).
+   */
+  final boolean hasNewAnchor;
+
+  /**
+   * Parallel to {@link #statesById}: {@code anchorBearingStates[id]} is true if that NFA state
+   * carries one of the 5 new anchor types. Exposed via {@link #anchorBearingStates()} so {@link
+   * LaurikariDFACache} can flag which of its interned DFA states must never have their outgoing
+   * transitions memoized (see that class's {@code anchorSensitive} field).
+   */
+  private final boolean[] anchorBearingStates;
+
   final int tagCount;
 
   LaurikariCaptureNfaStep(NFA nfa, int groupCount) {
@@ -109,16 +127,18 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
     this.isAccept = isAccept(nfa, statesById.length);
     this.startStateId = nfa.getStartState().id;
     this.tagCount = LaurikariTagNumbering.tagCount(groupCount);
-    LaurikariStepResult initial = closureFromStart(false, false);
+    this.anchorBearingStates = anchorBearingStates(statesById);
+    this.hasNewAnchor = anyTrue(anchorBearingStates);
+    LaurikariStepResult initial = closureFromStart(false, false, "", 0, 0);
     this.initialStates = initial.states;
     this.initialRegs = initial.regs;
 
     boolean hasMultiline = hasMultilineAnchor(nfa);
-    LaurikariStepResult reinject = closureFromStart(true, true);
+    LaurikariStepResult reinject = closureFromStart(true, true, "", 0, 0);
     this.reinjectStates = reinject.states;
     this.reinjectRegs = reinject.regs;
     if (hasMultiline) {
-      LaurikariStepResult afterNl = closureFromStart(true, false);
+      LaurikariStepResult afterNl = closureFromStart(true, false, "", 0, 0);
       this.reinjectAfterNlStates = afterNl.states;
       this.reinjectAfterNlRegs = afterNl.regs;
     } else {
@@ -132,6 +152,38 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
       if (s.anchor == NFA.AnchorType.START_MULTILINE) return true;
     }
     return false;
+  }
+
+  private static boolean isNewAnchorType(NFA.AnchorType a) {
+    return a == NFA.AnchorType.END
+        || a == NFA.AnchorType.STRING_END
+        || a == NFA.AnchorType.STRING_END_ABSOLUTE
+        || a == NFA.AnchorType.END_MULTILINE
+        || a == NFA.AnchorType.WORD_BOUNDARY;
+  }
+
+  private static boolean[] anchorBearingStates(NFA.NFAState[] statesById) {
+    boolean[] flags = new boolean[statesById.length];
+    for (int i = 0; i < statesById.length; i++) {
+      flags[i] = isNewAnchorType(statesById[i].anchor);
+    }
+    return flags;
+  }
+
+  private static boolean anyTrue(boolean[] flags) {
+    for (boolean f : flags) {
+      if (f) return true;
+    }
+    return false;
+  }
+
+  /**
+   * @return {@link #anchorBearingStates}, for {@link LaurikariDFACache} to test its own interned
+   *     subsets against — {@code null} when {@link #hasNewAnchor} is false (then every DFA state is
+   *     guaranteed non-anchor-sensitive, so the cache need not consult this array at all).
+   */
+  boolean[] anchorBearingStates() {
+    return hasNewAnchor ? anchorBearingStates : null;
   }
 
   private static boolean[] isAccept(NFA nfa, int stateCount) {
@@ -158,7 +210,11 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
    *     particular fresh attempt is allowed to cross — see {@link #reinjectStates}'s javadoc.
    */
   private LaurikariStepResult closureFromStart(
-      boolean blockStartAnchor, boolean blockMultilineAnchor) {
+      boolean blockStartAnchor,
+      boolean blockMultilineAnchor,
+      String input,
+      int pos,
+      int regionEnd) {
     int[] allUnset = new int[tagCount];
     Arrays.fill(allUnset, -1);
     allUnset[0] = 0; // group 0 opens here, age 0
@@ -166,7 +222,16 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
     List<Integer> outIds = new ArrayList<>();
     List<int[]> outRegs = new ArrayList<>();
     addClosure(
-        visited, outIds, outRegs, startStateId, allUnset, blockStartAnchor, blockMultilineAnchor);
+        visited,
+        outIds,
+        outRegs,
+        startStateId,
+        allUnset,
+        blockStartAnchor,
+        blockMultilineAnchor,
+        input,
+        pos,
+        regionEnd);
     // Unblocked (blockStartAnchor=false) is initialClosure(), seeding the anchored matches()/
     // match() path: never truncate, mirroring PikeVMMatcher.runMatches/runMatchResult, which keep
     // lower-priority threads alive after a mid-string accept since they may still be needed to
@@ -223,7 +288,10 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
       int id,
       int[] regs,
       boolean blockStartAnchor,
-      boolean blockMultilineAnchor) {
+      boolean blockMultilineAnchor,
+      String input,
+      int pos,
+      int regionEnd) {
     if (visited[id]) return;
     visited[id] = true;
     int tag = tagOfState[id];
@@ -240,9 +308,20 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
         return;
       }
       if (blockMultilineAnchor && a == NFA.AnchorType.START_MULTILINE) return;
+      if (isNewAnchorType(a) && !PikeVMMatcher.checkAnchor(a, input, pos, 0, regionEnd)) return;
     }
     for (NFA.NFAState e : statesById[id].getEpsilonTransitions()) {
-      addClosure(visited, outIds, outRegs, e.id, r, blockStartAnchor, blockMultilineAnchor);
+      addClosure(
+          visited,
+          outIds,
+          outRegs,
+          e.id,
+          r,
+          blockStartAnchor,
+          blockMultilineAnchor,
+          input,
+          pos,
+          regionEnd);
     }
   }
 
@@ -253,6 +332,18 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
    */
   LaurikariStepResult initialClosure() {
     return new LaurikariStepResult(initialStates, initialRegs);
+  }
+
+  /**
+   * Live variant of {@link #initialClosure} for {@code hasNewAnchor} patterns: recomputes the
+   * closure against the real input/regionEnd (position 0) instead of returning the
+   * constructor-precomputed fields, which were built before any real input existed. Returns the
+   * precomputed fields unchanged when {@code !hasNewAnchor} (byte-identical to pre-extension
+   * behavior).
+   */
+  LaurikariStepResult initialClosure(String input, int regionEnd) {
+    if (!hasNewAnchor) return initialClosure();
+    return closureFromStart(false, false, input, 0, regionEnd);
   }
 
   /**
@@ -271,6 +362,18 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
   }
 
   /**
+   * Live variant of {@link #truncatedInitialClosure} for {@code hasNewAnchor} patterns — see {@link
+   * #initialClosure(String, int)}.
+   */
+  LaurikariStepResult truncatedInitialClosure(String input, int regionEnd) {
+    if (!hasNewAnchor) return truncatedInitialClosure();
+    LaurikariStepResult initial = closureFromStart(false, false, input, 0, regionEnd);
+    List<Integer> ids = new ArrayList<>(initial.states.length);
+    for (int id : initial.states) ids.add(id);
+    return truncateAtFirstAccept(ids, new ArrayList<>(Arrays.asList(initial.regs)));
+  }
+
+  /**
    * @return the anchor-blocked closure {@link LaurikariDfaMatcher} seeds a {@code findFrom(input,
    *     start)} scan from when {@code start > 0} — {@link #initialClosure} is only valid when the
    *     scan truly begins at absolute position 0 ({@code ^}/{@code \A} satisfied); starting mid-
@@ -279,6 +382,15 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
    */
   LaurikariStepResult reinjectClosure() {
     return new LaurikariStepResult(reinjectStates, reinjectRegs);
+  }
+
+  /**
+   * Live variant of {@link #reinjectClosure} for {@code hasNewAnchor} patterns — see {@link
+   * #initialClosure(String, int)}.
+   */
+  LaurikariStepResult reinjectClosure(String input, int pos, int regionEnd) {
+    if (!hasNewAnchor) return reinjectClosure();
+    return closureFromStart(true, true, input, pos, regionEnd);
   }
 
   /**
@@ -292,9 +404,27 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
         : new LaurikariStepResult(reinjectAfterNlStates, reinjectAfterNlRegs);
   }
 
+  /**
+   * Live variant of {@link #reinjectAfterNlClosure} for {@code hasNewAnchor} patterns — see {@link
+   * #initialClosure(String, int)}. Note this is only meaningful when the pattern also has a
+   * multiline start anchor ({@code reinjectAfterNlStates != null} in the non-live case); when
+   * {@code hasNewAnchor} but the pattern has no multiline start anchor, this still returns {@code
+   * null} exactly like the no-arg variant.
+   */
+  LaurikariStepResult reinjectAfterNlClosure(String input, int pos, int regionEnd) {
+    if (!hasNewAnchor) return reinjectAfterNlClosure();
+    if (reinjectAfterNlStates == null) return null;
+    return closureFromStart(true, false, input, pos, regionEnd);
+  }
+
+  LaurikariStepResult apply(int[] curStates, int[][] curRegs, int c) {
+    return apply(curStates, curRegs, c, "", 0, 0, false);
+  }
+
   @Override
-  public LaurikariStepResult apply(int[] curStates, int[][] curRegs, int c) {
-    return apply(curStates, curRegs, c, false);
+  public LaurikariStepResult apply(
+      int[] curStates, int[][] curRegs, int c, String input, int pos, int regionEnd) {
+    return apply(curStates, curRegs, c, input, pos, regionEnd, false);
   }
 
   /**
@@ -304,10 +434,22 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
    * correctly with leftmost-first priority and the age-based {@link #absolutePositions} formula.
    */
   LaurikariStepResult applyFind(int[] curStates, int[][] curRegs, int c) {
-    return apply(curStates, curRegs, c, true);
+    return apply(curStates, curRegs, c, "", 0, 0, true);
   }
 
-  private LaurikariStepResult apply(int[] curStates, int[][] curRegs, int c, boolean reinject) {
+  LaurikariStepResult applyFind(
+      int[] curStates, int[][] curRegs, int c, String input, int pos, int regionEnd) {
+    return apply(curStates, curRegs, c, input, pos, regionEnd, true);
+  }
+
+  private LaurikariStepResult apply(
+      int[] curStates,
+      int[][] curRegs,
+      int c,
+      String input,
+      int pos,
+      int regionEnd,
+      boolean reinject) {
     int stateCount = statesById.length;
     // Step 1: consuming transitions from every NFA state in the current subset, in the same
     // priority order PikeVMMatcher.addThread walks (curStates' array order, index 0 highest
@@ -324,7 +466,17 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
     List<Integer> outIds = new ArrayList<>();
     List<int[]> outRegs = new ArrayList<>();
     for (int i = 0; i < seedIds.size(); i++) {
-      addClosure(visited, outIds, outRegs, seedIds.get(i), seedRegs.get(i), false, false);
+      addClosure(
+          visited,
+          outIds,
+          outRegs,
+          seedIds.get(i),
+          seedRegs.get(i),
+          false,
+          false,
+          input,
+          pos,
+          regionEnd);
     }
     if (reinject) {
       // Lowest priority: a fresh, already-closed, anchor-blocked start candidate appended straight
@@ -332,10 +484,21 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
       // never displaces a higher-priority (more leftmost) candidate already present. Mirrors
       // PikeVMMatcher.findStepClosure's sortedUnion(tc, reinjectClosureIds) exactly; see the class
       // javadoc for why this must be un-transitioned rather than fed through collectConsumingSeeds.
-      int[] rStates =
-          (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlStates : reinjectStates;
-      int[][] rRegs =
-          (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlRegs : reinjectRegs;
+      int[] rStates;
+      int[][] rRegs;
+      if (hasNewAnchor) {
+        boolean afterNl = reinjectAfterNlStates != null && c == '\n';
+        LaurikariStepResult live =
+            afterNl
+                ? reinjectAfterNlClosure(input, pos, regionEnd)
+                : reinjectClosure(input, pos, regionEnd);
+        rStates = live.states;
+        rRegs = live.regs;
+      } else {
+        rStates =
+            (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlStates : reinjectStates;
+        rRegs = (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlRegs : reinjectRegs;
+      }
       for (int i = 0; i < rStates.length; i++) {
         int id = rStates[i];
         if (!visited[id]) {

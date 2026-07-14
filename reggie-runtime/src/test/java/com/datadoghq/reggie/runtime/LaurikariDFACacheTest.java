@@ -16,6 +16,8 @@
 package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.codegen.automaton.NFA;
@@ -131,7 +133,7 @@ class LaurikariDFACacheTest {
     NFA.NFAState[] statesById = statesById(nfa);
     int stateCount = statesById.length;
     int startId = nfa.getStartState().id;
-    return (curStates, curRegs, c) -> {
+    return (curStates, curRegs, c, input, pos, regionEnd) -> {
       int[] rawAges = new int[stateCount];
       Arrays.fill(rawAges, -1);
       for (int i = 0; i < curStates.length; i++) {
@@ -350,5 +352,45 @@ class LaurikariDFACacheTest {
             + " growth, not a fixed NFA-structure bound) -- if this fails because stateCount is now"
             + " LOWER, that's a genuine improvement worth re-deriving this test's sweep for; if"
             + " it's HIGHER, the cache silently grew past its own advertised cap.");
+  }
+
+  // --- (e) TDFA Phase 2 anchorSensitive/asciiTables gating -------------------------------------
+  // Hand-rolled DFA-state graph (no real NFA involved -- LaurikariDFACache treats "NFA state ids"
+  // as opaque ints, only using anchorBearingStates[id] to decide anchor-sensitivity) with one
+  // anchor-bearing "NFA state" (id 0) and one anchor-free sibling (id 1), self-looping under a
+  // pass-through LaurikariNfaStep, both interned in the SAME cache instance. Proves the design
+  // doc's "zero risk to existing patterns" claim holds even within one shared cache: the
+  // anchor-sensitive DFA state's asciiTables entry is never populated no matter how many times it
+  // is stepped, while the anchor-free sibling's entry gets populated on its first step.
+
+  @Test
+  void anchorSensitiveState_neverPopulatesAsciiTable_siblingAnchorFreeStateDoes() {
+    boolean[] anchorBearingStates = {true, false}; // NFA state 0 is anchor-bearing, 1 is not
+    LaurikariNfaStep passThrough =
+        (curStates, curRegs, c, input, pos, regionEnd) ->
+            new LaurikariStepResult(curStates, curRegs);
+
+    LaurikariDFACache cache =
+        new LaurikariDFACache(new int[] {0}, new int[][] {{}}, new int[0], anchorBearingStates);
+    // Seed a second, anchor-free DFA state (subset {1}) in the SAME cache instance.
+    int anchorFreeState = cache.intern(new int[] {1}, new int[][] {{}});
+
+    assertTrue(
+        cache.anchorSensitive[0], "DFA state 0's subset touches the anchor-bearing NFA state");
+    assertTrue(
+        !cache.anchorSensitive[anchorFreeState],
+        "DFA state built from subset {1} touches no anchor-bearing NFA state");
+
+    for (int i = 0; i < 5; i++) {
+      cache.step(0, 'a', passThrough, "aaaaa", i + 1, 5);
+    }
+    assertNull(
+        cache.asciiTables[0],
+        "anchor-sensitive DFA state must never populate asciiTables, however often it's stepped");
+
+    cache.step(anchorFreeState, 'a', passThrough, "aaaaa", 1, 5);
+    assertNotNull(
+        cache.asciiTables[anchorFreeState],
+        "anchor-free sibling state must populate asciiTables on its first step");
   }
 }

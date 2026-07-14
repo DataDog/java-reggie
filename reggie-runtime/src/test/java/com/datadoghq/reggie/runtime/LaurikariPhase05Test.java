@@ -148,7 +148,7 @@ class LaurikariPhase05Test {
   private static LaurikariNfaStep laurikariStep(NFA nfa, int[] tagOfState) {
     NFA.NFAState[] statesById = statesById(nfa);
     int stateCount = statesById.length;
-    return (curStates, curRegs, c) -> {
+    return (curStates, curRegs, c, input, pos, regionEnd) -> {
       boolean[] seenTarget = new boolean[stateCount];
       List<Integer> seedIds = new ArrayList<>();
       List<int[]> seedRegs = new ArrayList<>();
@@ -237,7 +237,8 @@ class LaurikariPhase05Test {
     int consumed = 0;
     for (int i = 0; i < input.length(); i++) {
       if (curStates.length == 0) return null;
-      LaurikariStepResult r = built.step.apply(curStates, curRegs, input.charAt(i));
+      LaurikariStepResult r =
+          built.step.apply(curStates, curRegs, input.charAt(i), input, i + 1, input.length());
       curStates = r.states;
       curRegs = r.regs;
       consumed++;

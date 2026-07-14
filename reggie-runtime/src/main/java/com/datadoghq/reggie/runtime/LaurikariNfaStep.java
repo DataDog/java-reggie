@@ -48,6 +48,14 @@ package com.datadoghq.reggie.runtime;
  * <p>Kept as a separate interface from {@link NfaStep} rather than changing NfaStep's shape,
  * matching how {@link RejectDfaFactory}/{@link PikeVMMatcher} already keep multiple independent
  * NfaStep-shaped lambdas per purpose.
+ *
+ * <p><b>{@code input}/{@code pos}/{@code regionEnd}:</b> added to support end-anchor ({@code $},
+ * {@code \Z}, {@code \z}, {@code (?m)$}) and {@code \b} eligibility — those anchor types need the
+ * true input and absolute position to evaluate via {@link PikeVMMatcher#checkAnchor}, which
+ * ages-based registers alone don't supply. {@code pos} is the absolute position of the closure
+ * being built, i.e. the caller's "characters consumed so far" count <em>after</em> consuming {@code
+ * c} (see implementations for the exact convention). Step functions/drivers with no
+ * anchor-sensitive states (every Phase 0/0.5 driver today) simply ignore these three parameters.
  */
 @FunctionalInterface
 interface LaurikariNfaStep {
@@ -56,8 +64,14 @@ interface LaurikariNfaStep {
    *     implementation's tie-break discipline (see class javadoc)
    * @param curRegs curStates[i]'s register vector
    * @param c the character being consumed
+   * @param input the full input being scanned, for end-anchor/{@code \b} evaluation; may be ignored
+   *     by implementations with no anchor-sensitive states
+   * @param pos absolute position of the closure being built (after consuming {@code c})
+   * @param regionEnd the true end of the scan region (anchor-context {@code regionEnd}, never a
+   *     scan-bound optimization's narrower limit)
    * @return next active state ids and their per-state winning register vectors, after
    *     epsilon-closure and this step's merge/tie-break rule
    */
-  LaurikariStepResult apply(int[] curStates, int[][] curRegs, int c);
+  LaurikariStepResult apply(
+      int[] curStates, int[][] curRegs, int c, String input, int pos, int regionEnd);
 }
