@@ -71,8 +71,36 @@ final class LaurikariDFACache {
   static final int DEAD = -2;
   static final int FALLBACK = -3;
 
+  /**
+   * Number of {@link #lookaheadClass} buckets. See that method's javadoc for why exactly these 3
+   * suffice to make every one of the 5 new anchor types' {@code checkAnchor} outcome a pure
+   * function of {@code (consumed char, lookahead class)} away from {@code regionEnd}.
+   */
+  private static final int LOOKAHEAD_CLASSES = 3;
+
+  private static final int LOOKAHEAD_WORD = 0;
+  private static final int LOOKAHEAD_NEWLINE = 1;
+  private static final int LOOKAHEAD_OTHER = 2;
+
+  /**
+   * Below this distance from {@code regionEnd}, {@code checkAnchor}'s {@code END}/{@code
+   * STRING_END}/{@code STRING_END_ABSOLUTE} cases depend on more than just {@link #lookaheadClass}
+   * (up to 2 characters of literal lookahead for a {@code \r\n} pair, plus the {@code pos ==
+   * regionEnd} case itself) — see {@link #lookaheadClass}'s javadoc. Transitions this close to the
+   * end are always recomputed live, never memoized.
+   */
+  private static final int ANCHOR_LOOKAHEAD_LIVE_MARGIN = 2;
+
   private final ConcurrentHashMap<LaurikariStateSetKey, Integer> stateIndex;
   final int[][] asciiTables; // asciiTables[id] = int[128] or null
+
+  /**
+   * {@code anchorLookaheadTables[id]} = {@code int[128 * LOOKAHEAD_CLASSES]} or {@code null} — the
+   * anchor-sensitive counterpart to {@link #asciiTables}, indexed by {@code consumed-char *
+   * LOOKAHEAD_CLASSES + lookaheadClass(...)}. See {@link #step}.
+   */
+  final int[][] anchorLookaheadTables;
+
   final int[][]
       nfaStateSets; // nfaStateSets[id] = NFA state IDs, order per the driving step's convention
   final int[][][] regs; // regs[id][i] = register vector for nfaStateSets[id][i]
@@ -83,9 +111,11 @@ final class LaurikariDFACache {
    * of the 5 position-dependent anchor types ({@code END}, {@code STRING_END}, {@code
    * STRING_END_ABSOLUTE}, {@code END_MULTILINE}, {@code WORD_BOUNDARY}) — see the TDFA Phase 2
    * end-anchor/{@code \b} extension design. Such states' outgoing transitions must never be
-   * memoized in {@link #asciiTables} (the cached result would silently apply one call's anchor
-   * outcome to a different position/call); {@link #step}/{@link #lookupOrCompute} check this flag
-   * to bypass caching for exactly (and only) these states. Always all-false when {@code
+   * memoized in {@link #asciiTables} keyed on the consumed char alone (the cached result would
+   * silently apply one call's anchor outcome to a different position/call); {@link #step} instead
+   * memoizes them in {@link #anchorLookaheadTables}, additionally keyed on {@link #lookaheadClass},
+   * except within {@link #ANCHOR_LOOKAHEAD_LIVE_MARGIN} characters of {@code regionEnd}, where it
+   * always calls {@link #lookupOrCompute} directly. Always all-false when {@code
    * anchorBearingStates} is {@code null} (every pre-extension caller), so behavior for those
    * callers is byte-identical to before this field existed.
    */
@@ -130,6 +160,7 @@ final class LaurikariDFACache {
     this.anchorBearingStates = anchorBearingStates;
     this.stateIndex = new ConcurrentHashMap<>();
     this.asciiTables = new int[cap][];
+    this.anchorLookaheadTables = new int[cap][];
     this.nfaStateSets = new int[cap][];
     this.regs = new int[cap][][];
     this.accepting = new boolean[cap];
@@ -215,7 +246,23 @@ final class LaurikariDFACache {
 
   int step(int state, int c, LaurikariNfaStep nfaStep, String input, int pos, int regionEnd) {
     if (anchorSensitive[state]) {
-      return lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
+      if (c >= 128 || regionEnd - pos <= ANCHOR_LOOKAHEAD_LIVE_MARGIN) {
+        return lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
+      }
+      int cls = lookaheadClass(input, pos);
+      int[] table =
+          NEEDS_INT_ARRAY_ACQUIRE
+              ? (int[]) TABLES_VH.getAcquire(anchorLookaheadTables, state)
+              : anchorLookaheadTables[state];
+      if (table != null) {
+        int idx = c * LOOKAHEAD_CLASSES + cls;
+        int cached =
+            NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, idx) : table[idx];
+        if (cached != UNCACHED) return cached;
+      }
+      int next = lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
+      if (next != FALLBACK) cacheAnchorLookaheadEntry(state, c, cls, next);
+      return next;
     }
     int[] table =
         NEEDS_INT_ARRAY_ACQUIRE
@@ -285,6 +332,44 @@ final class LaurikariDFACache {
       TABLES_VH.setRelease(asciiTables, state, t);
     } else {
       INT_ARRAY_VH.setRelease(table, c, value);
+    }
+  }
+
+  /**
+   * Classifies the not-yet-consumed character at {@code input.charAt(pos)} into one of {@link
+   * #LOOKAHEAD_CLASSES} buckets, sufficient (together with the already-consumed char {@code c},
+   * which is a separate cache dimension) to determine every one of the 5 new anchor types' {@code
+   * PikeVMMatcher.checkAnchor} outcome, <b>provided</b> the caller has already excluded positions
+   * within {@link #ANCHOR_LOOKAHEAD_LIVE_MARGIN} of {@code regionEnd} (guaranteed by {@link
+   * #step}):
+   *
+   * <ul>
+   *   <li>{@code END}/{@code STRING_END}/{@code STRING_END_ABSOLUTE}: always false away from {@code
+   *       regionEnd} — no dependency on this class at all.
+   *   <li>{@code END_MULTILINE}: {@code pos < regionEnd && charAt(pos) == '\n'} — true iff {@link
+   *       #LOOKAHEAD_NEWLINE}.
+   *   <li>{@code WORD_BOUNDARY}: {@code isLetterOrDigit(charAt(pos-1)) != isLetterOrDigit(charAt(
+   *       pos))}. The first operand is {@code isLetterOrDigit((char) c)} (already a cache
+   *       dimension); the second is true iff {@link #LOOKAHEAD_WORD} (a newline is never a word
+   *       char, so {@link #LOOKAHEAD_NEWLINE} and {@link #LOOKAHEAD_WORD} are mutually exclusive).
+   * </ul>
+   */
+  private static int lookaheadClass(String input, int pos) {
+    char next = input.charAt(pos);
+    if (next == '\n') return LOOKAHEAD_NEWLINE;
+    return Character.isLetterOrDigit(next) ? LOOKAHEAD_WORD : LOOKAHEAD_OTHER;
+  }
+
+  private void cacheAnchorLookaheadEntry(int state, int c, int cls, int value) {
+    int idx = c * LOOKAHEAD_CLASSES + cls;
+    int[] table = anchorLookaheadTables[state];
+    if (table == null) {
+      int[] t = new int[128 * LOOKAHEAD_CLASSES];
+      Arrays.fill(t, UNCACHED);
+      t[idx] = value;
+      TABLES_VH.setRelease(anchorLookaheadTables, state, t);
+    } else {
+      INT_ARRAY_VH.setRelease(table, idx, value);
     }
   }
 

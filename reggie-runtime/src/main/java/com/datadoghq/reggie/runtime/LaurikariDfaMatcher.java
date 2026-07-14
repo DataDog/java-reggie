@@ -66,7 +66,8 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
   private final boolean hasNewAnchor;
 
   private final LaurikariDFACache anchoredCache;
-  private final LaurikariDFACache findCache;
+  // package-private for tests: anchorSensitiveCount()/stateCount() proxy checks
+  final LaurikariDFACache findCache;
 
   /**
    * {@code findCache} state to seed a {@code findFrom(input, start)} scan from when {@code start >

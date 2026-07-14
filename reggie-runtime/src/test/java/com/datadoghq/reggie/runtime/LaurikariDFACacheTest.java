@@ -393,4 +393,52 @@ class LaurikariDFACacheTest {
         cache.asciiTables[anchorFreeState],
         "anchor-free sibling state must populate asciiTables on its first step");
   }
+
+  // --- (f) TDFA Phase 2 follow-up: anchor-lookahead fan-out caching -----------------------------
+  // 274488d's anchorSensitive gating made anchor-bearing states never populate asciiTables at
+  // all -- correct, but for find()'s self-anchoring reinject this meant a live recomputation
+  // (including a checkAnchor call) on nearly every character. This proves the follow-up fix: away
+  // from regionEnd, the anchor outcome collapses to a small (consumed-char, lookahead-class) pair
+  // (see LaurikariDFACache#lookaheadClass), so those transitions ARE cached now (in
+  // anchorLookaheadTables, never asciiTables), while positions within
+  // ANCHOR_LOOKAHEAD_LIVE_MARGIN characters of regionEnd are still always recomputed live.
+
+  @Test
+  void anchorSensitiveState_cachesTransitionsAwayFromRegionEnd_liveNearRegionEnd() {
+    boolean[] anchorBearingStates = {true, false};
+    int[] calls = {0};
+    LaurikariNfaStep countingPassThrough =
+        (curStates, curRegs, c, input, pos, regionEnd) -> {
+          calls[0]++;
+          return new LaurikariStepResult(curStates, curRegs);
+        };
+
+    LaurikariDFACache cache =
+        new LaurikariDFACache(new int[] {0}, new int[][] {{}}, new int[0], anchorBearingStates);
+    String input = "aaaaaaaaaa";
+    int regionEnd = input.length();
+
+    // Far from regionEnd: first step recomputes live and caches into anchorLookaheadTables.
+    cache.step(0, 'a', countingPassThrough, input, 1, regionEnd);
+    assertNotNull(
+        cache.anchorLookaheadTables[0],
+        "anchor-sensitive state must populate anchorLookaheadTables away from regionEnd");
+    assertNull(cache.asciiTables[0], "must still never populate asciiTables directly");
+    int callsAfterFirst = calls[0];
+
+    // Same (state, char, lookahead-class) at other far-from-regionEnd positions: cache hit, no
+    // further live recomputation.
+    for (int i = 1; i < 5; i++) {
+      cache.step(0, 'a', countingPassThrough, input, i + 1, regionEnd);
+    }
+    assertEquals(
+        callsAfterFirst,
+        calls[0],
+        "repeated (state, char, lookahead-class) transitions must hit the cache, not recompute"
+            + " live");
+
+    // Within ANCHOR_LOOKAHEAD_LIVE_MARGIN of regionEnd: always live, never cached.
+    cache.step(0, 'a', countingPassThrough, input, regionEnd - 1, regionEnd);
+    assertTrue(calls[0] > callsAfterFirst, "positions near regionEnd must always recompute live");
+  }
 }
