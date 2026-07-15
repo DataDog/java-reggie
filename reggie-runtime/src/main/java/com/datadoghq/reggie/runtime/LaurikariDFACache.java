@@ -370,8 +370,8 @@ final class LaurikariDFACache {
    *       regionEnd} — no dependency on this class at all.
    *   <li>{@code END_MULTILINE}: {@code pos < regionEnd && charAt(pos) == '\n'} — true iff {@link
    *       #LOOKAHEAD_NEWLINE}.
-   *   <li>{@code WORD_BOUNDARY}: {@code isLetterOrDigit(charAt(pos-1)) != isLetterOrDigit(charAt(
-   *       pos))}. The first operand is {@code isLetterOrDigit((char) c)} (already a cache
+   *   <li>{@code WORD_BOUNDARY}: {@code isWordChar(charAt(pos-1)) != isWordChar(charAt(
+   *       pos))}. The first operand is {@code PikeVMMatcher.isWordChar((char) c)} (already a cache
    *       dimension); the second is true iff {@link #LOOKAHEAD_WORD} (a newline is never a word
    *       char, so {@link #LOOKAHEAD_NEWLINE} and {@link #LOOKAHEAD_WORD} are mutually exclusive).
    *   <li>{@code NON_WORD_BOUNDARY}: the negation of {@code WORD_BOUNDARY}'s equation above — same
@@ -382,7 +382,7 @@ final class LaurikariDFACache {
   private static int lookaheadClass(String input, int pos) {
     char next = input.charAt(pos);
     if (next == '\n') return LOOKAHEAD_NEWLINE;
-    return Character.isLetterOrDigit(next) ? LOOKAHEAD_WORD : LOOKAHEAD_OTHER;
+    return PikeVMMatcher.isWordChar(next) ? LOOKAHEAD_WORD : LOOKAHEAD_OTHER;
   }
 
   private void cacheAnchorLookaheadEntry(int state, int c, int cls, int value) {

@@ -366,9 +366,9 @@ class LaurikariAnchorLookaheadFuzzTest {
       "a1\nb2\nc3",
       "a1\r\nb2\r\nc3",
       "a1\rb2\rc3",
-      "1 ", // LINE SEPARATOR
-      "1 ", // PARAGRAPH SEPARATOR
-      "1", // NEL
+      "1\u2028", // LINE SEPARATOR
+      "1\u2029", // PARAGRAPH SEPARATOR
+      "1\u0085", // NEL
     };
     for (String input : inputs) {
       LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);

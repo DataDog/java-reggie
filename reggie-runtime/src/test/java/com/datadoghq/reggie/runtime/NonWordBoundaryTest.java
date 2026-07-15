@@ -91,6 +91,37 @@ class NonWordBoundaryTest {
   }
 
   @Test
+  void wordCharIncludesUnderscore() {
+    // '_' is a word char ([A-Za-z0-9_]), so there is no boundary between it and an adjacent
+    // letter/digit -- matches both Reggie's own \w and JDK's default (non-UNICODE_CHARACTER_CLASS)
+    // \b semantics.
+    // find() must skip position 0 (there IS a boundary before '_' at the very start of input)
+    // and match starting at position 1 (no boundary between '_' and 'a').
+    expectFindMatch("\\B\\w+", "_a", 1, 2);
+    expectFindMatch("\\bfoo_bar\\b", "foo_bar baz", 0, 7);
+    expectFindNone("foo\\b", "foo_bar");
+
+    String[] inputs = {"_", "_a", "a_", "_1", "1_", "__", "a_b", "_ a", "a _"};
+    for (String input : inputs) {
+      assertFindFamilyMatchesJdk("\\b\\w+\\b", input);
+      assertFindFamilyMatchesJdk("\\B\\w+", input);
+      assertFindFamilyMatchesJdk("\\w+\\B", input);
+    }
+  }
+
+  @Test
+  void wordCharExcludesNonAsciiLettersAndDigits() {
+    // Character.isLetterOrDigit would (incorrectly) treat Cyrillic letters as word chars; the
+    // ASCII-only definition must not, matching JDK's default (non-UNICODE_CHARACTER_CLASS) \b.
+    String[] inputs = {"д", "aд", "дa", " д ", "дд"};
+    for (String input : inputs) {
+      assertFindFamilyMatchesJdk("\\b\\w+\\b", input);
+      assertFindFamilyMatchesJdk("\\B", input);
+      assertFindFamilyMatchesJdk("\\b", input);
+    }
+  }
+
+  @Test
   void combinedWithBackreference() {
     // Linear pattern with a backreference plus a boundary anchor: routes through the
     // LINEAR_BACKREFERENCE strategy (LinearPatternAnalyzer/BackrefBacktrackMatcher), a

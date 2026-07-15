@@ -371,6 +371,40 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
+  void testFixedSequenceWithWordBoundaryStrategy() throws Exception {
+    // Bare \b/\B + literal patterns route to SPECIALIZED_FIXED_SEQUENCE (see
+    // WordBoundaryFixedSequenceTest in reggie-runtime for the runtime-compiler-path coverage of
+    // this same strategy). This test exercises the annotation-processor path
+    // (ReggieMatcherBytecodeGenerator), which generates the leading/trailing isBoundary check via
+    // its own FixedSequenceBytecodeGenerator instance -- a call to matches()/find() here fails with
+    // a verification/NoSuchMethodError if the generated class references isBoundary without the
+    // helper methods actually being emitted.
+    Object leading = compile("\\bfoo", "LeadingBoundaryMatcher");
+    Method leadingMatches = leading.getClass().getMethod("matches", String.class);
+    Method leadingFind = leading.getClass().getMethod("find", String.class);
+    assertTrue((Boolean) leadingMatches.invoke(leading, "foo"));
+    assertTrue((Boolean) leadingFind.invoke(leading, "xx foo"));
+    assertFalse((Boolean) leadingFind.invoke(leading, "xfoo"));
+
+    Object trailing = compile("foo\\b", "TrailingBoundaryMatcher");
+    Method trailingMatches = trailing.getClass().getMethod("matches", String.class);
+    Method trailingFind = trailing.getClass().getMethod("find", String.class);
+    assertTrue((Boolean) trailingMatches.invoke(trailing, "foo"));
+    assertTrue((Boolean) trailingFind.invoke(trailing, "foo bar"));
+    assertFalse((Boolean) trailingFind.invoke(trailing, "foox"));
+
+    Object both = compile("\\bfoo\\b", "BothBoundaryMatcher");
+    Method bothMatches = both.getClass().getMethod("matches", String.class);
+    assertTrue((Boolean) bothMatches.invoke(both, "foo"));
+    assertFalse((Boolean) bothMatches.invoke(both, "foox"));
+
+    Object nonWord = compile("\\Bfoo\\B", "NonWordBoundaryMatcher");
+    Method nonWordFind = nonWord.getClass().getMethod("find", String.class);
+    assertTrue((Boolean) nonWordFind.invoke(nonWord, "xfoox"));
+    assertFalse((Boolean) nonWordFind.invoke(nonWord, "foo"));
+  }
+
+  @Test
   void testBitStateBytecodeStrategy() throws Exception {
     // Prefix-guarded-scan shape recognized by PatternAnalyzer#detectPrefixGuardedScan; exercises
     // the compile-time BITSTATE_BYTECODE dispatch case (com.datadoghq.reggie.codegen.codegen.

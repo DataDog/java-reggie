@@ -363,7 +363,7 @@ class LaurikariDfaMatcherTest {
     PikeVMMatcher oracle = pikeVm(pattern, groupCount);
 
     for (String input :
-        new String[] {"aaa", "aaa\n", "aaa\r", "aaa\r\n", "aaa\n\n", "aaab", "", "aaa ", "aaa"}) {
+        new String[] {"aaa", "aaa\n", "aaa\r", "aaa\r\n", "aaa\n\n", "aaab", "", "aaa\u2028", "aaa\u0085"}) {
       assertAllApisMatchOracle(laurikari, oracle, groupCount, input);
     }
     assertEquals(0, laurikari.fallbackCount());
