@@ -1309,10 +1309,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // -------------------------------------------------------------------------
 
   /**
-   * ASCII word-char predicate used by {@code \b}/{@code \B} — matches {@code CharSet.WORD}
-   * ({@code [A-Za-z0-9_]}), the same word-char definition {@code \w} and the generated {@code
-   * isWordChar} helpers use elsewhere in this codebase (unlike {@code Character.isLetterOrDigit},
-   * which admits Unicode letters/digits and excludes {@code '_'}).
+   * ASCII word-char predicate used by {@code \b}/{@code \B} — matches {@code CharSet.WORD} ({@code
+   * [A-Za-z0-9_]}), the same word-char definition {@code \w} and the generated {@code isWordChar}
+   * helpers use elsewhere in this codebase (unlike {@code Character.isLetterOrDigit}, which admits
+   * Unicode letters/digits and excludes {@code '_'}).
    */
   static boolean isWordChar(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';

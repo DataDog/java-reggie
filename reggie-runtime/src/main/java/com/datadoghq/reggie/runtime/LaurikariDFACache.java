@@ -370,10 +370,10 @@ final class LaurikariDFACache {
    *       regionEnd} — no dependency on this class at all.
    *   <li>{@code END_MULTILINE}: {@code pos < regionEnd && charAt(pos) == '\n'} — true iff {@link
    *       #LOOKAHEAD_NEWLINE}.
-   *   <li>{@code WORD_BOUNDARY}: {@code isWordChar(charAt(pos-1)) != isWordChar(charAt(
-   *       pos))}. The first operand is {@code PikeVMMatcher.isWordChar((char) c)} (already a cache
-   *       dimension); the second is true iff {@link #LOOKAHEAD_WORD} (a newline is never a word
-   *       char, so {@link #LOOKAHEAD_NEWLINE} and {@link #LOOKAHEAD_WORD} are mutually exclusive).
+   *   <li>{@code WORD_BOUNDARY}: {@code isWordChar(charAt(pos-1)) != isWordChar(charAt( pos))}. The
+   *       first operand is {@code PikeVMMatcher.isWordChar((char) c)} (already a cache dimension);
+   *       the second is true iff {@link #LOOKAHEAD_WORD} (a newline is never a word char, so {@link
+   *       #LOOKAHEAD_NEWLINE} and {@link #LOOKAHEAD_WORD} are mutually exclusive).
    *   <li>{@code NON_WORD_BOUNDARY}: the negation of {@code WORD_BOUNDARY}'s equation above — same
    *       two operands, {@code ==} instead of {@code !=} — so it depends on this class exactly the
    *       same way.

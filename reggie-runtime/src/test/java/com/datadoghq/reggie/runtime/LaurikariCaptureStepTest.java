@@ -237,8 +237,7 @@ class LaurikariCaptureStepTest {
         "reinjectClosure() live vs precomputed");
 
     LaurikariStepResult reinjectAfterNl = step.reinjectAfterNlClosure();
-    LaurikariStepResult reinjectAfterNlLive =
-        step.reinjectAfterNlClosure(input, 1, input.length());
+    LaurikariStepResult reinjectAfterNlLive = step.reinjectAfterNlClosure(input, 1, input.length());
     if (reinjectAfterNl == null) {
       org.junit.jupiter.api.Assertions.assertNull(
           reinjectAfterNlLive, "reinjectAfterNlClosure() live vs precomputed (both null)");
