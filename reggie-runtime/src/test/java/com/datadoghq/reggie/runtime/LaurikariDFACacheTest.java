@@ -354,6 +354,28 @@ class LaurikariDFACacheTest {
             + " it's HIGHER, the cache silently grew past its own advertised cap.");
   }
 
+  @Test
+  void denseAlternation_hitsCapAndFallbackScanExhaustsInputWithoutMatch() throws Exception {
+    // Same dense-branchy setup as the test above, but WITHOUT the trailing 'z' that lets the
+    // fallback scan accept: this drives nfaFallbackFindLeftmostStart's fallback loop all the way
+    // to the end of input with no accept ever reached, exercising its final `return -1` (as
+    // opposed to the sibling test above, which only exercises its mid-scan accept branch).
+    Built b = build("(?:aab|aba|baa|abb|bab|bba)*z", 0);
+
+    StringBuilder sb = new StringBuilder();
+    String[] cycle = {"a", "b", "ab", "ba", "aab", "bba"};
+    for (int i = 0; i < 3000; i++) {
+      sb.append(cycle[i % cycle.length]);
+    }
+    String denseInputNoZ = sb.toString();
+
+    assertEquals(-1, b.cache.findLeftmostStart(denseInputNoZ, 0, b.step));
+    assertEquals(
+        LaurikariDFACache.DEFAULT_CAP,
+        b.cache.stateCount(),
+        "expected the same dense growth (minus the final 'z' consumption) to still hit the cap");
+  }
+
   // --- (e) TDFA Phase 2 anchorSensitive/asciiTables gating -------------------------------------
   // Hand-rolled DFA-state graph (no real NFA involved -- LaurikariDFACache treats "NFA state ids"
   // as opaque ints, only using anchorBearingStates[id] to decide anchor-sensitivity) with one

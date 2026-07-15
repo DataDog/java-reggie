@@ -451,6 +451,33 @@ class LaurikariDfaMatcherTest {
   }
 
   @Test
+  void multilineStartAnchorCombinedWithWordBoundary_findAcrossNewlines_matchesOracle()
+      throws Exception {
+    // Combines a START_MULTILINE reinject ((?m)^) with a WORD_BOUNDARY (hasNewAnchor): the
+    // find()-family reinject path must recompute the after-'\n' seed closure live via
+    // reinjectAfterNlClosure(input, pos, regionEnd) at each '\n' crossing, not the precomputed
+    // reinjectAfterNlStates field (which predates the input string and can't evaluate \b).
+    String pattern = "(?m)^\\w+\\b";
+    int groupCount = 0;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    String input = "xx\nfoo bar\nx\nbaz9 qux";
+    for (int start = 0; start <= input.length(); start++) {
+      assertEquals(
+          oracle.findFrom(input, start),
+          laurikari.findFrom(input, start),
+          "findFrom(" + start + ") diverged");
+      assertMatchEquals(
+          oracle.findMatchFrom(input, start),
+          laurikari.findMatchFrom(input, start),
+          groupCount,
+          input + "@" + start);
+    }
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  @Test
   void endAnchor_sameSubsetRecursAtDifferentPositions_matchesOracle() throws Exception {
     // Direct regression for the cache-soundness risk named in the design doc: a single instance
     // is matched() against several inputs, some where the trailing 'a' run sits at true
@@ -518,5 +545,140 @@ class LaurikariDfaMatcherTest {
   @Test
   void sqlPostgresqlTokenizer_routesThroughLaurikari() throws Exception {
     assertSqlRoutesThroughLaurikari(SQL_POSTGRESQL);
+  }
+
+  // --- embedsNameMap: RuntimeCompiler consults this to decide whether to wrap the matcher in a
+  // --- NameEnrichingMatcher for named groups -- exercised directly here since this test suite
+  // --- constructs LaurikariDfaMatcher without going through RuntimeCompiler/Reggie.compile().
+
+  @Test
+  void embedsNameMap_returnsTrue() throws Exception {
+    LaurikariDfaMatcher m = laurikari("(a)(b)", 2);
+    assertTrue(m.embedsNameMap());
+  }
+
+  // --- findFrom(start > input.length()): runFind's own out-of-range guard, distinct from
+  // --- PikeVMMatcher's identical clamp (see class javadoc's comparison to BitStateMatcher.search).
+
+  @Test
+  void findFromStartBeyondInputLength_returnsNoMatch() throws Exception {
+    String pattern = "(a+)(b+)";
+    int groupCount = 2;
+    LaurikariDfaMatcher laurikari = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    String input = "aabb";
+    int start = input.length() + 5;
+    assertEquals(oracle.findFrom(input, start), laurikari.findFrom(input, start));
+    assertNull(laurikari.findMatchFrom(input, start));
+    assertEquals(0, laurikari.fallbackCount());
+  }
+
+  // --- hasNewAnchor cache-overflow FALLBACK at the *seed* (as opposed to
+  // --- findSurvivesDfaCacheOverflowMidMatch's mid-scan FALLBACK): runAnchored/runFind's
+  // --- hasNewAnchor branches recompute their seed live via anchoredCache.intern/findCache.intern
+  // --- on every call (see LaurikariDfaMatcher's class javadoc on why -- the constructor-precomputed
+  // --- seeds are just placeholders for hasNewAnchor patterns). Once a prior call has already frozen
+  // --- the cache, a *later* call whose live seed key was never interned before must itself return
+  // --- FALLBACK, delegating the whole call to PikeVMMatcher -- exercised here for both the anchored
+  // --- (matches()/match()) and self-anchoring (find()/findFrom()) drivers, and for both a
+  // --- fallback-still-matches and a fallback-finds-nothing outcome.
+
+  @Test
+  void hasNewAnchor_seedFallbackAfterAnchoredCacheOverflow() throws Exception {
+    String pattern = "\\b(a)(b)*c";
+    int groupCount = 2;
+    LaurikariDfaMatcher m = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    StringBuilder sb = new StringBuilder("a");
+    for (int i = 0; i < 10_000; i++) sb.append('b');
+    sb.append('c');
+    String overflowInput = sb.toString();
+    // Word-initial: satisfies the leading \b, so this call's live initial-closure seed is the
+    // "anchor satisfied" variant -- drives anchoredCache past DEFAULT_CAP via (b)*'s per-position
+    // register growth, exactly like findSurvivesDfaCacheOverflowMidMatch but for matches().
+    assertEquals(oracle.matches(overflowInput), m.matches(overflowInput));
+    assertTrue(m.fallbackCount() > 0, "overflowInput must overflow anchoredCache mid-scan");
+
+    // Non-word-initial: \b fails at position 0, so this call's live seed is the anchor-*blocked*
+    // variant -- a key anchoredCache never interned before it froze -- forcing intern() to return
+    // FALLBACK directly from the seed check (runAnchored's hasNewAnchor branch), not mid-scan.
+    String blockedInput = " " + overflowInput;
+    assertNull(oracle.match(blockedInput), "oracle sanity check: leading \\b must fail here");
+    assertEquals(oracle.matches(blockedInput), m.matches(blockedInput));
+    assertNull(m.match(blockedInput));
+  }
+
+  @Test
+  void hasNewAnchor_seedFallbackAfterFindCacheOverflow() throws Exception {
+    String pattern = "\\b(a)(b)*c";
+    int groupCount = 2;
+    LaurikariDfaMatcher m = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    StringBuilder sb = new StringBuilder("a");
+    for (int i = 0; i < 10_000; i++) sb.append('b');
+    sb.append('c');
+    String overflowInput = sb.toString();
+    assertTrue(oracle.find(overflowInput), "oracle sanity check");
+    assertTrue(m.find(overflowInput), "find() must not lose the match's prefix on cache overflow");
+    assertTrue(m.fallbackCount() > 0, "overflowInput must overflow findCache mid-scan");
+
+    // A short, unrelated input scanned from a non-zero offset: findCache is already frozen, and
+    // this call's live reinject-seed key (startDfaStateFor's hasNewAnchor branch) was never
+    // interned before -- forcing FALLBACK directly at the seed, before any per-character stepping.
+    // No 'c' anywhere after the offset, so the delegated PikeVMMatcher scan also finds nothing.
+    String shortInput = "xx bbbbb";
+    int start = 3;
+    assertNull(oracle.findMatchFrom(shortInput, start), "oracle sanity check: no 'c' after offset");
+    assertEquals(oracle.findFrom(shortInput, start), m.findFrom(shortInput, start));
+    assertNull(m.findMatchFrom(shortInput, start));
+  }
+
+  // --- runFind's FALLBACK-mid-scan ternary's "best != null" branch: unlike
+  // --- findSurvivesDfaCacheOverflowMidMatch (whose pattern can't accept before the mandatory
+  // --- trailing 'c', so `best` is always still null when FALLBACK hits), this pattern's trailing
+  // --- 'c' is optional, so every prefix "a", "ab", "abb", ... is already a valid (shorter) match --
+  // --- `best` is non-null well before the cache overflows deep into the 'b' run. Per runFind's own
+  // --- javadoc (LaurikariDfaMatcher.java:279-283), a mid-scan FALLBACK with a non-null `best` returns
+  // --- that already-recorded (possibly non-maximal) match as-is rather than delegating to the
+  // --- fallback engine to keep extending -- a deliberate whole-call-delegation-or-nothing trade-off,
+  // --- not a bug -- so this test checks self-consistency against the pattern, not equality with the
+  // --- oracle's true greedy (longest) match.
+
+  @Test
+  void findSurvivesDfaCacheOverflow_withAlreadyRecordedBest() throws Exception {
+    String pattern = "\\b(a)(b)*c?";
+    int groupCount = 2;
+    LaurikariDfaMatcher m = laurikari(pattern, groupCount);
+    PikeVMMatcher oracle = pikeVm(pattern, groupCount);
+
+    StringBuilder sb = new StringBuilder("a");
+    for (int i = 0; i < 10_000; i++) sb.append('b');
+    String input = sb.toString();
+
+    assertTrue(oracle.find(input), "oracle sanity check");
+    assertTrue(m.find(input), "find() must keep the already-recorded best match on cache overflow");
+    assertTrue(m.fallbackCount() > 0, "input must overflow findCache mid-scan");
+
+    MatchResult oracleResult = oracle.findMatch(input);
+    MatchResult actual = m.findMatch(input);
+    assertNotNull(actual, "the already-recorded best match must survive the overflow");
+    assertEquals(0, actual.start(0), "group 0 start diverged");
+    assertEquals(0, actual.start(1), "group 1 start diverged");
+    assertEquals(1, actual.end(1), "group 1 ('a') must end right after position 0");
+    assertTrue(
+        actual.end(0) >= 1 && actual.end(0) <= oracleResult.end(0),
+        "the recorded best is truncated by the overflow, so its span must be a proper prefix of "
+            + "the oracle's true greedy match: expected 1 <= "
+            + actual.end(0)
+            + " <= "
+            + oracleResult.end(0));
+    assertTrue(
+        java.util.regex.Pattern.compile(pattern)
+            .matcher(input.substring(0, actual.end(0)))
+            .matches(),
+        "the recorded best span itself must be a valid, self-consistent match of the pattern");
   }
 }

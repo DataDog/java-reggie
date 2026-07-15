@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -179,6 +180,71 @@ class LaurikariCaptureStepTest {
       int[] absolute = runToEnd(built, input);
       assertNotNull(absolute, "Laurikari driver must also match " + input);
       assertCapturesMatchOracle(absolute, oracleResult, groupCount, input);
+    }
+  }
+
+  // --- package-private compatibility overloads (no production caller ever exercises these
+  // --- exact arities, since LaurikariDfaMatcher always threads real input/pos/regionEnd through;
+  // --- covered here directly as they're part of LaurikariCaptureNfaStep's real API surface).
+
+  private static void assertResultsEqual(LaurikariStepResult a, LaurikariStepResult b, String msg) {
+    assertArrayEquals(a.states, b.states, msg + " (states)");
+    for (int i = 0; i < a.states.length; i++) {
+      assertArrayEquals(a.regs[i], b.regs[i], msg + " (regs[" + i + "])");
+    }
+  }
+
+  @Test
+  void noArgApplyOverloads_matchExplicitEmptyInputVariant() throws Exception {
+    String pattern = "(a)(b)";
+    int groupCount = 2;
+    NFA nfa = nfa(pattern, groupCount);
+    LaurikariCaptureNfaStep step = new LaurikariCaptureNfaStep(nfa, groupCount);
+    assertFalse(step.hasNewAnchor, "no-anchor pattern must not set hasNewAnchor");
+
+    LaurikariStepResult initial = step.initialClosure();
+
+    LaurikariStepResult viaShort = step.apply(initial.states, initial.regs, 'a');
+    LaurikariStepResult viaExplicit = step.apply(initial.states, initial.regs, 'a', "", 0, 0);
+    assertResultsEqual(viaShort, viaExplicit, "apply() 3-arg vs 6-arg for 'a'");
+
+    LaurikariStepResult viaFindShort = step.applyFind(initial.states, initial.regs, 'a');
+    LaurikariStepResult viaFindExplicit =
+        step.applyFind(initial.states, initial.regs, 'a', "", 0, 0);
+    assertResultsEqual(viaFindShort, viaFindExplicit, "applyFind() 3-arg vs 6-arg for 'a'");
+  }
+
+  @Test
+  void liveClosureOverloads_delegateToPrecomputedFieldsWhenNoNewAnchor() throws Exception {
+    String pattern = "(a+)(b)?";
+    int groupCount = 2;
+    NFA nfa = nfa(pattern, groupCount);
+    LaurikariCaptureNfaStep step = new LaurikariCaptureNfaStep(nfa, groupCount);
+    assertFalse(step.hasNewAnchor, "no-anchor pattern must not set hasNewAnchor");
+
+    String input = "aab";
+    assertResultsEqual(
+        step.initialClosure(),
+        step.initialClosure(input, input.length()),
+        "initialClosure() live vs precomputed");
+    assertResultsEqual(
+        step.truncatedInitialClosure(),
+        step.truncatedInitialClosure(input, input.length()),
+        "truncatedInitialClosure() live vs precomputed");
+    assertResultsEqual(
+        step.reinjectClosure(),
+        step.reinjectClosure(input, 1, input.length()),
+        "reinjectClosure() live vs precomputed");
+
+    LaurikariStepResult reinjectAfterNl = step.reinjectAfterNlClosure();
+    LaurikariStepResult reinjectAfterNlLive =
+        step.reinjectAfterNlClosure(input, 1, input.length());
+    if (reinjectAfterNl == null) {
+      org.junit.jupiter.api.Assertions.assertNull(
+          reinjectAfterNlLive, "reinjectAfterNlClosure() live vs precomputed (both null)");
+    } else {
+      assertResultsEqual(
+          reinjectAfterNl, reinjectAfterNlLive, "reinjectAfterNlClosure() live vs precomputed");
     }
   }
 }

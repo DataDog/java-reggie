@@ -90,6 +90,25 @@ class NonWordBoundaryTest {
     }
   }
 
+  @Test
+  void combinedWithBackreference() {
+    // Linear pattern with a backreference plus a boundary anchor: routes through the
+    // LINEAR_BACKREFERENCE strategy (LinearPatternAnalyzer/BackrefBacktrackMatcher), a
+    // different code path than the plain-anchor cases above (which route through BITSTATE_CAPTURE).
+    expectFindMatch("(a)\\1\\B", "aab", 0, 2);
+    expectFindNone("(a)\\1\\B", "aa");
+    expectFindNone("(a)\\1\\B", "aa ");
+
+    expectFindMatch("(a)\\1\\b", "aa", 0, 2);
+    expectFindNone("(a)\\1\\b", "aab");
+
+    String[] inputs = {"", "a", "aa", "aab", "aa ", "aaa", " aa "};
+    for (String input : inputs) {
+      assertFindFamilyMatchesJdk("(a)\\1\\B", input);
+      assertFindFamilyMatchesJdk("(a)\\1\\b", input);
+    }
+  }
+
   private static void assertFindFamilyMatchesJdk(String regex, String input) {
     Pattern jdk = Pattern.compile(regex);
     Matcher jm = jdk.matcher(input);

@@ -435,6 +435,44 @@ class BitStateMatcherTest {
   }
 
   @Test
+  void matchesOversizedInputWithEligiblePatternRoutesToLaurikariNotPikeVm() throws Exception {
+    String pat = "(a)(b)*c";
+    BitStateMatcher bitState = buildWithLaurikari(pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.laurikariCount());
+    assertTrue(bitState.matches(input));
+    assertEquals(1L, bitState.laurikariCount());
+    assertEquals(0L, bitState.fallbackCount());
+  }
+
+  @Test
+  void findFromOversizedInputWithEligiblePatternRoutesToLaurikariNotPikeVm() throws Exception {
+    String pat = "(a)(b)*c";
+    BitStateMatcher bitState = buildWithLaurikari(pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.laurikariCount());
+    assertEquals(0, bitState.findFrom(input, 0));
+    assertEquals(1L, bitState.laurikariCount());
+    assertEquals(0L, bitState.fallbackCount());
+  }
+
+  @Test
+  void findMatchFromOversizedInputWithEligiblePatternRoutesToLaurikariNotPikeVm() throws Exception {
+    String pat = "(a)(b)*c";
+    BitStateMatcher bitState = buildWithLaurikari(pat);
+    String input = oversizedInput();
+
+    assertEquals(0L, bitState.laurikariCount());
+    MatchResult result = bitState.findMatchFrom(input, 0);
+    assertNotNull(result);
+    assertEquals(0, result.start(0));
+    assertEquals(1L, bitState.laurikariCount());
+    assertEquals(0L, bitState.fallbackCount());
+  }
+
+  @Test
   void nullLaurikariPreservesExistingFallbackBehavior() throws Exception {
     // The 2-arg constructor (used by every pre-Phase-2 call site) must behave identically to
     // before: laurikari is always null, so BUDGET_CELLS overflow always goes straight to
