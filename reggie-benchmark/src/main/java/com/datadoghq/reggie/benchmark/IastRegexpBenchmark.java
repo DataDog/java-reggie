@@ -106,6 +106,11 @@ public class IastRegexpBenchmark {
   // Original flags: MULTILINE | DOTALL — expressed as inline (?s)(?m) for Reggie.
   private static final String COMMAND = "(?s)(?m)^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.*)";
 
+  // Bare word-boundary anchor, isolated from any surrounding tokenizer pattern — measures \b's
+  // own cost rather than a larger pattern's. Scan-prefix growth: filler text (no "foo" substring)
+  // is prepended before the matching "foo", stressing find()'s scan cost.
+  private static final String BARE_WORD_BOUNDARY = "\\bfoo";
+
   // UrlRegexpTokenizer: matches credentials in the authority component, or sensitive query params.
   // Named groups: JDK/Reggie use (?<name>), re2j uses (?P<name>).
   private static final String URL_JDK =
@@ -154,6 +159,7 @@ public class IastRegexpBenchmark {
 
   // --- Reggie matchers ---
   private ReggieMatcher reggieCommand;
+  private ReggieMatcher reggieBareWordBoundary;
   private ReggieMatcher reggieUrl;
   private ReggieMatcher reggieSqlAnsi;
   private ReggieMatcher reggieSqlMysql;
@@ -163,6 +169,7 @@ public class IastRegexpBenchmark {
 
   // --- JDK patterns ---
   private Pattern jdkCommand;
+  private Pattern jdkBareWordBoundary;
   private Pattern jdkUrl;
   private Pattern jdkSqlAnsi;
   private Pattern jdkSqlMysql;
@@ -172,6 +179,7 @@ public class IastRegexpBenchmark {
 
   // --- RE2J patterns ---
   private com.google.re2j.Pattern re2jCommand;
+  private com.google.re2j.Pattern re2jBareWordBoundary;
   private com.google.re2j.Pattern re2jUrl;
   private com.google.re2j.Pattern re2jSqlAnsi;
   private com.google.re2j.Pattern re2jSqlMysql;
@@ -185,6 +193,9 @@ public class IastRegexpBenchmark {
   // Command: a sudo invocation with arguments (find() always matches — tests match-path cost).
   // Matched-region growth: the trailing (.*) capture widens.
   private String commandInput;
+
+  // Bare word-boundary: scan-prefix growth — filler (no "foo" substring) grows before the match.
+  private String bareWordBoundaryInput;
 
   // URL: authority credentials match vs query-param match vs no match.
   // AUTHORITY branch is matched-region growth (^-anchored, so scan-prefix filler isn't possible
@@ -224,6 +235,16 @@ public class IastRegexpBenchmark {
     reggieCommand = RuntimeCompiler.compile(COMMAND);
     jdkCommand = Pattern.compile(COMMAND);
     re2jCommand = com.google.re2j.Pattern.compile(COMMAND);
+
+    bareWordBoundaryInput =
+        pick(
+            scale,
+            "lorem ipsum dolor sit amet foo",
+            "lorem ipsum dolor sit amet ".repeat(20) + "foo",
+            "lorem ipsum dolor sit amet ".repeat(2000) + "foo");
+    reggieBareWordBoundary = RuntimeCompiler.compile(BARE_WORD_BOUNDARY);
+    jdkBareWordBoundary = Pattern.compile(BARE_WORD_BOUNDARY);
+    re2jBareWordBoundary = com.google.re2j.Pattern.compile(BARE_WORD_BOUNDARY);
 
     urlAuthMatch =
         pick(
@@ -395,6 +416,23 @@ public class IastRegexpBenchmark {
       return -1L;
     }
     return (long) m.start(1) + m.end(1);
+  }
+
+  // ===== Bare word boundary =====
+
+  @Benchmark
+  public boolean reggieBareWordBoundaryFind() {
+    return reggieBareWordBoundary.find(bareWordBoundaryInput);
+  }
+
+  @Benchmark
+  public boolean jdkBareWordBoundaryFind() {
+    return jdkBareWordBoundary.matcher(bareWordBoundaryInput).find();
+  }
+
+  @Benchmark
+  public boolean re2jBareWordBoundaryFind() {
+    return re2jBareWordBoundary.matcher(bareWordBoundaryInput).find();
   }
 
   // ===== URL =====

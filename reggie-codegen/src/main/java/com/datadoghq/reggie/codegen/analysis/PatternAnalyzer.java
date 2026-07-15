@@ -6785,10 +6785,24 @@ public class PatternAnalyzer {
     public final int minLength; // Minimum length (with optional parts excluded)
     public final int maxLength; // Maximum length (with optional parts included)
     public final int groupCount; // Number of capturing groups
+    // Non-null if the sequence is preceded/followed by \b or \B (WORD_BOUNDARY /
+    // NON_WORD_BOUNDARY only); null otherwise.
+    public final AnchorNode.Type leadingBoundary;
+    public final AnchorNode.Type trailingBoundary;
 
     public FixedSequenceInfo(List<SequenceElement> elements, int groupCount) {
+      this(elements, groupCount, null, null);
+    }
+
+    public FixedSequenceInfo(
+        List<SequenceElement> elements,
+        int groupCount,
+        AnchorNode.Type leadingBoundary,
+        AnchorNode.Type trailingBoundary) {
       this.elements = elements;
       this.groupCount = groupCount;
+      this.leadingBoundary = leadingBoundary;
+      this.trailingBoundary = trailingBoundary;
       int min = 0;
       int max = 0;
       for (SequenceElement elem : elements) {
@@ -6807,6 +6821,8 @@ public class PatternAnalyzer {
       hash = 31 * hash + minLength;
       hash = 31 * hash + maxLength;
       hash = 31 * hash + groupCount;
+      hash = 31 * hash + (leadingBoundary == null ? 0 : leadingBoundary.hashCode());
+      hash = 31 * hash + (trailingBoundary == null ? 0 : trailingBoundary.hashCode());
       return hash;
     }
   }
@@ -7393,10 +7409,35 @@ public class PatternAnalyzer {
     }
 
     ConcatNode concat = (ConcatNode) ast;
+    List<RegexNode> children = concat.children;
 
-    // Analyze each child element, using flattenElement to handle multi-char literal groups
-    // like (foo)(bar) which analyzeElement alone cannot decompose.
-    for (RegexNode child : concat.children) {
+    // Strip a single leading and/or trailing \b / \B anchor (bare word-boundary literal, e.g.
+    // \bfoo, foo\b, \bfoo\b) - these are otherwise rejected outright below since analyzeElement
+    // has no AnchorNode case. The stripped anchor type(s) are recorded and checked at match time
+    // by the bytecode generator instead.
+    int startIdx = 0;
+    int endIdx = children.size();
+    AnchorNode.Type leadingBoundary = null;
+    AnchorNode.Type trailingBoundary = null;
+    if (startIdx < endIdx && children.get(startIdx) instanceof AnchorNode) {
+      AnchorNode.Type type = ((AnchorNode) children.get(startIdx)).type;
+      if (type == AnchorNode.Type.WORD_BOUNDARY || type == AnchorNode.Type.NON_WORD_BOUNDARY) {
+        leadingBoundary = type;
+        startIdx++;
+      }
+    }
+    if (endIdx > startIdx && children.get(endIdx - 1) instanceof AnchorNode) {
+      AnchorNode.Type type = ((AnchorNode) children.get(endIdx - 1)).type;
+      if (type == AnchorNode.Type.WORD_BOUNDARY || type == AnchorNode.Type.NON_WORD_BOUNDARY) {
+        trailingBoundary = type;
+        endIdx--;
+      }
+    }
+
+    // Analyze each remaining child element, using flattenElement to handle multi-char literal
+    // groups like (foo)(bar) which analyzeElement alone cannot decompose.
+    for (int idx = startIdx; idx < endIdx; idx++) {
+      RegexNode child = children.get(idx);
       int prevSize = elements.size();
       if (!flattenElement(child, -1, groupCounter, elements)) {
         return null; // Contains unsupported element
@@ -7415,7 +7456,8 @@ public class PatternAnalyzer {
     }
 
     // Check if it's actually fixed-length or has reasonable bounds
-    FixedSequenceInfo info = new FixedSequenceInfo(elements, groupCounter[0]);
+    FixedSequenceInfo info =
+        new FixedSequenceInfo(elements, groupCounter[0], leadingBoundary, trailingBoundary);
 
     // Only optimize if length is reasonable
     if (info.maxLength > 100) {

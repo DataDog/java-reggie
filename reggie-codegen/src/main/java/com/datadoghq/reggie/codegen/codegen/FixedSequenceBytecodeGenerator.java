@@ -23,6 +23,7 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.LiteralElement;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.OptionalLiteralElement;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.RepetitionElement;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.SequenceElement;
+import com.datadoghq.reggie.codegen.ast.AnchorNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
@@ -127,8 +128,20 @@ public class FixedSequenceBytecodeGenerator {
       mv.visitLabel(maxOk);
     }
 
-    // Generate checks for each element
     Label returnFalse = new Label();
+
+    // Leading/trailing \b or \B check (info.totalLength is always fixed when a boundary is
+    // present - boundary-bearing patterns never carry OptionalLiteralElements, see
+    // PatternAnalyzer.detectFixedSequence).
+    if (info.leadingBoundary != null) {
+      generateBoundaryCheckConstPos(mv, 1, 0, info.leadingBoundary, returnFalse, className);
+    }
+    if (info.trailingBoundary != null) {
+      generateBoundaryCheckConstPos(
+          mv, 1, info.totalLength, info.trailingBoundary, returnFalse, className);
+    }
+
+    // Generate checks for each element
     int pos = 0;
     for (SequenceElement elem : info.elements) {
       pos = generateElementCheck(mv, elem, pos, 1, returnFalse, allocator);
@@ -149,6 +162,174 @@ public class FixedSequenceBytecodeGenerator {
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
+  }
+
+  /** True if this pattern has a leading/trailing \b or \B requiring the isBoundary helper. */
+  public boolean needsBoundaryHelpers() {
+    return info.leadingBoundary != null || info.trailingBoundary != null;
+  }
+
+  /**
+   * Generates the {@code isWordChar}/{@code isBoundary} private static helpers used by {@code
+   * matches()}/{@code findFrom()} to check a leading/trailing \b or \B. Mirrors {@code
+   * BitStateBytecodeGenerator}'s implementation exactly (this codebase duplicates such helpers per
+   * generator class rather than sharing them). Call at most once per generated class, only when
+   * {@link #needsBoundaryHelpers()} is true.
+   */
+  public void generateBoundaryHelperMethods(ClassWriter cw, String className) {
+    generateIsWordCharMethod(cw);
+    generateIsBoundaryMethod(cw, className);
+  }
+
+  /** {@code private static boolean isWordChar(char c)} - the fixed PCRE/Java \b word-char set. */
+  private void generateIsWordCharMethod(ClassWriter cw) {
+    MethodVisitor mv = cw.visitMethod(ACC_PRIVATE | ACC_STATIC, "isWordChar", "(C)Z", null, null);
+    mv.visitCode();
+    int cVar = 0;
+    Label checkUpper = new Label();
+    Label checkDigit = new Label();
+    Label checkUnderscore = new Label();
+    Label yes = new Label();
+    Label no = new Label();
+
+    mv.visitVarInsn(ILOAD, cVar);
+    pushInt(mv, 'a');
+    mv.visitJumpInsn(IF_ICMPLT, checkUpper);
+    mv.visitVarInsn(ILOAD, cVar);
+    pushInt(mv, 'z');
+    mv.visitJumpInsn(IF_ICMPLE, yes);
+
+    mv.visitLabel(checkUpper);
+    mv.visitVarInsn(ILOAD, cVar);
+    pushInt(mv, 'A');
+    mv.visitJumpInsn(IF_ICMPLT, checkDigit);
+    mv.visitVarInsn(ILOAD, cVar);
+    pushInt(mv, 'Z');
+    mv.visitJumpInsn(IF_ICMPLE, yes);
+
+    mv.visitLabel(checkDigit);
+    mv.visitVarInsn(ILOAD, cVar);
+    pushInt(mv, '0');
+    mv.visitJumpInsn(IF_ICMPLT, checkUnderscore);
+    mv.visitVarInsn(ILOAD, cVar);
+    pushInt(mv, '9');
+    mv.visitJumpInsn(IF_ICMPLE, yes);
+
+    mv.visitLabel(checkUnderscore);
+    mv.visitVarInsn(ILOAD, cVar);
+    pushInt(mv, '_');
+    mv.visitJumpInsn(IF_ICMPEQ, yes);
+    mv.visitJumpInsn(GOTO, no);
+
+    mv.visitLabel(yes);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(no);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * {@code private static boolean isBoundary(String input, int p, int n)} - true iff exactly one of
+   * {@code (p>0 && isWordChar(input.charAt(p-1)))} / {@code (p<n && isWordChar(input.charAt(p)))}
+   * holds.
+   */
+  private void generateIsBoundaryMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PRIVATE | ACC_STATIC, "isBoundary", "(Ljava/lang/String;II)Z", null, null);
+    mv.visitCode();
+    int inputVar = 0;
+    int pVar = 1;
+    int nVar = 2;
+    LocalVarAllocator allocator = new LocalVarAllocator(3);
+    int beforeVar = allocator.allocate();
+    int afterVar = allocator.allocate();
+
+    // before = p > 0 && isWordChar(input.charAt(p - 1));
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, beforeVar);
+    Label skipBefore = new Label();
+    mv.visitVarInsn(ILOAD, pVar);
+    mv.visitJumpInsn(IFLE, skipBefore);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, pVar);
+    pushInt(mv, 1);
+    mv.visitInsn(ISUB);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitMethodInsn(INVOKESTATIC, className.replace('.', '/'), "isWordChar", "(C)Z", false);
+    mv.visitVarInsn(ISTORE, beforeVar);
+    mv.visitLabel(skipBefore);
+
+    // after = p < n && isWordChar(input.charAt(p));
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, afterVar);
+    Label skipAfter = new Label();
+    mv.visitVarInsn(ILOAD, pVar);
+    mv.visitVarInsn(ILOAD, nVar);
+    mv.visitJumpInsn(IF_ICMPGE, skipAfter);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, pVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitMethodInsn(INVOKESTATIC, className.replace('.', '/'), "isWordChar", "(C)Z", false);
+    mv.visitVarInsn(ISTORE, afterVar);
+    mv.visitLabel(skipAfter);
+
+    // return before != after;
+    Label returnTrue = new Label();
+    mv.visitVarInsn(ILOAD, beforeVar);
+    mv.visitVarInsn(ILOAD, afterVar);
+    mv.visitJumpInsn(IF_ICMPNE, returnTrue);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(returnTrue);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /** isBoundary(input, posConst, input.length()); jumps to failLabel if the anchor doesn't hold. */
+  private void generateBoundaryCheckConstPos(
+      MethodVisitor mv,
+      int inputVar,
+      int posConst,
+      AnchorNode.Type anchorType,
+      Label failLabel,
+      String className) {
+    mv.visitVarInsn(ALOAD, inputVar);
+    pushInt(mv, posConst);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitMethodInsn(
+        INVOKESTATIC, className.replace('.', '/'), "isBoundary", "(Ljava/lang/String;II)Z", false);
+    mv.visitJumpInsn(anchorType == AnchorNode.Type.WORD_BOUNDARY ? IFEQ : IFNE, failLabel);
+  }
+
+  /** isBoundary(input, posVar + offset, lenVar); jumps to failLabel if the anchor doesn't hold. */
+  private void generateBoundaryCheckVarPos(
+      MethodVisitor mv,
+      int inputVar,
+      int posVar,
+      int offset,
+      int lenVar,
+      AnchorNode.Type anchorType,
+      Label failLabel,
+      String className) {
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    if (offset != 0) {
+      pushInt(mv, offset);
+      mv.visitInsn(IADD);
+    }
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitMethodInsn(
+        INVOKESTATIC, className.replace('.', '/'), "isBoundary", "(Ljava/lang/String;II)Z", false);
+    mv.visitJumpInsn(anchorType == AnchorNode.Type.WORD_BOUNDARY ? IFEQ : IFNE, failLabel);
   }
 
   /**
@@ -449,6 +630,17 @@ public class FixedSequenceBytecodeGenerator {
 
     // Generate inline matching checks for all elements at offset i
     Label tryNext = new Label();
+
+    // Leading/trailing \b or \B check at this candidate position (info.totalLength is always
+    // fixed when a boundary is present, see PatternAnalyzer.detectFixedSequence).
+    if (info.leadingBoundary != null) {
+      generateBoundaryCheckVarPos(mv, 1, iVar, 0, lenVar, info.leadingBoundary, tryNext, className);
+    }
+    if (info.trailingBoundary != null) {
+      generateBoundaryCheckVarPos(
+          mv, 1, iVar, info.totalLength, lenVar, info.trailingBoundary, tryNext, className);
+    }
+
     int pos = 0;
     for (SequenceElement elem : info.elements) {
       if (elem instanceof LiteralElement) {

@@ -1072,6 +1072,9 @@ public class RuntimeCompiler {
             (PatternAnalyzer.FixedSequenceInfo) result.patternInfo;
         FixedSequenceBytecodeGenerator fixedGen =
             new FixedSequenceBytecodeGenerator(fixedInfo, nfa.getGroupCount());
+        if (fixedGen.needsBoundaryHelpers()) {
+          fixedGen.generateBoundaryHelperMethods(cw, "com/datadoghq/reggie/runtime/" + className);
+        }
         fixedGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
