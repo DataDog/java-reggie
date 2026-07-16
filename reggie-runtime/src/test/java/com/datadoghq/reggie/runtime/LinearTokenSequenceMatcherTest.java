@@ -188,6 +188,105 @@ class LinearTokenSequenceMatcherTest {
   }
 
   @Test
+  void boundedExecutionUsesOnlyCharAtAndReturnsAbsoluteSpans() throws Exception {
+    LinearTokenSequenceMatcher matcher =
+        (LinearTokenSequenceMatcher) matcherFor("host=(?<host>\\S+) status=(?<status>[+-]?\\d+)");
+    String source = "prefix host=api.example status=200 suffix";
+    int start = source.indexOf("host=");
+    int end = source.indexOf(" suffix");
+    RangeGuardCharSequence input = new RangeGuardCharSequence(source, start, end);
+    int[] starts = new int[3];
+    int[] ends = new int[3];
+
+    assertTrue(matcher.matchIntoBounded(input, start, end, starts, ends));
+
+    assertEquals(start, starts[0]);
+    assertEquals(end, ends[0]);
+    assertEquals("api.example", source.substring(starts[1], ends[1]));
+    assertEquals("200", source.substring(starts[2], ends[2]));
+  }
+
+  @Test
+  void boundedExecutionRejectsInvalidArgumentsAndKeepsArraysAtomicOnFailure() throws Exception {
+    LinearTokenSequenceMatcher matcher =
+        (LinearTokenSequenceMatcher) matcherFor("host=(?<host>\\S+) status=(?<status>[+-]?\\d+)");
+    int[] starts = new int[] {7, 7, 7};
+    int[] ends = new int[] {9, 9, 9};
+    CharSequence input = new ConversionFailingCharSequence("host=api status=not-a-number");
+
+    assertFalse(matcher.matchIntoBounded(input, 0, input.length(), starts, ends));
+    assertTrue(Arrays.equals(new int[] {7, 7, 7}, starts));
+    assertTrue(Arrays.equals(new int[] {9, 9, 9}, ends));
+    assertThrows(
+        NullPointerException.class,
+        () -> matcher.matchIntoBounded(null, 0, 0, new int[3], new int[3]));
+    assertThrows(
+        NullPointerException.class,
+        () -> matcher.matchIntoBounded(input, 0, input.length(), null, new int[3]));
+    assertThrows(
+        IndexOutOfBoundsException.class,
+        () -> matcher.matchIntoBounded(input, -1, input.length(), new int[3], new int[3]));
+    assertThrows(
+        IndexOutOfBoundsException.class,
+        () -> matcher.matchIntoBounded(input, 0, input.length(), new int[2], new int[3]));
+  }
+
+  @Test
+  void boundedExecutionCoversQuotedAndOptionalHttpVersionPathsWithoutConversion() throws Exception {
+    LinearTokenSequenceMatcher quoted =
+        (LinearTokenSequenceMatcher) matcherFor("referer=\"(?<referer>[^\"]*)\"");
+    String quotedSource = "referer=\"https://example.com/index.html\"";
+    CharSequence quotedInput = new ConversionFailingCharSequence(quotedSource);
+    assertTrue(quoted.matchesBounded(quotedInput, 0, quotedInput.length()));
+
+    LinearTokenSequenceMatcher request =
+        (LinearTokenSequenceMatcher)
+            matcherFor(
+                "\"(?<method>\\b\\w+\\b) (?<target>\\S+)(?: HTTP/(?<version>\\d+\\.\\d+)|)\"");
+    String requestSource = "\"GET /health HTTP/2.0\"";
+    CharSequence requestInput = new ConversionFailingCharSequence(requestSource);
+    int[] starts = new int[4];
+    int[] ends = new int[4];
+    assertTrue(request.matchIntoBounded(requestInput, 0, requestInput.length(), starts, ends));
+    assertEquals("GET", requestSource.substring(starts[1], ends[1]));
+    assertEquals("/health", requestSource.substring(starts[2], ends[2]));
+    assertEquals("2.0", requestSource.substring(starts[3], ends[3]));
+  }
+
+  @Test
+  void finalSkipAnyConsumesTheTailAndPropagatesCharAtFailures() throws Exception {
+    LinearTokenSequenceMatcher matcher =
+        (LinearTokenSequenceMatcher) matcherFor("(?<prefix>\\S+) .*");
+    String source = "token remaining";
+    CountingCharSequence counted = new CountingCharSequence(source);
+
+    assertTrue(matcher.matchesBounded(counted, 0, counted.length()));
+    assertTrue(counted.charAtCalls >= source.length());
+    assertThrows(
+        CharAtFailure.class,
+        () ->
+            matcher.matchesBounded(
+                new FailingAtCharSequence(source, source.indexOf('r')), 0, source.length()));
+  }
+
+  @Test
+  void matchBoundedMaterializesOnlyAfterSuccessAndUsesAbsoluteSpans() throws Exception {
+    LinearTokenSequenceMatcher matcher =
+        (LinearTokenSequenceMatcher) matcherFor("(?<host>\\S+)(?: (?<status>\\d+)|)", 2);
+    CharSequence failing = new ConversionFailingCharSequence("host not-a-number");
+    assertNull(matcher.matchBounded(failing, 0, failing.length()));
+
+    String source = "xxapiyy";
+    MatchResult result = matcher.matchBounded(source, 2, 5);
+    assertNotNull(result);
+    assertEquals(2, result.start());
+    assertEquals(5, result.end());
+    assertEquals("api", result.group("host"));
+    assertEquals(-1, result.start("status"));
+    assertNull(result.group("status"));
+  }
+
+  @Test
   void capturedDashAlternativeRecordsNamedGroupSpan() throws Exception {
     ReggieMatcher matcher = Reggie.compile("(?<bytes>(?:-|[+-]?\\d+))", NAMED_ONLY_OPTIONS);
 
@@ -317,4 +416,84 @@ class LinearTokenSequenceMatcherTest {
         LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElseThrow();
     return new LinearTokenSequenceMatcher(pattern, plan, groupCount, names);
   }
+
+  private static class ConversionFailingCharSequence implements CharSequence {
+    final String value;
+
+    ConversionFailingCharSequence(String value) {
+      this.value = value;
+    }
+
+    @Override
+    public int length() {
+      return value.length();
+    }
+
+    @Override
+    public char charAt(int index) {
+      return value.charAt(index);
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      throw new AssertionError("subSequence must not be called while matching");
+    }
+
+    @Override
+    public String toString() {
+      throw new AssertionError("toString must not be called while matching");
+    }
+  }
+
+  private static final class RangeGuardCharSequence extends ConversionFailingCharSequence {
+    private final int allowedStart;
+    private final int allowedEnd;
+
+    RangeGuardCharSequence(String value, int allowedStart, int allowedEnd) {
+      super(value);
+      this.allowedStart = allowedStart;
+      this.allowedEnd = allowedEnd;
+    }
+
+    @Override
+    public char charAt(int index) {
+      if (index < allowedStart || index >= allowedEnd) {
+        throw new AssertionError("read outside bounded region: " + index);
+      }
+      return super.charAt(index);
+    }
+  }
+
+  private static final class CountingCharSequence extends ConversionFailingCharSequence {
+    int charAtCalls;
+
+    CountingCharSequence(String value) {
+      super(value);
+    }
+
+    @Override
+    public char charAt(int index) {
+      charAtCalls++;
+      return super.charAt(index);
+    }
+  }
+
+  private static final class FailingAtCharSequence extends ConversionFailingCharSequence {
+    private final int failingIndex;
+
+    FailingAtCharSequence(String value, int failingIndex) {
+      super(value);
+      this.failingIndex = failingIndex;
+    }
+
+    @Override
+    public char charAt(int index) {
+      if (index == failingIndex) {
+        throw new CharAtFailure();
+      }
+      return super.charAt(index);
+    }
+  }
+
+  private static final class CharAtFailure extends RuntimeException {}
 }

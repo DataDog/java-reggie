@@ -174,6 +174,42 @@ class LinearTokenSequenceAccessLogTest {
   }
 
   @Test
+  void realExpandedPatternsUseOnlyTheBoundedCharSequenceRegion() throws Exception {
+    assertBoundedFixtureUsesOnlyItsRegion(
+        testResource("logs-grok-pattern-1.regex"),
+        commonMessage("10.202.82.195", "POST ", "/config?x=y", " HTTP/1.1", "17888"),
+        commonMessage("10.202.82.195", "POST ", "/config?x=y", " HTTP/1.1", "not-a-number"));
+    assertBoundedFixtureUsesOnlyItsRegion(
+        testResource("logs-grok-pattern-2.regex"),
+        combinedMessage(
+            "10.202.82.195",
+            "POST ",
+            "/config?x=y",
+            " HTTP/1.1",
+            "17888",
+            "https://example.com/index.html",
+            "Mozilla/5.0 Test",
+            "-",
+            "tracking-id",
+            "0.024",
+            "0.024",
+            "[decoy] . [nginx_access]  [not-the-logger]"),
+        combinedMessage(
+            "10.202.82.195",
+            "POST ",
+            "/config?x=y",
+            " HTTP/1.1",
+            "not-a-number",
+            "https://example.com/index.html",
+            "Mozilla/5.0 Test",
+            "-",
+            "tracking-id",
+            "0.024",
+            "0.024",
+            "[decoy] . [nginx_access]  [not-the-logger]"));
+  }
+
+  @Test
   void leavesCallerArraysUnchangedOnNoMatch() {
     ReggieMatcher matcher = Reggie.compile(COMBINED_ACCESS_LOG_PATTERN, NAMED_ONLY);
     int[] starts = new int[17];
@@ -229,6 +265,43 @@ class LinearTokenSequenceAccessLogTest {
               entry.getKey() + " value: " + input);
         }
       }
+    }
+  }
+
+  private static void assertBoundedFixtureUsesOnlyItsRegion(
+      String pattern, String matchingInput, String failingInput) throws Exception {
+    ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY);
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
+    LinearTokenSequenceMatcher ltsMatcher = (LinearTokenSequenceMatcher) matcher;
+    int groupCount = Pattern.compile(pattern).matcher("").groupCount();
+
+    assertBoundedResult(
+        ltsMatcher, groupCount, "before " + matchingInput + " after ", matchingInput, true);
+    assertBoundedResult(
+        ltsMatcher, groupCount, "before " + failingInput + " after ", failingInput, false);
+  }
+
+  private static void assertBoundedResult(
+      LinearTokenSequenceMatcher matcher,
+      int groupCount,
+      String source,
+      String region,
+      boolean expectedMatch) {
+    int start = source.indexOf(region);
+    int end = start + region.length();
+    RangeGuardCharSequence input = new RangeGuardCharSequence(source, start, end);
+    int[] starts = new int[groupCount + 1];
+    int[] ends = new int[groupCount + 1];
+    Arrays.fill(starts, 777);
+    Arrays.fill(ends, 888);
+
+    assertEquals(expectedMatch, matcher.matchIntoBounded(input, start, end, starts, ends));
+    if (expectedMatch) {
+      assertEquals(start, starts[0]);
+      assertEquals(end, ends[0]);
+    } else {
+      assertTrue(Arrays.stream(starts).allMatch(value -> value == 777));
+      assertTrue(Arrays.stream(ends).allMatch(value -> value == 888));
     }
   }
 
@@ -300,6 +373,41 @@ class LinearTokenSequenceAccessLogTest {
       assertDelegateType(matcher, expectedType);
     } catch (Exception e) {
       throw new AssertionError(e);
+    }
+  }
+
+  private static final class RangeGuardCharSequence implements CharSequence {
+    private final String value;
+    private final int start;
+    private final int end;
+
+    RangeGuardCharSequence(String value, int start, int end) {
+      this.value = value;
+      this.start = start;
+      this.end = end;
+    }
+
+    @Override
+    public int length() {
+      return value.length();
+    }
+
+    @Override
+    public char charAt(int index) {
+      if (index < start || index >= end) {
+        throw new AssertionError("read outside bounded region: " + index);
+      }
+      return value.charAt(index);
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      throw new AssertionError("subSequence must not be called while matching");
+    }
+
+    @Override
+    public String toString() {
+      throw new AssertionError("toString must not be called while matching");
     }
   }
 }
