@@ -579,10 +579,13 @@ class LaurikariDfaMatcherTest {
   // --- hasNewAnchor cache-overflow FALLBACK at the *seed* (as opposed to
   // --- findSurvivesDfaCacheOverflowMidMatch's mid-scan FALLBACK): runAnchored/runFind's
   // --- hasNewAnchor branches recompute their seed live via anchoredCache.intern/findCache.intern
-  // --- on every call (see LaurikariDfaMatcher's class javadoc on why -- the constructor-precomputed
-  // --- seeds are just placeholders for hasNewAnchor patterns). Once a prior call has already frozen
+  // --- on every call (see LaurikariDfaMatcher's class javadoc on why -- the
+  // constructor-precomputed
+  // --- seeds are just placeholders for hasNewAnchor patterns). Once a prior call has already
+  // frozen
   // --- the cache, a *later* call whose live seed key was never interned before must itself return
-  // --- FALLBACK, delegating the whole call to PikeVMMatcher -- exercised here for both the anchored
+  // --- FALLBACK, delegating the whole call to PikeVMMatcher -- exercised here for both the
+  // anchored
   // --- (matches()/match()) and self-anchoring (find()/findFrom()) drivers, and for both a
   // --- fallback-still-matches and a fallback-finds-nothing outcome.
 
@@ -641,12 +644,16 @@ class LaurikariDfaMatcherTest {
   // --- runFind's FALLBACK-mid-scan ternary's "best != null" branch: unlike
   // --- findSurvivesDfaCacheOverflowMidMatch (whose pattern can't accept before the mandatory
   // --- trailing 'c', so `best` is always still null when FALLBACK hits), this pattern's trailing
-  // --- 'c' is optional, so every prefix "a", "ab", "abb", ... is already a valid (shorter) match --
+  // --- 'c' is optional, so every prefix "a", "ab", "abb", ... is already a valid (shorter) match
+  // --
   // --- `best` is non-null well before the cache overflows deep into the 'b' run. Per runFind's own
-  // --- javadoc (LaurikariDfaMatcher.java:279-283), a mid-scan FALLBACK with a non-null `best` returns
+  // --- javadoc (LaurikariDfaMatcher.java:279-283), a mid-scan FALLBACK with a non-null `best`
+  // returns
   // --- that already-recorded (possibly non-maximal) match as-is rather than delegating to the
-  // --- fallback engine to keep extending -- a deliberate whole-call-delegation-or-nothing trade-off,
-  // --- not a bug -- so this test checks self-consistency against the pattern, not equality with the
+  // --- fallback engine to keep extending -- a deliberate whole-call-delegation-or-nothing
+  // trade-off,
+  // --- not a bug -- so this test checks self-consistency against the pattern, not equality with
+  // the
   // --- oracle's true greedy (longest) match.
 
   @Test
