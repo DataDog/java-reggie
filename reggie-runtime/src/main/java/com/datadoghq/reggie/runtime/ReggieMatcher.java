@@ -52,6 +52,7 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   private boolean expectsNativeRichApi;
 
   protected final String pattern;
+  private String reportedPattern;
 
   // injected by RuntimeCompiler after instantiation
   protected Map<String, Integer> nameToIndex = Collections.emptyMap();
@@ -140,6 +141,10 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
 
   protected ReggieMatcher(String pattern) {
     this.pattern = pattern;
+  }
+
+  final void setReportedPattern(String reportedPattern) {
+    this.reportedPattern = reportedPattern;
   }
 
   /**
@@ -767,6 +772,6 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
    * @return the regex pattern
    */
   public final String pattern() {
-    return pattern;
+    return reportedPattern != null ? reportedPattern : pattern;
   }
 }

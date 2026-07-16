@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.objectweb.asm.Opcodes.*;
 
+import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOption;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.UnsupportedPatternException;
@@ -96,7 +97,7 @@ public class RuntimeCompiler {
 
   // Level 1: Pattern string → matcher instance (fast path for exact matches).
   // NFA-backed patterns are NOT stored here; they use NFA_CLASS_CACHE instead.
-  private static final ConcurrentHashMap<String, ReggieMatcher> PATTERN_CACHE =
+  private static final ConcurrentHashMap<Object, ReggieMatcher> PATTERN_CACHE =
       new ConcurrentHashMap<>();
 
   /**
@@ -136,7 +137,7 @@ public class RuntimeCompiler {
   // NFA matchers mutate shared instance fields (currentStates, nextStates, epsilonProcessed,
   // configGroupStarts) during matching, so a single shared instance cannot be used concurrently.
   // We cache a factory here that produces a fresh enriched instance on every compile() call.
-  private static final ConcurrentHashMap<String, NfaMatcherFactory> NFA_CLASS_CACHE =
+  private static final ConcurrentHashMap<Object, NfaMatcherFactory> NFA_CLASS_CACHE =
       new ConcurrentHashMap<>();
 
   /**
@@ -168,7 +169,7 @@ public class RuntimeCompiler {
   // Level 1c: Pattern string → PikeVMEntry for PIKEVM_CAPTURE patterns.
   // PikeVMMatcher carries mutable per-call buffers and must be freshly instantiated on every
   // compile() call; only the NFA (immutable after construction) and the name map are cached.
-  private static final ConcurrentHashMap<String, PikeVMEntry> PIKEVM_NFA_CACHE =
+  private static final ConcurrentHashMap<Object, PikeVMEntry> PIKEVM_NFA_CACHE =
       new ConcurrentHashMap<>();
 
   /**
@@ -212,7 +213,7 @@ public class RuntimeCompiler {
   // Level 1d: Pattern string → BitStateEntry for BITSTATE_CAPTURE patterns.
   // BitStateMatcher carries mutable per-call buffers and must be freshly instantiated on every
   // compile() call; only the NFA (immutable after construction) and the name map are cached.
-  private static final ConcurrentHashMap<String, BitStateEntry> BITSTATE_NFA_CACHE =
+  private static final ConcurrentHashMap<Object, BitStateEntry> BITSTATE_NFA_CACHE =
       new ConcurrentHashMap<>();
 
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
@@ -255,22 +256,40 @@ public class RuntimeCompiler {
     return compile(pattern, ReggieOptions.DEFAULT);
   }
 
+  /** Compile a pattern with supported {@link ReggieFlags}. */
+  public static ReggieMatcher compile(String pattern, int flags) {
+    return compile(pattern, flags, ReggieOptions.DEFAULT);
+  }
+
+  /** Compile a pattern with supported {@link ReggieFlags} and engine compilation options. */
+  public static ReggieMatcher compile(String pattern, int flags, ReggieOptions options) {
+    if (flags == 0) {
+      return compile(pattern, options);
+    }
+    String normalizedPattern = normalizePatternFlags(pattern, flags);
+    return compile(normalizedPattern, options, cacheKeyForFlags(pattern, flags, options), pattern);
+  }
+
   /** Compile pattern with runtime compilation options. */
   public static ReggieMatcher compile(String pattern, ReggieOptions options) {
-    String cacheKey = cacheKeyFor(pattern, options);
+    return compile(pattern, options, cacheKeyFor(pattern, options), pattern);
+  }
+
+  private static ReggieMatcher compile(
+      String pattern, ReggieOptions options, Object cacheKey, String reportedPattern) {
 
     // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
     PikeVMEntry pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
     if (pikevmEntry != null) {
-      return pikevmEntry.newMatcher(pattern);
+      return reportPattern(pikevmEntry.newMatcher(pattern), reportedPattern);
     }
 
     // Fast path: BITSTATE_CAPTURE patterns are in BITSTATE_NFA_CACHE — return a fresh matcher.
     // BitStateMatcher carries mutable per-call buffers and must not be shared across calls.
     BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
     if (bitStateEntry != null) {
-      return bitStateEntry.newMatcher(pattern);
+      return reportPattern(bitStateEntry.newMatcher(pattern), reportedPattern);
     }
 
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
@@ -278,7 +297,7 @@ public class RuntimeCompiler {
     // threads or calls; we cache a factory and instantiate per-call instead.
     NfaMatcherFactory factory = NFA_CLASS_CACHE.get(cacheKey);
     if (factory != null) {
-      return factory.newInstance(pattern);
+      return reportPattern(factory.newInstance(pattern), reportedPattern);
     }
 
     // Slow path: compile and cache the result.
@@ -292,7 +311,7 @@ public class RuntimeCompiler {
     pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
     if (pikevmEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return pikevmEntry.newMatcher(pattern);
+      return reportPattern(pikevmEntry.newMatcher(pattern), reportedPattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as BITSTATE_CAPTURE,
@@ -300,7 +319,7 @@ public class RuntimeCompiler {
     bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
     if (bitStateEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return bitStateEntry.newMatcher(pattern);
+      return reportPattern(bitStateEntry.newMatcher(pattern), reportedPattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
@@ -308,9 +327,14 @@ public class RuntimeCompiler {
     factory = NFA_CLASS_CACHE.get(cacheKey);
     if (factory != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return factory.newInstance(pattern);
+      return reportPattern(factory.newInstance(pattern), reportedPattern);
     }
-    return compiled;
+    return reportPattern(compiled, reportedPattern);
+  }
+
+  private static ReggieMatcher reportPattern(ReggieMatcher matcher, String pattern) {
+    matcher.setReportedPattern(pattern);
+    return matcher;
   }
 
   private static final char NAME_SEP = ''; // US (unit separator)
@@ -445,7 +469,10 @@ public class RuntimeCompiler {
 
   /** Get all cached pattern keys. */
   public static Set<String> cachedPatterns() {
-    return PATTERN_CACHE.keySet();
+    return PATTERN_CACHE.keySet().stream()
+        .filter(String.class::isInstance)
+        .map(String.class::cast)
+        .collect(java.util.stream.Collectors.toUnmodifiableSet());
   }
 
   /**
@@ -474,6 +501,34 @@ public class RuntimeCompiler {
     return sb == null ? pattern : sb.toString();
   }
 
+  private record FlaggedCacheKey(String pattern, int flags, String optionsKey) {}
+
+  private static FlaggedCacheKey cacheKeyForFlags(
+      String pattern, int flags, ReggieOptions options) {
+    return new FlaggedCacheKey(pattern, flags, cacheKeyFor(pattern, options));
+  }
+
+  private static String normalizePatternFlags(String pattern, int flags) {
+    if (!ReggieFlags.areSupported(flags)) {
+      throw new IllegalArgumentException("Unsupported Reggie regex flags: " + flags);
+    }
+
+    StringBuilder normalized = new StringBuilder(pattern.length() + 12);
+    // CASE_INSENSITIVE is emitted first so isCaseInsensitive() retains its existing routing hint.
+    if ((flags & ReggieFlags.CASE_INSENSITIVE) != 0) {
+      normalized.append("(?i)");
+    }
+    if ((flags & ReggieFlags.MULTILINE) != 0) {
+      normalized.append("(?m)");
+    }
+    if ((flags & ReggieFlags.DOTALL) != 0) {
+      normalized.append("(?s)");
+    }
+    normalized.append(
+        (flags & ReggieFlags.LITERAL) != 0 ? java.util.regex.Pattern.quote(pattern) : pattern);
+    return normalized.toString();
+  }
+
   private static ReggieMatcher fallbackOrThrow(
       String pattern, String reason, Map<String, Integer> nameMap, ReggieOptions options) {
     if (!options.has(ReggieOption.ALLOW_JDK_FALLBACK)) {
@@ -492,7 +547,7 @@ public class RuntimeCompiler {
    * return a fresh instance on every subsequent call.
    */
   private static ReggieMatcher compileInternal(
-      String pattern, ReggieOptions options, String cacheKey) {
+      String pattern, ReggieOptions options, Object cacheKey) {
     try {
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
@@ -1614,6 +1669,17 @@ public class RuntimeCompiler {
     boolean escaped = false;
     for (int i = 0; i < pattern.length(); i++) {
       char c = pattern.charAt(i);
+      if (c == '\\' && i + 1 < pattern.length() && pattern.charAt(i + 1) == 'Q') {
+        i += 2;
+        while (i + 1 < pattern.length()
+            && !(pattern.charAt(i) == '\\' && pattern.charAt(i + 1) == 'E')) {
+          i++;
+        }
+        if (i + 1 < pattern.length()) {
+          i++;
+        }
+        continue;
+      }
       if (escaped) {
         escaped = false;
         continue;

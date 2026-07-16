@@ -114,6 +114,29 @@ public final class Reggie {
   }
 
   /**
+   * Compile a regex pattern using {@link ReggieFlags}.
+   *
+   * <p>Supports {@link ReggieFlags#CASE_INSENSITIVE}, {@link ReggieFlags#MULTILINE}, {@link
+   * ReggieFlags#DOTALL}, and {@link ReggieFlags#LITERAL}. JDK migrations can use {@link
+   * com.datadoghq.reggie.compat.JdkPatternCompatibility#toReggieFlags(int)} at their boundary.
+   *
+   * @param pattern the regex pattern string
+   * @param flags bitwise OR of supported {@code ReggieFlags} constants
+   * @return compiled matcher instance
+   * @throws IllegalArgumentException if {@code flags} includes an unsupported value
+   * @throws java.util.regex.PatternSyntaxException if pattern is invalid
+   * @throws UnsupportedPatternException if pattern uses an unsupported regex construct
+   */
+  public static ReggieMatcher compile(String pattern, int flags) {
+    return RuntimeCompiler.compile(pattern, flags);
+  }
+
+  /** Compile a regex pattern with Reggie semantic flags and engine compilation options. */
+  public static ReggieMatcher compile(String pattern, int flags, ReggieOptions options) {
+    return RuntimeCompiler.compile(pattern, flags, options);
+  }
+
+  /**
    * Compile a regex pattern at runtime with explicit options.
    *
    * @param pattern the regex pattern string

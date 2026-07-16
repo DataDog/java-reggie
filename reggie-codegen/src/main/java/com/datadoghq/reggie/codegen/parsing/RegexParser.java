@@ -246,19 +246,7 @@ public class RegexParser {
       throw new ParseException("Unexpected metacharacter '" + ch + "' at position " + pos);
     } else {
       consume();
-      // Apply case-insensitive modifier if active
-      if (currentModifiers.isCaseInsensitive() && Character.isLetter(ch)) {
-        // Convert to character class [aA]
-        char lower = Character.toLowerCase(ch);
-        char upper = Character.toUpperCase(ch);
-        if (lower != upper) {
-          List<CharSet.Range> ranges = new ArrayList<>();
-          ranges.add(new CharSet.Range(lower, lower));
-          ranges.add(new CharSet.Range(upper, upper));
-          return new CharClassNode(CharSet.fromRanges(ranges), false);
-        }
-      }
-      return new LiteralNode(ch);
+      return literalNode(ch);
     }
   }
 
@@ -638,7 +626,7 @@ public class RegexParser {
 
           // First digit is 8 or 9 and no valid backref: treat as literal character '8' or '9'.
           pos = posBeforeFirst + 1; // restore to position just after the first digit
-          return new LiteralNode((char) ('0' + firstDigit));
+          return literalNode((char) ('0' + firstDigit));
         }
       case 'k':
         // Named backreference: \k<name> or \k'name'
@@ -655,7 +643,7 @@ public class RegexParser {
         return parseUnicodeProperty(true);
       default:
         // Escaped literal (e.g., \., \*, \+)
-        return new LiteralNode(ch);
+        return literalNode(ch);
     }
   }
 
@@ -707,7 +695,8 @@ public class RegexParser {
    * character represented by the hex value.
    */
   private RegexNode parseHexEscape() throws ParseException {
-    return parseHexEscapeInternal();
+    RegexNode node = parseHexEscapeInternal();
+    return node instanceof LiteralNode ? literalNode(((LiteralNode) node).ch) : node;
   }
 
   /** Internal implementation of hex escape parsing. Handles both \xhh and \x{NNNN} forms. */
@@ -774,7 +763,8 @@ public class RegexParser {
    * octal: - If result <= 99 and within group count, it's a backreference - Otherwise, it's octal
    */
   private RegexNode parseOctalEscape() throws ParseException {
-    return parseOctalEscapeInternal();
+    RegexNode node = parseOctalEscapeInternal();
+    return node instanceof LiteralNode ? literalNode(((LiteralNode) node).ch) : node;
   }
 
   /** Internal implementation of octal escape parsing. */
@@ -910,7 +900,7 @@ public class RegexParser {
         consume(); // consume 'E'
         break;
       }
-      parts.add(new LiteralNode(ch));
+      parts.add(literalNode(ch));
     }
 
     if (parts.isEmpty()) {
@@ -930,6 +920,20 @@ public class RegexParser {
     } else {
       throw new ParseException("Unexpected anchor: " + ch);
     }
+  }
+
+  private RegexNode literalNode(char ch) {
+    if (currentModifiers.isCaseInsensitive() && Character.isLetter(ch)) {
+      char lower = Character.toLowerCase(ch);
+      char upper = Character.toUpperCase(ch);
+      if (lower != upper) {
+        List<CharSet.Range> ranges = new ArrayList<>();
+        ranges.add(new CharSet.Range(lower, lower));
+        ranges.add(new CharSet.Range(upper, upper));
+        return new CharClassNode(CharSet.fromRanges(ranges), false);
+      }
+    }
+    return new LiteralNode(ch);
   }
 
   private RegexNode parseLookahead() throws ParseException {
@@ -1515,7 +1519,15 @@ public class RegexParser {
     int len = pat.length();
     while (i < len) {
       char c = pat.charAt(i);
-      if (c == '\\') {
+      if (c == '\\' && i + 1 < len && pat.charAt(i + 1) == 'Q') {
+        i += 2;
+        while (i + 1 < len && !(pat.charAt(i) == '\\' && pat.charAt(i + 1) == 'E')) {
+          i++;
+        }
+        if (i + 1 < len) {
+          i += 2;
+        }
+      } else if (c == '\\') {
         i += 2; // skip escaped character
       } else if (c == '[') {
         // skip character class
