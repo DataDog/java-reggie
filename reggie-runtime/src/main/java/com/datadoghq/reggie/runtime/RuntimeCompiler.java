@@ -475,8 +475,10 @@ public class RuntimeCompiler {
    * compile(pattern[, options])}) are returned verbatim. Keys for patterns compiled with {@link
    * ReggieFlags} (via {@code compile(pattern, flags[, options])}) are backed by an internal {@code
    * FlaggedCacheKey} record rather than the pattern string itself; those entries are rendered as
-   * {@code "<pattern> [flags=<flags>]"} so flagged compilations remain visible for cache-size
-   * accounting and debugging.
+   * {@code "<pattern> [flags=<flags>]"}, or {@code "<pattern> [flags=<flags> options=<options>]"}
+   * when non-default {@link ReggieOptions} were also used, so flagged compilations remain visible
+   * for cache-size accounting and debugging, and entries that differ only by options no longer
+   * collapse to the same displayed string.
    */
   public static Set<String> cachedPatterns() {
     return PATTERN_CACHE.keySet().stream()
@@ -489,7 +491,15 @@ public class RuntimeCompiler {
       return s;
     }
     if (key instanceof FlaggedCacheKey flaggedKey) {
-      return flaggedKey.pattern() + " [flags=" + flaggedKey.flags() + "]";
+      String optionsSuffix = "";
+      if (!flaggedKey.optionsKey().equals(flaggedKey.pattern())) {
+        // cacheKeyFor() appends "\0<OPTION_NAME>" for each enabled ReggieOption; render it as a
+        // comma-separated, human-readable options=... suffix so distinct ReggieOptions combined
+        // with the same pattern+flags no longer collapse to the same displayed string.
+        String encodedOptions = flaggedKey.optionsKey().substring(flaggedKey.pattern().length());
+        optionsSuffix = " options=" + encodedOptions.substring(1).replace('\0', ',');
+      }
+      return flaggedKey.pattern() + " [flags=" + flaggedKey.flags() + optionsSuffix + "]";
     }
     return String.valueOf(key);
   }

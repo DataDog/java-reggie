@@ -453,4 +453,30 @@ public class RuntimeCompilerTest {
   //             "Find results should match JDK for input: " + input);
   //     }
   // }
+
+  // ==================== JDK Fallback Unicode Case Tests ====================
+
+  @Test
+  public void testFallbackMatcherPreservesUnicodeCaseFolding() {
+    // JavaRegexFallbackMatcher must fold non-ASCII letters the same way Reggie's native
+    // case-insensitive parsing does, not JDK's default ASCII-only (?i) folding.
+    ReggieMatcher fallback = new JavaRegexFallbackMatcher("(?i)é", "unit test");
+    assertTrue(fallback.matches("É"));
+  }
+
+  // ==================== Flagged Cache Display Tests ====================
+
+  @Test
+  public void testCachedPatternsIncludeOptionsForFlaggedEntries() {
+    RuntimeCompiler.compile("abc", com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE);
+    RuntimeCompiler.compile(
+        "abc",
+        com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE,
+        com.datadoghq.reggie.ReggieOptions.builder().allowJdkFallback().build());
+
+    // Two distinct L1 entries (same pattern+flags, different ReggieOptions) must not collapse
+    // into a single displayed string.
+    assertEquals(2, RuntimeCompiler.cacheSize());
+    assertEquals(2, RuntimeCompiler.cachedPatterns().size());
+  }
 }
