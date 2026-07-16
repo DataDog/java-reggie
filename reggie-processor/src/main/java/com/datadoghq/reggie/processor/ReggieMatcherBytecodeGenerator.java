@@ -805,6 +805,17 @@ public class ReggieMatcherBytecodeGenerator {
     boolean inEscape = false;
     for (int i = 0; i < pattern.length(); i++) {
       char ch = pattern.charAt(i);
+      if (ch == '\\' && i + 1 < pattern.length() && pattern.charAt(i + 1) == 'Q') {
+        i += 2;
+        while (i + 1 < pattern.length()
+            && !(pattern.charAt(i) == '\\' && pattern.charAt(i + 1) == 'E')) {
+          i++;
+        }
+        if (i + 1 < pattern.length()) {
+          i++;
+        }
+        continue;
+      }
       if (inEscape) {
         inEscape = false;
         continue;

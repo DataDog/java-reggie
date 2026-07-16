@@ -30,7 +30,11 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
 
   JavaRegexFallbackMatcher(String pattern, String reason) {
     super(pattern);
-    this.javaPattern = Pattern.compile(toJdkCompatible(pattern));
+    // UNICODE_CASE is a no-op unless the pattern also enables case-insensitive matching (via an
+    // inline (?i) modifier), in which case it makes java.util.regex fold non-ASCII letters the
+    // same way Reggie's native parser does (Character.toLowerCase/toUpperCase), instead of JDK's
+    // default ASCII-only case folding.
+    this.javaPattern = Pattern.compile(toJdkCompatible(pattern), Pattern.UNICODE_CASE);
     LOG.warning("Falling back to java.util.regex for pattern '" + pattern + "': " + reason);
   }
 
