@@ -362,6 +362,9 @@ public class ReggieMatcherBytecodeGenerator {
             (PatternAnalyzer.FixedSequenceInfo) result.patternInfo;
         FixedSequenceBytecodeGenerator fixedGen =
             new FixedSequenceBytecodeGenerator(fixedInfo, nfa.getGroupCount());
+        if (fixedGen.needsBoundaryHelpers()) {
+          fixedGen.generateBoundaryHelperMethods(cw, getJavaClassName());
+        }
         fixedGen.generateMatchesMethod(cw, getJavaClassName());
         fixedGen.generateFindMethod(cw, getJavaClassName());
         fixedGen.generateFindFromMethod(cw, getJavaClassName());

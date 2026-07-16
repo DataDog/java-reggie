@@ -246,6 +246,14 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     return new MatchResultImpl(input, starts, ends, groupCount);
   }
 
+  /**
+   * ASCII word-char predicate used by {@code \b}/{@code \B} — mirrors {@link
+   * PikeVMMatcher#isWordChar}.
+   */
+  private static boolean isWordChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+  }
+
   /** Mirrors {@link PikeVMMatcher}'s anchor semantics. */
   private static boolean checkAnchor(
       NFA.AnchorType anchor, String input, int pos, int regionStart, int regionEnd) {
@@ -265,9 +273,15 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         return pos == regionEnd || (pos < regionEnd && input.charAt(pos) == '\n');
       case WORD_BOUNDARY:
         {
-          boolean beforeWord = pos > 0 && Character.isLetterOrDigit(input.charAt(pos - 1));
-          boolean afterWord = pos < regionEnd && Character.isLetterOrDigit(input.charAt(pos));
+          boolean beforeWord = pos > 0 && isWordChar(input.charAt(pos - 1));
+          boolean afterWord = pos < regionEnd && isWordChar(input.charAt(pos));
           return beforeWord != afterWord;
+        }
+      case NON_WORD_BOUNDARY:
+        {
+          boolean beforeWord = pos > 0 && isWordChar(input.charAt(pos - 1));
+          boolean afterWord = pos < regionEnd && isWordChar(input.charAt(pos));
+          return beforeWord == afterWord;
         }
       case RESET_MATCH:
         return true;

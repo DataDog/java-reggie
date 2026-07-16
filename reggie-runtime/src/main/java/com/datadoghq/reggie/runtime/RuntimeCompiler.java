@@ -181,15 +181,25 @@ public class RuntimeCompiler {
   private static final class BitStateEntry {
     final NFA nfa;
     final Map<String, Integer> nameMap;
+    final boolean usePosixLastMatch;
 
-    BitStateEntry(NFA nfa, Map<String, Integer> nameMap) {
+    BitStateEntry(NFA nfa, Map<String, Integer> nameMap, boolean usePosixLastMatch) {
       this.nfa = nfa;
       this.nameMap = nameMap;
+      this.usePosixLastMatch = usePosixLastMatch;
     }
 
     ReggieMatcher newMatcher(String pattern) {
-      ReggieMatcher m = new BitStateMatcher(nfa, pattern);
+      // Phase 2 Task 2.1 (Option A, doc/2026-07-10-tdfa-capture-engine-impl-plan.md §4): try the
+      // TDFA capture engine before BitStateMatcher's own BUDGET_CELLS-overflow call falls all the
+      // way through to PikeVMMatcher. null when LaurikariEligibility rejects this pattern.
+      ReggieMatcher laurikari =
+          LaurikariDfaSupport.tryCreate(nfa, pattern, nfa.getGroupCount(), usePosixLastMatch);
+      ReggieMatcher m = new BitStateMatcher(nfa, pattern, laurikari);
       if (!nameMap.isEmpty()) {
+        if (laurikari != null) {
+          laurikari.setNameToIndex(nameMap);
+        }
         m.setNameToIndex(nameMap);
         if (!m.embedsNameMap()) {
           m = new NameEnrichingMatcher(m);
@@ -574,7 +584,8 @@ public class RuntimeCompiler {
           return fallbackOrThrow(pattern, bitStateFallbackReason, nameMap, options);
         }
         NFA bitStateNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
-        BITSTATE_NFA_CACHE.putIfAbsent(cacheKey, new BitStateEntry(bitStateNfa, nameMap));
+        BITSTATE_NFA_CACHE.putIfAbsent(
+            cacheKey, new BitStateEntry(bitStateNfa, nameMap, result.usePosixLastMatch));
         return BITSTATE_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -1061,6 +1072,9 @@ public class RuntimeCompiler {
             (PatternAnalyzer.FixedSequenceInfo) result.patternInfo;
         FixedSequenceBytecodeGenerator fixedGen =
             new FixedSequenceBytecodeGenerator(fixedInfo, nfa.getGroupCount());
+        if (fixedGen.needsBoundaryHelpers()) {
+          fixedGen.generateBoundaryHelperMethods(cw, "com/datadoghq/reggie/runtime/" + className);
+        }
         fixedGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);

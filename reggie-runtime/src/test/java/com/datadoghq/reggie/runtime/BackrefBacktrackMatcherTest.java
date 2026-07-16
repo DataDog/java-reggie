@@ -51,6 +51,9 @@ public class BackrefBacktrackMatcherTest {
     {"(ab)\\1", "abab"},
     {"(a)(b)\\2\\1", "abba"},
     {"(.)\\1", "zz"},
+    {"(a+)\\1\\B", "aaaab"},
+    {"(a+)\\1\\B", "aaaa"},
+    {"(a+)\\1\\b", "aaaa"},
   };
 
   @Test

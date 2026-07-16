@@ -99,6 +99,27 @@ public final class RegexFuzzOracle {
       return Result.skipped(
           "Reggie rejected pattern: " + t.getClass().getSimpleName() + ": " + t.getMessage());
     }
+    return compareAgainstJdk(jdk, pattern, input, reggie);
+  }
+
+  /**
+   * Task 1.6a (doc/2026-07-10-tdfa-capture-engine-impl-plan.md §3): same JDK comparison as {@link
+   * #check}, but against a caller-supplied {@code candidate} matcher instead of one obtained via
+   * {@link Reggie#compile}. Lets callers exercise a matcher built outside the normal compile
+   * pipeline (e.g. a hand-constructed {@code LaurikariDfaMatcher}) against the JDK oracle.
+   */
+  public Result checkAgainst(String pattern, String input, ReggieMatcher candidate) {
+    Pattern jdk;
+    try {
+      jdk = Pattern.compile(pattern);
+    } catch (PatternSyntaxException e) {
+      return Result.skipped("JDK rejected pattern: " + e.getDescription());
+    }
+    return compareAgainstJdk(jdk, pattern, input, candidate);
+  }
+
+  private Result compareAgainstJdk(
+      Pattern jdk, String pattern, String input, ReggieMatcher reggie) {
     List<Finding> findings = new ArrayList<>();
 
     // matches() — anchored full-input match

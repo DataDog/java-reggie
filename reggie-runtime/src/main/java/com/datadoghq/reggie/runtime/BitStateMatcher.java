@@ -43,9 +43,13 @@ import java.util.List;
  * anti-pattern of restarting a fresh search at every candidate start position.
  *
  * <p>When the per-search budget ({@code stateCount × (spanLength + 1)}) exceeds {@link
- * #BUDGET_CELLS}, the whole call is delegated to a lazily-constructed {@link PikeVMMatcher} over
- * the same NFA, and {@link #fallbackCount()} is incremented — the budget overflow is observable,
- * never silently truncated.
+ * #BUDGET_CELLS}, the whole call is delegated either to a caller-supplied {@code laurikari} matcher
+ * (Phase 2 Task 2.1, Option A: a {@link LaurikariDfaMatcher} over the same NFA, tried when {@link
+ * LaurikariEligibility} accepted the pattern — see {@link #laurikariCount()}) or, if none was
+ * supplied or eligible, to a lazily-constructed {@link PikeVMMatcher} over the same NFA, with
+ * {@link #fallbackCount()} incremented — the budget overflow is observable, never silently
+ * truncated. {@code matchesBounded}/{@code matchBounded} always go straight to the {@code
+ * PikeVMMatcher} fallback: {@link LaurikariDfaMatcher} has no bounded-region API.
  *
  * <p>v1 scope (see design doc §10, "P1"): no atomic groups, possessive quantifiers, backreferences,
  * or lookaround — patterns using those constructs must not be routed to this matcher (an
@@ -113,6 +117,12 @@ final class BitStateMatcher extends ReggieMatcher {
   private PikeVMMatcher fallback;
   private long fallbackCount;
 
+  // Phase 2 Task 2.1 (Option A): pre-built by the caller (RuntimeCompiler) when
+  // LaurikariEligibility accepted this pattern, null otherwise. Tried before falling all the way
+  // through to PikeVMMatcher on BUDGET_CELLS overflow.
+  private final ReggieMatcher laurikari;
+  private long laurikariCount;
+
   // Single-char SIMD fast-reject (mirrors PikeVMMatcher.singleFirstCharAscii): when exactly one
   // ASCII char can begin a match, String.indexOf() gives a SIMD-accelerated scan that rejects
   // no-match inputs without running the DFS at every position. -1 when zero or multiple chars
@@ -133,7 +143,12 @@ final class BitStateMatcher extends ReggieMatcher {
   private final int[] localizeScratch = new int[2];
 
   BitStateMatcher(NFA nfa, String pattern) {
+    this(nfa, pattern, null);
+  }
+
+  BitStateMatcher(NFA nfa, String pattern, ReggieMatcher laurikari) {
     super(pattern);
+    this.laurikari = laurikari;
     this.nfa = nfa;
     this.patternText = pattern;
     this.groupCount = nfa.getGroupCount();
@@ -232,6 +247,10 @@ final class BitStateMatcher extends ReggieMatcher {
   @Override
   public boolean matches(String input) {
     if (exceedsBudget(input.length())) {
+      if (laurikari != null) {
+        laurikariCount++;
+        return laurikari.matches(input);
+      }
       fallbackCount++;
       return fallback().matches(input);
     }
@@ -251,6 +270,10 @@ final class BitStateMatcher extends ReggieMatcher {
     int scanStart = localizeScratch[0];
     int spanEnd = localizeScratch[1];
     if (exceedsBudget(spanEnd - scanStart)) {
+      if (laurikari != null) {
+        laurikariCount++;
+        return laurikari.find(input);
+      }
       fallbackCount++;
       return fallback().findFrom(input, scanStart) >= 0;
     }
@@ -271,6 +294,10 @@ final class BitStateMatcher extends ReggieMatcher {
     int scanStart = localizeScratch[0];
     int spanEnd = localizeScratch[1];
     if (exceedsBudget(spanEnd - scanStart)) {
+      if (laurikari != null) {
+        laurikariCount++;
+        return laurikari.findFrom(input, start);
+      }
       fallbackCount++;
       return fallback().findFrom(input, scanStart);
     }
@@ -281,6 +308,10 @@ final class BitStateMatcher extends ReggieMatcher {
   @Override
   public MatchResult match(String input) {
     if (exceedsBudget(input.length())) {
+      if (laurikari != null) {
+        laurikariCount++;
+        return laurikari.match(input);
+      }
       fallbackCount++;
       return fallback().match(input);
     }
@@ -307,6 +338,10 @@ final class BitStateMatcher extends ReggieMatcher {
     int scanStart = localizeScratch[0];
     int spanEnd = localizeScratch[1];
     if (exceedsBudget(spanEnd - scanStart)) {
+      if (laurikari != null) {
+        laurikariCount++;
+        return laurikari.findMatchFrom(input, start);
+      }
       fallbackCount++;
       return fallback().findMatchFrom(input, scanStart);
     }
@@ -406,6 +441,15 @@ final class BitStateMatcher extends ReggieMatcher {
     return fallbackCount;
   }
 
+  /**
+   * Number of calls delegated to the {@code laurikari} matcher supplied at construction (Phase 2
+   * Task 2.1/2.2: TDFA capture engine served this BUDGET_CELLS-overflow call instead of {@link
+   * PikeVMMatcher}).
+   */
+  long laurikariCount() {
+    return laurikariCount;
+  }
+
   private boolean exceedsBudget(int spanLen) {
     return (long) stateCount * (spanLen + 1) > BUDGET_CELLS;
   }
@@ -423,6 +467,7 @@ final class BitStateMatcher extends ReggieMatcher {
   private PikeVMMatcher fallback() {
     if (fallback == null) {
       fallback = new PikeVMMatcher(nfa, patternText);
+      fallback.setNameToIndex(nameToIndex);
     }
     return fallback;
   }

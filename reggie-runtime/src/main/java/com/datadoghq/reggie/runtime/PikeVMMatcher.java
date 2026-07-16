@@ -1308,6 +1308,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // Anchor checking
   // -------------------------------------------------------------------------
 
+  /**
+   * ASCII word-char predicate used by {@code \b}/{@code \B} — matches {@code CharSet.WORD} ({@code
+   * [A-Za-z0-9_]}), the same word-char definition {@code \w} and the generated {@code isWordChar}
+   * helpers use elsewhere in this codebase (unlike {@code Character.isLetterOrDigit}, which admits
+   * Unicode letters/digits and excludes {@code '_'}).
+   */
+  static boolean isWordChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+  }
+
   static boolean checkAnchor(
       NFA.AnchorType anchor, String input, int pos, int regionStart, int regionEnd) {
     switch (anchor) {
@@ -1338,9 +1348,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
         return pos == regionEnd || (pos < regionEnd && input.charAt(pos) == '\n');
       case WORD_BOUNDARY:
         {
-          boolean beforeWord = pos > 0 && Character.isLetterOrDigit(input.charAt(pos - 1));
-          boolean afterWord = pos < regionEnd && Character.isLetterOrDigit(input.charAt(pos));
+          boolean beforeWord = pos > 0 && isWordChar(input.charAt(pos - 1));
+          boolean afterWord = pos < regionEnd && isWordChar(input.charAt(pos));
           return beforeWord != afterWord;
+        }
+      case NON_WORD_BOUNDARY:
+        {
+          boolean beforeWord = pos > 0 && isWordChar(input.charAt(pos - 1));
+          boolean afterWord = pos < regionEnd && isWordChar(input.charAt(pos));
+          return beforeWord == afterWord;
         }
       case RESET_MATCH:
         return true;

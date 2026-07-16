@@ -150,6 +150,21 @@ public final class NFA {
   }
 
   /**
+   * Check if this NFA contains a word-boundary anchor ({@code \b} or {@code \B}).
+   *
+   * @return true if any state has WORD_BOUNDARY or NON_WORD_BOUNDARY anchor
+   */
+  public boolean hasWordBoundaryAnchor() {
+    for (NFAState state : states) {
+      if (state.anchor == AnchorType.WORD_BOUNDARY
+          || state.anchor == AnchorType.NON_WORD_BOUNDARY) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Check if a start anchor is REQUIRED to match this pattern. Unlike hasStartAnchor(), this
    * returns true only if ALL paths to character transitions go through a START or STRING_START
    * anchor.
@@ -461,6 +476,7 @@ public final class NFA {
     START_MULTILINE, // ^ (multiline mode - matches at start or after \n)
     END_MULTILINE, // $ (multiline mode - matches at end or before \n)
     WORD_BOUNDARY, // \b
+    NON_WORD_BOUNDARY, // \B
     STRING_START, // \A (start of string, not affected by multiline)
     STRING_END, // \Z (end of string or before final newline)
     STRING_END_ABSOLUTE, // \z (absolute end of string)

@@ -19,6 +19,11 @@ dependencies {
     // JSON parsing for test data
     implementation 'com.google.code.gson:gson:2.14.0'
 
+    // RegexParser/ThompsonBuilder/NFA/PatternAnalyzer for LaurikariAlgorithmicFuzzTest's
+    // direct-construction driver. reggie-runtime declares this as 'implementation' (not 'api'),
+    // so it is not exposed transitively and must be declared explicitly here.
+    testImplementation project(':reggie-codegen')
+
     // JUnit for integration testing
     testImplementation 'org.junit.jupiter:junit-jupiter:6.0.3'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'

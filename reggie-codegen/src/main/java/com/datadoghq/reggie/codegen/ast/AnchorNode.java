@@ -22,6 +22,7 @@ public final class AnchorNode implements RegexNode {
     START, // ^ (affected by multiline mode)
     END, // $ (affected by multiline mode)
     WORD_BOUNDARY, // \b
+    NON_WORD_BOUNDARY, // \B
     STRING_START, // \A (start of string, not affected by multiline)
     STRING_END, // \Z (end of string or before final newline)
     STRING_END_ABSOLUTE, // \z (absolute end of string)
