@@ -16,6 +16,8 @@
 package com.datadoghq.reggie.codegen.analysis;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -61,6 +63,33 @@ class LinearTokenSequencePlanTest {
     PatternCategorization categorization = categorize("(?<word>\\w+)\\s+\\1");
 
     assertTrue(LinearTokenSequencePlan.from(categorization).isEmpty());
+  }
+
+  @Test
+  void coverageIncludesCapturesNestedInOptionalSequences() throws Exception {
+    LinearTokenSequencePlan plan = planFor("(?:|(?<value>\\S+))");
+
+    assertEquals(0, plan.groupCount());
+    assertTrue(plan.coversCaptureIndexes(List.of(1)));
+    assertFalse(plan.coversCaptureIndexes(List.of(2)));
+  }
+
+  @Test
+  void coverageRequiresEveryNamedCaptureNotOnlyTheLargestGroupNumber() throws Exception {
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse("(?<outer>(?:-|(?<inner>[+-]?\\d+)))");
+    LinearTokenSequencePlan plan =
+        LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElseThrow();
+
+    assertTrue(plan.coversCaptureIndexes(List.of(2)));
+    assertFalse(plan.coversCaptureIndexes(parser.getGroupNameMap().values()));
+  }
+
+  @Test
+  void coverageRejectsNonPositiveGroupIndexes() throws Exception {
+    LinearTokenSequencePlan plan = planFor("(?<value>\\S+)");
+
+    assertThrows(IllegalArgumentException.class, () -> plan.coversCaptureIndexes(List.of(0)));
   }
 
   private static LinearTokenSequencePlan planFor(String pattern) throws Exception {

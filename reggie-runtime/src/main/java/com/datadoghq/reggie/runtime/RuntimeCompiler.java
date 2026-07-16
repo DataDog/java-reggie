@@ -816,6 +816,7 @@ public class RuntimeCompiler {
   private static ReggieMatcher tryCompileLinearTokenSequence(
       String pattern, RegexNode ast, Map<String, Integer> nameMap) {
     return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
+        .filter(plan -> plan.coversCaptureIndexes(nameMap.values()))
         .filter(RuntimeCompiler::isRuntimeExecutableLinearTokenSequence)
         .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
         .map(m -> m.embedsNameMap() ? m : new NameEnrichingMatcher(m))

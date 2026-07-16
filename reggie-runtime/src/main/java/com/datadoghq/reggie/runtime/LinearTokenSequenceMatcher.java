@@ -24,10 +24,7 @@ import java.util.Objects;
 final class LinearTokenSequenceMatcher extends ReggieMatcher {
   private final LinearTokenSequencePlan plan;
   private final int groupCount;
-  private final int[] scratchStarts;
-  private final int[] scratchEnds;
-  private final int[][] optionalScratchStarts;
-  private final int[][] optionalScratchEnds;
+  private final int optionalDepth;
 
   LinearTokenSequenceMatcher(
       String pattern,
@@ -38,11 +35,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     this.plan = plan;
     this.groupCount = groupCount;
     this.nameToIndex = Map.copyOf(nameToIndex);
-    this.scratchStarts = new int[groupCount + 1];
-    this.scratchEnds = new int[groupCount + 1];
-    int optionalDepth = maxOptionalDepth(plan.ops());
-    this.optionalScratchStarts = new int[optionalDepth][groupCount + 1];
-    this.optionalScratchEnds = new int[optionalDepth][groupCount + 1];
+    this.optionalDepth = maxOptionalDepth(plan.ops());
   }
 
   @Override
@@ -52,7 +45,8 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   @Override
   public boolean matches(String input) {
-    return matchInto(input, scratchStarts, scratchEnds);
+    Objects.requireNonNull(input, "input");
+    return matchesAt(input, 0, newWorkspace(), true);
   }
 
   @Override
@@ -64,21 +58,23 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public int findFrom(String input, int start) {
     Objects.requireNonNull(input, "input");
     if (start < 0 || start > input.length()) return -1;
+    MatchWorkspace workspace = newWorkspace();
     for (int pos = start; pos <= input.length(); pos++) {
-      if (matchesAt(input, pos, scratchStarts, scratchEnds, false)) return pos;
+      if (matchesAt(input, pos, workspace, false)) return pos;
     }
     return -1;
   }
 
   @Override
   public MatchResult match(String input) {
-    int[] starts = new int[groupCount + 1];
-    int[] ends = new int[groupCount + 1];
-    if (!matchInto(input, starts, ends)) return null;
+    Objects.requireNonNull(input, "input");
+    MatchWorkspace workspace = newWorkspace();
+    if (!matchesAt(input, 0, workspace, true)) return null;
     if (!nameToIndex.isEmpty()) {
-      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+      return new NamedMatchResultImpl(
+          input, workspace.starts, workspace.ends, groupCount, nameToIndex);
     }
-    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    return new MatchResultImpl(input, workspace.starts, workspace.ends, groupCount, nameToIndex);
   }
 
   @Override
@@ -104,15 +100,20 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult findMatchFrom(String input, int start) {
-    int pos = findFrom(input, start);
-    if (pos < 0) return null;
-    int[] starts = new int[groupCount + 1];
-    int[] ends = new int[groupCount + 1];
-    if (!matchesAt(input, pos, starts, ends, false)) return null;
-    if (!nameToIndex.isEmpty()) {
-      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    Objects.requireNonNull(input, "input");
+    if (start < 0 || start > input.length()) return null;
+    MatchWorkspace workspace = newWorkspace();
+    for (int pos = start; pos <= input.length(); pos++) {
+      if (!matchesAt(input, pos, workspace, false)) {
+        continue;
+      }
+      if (!nameToIndex.isEmpty()) {
+        return new NamedMatchResultImpl(
+            input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+      }
+      return new MatchResultImpl(input, workspace.starts, workspace.ends, groupCount, nameToIndex);
     }
-    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    return null;
   }
 
   @Override
@@ -123,13 +124,20 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     if (groupStarts.length <= groupCount || groupEnds.length <= groupCount) {
       throw new IndexOutOfBoundsException("group arrays too small for " + groupCount + " groups");
     }
-    if (!matchesAt(input, 0, scratchStarts, scratchEnds, true)) return false;
-    System.arraycopy(scratchStarts, 0, groupStarts, 0, groupCount + 1);
-    System.arraycopy(scratchEnds, 0, groupEnds, 0, groupCount + 1);
+    MatchWorkspace workspace = newWorkspace();
+    if (!matchesAt(input, 0, workspace, true)) return false;
+    System.arraycopy(workspace.starts, 0, groupStarts, 0, groupCount + 1);
+    System.arraycopy(workspace.ends, 0, groupEnds, 0, groupCount + 1);
     return true;
   }
 
-  private boolean matchesAt(String input, int offset, int[] starts, int[] ends, boolean fullMatch) {
+  private MatchWorkspace newWorkspace() {
+    return new MatchWorkspace(groupCount, optionalDepth);
+  }
+
+  private boolean matchesAt(String input, int offset, MatchWorkspace workspace, boolean fullMatch) {
+    int[] starts = workspace.starts;
+    int[] ends = workspace.ends;
     Arrays.fill(starts, -1);
     Arrays.fill(ends, -1);
     starts[0] = offset;
@@ -144,7 +152,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
         i++;
         continue;
       }
-      pos = apply(op, input, pos, starts, ends, i == plan.ops().size() - 1, 0);
+      pos = apply(op, input, pos, starts, ends, i == plan.ops().size() - 1, workspace, 0);
       if (pos < 0) return false;
     }
     if (fullMatch && pos != input.length()) return false;
@@ -159,6 +167,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       int[] starts,
       int[] ends,
       boolean lastOp,
+      MatchWorkspace workspace,
       int optionalDepth) {
     return switch (op.kind()) {
       case LITERAL -> startsWith(input, pos, op.literal()) ? pos + op.literal().length() : -1;
@@ -187,7 +196,8 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
           captureBracketedWordAfterSkip(input, pos, op.groupNumber(), starts, ends);
       case SKIP_ANY -> lastOp ? input.length() : -1;
       case ANCHOR -> pos;
-      case OPTIONAL_SEQUENCE -> applyOptional(op, input, pos, starts, ends, optionalDepth);
+      case OPTIONAL_SEQUENCE ->
+          applyOptional(op, input, pos, starts, ends, workspace, optionalDepth);
     };
   }
 
@@ -292,24 +302,35 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   private static int captureBracketedWordAfterSkip(
       String input, int pos, int group, int[] starts, int[] ends) {
-    int search = pos;
     int lastStart = -1;
     int lastEnd = -1;
-    while (search < input.length()) {
-      int open = input.indexOf('[', search);
-      if (open < 0) break;
-      int close = input.indexOf(']', open + 1);
-      if (close < 0) break;
-      int wordEnd = open + 1;
-      while (wordEnd < close && isWord(input.charAt(wordEnd))) wordEnd++;
-      if (wordEnd == close
-          && wordEnd > open + 1
-          && close + 1 < input.length()
-          && Character.isWhitespace(input.charAt(close + 1))) {
-        lastStart = open + 1;
-        lastEnd = close;
+    int open = -1;
+    int wordEnd = -1;
+    for (int index = pos; index < input.length(); index++) {
+      char ch = input.charAt(index);
+      if (ch == '[') {
+        open = index;
+        wordEnd = index + 1;
+        continue;
       }
-      search = open + 1;
+      if (open < 0) {
+        continue;
+      }
+      if (ch == ']') {
+        if (wordEnd == index
+            && wordEnd > open + 1
+            && index + 1 < input.length()
+            && Character.isWhitespace(input.charAt(index + 1))) {
+          lastStart = open + 1;
+          lastEnd = index;
+        }
+        open = -1;
+        wordEnd = -1;
+      } else if (wordEnd == index && isWord(ch)) {
+        wordEnd++;
+      } else {
+        wordEnd = -1;
+      }
     }
     if (lastStart < 0) return -1;
     set(starts, ends, group, lastStart, lastEnd);
@@ -365,9 +386,10 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       int pos,
       int[] starts,
       int[] ends,
+      MatchWorkspace workspace,
       int optionalDepth) {
-    int[] savedStarts = optionalScratchStarts[optionalDepth];
-    int[] savedEnds = optionalScratchEnds[optionalDepth];
+    int[] savedStarts = workspace.optionalStarts[optionalDepth];
+    int[] savedEnds = workspace.optionalEnds[optionalDepth];
     System.arraycopy(starts, 0, savedStarts, 0, starts.length);
     System.arraycopy(ends, 0, savedEnds, 0, ends.length);
     int next = pos;
@@ -380,6 +402,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
               starts,
               ends,
               i == op.children().size() - 1,
+              workspace,
               optionalDepth + 1);
       if (next < 0) {
         System.arraycopy(savedStarts, 0, starts, 0, starts.length);
@@ -402,6 +425,20 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
                   : childDepth);
     }
     return max;
+  }
+
+  private static final class MatchWorkspace {
+    final int[] starts;
+    final int[] ends;
+    final int[][] optionalStarts;
+    final int[][] optionalEnds;
+
+    MatchWorkspace(int groupCount, int optionalDepth) {
+      starts = new int[groupCount + 1];
+      ends = new int[groupCount + 1];
+      optionalStarts = new int[optionalDepth][groupCount + 1];
+      optionalEnds = new int[optionalDepth][groupCount + 1];
+    }
   }
 
   private static int skipWhitespace(String input, int pos) {

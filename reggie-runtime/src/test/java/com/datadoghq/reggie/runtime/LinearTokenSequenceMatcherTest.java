@@ -32,6 +32,8 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class LinearTokenSequenceMatcherTest {
@@ -159,6 +161,33 @@ class LinearTokenSequenceMatcherTest {
   }
 
   @Test
+  void namedOnlyRoutingRejectsPlansMissingAnObservableNamedCapture() throws Exception {
+    String pattern = "(?<outer>(?:-|(?<inner>[+-]?\\d+)))";
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pattern);
+    LinearTokenSequencePlan plan =
+        LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElseThrow();
+    assertFalse(plan.coversCaptureIndexes(parser.getGroupNameMap().values()));
+
+    ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY_OPTIONS);
+    assertNotLinearTokenSequenceDelegate(matcher);
+
+    Pattern jdkPattern = Pattern.compile(pattern);
+    for (String input : new String[] {"-", "42"}) {
+      Matcher jdk = jdkPattern.matcher(input);
+      assertTrue(jdk.matches(), input);
+
+      MatchResult actual = matcher.match(input);
+      assertNotNull(actual, input);
+      for (int group : parser.getGroupNameMap().values()) {
+        assertEquals(jdk.start(group), actual.start(group), "start group " + group + ": " + input);
+        assertEquals(jdk.end(group), actual.end(group), "end group " + group + ": " + input);
+        assertEquals(jdk.group(group), actual.group(group), "value group " + group + ": " + input);
+      }
+    }
+  }
+
+  @Test
   void capturedDashAlternativeRecordsNamedGroupSpan() throws Exception {
     ReggieMatcher matcher = Reggie.compile("(?<bytes>(?:-|[+-]?\\d+))", NAMED_ONLY_OPTIONS);
 
@@ -208,6 +237,39 @@ class LinearTokenSequenceMatcherTest {
     assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
   }
 
+  @Test
+  void bracketedWordAfterSkipUsesLastEligibleBracketedWord() throws Exception {
+    ReggieMatcher matcher = matcherFor(".* \\[(?<logger>\\b\\w+\\b)\\] .*");
+
+    MatchResult result = matcher.match("[ignored] [[first] [last] trailing");
+
+    assertNotNull(result);
+    assertEquals("last", result.group("logger"));
+  }
+
+  @Test
+  void bracketedWordAfterSkipIgnoresMalformedPrefixes() throws Exception {
+    ReggieMatcher matcher = matcherFor(".* \\[(?<logger>\\b\\w+\\b)\\] .*");
+
+    MatchResult result = matcher.match("[bad-value] [valid] trailing");
+
+    assertNotNull(result);
+    assertEquals("valid", result.group("logger"));
+  }
+
+  @Test
+  void bracketedWordAfterSkipHandlesManyUnclosedBracketsInOnePass() throws Exception {
+    ReggieMatcher matcher = matcherFor(".* \\[(?<logger>\\b\\w+\\b)\\] .*");
+    assertNull(matcher.match("[".repeat(20_000)));
+
+    String input = "[".repeat(20_000) + "word] ";
+
+    MatchResult result = matcher.match(input);
+
+    assertNotNull(result);
+    assertEquals("word", result.group("logger"));
+  }
+
   private static final ReggieOptions NAMED_ONLY_OPTIONS =
       ReggieOptions.builder().namedOnly().build();
 
@@ -219,6 +281,19 @@ class LinearTokenSequenceMatcherTest {
     Field delegate = matcher.getClass().getDeclaredField("delegate");
     delegate.setAccessible(true);
     assertEquals(expectedType, delegate.get(matcher).getClass());
+  }
+
+  private static void assertNotLinearTokenSequenceDelegate(ReggieMatcher matcher) throws Exception {
+    if (matcher.getClass() == LinearTokenSequenceMatcher.class) {
+      throw new AssertionError("matcher unexpectedly used LinearTokenSequenceMatcher");
+    }
+    try {
+      Field delegate = matcher.getClass().getDeclaredField("delegate");
+      delegate.setAccessible(true);
+      assertNotEquals(LinearTokenSequenceMatcher.class, delegate.get(matcher).getClass());
+    } catch (NoSuchFieldException ignored) {
+      // A non-wrapper matcher cannot be an LTS matcher because the direct type was checked above.
+    }
   }
 
   private static ReggieMatcher matcherFor(String pattern) throws Exception {
