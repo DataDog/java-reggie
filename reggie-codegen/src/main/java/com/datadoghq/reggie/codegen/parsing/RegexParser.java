@@ -1525,7 +1525,10 @@ public class RegexParser {
           i++;
         }
         if (i + 1 < len) {
-          i += 2;
+          i += 2; // skip \E
+        } else {
+          // Unterminated \Q...: quote extends to end of pattern (PCRE semantics).
+          i = len;
         }
       } else if (c == '\\') {
         i += 2; // skip escaped character

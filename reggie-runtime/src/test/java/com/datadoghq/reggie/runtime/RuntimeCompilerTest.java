@@ -186,6 +186,16 @@ public class RuntimeCompilerTest {
   }
 
   @Test
+  public void testCachedPatternsIncludesFlaggedEntries() {
+    RuntimeCompiler.compile("abc", com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE);
+
+    assertEquals(1, RuntimeCompiler.cacheSize());
+    assertEquals(1, RuntimeCompiler.cachedPatterns().size());
+    assertTrue(
+        RuntimeCompiler.cachedPatterns().stream().anyMatch(k -> k.startsWith("abc [flags=")));
+  }
+
+  @Test
   public void testExplicitCacheKeySamePattern() {
     ReggieMatcher m1 = RuntimeCompiler.cached("key1", "\\d+");
     ReggieMatcher m2 = RuntimeCompiler.cached("key1", "\\d+");

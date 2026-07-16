@@ -303,8 +303,11 @@ public class RuntimeCompiler {
     // Slow path: compile and cache the result.
     // compileInternal will populate NFA_CLASS_CACHE if the strategy is NFA-backed, in which case
     // the L1 entry is immediately removed so that subsequent calls hit the fast path above.
+    // The reported pattern is set inside the mapping function so the instance published to
+    // PATTERN_CACHE is already fully initialized and is never mutated again after publication.
     ReggieMatcher compiled =
-        PATTERN_CACHE.computeIfAbsent(cacheKey, k -> compileInternal(pattern, options, k));
+        PATTERN_CACHE.computeIfAbsent(
+            cacheKey, k -> reportPattern(compileInternal(pattern, options, k), reportedPattern));
 
     // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
     // remove it from L1 and return a fresh matcher so callers never share mutable state.
@@ -329,7 +332,7 @@ public class RuntimeCompiler {
       PATTERN_CACHE.remove(cacheKey, compiled);
       return reportPattern(factory.newInstance(pattern), reportedPattern);
     }
-    return reportPattern(compiled, reportedPattern);
+    return compiled;
   }
 
   private static ReggieMatcher reportPattern(ReggieMatcher matcher, String pattern) {
@@ -467,12 +470,28 @@ public class RuntimeCompiler {
     return STRUCTURE_CACHE.size();
   }
 
-  /** Get all cached pattern keys. */
+  /**
+   * Get a string snapshot of all level-1 cache keys. Plain pattern-string keys (from {@code
+   * compile(pattern[, options])}) are returned verbatim. Keys for patterns compiled with {@link
+   * ReggieFlags} (via {@code compile(pattern, flags[, options])}) are backed by an internal {@code
+   * FlaggedCacheKey} record rather than the pattern string itself; those entries are rendered as
+   * {@code "<pattern> [flags=<flags>]"} so flagged compilations remain visible for cache-size
+   * accounting and debugging.
+   */
   public static Set<String> cachedPatterns() {
     return PATTERN_CACHE.keySet().stream()
-        .filter(String.class::isInstance)
-        .map(String.class::cast)
+        .map(RuntimeCompiler::cacheKeyToDisplayString)
         .collect(java.util.stream.Collectors.toUnmodifiableSet());
+  }
+
+  private static String cacheKeyToDisplayString(Object key) {
+    if (key instanceof String s) {
+      return s;
+    }
+    if (key instanceof FlaggedCacheKey flaggedKey) {
+      return flaggedKey.pattern() + " [flags=" + flaggedKey.flags() + "]";
+    }
+    return String.valueOf(key);
   }
 
   /**

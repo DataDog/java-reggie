@@ -164,4 +164,29 @@ class RegexParserTest {
   void atomicGroup_digitPlusWithSuffix_throwsUnsupported() {
     assertDoesNotThrow(() -> parse("(?>\\d+)abc"), "(?>\\d+)abc must parse successfully");
   }
+
+  // ==================== Unterminated \Q...\E must not be counted as capturing ====================
+
+  /**
+   * An unterminated {@code \Q} quotes every remaining character, including any {@code (}, as a
+   * literal (PCRE semantics). The parenthesis inside must not be counted as a capturing group by
+   * the {@code countCapturingGroups} pre-scan used for multi-digit backreference resolution.
+   *
+   * <p>With 9 real capturing groups followed by {@code \10} and a trailing unterminated {@code
+   * \Q(}: if the stray {@code (} were miscounted as a 10th group, {@code \10} would resolve to a
+   * backreference to that (non-existent) group. With the correct count of 9, {@code \10} must
+   * resolve to backreference \1 followed by the literal digit '0' (JDK-compatible semantics).
+   */
+  @Test
+  void unterminatedQuoteAfterNineGroups_doesNotInflateGroupCount()
+      throws RegexParser.ParseException {
+    RegexNode node = parse("(a)(a)(a)(a)(a)(a)(a)(a)(a)\\10\\Q(");
+    String rendered = node.toString();
+    assertTrue(
+        rendered.contains("Backref(\\1)"),
+        "\\10 with 9 real groups must resolve to Backref(\\1) + literal '0', got: " + rendered);
+    assertFalse(
+        rendered.contains("Backref(\\10)"),
+        "Unterminated \\Q( must not be counted as a capturing group, got: " + rendered);
+  }
 }
