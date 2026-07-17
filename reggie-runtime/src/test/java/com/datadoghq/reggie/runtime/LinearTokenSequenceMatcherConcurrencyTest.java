@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.IOException;
@@ -57,8 +58,8 @@ class LinearTokenSequenceMatcherConcurrencyTest {
     Reggie.clearCache();
     String pattern = testResource("logs-grok-pattern-1.regex");
     Map<String, Integer> groupNumbers = groupNumbers(pattern);
-    ReggieMatcher shared = Reggie.compile(pattern, NAMED_ONLY);
-    ReggieMatcher second = Reggie.compile(pattern, NAMED_ONLY);
+    ReggieMatcher shared = compileNamedOnlyFixture(pattern);
+    ReggieMatcher second = compileNamedOnlyFixture(pattern);
     int groupCount = shared.match(WITH_OPTIONAL_CAPTURES).groupCount();
 
     assertSame(shared, second);
@@ -155,6 +156,13 @@ class LinearTokenSequenceMatcherConcurrencyTest {
     executor.shutdownNow();
     assertTrue(
         failures.isEmpty(), () -> "concurrent nested-optional LTS failure: " + failures.peek());
+  }
+
+  private static ReggieMatcher compileNamedOnlyFixture(String pattern) {
+    if (pattern.startsWith("(?s)")) {
+      return Reggie.compile(pattern.substring("(?s)".length()), ReggieFlags.DOTALL, NAMED_ONLY);
+    }
+    return Reggie.compile(pattern, NAMED_ONLY);
   }
 
   private static void assertMatchWithOptionalCaptures(

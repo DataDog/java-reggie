@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.analysis.LinearTokenSequencePlan;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
@@ -345,7 +346,7 @@ class LinearTokenSequenceMatcherTest {
   @Test
   void runtimeCompilerRoutesCombinedAccessLogTemplateWithNonGrokNames() throws Exception {
     String pattern =
-        "(?s)(?<client>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}|[A-Za-z0-9.-]+) "
+        "(?<client>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}|[A-Za-z0-9.-]+) "
             + "(?<ident>\\S+) (?<auth>\\S+) "
             + "\\[(?<timestamp>[\\d]{2}/(?:[jJ][aA][nN]|[mM][aA][rR])/[\\d]{4,19}:[\\d]{2}:[\\d]{2}:[\\d]{2} [+-]\\d\\d:?\\d\\d)\\]\\s+"
             + "\"(?>(?<method>\\b\\w+\\b) |)(?<target>\\S+)(?> HTTP\\/(?<version>\\d+\\.\\d+)|)\" "
@@ -354,7 +355,7 @@ class LinearTokenSequenceMatcherTest {
             + "(?<duration>[+-]?(?>\\d+(?:\\.(?:\\d*)?)?|\\.\\d+)) "
             + "(?<upstream>[+-]?(?>\\d+(?:\\.(?:\\d*)?)?|\\.\\d+)).* "
             + "\\[(?<logger>\\b\\w+\\b)\\] .*";
-    ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY_OPTIONS);
+    ReggieMatcher matcher = Reggie.compile(pattern, ReggieFlags.DOTALL, NAMED_ONLY_OPTIONS);
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
             + "200 17888 \"https://example.com/index.html\" \"Mozilla/5.0 Test\" \"-\" "
@@ -421,7 +422,6 @@ class LinearTokenSequenceMatcherTest {
   @Test
   void bracketedWordAfterSkipPreservesDefaultDotAndDotAllNewlineSemantics() throws Exception {
     String defaultPattern = ".* \\[(?<logger>\\b\\w+\\b)\\] .*";
-    String dotAllPattern = "(?s)" + defaultPattern;
     String newlineBeforeLogger = "prefix\n [logger] trailing";
     String newlineAfterLogger = "prefix [logger] trailing\nrest";
 
@@ -435,9 +435,10 @@ class LinearTokenSequenceMatcherTest {
         jdkDefault.matcher(newlineAfterLogger).matches(),
         defaultMatcher.matches(newlineAfterLogger));
 
-    ReggieMatcher dotAllMatcher = Reggie.compile(dotAllPattern, NAMED_ONLY_OPTIONS);
+    ReggieMatcher dotAllMatcher =
+        Reggie.compile(defaultPattern, ReggieFlags.DOTALL, NAMED_ONLY_OPTIONS);
     assertDelegateType(dotAllMatcher, LinearTokenSequenceMatcher.class);
-    Pattern jdkDotAll = Pattern.compile(dotAllPattern);
+    Pattern jdkDotAll = Pattern.compile(defaultPattern, Pattern.DOTALL);
     assertEquals(
         jdkDotAll.matcher(newlineBeforeLogger).matches(),
         dotAllMatcher.matches(newlineBeforeLogger));
@@ -461,6 +462,112 @@ class LinearTokenSequenceMatcherTest {
     ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY_OPTIONS);
 
     assertNotLinearTokenSequenceDelegate(matcher);
+  }
+
+  @Test
+  void linearTokenSequenceAdmitsDotAllOnlyThroughAnExplicitReggieFlag() throws Exception {
+    String pattern = ".* \\[(?<logger>\\b\\w+\\b)\\] .*";
+
+    Reggie.clearCache();
+    assertNotLinearTokenSequenceDelegate(Reggie.compile(pattern, NAMED_ONLY_OPTIONS));
+
+    Reggie.clearCache();
+    ReggieMatcher dotAllMatcher = Reggie.compile(pattern, ReggieFlags.DOTALL, NAMED_ONLY_OPTIONS);
+    assertDelegateType(dotAllMatcher, LinearTokenSequenceMatcher.class);
+    assertNotNull(dotAllMatcher.match("prefix\n [logger] trailing\nrest"));
+
+    Reggie.clearCache();
+    assertNotLinearTokenSequenceDelegate(
+        Reggie.compile("(?s)" + pattern, ReggieFlags.DOTALL, NAMED_ONLY_OPTIONS));
+  }
+
+  @Test
+  void linearTokenSequenceDotAllAdmissionIsCacheOrderIndependent() throws Exception {
+    String pattern = ".* \\[(?<logger>\\b\\w+\\b)\\] .*";
+
+    Reggie.clearCache();
+    assertNotLinearTokenSequenceDelegate(Reggie.compile(pattern, NAMED_ONLY_OPTIONS));
+    assertDelegateType(
+        Reggie.compile(pattern, ReggieFlags.DOTALL, NAMED_ONLY_OPTIONS),
+        LinearTokenSequenceMatcher.class);
+
+    Reggie.clearCache();
+    assertDelegateType(
+        Reggie.compile(pattern, ReggieFlags.DOTALL, NAMED_ONLY_OPTIONS),
+        LinearTokenSequenceMatcher.class);
+    assertNotLinearTokenSequenceDelegate(Reggie.compile(pattern, NAMED_ONLY_OPTIONS));
+  }
+
+  @Test
+  void linearTokenSequenceRejectsNonDotAllReggieFlags() throws Exception {
+    String pattern = "(?<value>\\S+)";
+    for (int flags :
+        new int[] {
+          ReggieFlags.CASE_INSENSITIVE,
+          ReggieFlags.MULTILINE,
+          ReggieFlags.LITERAL,
+          ReggieFlags.CASE_INSENSITIVE | ReggieFlags.DOTALL
+        }) {
+      Reggie.clearCache();
+      assertNotLinearTokenSequenceDelegate(Reggie.compile(pattern, flags, NAMED_ONLY_OPTIONS));
+    }
+  }
+
+  @Test
+  void linearTokenSequenceRejectsParserSupportedInlineModifiers() throws Exception {
+    for (String pattern :
+        new String[] {
+          "(?i)(?<value>\\S+)",
+          "(?m)(?<value>\\S+)",
+          "(?s)(?<value>\\S+)",
+          "(?x)(?<value>\\S+)",
+          "(?-i)(?<value>\\S+)",
+          "(?im)(?<value>\\S+)",
+          "(?i:(?<value>\\S+))"
+        }) {
+      Reggie.clearCache();
+      assertNotLinearTokenSequenceDelegate(Reggie.compile(pattern, NAMED_ONLY_OPTIONS));
+    }
+  }
+
+  @Test
+  void inlineModifierLookalikesDoNotBlockLinearTokenSequence() throws Exception {
+    for (String pattern :
+        new String[] {
+          "\\Q(?s)\\E(?<value>\\S+)",
+          "\\(\\?s\\)(?<value>\\S+)",
+          "(?# no modifier here)(?<value>\\S+)"
+        }) {
+      Reggie.clearCache();
+      assertDelegateType(
+          Reggie.compile(pattern, NAMED_ONLY_OPTIONS), LinearTokenSequenceMatcher.class);
+    }
+  }
+
+  @Test
+  void sourceInlineModifierScannerHonorsParserLiteralContexts() {
+    for (String source :
+        new String[] {
+          "\\(\\?s\\)(?<value>\\S+)",
+          "\\Q(?s)\\E(?<value>\\S+)",
+          "[(?s)](?<value>\\S+)",
+          "[\\Q(?s)\\E](?<value>\\S+)",
+          "(?# (?s) )(?<value>\\S+)"
+        }) {
+      assertFalse(RuntimeCompiler.hasSourceInlineModifier(source), source);
+    }
+    for (String source : new String[] {"(?i)(?<value>\\S+)", "(?s:(?<value>\\S+))"}) {
+      assertTrue(RuntimeCompiler.hasSourceInlineModifier(source), source);
+    }
+  }
+
+  @Test
+  void unsupportedInlineModifierFamiliesRemainSyntaxErrors() {
+    for (String modifier : new String[] {"u", "U", "d"}) {
+      assertThrows(
+          com.datadoghq.reggie.UnsupportedPatternException.class,
+          () -> Reggie.compile("(?%s)(?<value>\\S+)".formatted(modifier), NAMED_ONLY_OPTIONS));
+    }
   }
 
   private static final ReggieOptions NAMED_ONLY_OPTIONS =
