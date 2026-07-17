@@ -815,19 +815,31 @@ public class RuntimeCompiler {
 
   private static ReggieMatcher tryCompileLinearTokenSequence(
       String pattern, RegexNode ast, Map<String, Integer> nameMap) {
+    if ((pattern.contains(".*") || pattern.contains(".{")) && !pattern.startsWith("(?s)")) {
+      return null;
+    }
     return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
         .filter(plan -> plan.coversCaptureIndexes(nameMap.values()))
-        .filter(RuntimeCompiler::isRuntimeExecutableLinearTokenSequence)
+        .filter(plan -> isRuntimeExecutableLinearTokenSequence(pattern, plan))
         .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
         .map(m -> m.embedsNameMap() ? m : new NameEnrichingMatcher(m))
         .orElse(null);
   }
 
-  private static boolean isRuntimeExecutableLinearTokenSequence(LinearTokenSequencePlan plan) {
+  private static boolean isRuntimeExecutableLinearTokenSequence(
+      String pattern, LinearTokenSequencePlan plan) {
+    boolean requiresDotAll = false;
     for (int i = 0; i < plan.ops().size(); i++) {
       LinearTokenSequencePlan.Op op = plan.ops().get(i);
       if (op.kind() == LinearTokenSequencePlan.OpKind.ANCHOR) return false;
-      if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY && i != plan.ops().size() - 1) {
+      if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE) return false;
+      if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
+          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_BRACKETED_WORD_AFTER_SKIP) {
+        requiresDotAll = true;
+      }
+      if ((op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
+              || op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE)
+          && i != plan.ops().size() - 1) {
         return false;
       }
       if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
@@ -836,7 +848,7 @@ public class RuntimeCompiler {
         return false;
       }
     }
-    return true;
+    return !requiresDotAll || pattern.startsWith("(?s)");
   }
 
   private static boolean canOptionalPresentBranchStealFollowingInput(

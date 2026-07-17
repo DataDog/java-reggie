@@ -219,6 +219,8 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       case CAPTURE_BRACKETED_WORD_AFTER_SKIP ->
           captureBracketedWordAfterSkip(input, pos, regionEnd, op.groupNumber(), starts, ends);
       case SKIP_ANY -> lastOp ? consumeToEnd(input, pos, regionEnd) : -1;
+      case SKIP_ANY_EXCEPT_NEWLINE ->
+          lastOp ? consumeToEndExceptNewline(input, pos, regionEnd) : -1;
       case ANCHOR -> pos;
       case OPTIONAL_SEQUENCE ->
           applyOptional(op, input, pos, regionEnd, starts, ends, workspace, optionalDepth);
@@ -228,7 +230,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   private static int captureNonSpace(
       CharSequence input, int pos, int regionEnd, int group, int[] starts, int[] ends) {
     int start = pos;
-    while (pos < regionEnd && !Character.isWhitespace(input.charAt(pos))) pos++;
+    while (pos < regionEnd && !isJdkWhitespace(input.charAt(pos))) pos++;
     if (pos == start) return -1;
     set(starts, ends, group, start, pos);
     return pos;
@@ -334,7 +336,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     if (end == regionEnd) return -1;
     if (nonSpace) {
       for (int i = start; i < end; i++) {
-        if (Character.isWhitespace(input.charAt(i))) return -1;
+        if (isJdkWhitespace(input.charAt(i))) return -1;
       }
     }
     set(starts, ends, group, start, end);
@@ -355,7 +357,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     int wordEnd = -1;
     for (int index = pos; index < regionEnd; index++) {
       char ch = input.charAt(index);
-      if (ch == '[') {
+      if (ch == '[' && index > pos && input.charAt(index - 1) == ' ') {
         open = index;
         wordEnd = index + 1;
         continue;
@@ -367,7 +369,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
         if (wordEnd == index
             && wordEnd > open + 1
             && index + 1 < regionEnd
-            && Character.isWhitespace(input.charAt(index + 1))) {
+            && input.charAt(index + 1) == ' ') {
           lastStart = open + 1;
           lastEnd = index;
         }
@@ -493,7 +495,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   private static int skipWhitespace(CharSequence input, int pos, int regionEnd) {
     int start = pos;
-    while (pos < regionEnd && Character.isWhitespace(input.charAt(pos))) pos++;
+    while (pos < regionEnd && isJdkWhitespace(input.charAt(pos))) pos++;
     return pos == start ? -1 : pos;
   }
 
@@ -527,6 +529,13 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     return regionEnd;
   }
 
+  private static int consumeToEndExceptNewline(CharSequence input, int pos, int regionEnd) {
+    while (pos < regionEnd) {
+      if (input.charAt(pos++) == '\n') return -1;
+    }
+    return regionEnd;
+  }
+
   private static void set(int[] starts, int[] ends, int group, int start, int end) {
     if (group > 0) {
       starts[group] = start;
@@ -547,7 +556,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   private static boolean isNonSpace(CharSequence input, int start, int end) {
     if (end <= start) return false;
     for (int i = start; i < end; i++) {
-      if (Character.isWhitespace(input.charAt(i))) return false;
+      if (isJdkWhitespace(input.charAt(i))) return false;
     }
     return true;
   }
@@ -568,6 +577,10 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       return -1;
     }
     return pos;
+  }
+
+  private static boolean isJdkWhitespace(char ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\u000B' || ch == '\f' || ch == '\r';
   }
 
   private static boolean isDigit(char ch) {
