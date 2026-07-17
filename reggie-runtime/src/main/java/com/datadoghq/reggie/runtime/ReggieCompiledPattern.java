@@ -34,6 +34,10 @@ public final class ReggieCompiledPattern {
    */
   public static ReggieCompilationResult tryCompile(ReggieCompileRequest request) {
     Objects.requireNonNull(request, "request");
+    return tryCompileNative(request);
+  }
+
+  static ReggieCompilationResult tryCompileNative(ReggieCompileRequest request) {
     RuntimeCompiler.NamedOnlyLtsCompilation compilation =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence(
             request.source(), request.flag().reggieFlags());
