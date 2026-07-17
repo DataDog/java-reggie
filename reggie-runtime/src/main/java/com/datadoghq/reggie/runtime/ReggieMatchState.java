@@ -29,6 +29,7 @@ public final class ReggieMatchState {
   private final int[] starts;
   private final int[] ends;
   private boolean matched;
+  private boolean usedInterruptibleExecution;
 
   ReggieMatchState(LinearTokenSequenceMatcher matcher) {
     this.matcher = Objects.requireNonNull(matcher, "matcher");
@@ -45,7 +46,16 @@ public final class ReggieMatchState {
    */
   public boolean matches(CharSequence input, int start, int end) {
     clear();
+    if (input instanceof InterruptibleCharSequence interruptible) {
+      usedInterruptibleExecution = true;
+      return matched =
+          matcher.matchIntoBoundedInterruptibly(interruptible, start, end, starts, ends, workspace);
+    }
     return matched = matcher.matchIntoBounded(input, start, end, starts, ends, workspace);
+  }
+
+  boolean usedInterruptibleExecution() {
+    return usedInterruptibleExecution;
   }
 
   public int start() {
@@ -72,6 +82,7 @@ public final class ReggieMatchState {
     Arrays.fill(starts, -1);
     Arrays.fill(ends, -1);
     matched = false;
+    usedInterruptibleExecution = false;
   }
 
   private void requireMatched() {
