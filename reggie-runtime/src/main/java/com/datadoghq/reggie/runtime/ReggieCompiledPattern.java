@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.runtime;
 
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Immutable native compiled pattern for the named linear-token-sequence profile.
@@ -23,6 +24,11 @@ import java.util.Objects;
  * <p>This API never selects another Reggie strategy and never delegates to the JDK.
  */
 public final class ReggieCompiledPattern {
+  private static final Set<ReggieNativeCapability> CAPABILITIES =
+      Set.of(
+          ReggieNativeCapability.NATIVE_ONLY,
+          ReggieNativeCapability.LINEAR_TIME,
+          ReggieNativeCapability.INTERRUPTIBLE_CHAR_SEQUENCE);
   private final LinearTokenSequenceMatcher matcher;
 
   private ReggieCompiledPattern(LinearTokenSequenceMatcher matcher) {
@@ -51,5 +57,10 @@ public final class ReggieCompiledPattern {
   /** Creates a new single-thread-confined state object for matching this immutable pattern. */
   public ReggieMatchState newState() {
     return new ReggieMatchState(matcher);
+  }
+
+  /** Returns the immutable capabilities of this native named-LTS compiled pattern. */
+  public Set<ReggieNativeCapability> capabilities() {
+    return CAPABILITIES;
   }
 }
