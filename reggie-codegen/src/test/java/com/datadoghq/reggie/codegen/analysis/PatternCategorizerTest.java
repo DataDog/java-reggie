@@ -28,7 +28,7 @@ class PatternCategorizerTest {
   @Test
   void categorizesLinearDelimitedLogTemplateWithoutGrokNames() throws Exception {
     String pattern =
-        "(?<client>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}|[A-Za-z0-9.-]+) "
+        "(?s)(?<client>(?:[0-9]{1,3}\\.){3}[0-9]{1,3}|[A-Za-z0-9.-]+) "
             + "(?<ident>\\S+) "
             + "(?<auth>\\S+) "
             + "\\[(?<timestamp>[^\\]]+)\\]\\s+"

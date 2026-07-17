@@ -275,10 +275,12 @@ public final class PatternCategorizer {
           if (delimiter != null) {
             return PatternAtom.capturedUntil(groupNumber, groupName, delimiter);
           }
-          if ((charClass.chars.equals(CharSet.ANY)
-                  || charClass.chars.equals(CharSet.ANY_EXCEPT_NEWLINE))
-              && !charClass.negated) {
+          if (charClass.chars.equals(CharSet.ANY) && !charClass.negated) {
             return PatternAtom.captured(PatternAtom.Kind.ANY_STAR, groupNumber, groupName);
+          }
+          if (charClass.chars.equals(CharSet.ANY_EXCEPT_NEWLINE) && !charClass.negated) {
+            return PatternAtom.captured(
+                PatternAtom.Kind.ANY_STAR_EXCEPT_NEWLINE, groupNumber, groupName);
           }
         }
       }
@@ -350,7 +352,7 @@ public final class PatternCategorizer {
 
     private static boolean isTrailingBracketedWordSearch(List<RegexNode> children, int index) {
       if (index + 6 >= children.size()) return false;
-      return isAnyStar(children.get(index))
+      return isDotAllAnyStar(children.get(index))
           && children.get(index + 1) instanceof LiteralNode spaceBefore
           && spaceBefore.ch == ' '
           && children.get(index + 2) instanceof LiteralNode open
@@ -362,7 +364,7 @@ public final class PatternCategorizer {
           && close.ch == ']'
           && children.get(index + 5) instanceof LiteralNode spaceAfter
           && spaceAfter.ch == ' '
-          && isAnyStar(children.get(index + 6));
+          && isDotAllAnyStar(children.get(index + 6));
     }
 
     private static boolean containsBacktrackingControl(RegexNode node) {
@@ -430,17 +432,15 @@ public final class PatternCategorizer {
           });
     }
 
-    private static boolean isAnyStar(RegexNode node) {
+    private static boolean isDotAllAnyStar(RegexNode node) {
       if (!(node instanceof QuantifierNode quantifier)
           || quantifier.min != 0
           || quantifier.max != -1
-          || !quantifier.greedy
-          || !(quantifier.child instanceof CharClassNode charClass)
-          || charClass.negated) {
-        return false;
-      }
-      return charClass.chars.equals(CharSet.ANY)
-          || charClass.chars.equals(CharSet.ANY_EXCEPT_NEWLINE);
+          || !quantifier.greedy) return false;
+      RegexNode child = stripNonCapturingGroup(quantifier.child);
+      return child instanceof CharClassNode charClass
+          && charClass.chars.equals(CharSet.ANY)
+          && !charClass.negated;
     }
 
     private static RegexNode stripNonCapturingGroup(RegexNode node) {
