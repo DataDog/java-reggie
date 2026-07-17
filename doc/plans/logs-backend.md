@@ -64,38 +64,61 @@ Key parser locations:
 - Source: reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/parsing/RegexParser.java
 ---
 
-## Final adoption architecture/status
+## Adoption progress — July 2026
 
-The logs-backend Grok access-log path now uses a native, deterministic Reggie route under
-`CapturePolicy.NAMED_ONLY`:
+### Completed Reggie prerequisites
+
+The native logs migration stack is implemented as the draft PR chain #111 through #121.  The
+current top is #121 (`agent/logs-reggie-l1l`, based on #120).  The slices provide a deliberately
+small, native-only linear-token-sequence route:
 
 ```
 regex AST -> PatternCategorizer -> LinearTokenSequencePlan -> LinearTokenSequenceMatcher
 ```
 
-Important properties:
+The route now has the following properties:
 
-- The route is structural: it categorizes reusable token atoms (IP/host, non-space fields,
-  quoted fields, integers, decimals, optional request fragments, delimiter captures, and trailing
-  bracketed logger capture). It does **not** route by exact pattern string or `grokN` capture names.
-- `CapturePolicy.NAMED_ONLY` preserves original named group indexes so Grok can continue calling
-  `group(originalIndex)` after discovering names from the expanded regex.
-- The old ad-hoc `AccessLogGrokMatcher` oracle has been removed; production routing now depends on
-  the generic categorizer/planner/runtime matcher only.
-- The two real expanded logs-backend Grok patterns are committed as runtime test resources and have
-  regression tests proving they route through `LinearTokenSequenceMatcher`.
-- JDK/Reggie named capture-boundary equivalence is tested for the real expanded patterns across
-  common/combined access logs, optional method/version fields, `-` byte count, empty quoted fields,
-  IPv6/hostname clients, and logger bracket decoys.
+- Native direct compilation is bounded, cacheable, interruption-aware, and never falls back to the
+  JDK or general Reggie compiler.
+- L1l changes the direct facade from named-only spans to **full numeric spans**: `groupCount()`,
+  `start(int)`, and `end(int)` preserve all source capture indices for admitted patterns.  This is
+  required because Grok extracts captures by number and shadow comparison checks every group.
+- Admission is fail-closed. It requires a direct source capture layout, one matching plan operation
+  per group, deterministic non-backtracking boundaries, and the supported `NONE`/`DOTALL` flag
+  profile. Existing named-only routing and global compiler caches are unchanged.
+- The L1l implementation was independently plan-validated and code-reviewed, and passed
+  `:reggie-runtime:test` (2,542 tests; 29 skipped).
 
-Integrated benchmark after scratch-state reuse and oracle removal (`-wi 2 -i 3 -f 2 -prof gc`):
+### Not yet done
+
+This is **not** full logs-backend adoption and no logs-backend production supplier has been changed.
+The direct full-capture profile intentionally rejects shapes whose capture or matching semantics are
+not proven by the LTS executor, including IP/host and other alternatives, delimiter/quoted/bracket
+specializations, adjacent variable-width captures, and all optional forms except the proven HTTP
+version fragment.
+
+Next work, after the Reggie PR stack lands:
+
+1. Add a logs-backend `RegexPatternSupplier` adapter that maps `RegexMatcher.matches()`,
+   `group(int)`, and `groupCount()` to `ReggieCompiledPattern` / `ReggieMatchState`.
+2. Compile Reggie only for admitted patterns; make JDK selection an explicit logs-side fallback for
+   rejection. Do not use a hidden Reggie JDK fallback.
+3. Run the real expanded Grok corpus through JDK-vs-Reggie shadow comparison, including result,
+   group count, and all numeric group values; record admission and rejection cohorts.
+4. Enable native-primary only for a proven cohort, then gradually expand the profile in separately
+   reviewed correctness slices. IP/host alternatives and delimiter/quoted/bracket captures require
+   such slices before they can enter that cohort.
+
+The remaining performance target applies only once the logs adapter has a native-primary cohort:
+
+Historic target benchmark after scratch-state reuse (`-wi 2 -i 3 -f 2 -prof gc`):
 
 | Engine | Score | Allocation |
 |---|---:|---:|
 | JDK regex | 16.210 ± 2.128 us/op | 7701.393 ± 154.805 B/op |
 | Reggie native token sequence | 2.353 ± 0.161 us/op | 7682.979 ± 61.845 B/op |
 
-Target coverage for the logs-backend benchmark remains:
+Target coverage for the logs-backend benchmark, once adapter rollout starts, remains:
 
 ```
 [Reggie] coverage: 2/2 native, 0/2 internal JDK fallback, 0/2 after atomic-strip, 0/2 supplier JDK fallback
