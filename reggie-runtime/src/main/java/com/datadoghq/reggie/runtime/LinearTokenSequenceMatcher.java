@@ -129,6 +129,44 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     return true;
   }
 
+  MatchWorkspace newMatchWorkspace() {
+    return newWorkspace();
+  }
+
+  int groupCount() {
+    return groupCount;
+  }
+
+  int groupIndex(String name) {
+    Objects.requireNonNull(name, "name");
+    Integer index = nameToIndex.get(name);
+    if (index == null) {
+      throw new IllegalArgumentException("unknown group name: " + name);
+    }
+    return index;
+  }
+
+  boolean matchIntoBounded(
+      CharSequence input,
+      int start,
+      int end,
+      int[] groupStarts,
+      int[] groupEnds,
+      MatchWorkspace workspace) {
+    Objects.requireNonNull(input, "input");
+    Objects.requireNonNull(groupStarts, "groupStarts");
+    Objects.requireNonNull(groupEnds, "groupEnds");
+    Objects.requireNonNull(workspace, "workspace");
+    validateRegion(input, start, end);
+    if (groupStarts.length <= groupCount || groupEnds.length <= groupCount) {
+      throw new IndexOutOfBoundsException("group arrays too small for " + groupCount + " groups");
+    }
+    if (!matchesAt(input, start, end, workspace, true)) return false;
+    System.arraycopy(workspace.starts, 0, groupStarts, 0, groupCount + 1);
+    System.arraycopy(workspace.ends, 0, groupEnds, 0, groupCount + 1);
+    return true;
+  }
+
   private MatchResult toMatchResult(String input, MatchWorkspace workspace) {
     if (!nameToIndex.isEmpty()) {
       return new NamedMatchResultImpl(
@@ -479,7 +517,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     return max;
   }
 
-  private static final class MatchWorkspace {
+  static final class MatchWorkspace {
     final int[] starts;
     final int[] ends;
     final int[][] optionalStarts;
