@@ -920,6 +920,55 @@ public class RuntimeCompiler {
     }
   }
 
+  enum NamedOnlyLtsRejection {
+    UNSUPPORTED_FLAGS,
+    SOURCE_INLINE_MODIFIER,
+    PARSE_FAILURE,
+    PLAN_UNAVAILABLE,
+    MISSING_NAMED_CAPTURE,
+    PROFILE_INELIGIBLE
+  }
+
+  record NamedOnlyLtsCompilation(
+      LinearTokenSequenceMatcher matcher, NamedOnlyLtsRejection rejection) {
+    NamedOnlyLtsCompilation {
+      if ((matcher == null) == (rejection == null)) {
+        throw new IllegalArgumentException("exactly one of matcher or rejection is required");
+      }
+    }
+
+    static NamedOnlyLtsCompilation admitted(LinearTokenSequenceMatcher matcher) {
+      return new NamedOnlyLtsCompilation(matcher, null);
+    }
+
+    static NamedOnlyLtsCompilation rejected(NamedOnlyLtsRejection rejection) {
+      return new NamedOnlyLtsCompilation(null, rejection);
+    }
+  }
+
+  static NamedOnlyLtsCompilation tryCompileNamedOnlyLinearTokenSequence(String source, int flags) {
+    if (flags != 0 && flags != ReggieFlags.DOTALL) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.UNSUPPORTED_FLAGS);
+    }
+    if (hasSourceInlineModifier(source)) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.SOURCE_INLINE_MODIFIER);
+    }
+    boolean dotAll = flags == ReggieFlags.DOTALL;
+    String parsePattern = dotAll ? "(?s)" + source : source;
+    try {
+      RegexParser parser = new RegexParser();
+      RegexNode ast =
+          CaptureProjection.preserveNamedAndSemanticCaptures(parser.parse(parsePattern));
+      Map<String, Integer> nameMap = parser.getGroupNameMap();
+      return admitNamedOnlyLinearTokenSequence(
+          source, ast, nameMap, new LinearTokenSequenceAdmission(true, dotAll));
+    } catch (RegexParser.ParseException e) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PARSE_FAILURE);
+    } catch (UnsupportedOperationException | IllegalStateException e) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
+    }
+  }
+
   private static ReggieMatcher tryCompileLinearTokenSequence(
       String pattern,
       RegexNode ast,
@@ -928,15 +977,30 @@ public class RuntimeCompiler {
     if (!admission.isEligible()) {
       return null;
     }
+    return admitNamedOnlyLinearTokenSequence(pattern, ast, nameMap, admission).matcher();
+  }
+
+  private static NamedOnlyLtsCompilation admitNamedOnlyLinearTokenSequence(
+      String pattern,
+      RegexNode ast,
+      Map<String, Integer> nameMap,
+      LinearTokenSequenceAdmission admission) {
     if ((pattern.contains(".*") || pattern.contains(".{")) && !admission.isDotAll()) {
-      return null;
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PROFILE_INELIGIBLE);
     }
-    return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
-        .filter(plan -> plan.coversCaptureIndexes(nameMap.values()))
-        .filter(plan -> isRuntimeExecutableLinearTokenSequence(admission.isDotAll(), plan))
-        .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
-        .map(m -> m.embedsNameMap() ? m : new NameEnrichingMatcher(m))
-        .orElse(null);
+    LinearTokenSequencePlan plan =
+        LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElse(null);
+    if (plan == null) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
+    }
+    if (!plan.coversCaptureIndexes(nameMap.values())) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.MISSING_NAMED_CAPTURE);
+    }
+    if (!isRuntimeExecutableLinearTokenSequence(admission.isDotAll(), plan)) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PROFILE_INELIGIBLE);
+    }
+    return NamedOnlyLtsCompilation.admitted(
+        new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap));
   }
 
   private static boolean isRuntimeExecutableLinearTokenSequence(
