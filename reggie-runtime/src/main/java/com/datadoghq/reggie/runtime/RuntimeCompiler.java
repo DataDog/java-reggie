@@ -929,6 +929,15 @@ public class RuntimeCompiler {
     PROFILE_INELIGIBLE
   }
 
+  enum FullCaptureLtsRejection {
+    UNSUPPORTED_FLAGS,
+    SOURCE_INLINE_MODIFIER,
+    PARSE_FAILURE,
+    PLAN_UNAVAILABLE,
+    MISSING_CAPTURE,
+    PROFILE_INELIGIBLE
+  }
+
   record NamedOnlyLtsCompilation(
       LinearTokenSequenceMatcher matcher, NamedOnlyLtsRejection rejection) {
     NamedOnlyLtsCompilation {
@@ -944,6 +953,248 @@ public class RuntimeCompiler {
     static NamedOnlyLtsCompilation rejected(NamedOnlyLtsRejection rejection) {
       return new NamedOnlyLtsCompilation(null, rejection);
     }
+  }
+
+  record FullCaptureLtsCompilation(
+      LinearTokenSequenceMatcher matcher, FullCaptureLtsRejection rejection) {
+    FullCaptureLtsCompilation {
+      if ((matcher == null) == (rejection == null)) {
+        throw new IllegalArgumentException("exactly one of matcher or rejection is required");
+      }
+    }
+
+    static FullCaptureLtsCompilation admitted(LinearTokenSequenceMatcher matcher) {
+      return new FullCaptureLtsCompilation(matcher, null);
+    }
+
+    static FullCaptureLtsCompilation rejected(FullCaptureLtsRejection rejection) {
+      return new FullCaptureLtsCompilation(null, rejection);
+    }
+  }
+
+  /**
+   * Direct native LTS admission that preserves every source capture only when every boundary is
+   * represented by one deterministic plan operation. This path must not use general compilation or
+   * its caches.
+   */
+  static FullCaptureLtsCompilation tryCompileFullCaptureLinearTokenSequence(
+      String source, int flags) {
+    if (flags != 0 && flags != ReggieFlags.DOTALL) {
+      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.UNSUPPORTED_FLAGS);
+    }
+    if (hasSourceInlineModifier(source)) {
+      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.SOURCE_INLINE_MODIFIER);
+    }
+    boolean dotAll = flags == ReggieFlags.DOTALL;
+    try {
+      RegexParser parser = new RegexParser();
+      RegexNode ast = parser.parse(dotAll ? "(?s)" + source : source);
+      CaptureProjection.FullCaptureLayout layout = CaptureProjection.fullCaptureLayout(ast);
+      if (layout == null) {
+        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.MISSING_CAPTURE);
+      }
+      LinearTokenSequencePlan plan =
+          LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElse(null);
+      if (plan == null) {
+        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PLAN_UNAVAILABLE);
+      }
+      if (!hasExactCaptureLayout(plan, layout.indexes()) || !hasOnlyDirectCaptureOps(plan)) {
+        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.MISSING_CAPTURE);
+      }
+      if (!hasDeterministicCaptureBoundaries(plan)
+          || !isRuntimeExecutableLinearTokenSequence(dotAll, plan)) {
+        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PROFILE_INELIGIBLE);
+      }
+      return FullCaptureLtsCompilation.admitted(
+          new LinearTokenSequenceMatcher(
+              source, plan, layout.groupCount(), parser.getGroupNameMap()));
+    } catch (RegexParser.ParseException e) {
+      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PARSE_FAILURE);
+    } catch (UnsupportedOperationException | IllegalStateException e) {
+      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PLAN_UNAVAILABLE);
+    }
+  }
+
+  private static boolean hasExactCaptureLayout(
+      LinearTokenSequencePlan plan, Set<Integer> requiredIndexes) {
+    if (!plan.coversCaptureIndexes(requiredIndexes)) return false;
+    Map<Integer, Integer> occurrences = new java.util.HashMap<>();
+    countCaptureOperations(plan.ops(), occurrences);
+    if (occurrences.size() != requiredIndexes.size()) return false;
+    for (int index : requiredIndexes) {
+      if (occurrences.getOrDefault(index, 0) != 1) return false;
+    }
+    return true;
+  }
+
+  private static void countCaptureOperations(
+      java.util.List<LinearTokenSequencePlan.Op> ops, Map<Integer, Integer> occurrences) {
+    for (LinearTokenSequencePlan.Op op : ops) {
+      if (op.groupNumber() > 0) occurrences.merge(op.groupNumber(), 1, Integer::sum);
+      countCaptureOperations(op.children(), occurrences);
+    }
+  }
+
+  /** Declines categorizer transforms that do not retain a direct source-group boundary witness. */
+  private static boolean hasOnlyDirectCaptureOps(LinearTokenSequencePlan plan) {
+    return hasOnlyDirectCaptureOps(plan.ops());
+  }
+
+  private static boolean hasOnlyDirectCaptureOps(java.util.List<LinearTokenSequencePlan.Op> ops) {
+    for (LinearTokenSequencePlan.Op op : ops) {
+      if (op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_UNTIL_DELIMITER
+          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_QUOTED_UNTIL_DELIMITER
+          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_QUOTED_NON_SPACE
+          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_BRACKETED_WORD_AFTER_SKIP
+          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_IP_OR_HOST) {
+        return false;
+      }
+      if (!hasOnlyDirectCaptureOps(op.children())) return false;
+    }
+    return true;
+  }
+
+  private static boolean hasDeterministicCaptureBoundaries(LinearTokenSequencePlan plan) {
+    return hasDeterministicCaptureBoundaries(plan.ops());
+  }
+
+  private static boolean hasDeterministicCaptureBoundaries(
+      java.util.List<LinearTokenSequencePlan.Op> ops) {
+    for (int index = 0; index < ops.size(); index++) {
+      LinearTokenSequencePlan.Op op = ops.get(index);
+      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE) {
+        LinearTokenSequencePlan.Op successor = index + 1 < ops.size() ? ops.get(index + 1) : null;
+        if (!isProvenOptionalHttpVersion(ops, index)
+            || !hasDeterministicCaptureBoundaries(op.children(), successor)) return false;
+        continue;
+      }
+      if (!op.children().isEmpty() && !hasDeterministicCaptureBoundaries(op.children()))
+        return false;
+      if (!isVariableWidth(op) || index == ops.size() - 1) continue;
+      LinearTokenSequencePlan.Op next = ops.get(index + 1);
+      if (next.groupNumber() > 0) return false;
+      if (next.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE) {
+        if (next.children().isEmpty()
+            || next.children().get(0).kind() != LinearTokenSequencePlan.OpKind.LITERAL
+            || index + 2 == ops.size()
+            || !isBoundary(ops.get(index + 2))
+            || !isSafeLiteralBoundary(op, next.children().get(0).literal())) return false;
+      } else if (!isSafeBoundary(op, next)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean isProvenOptionalHttpVersion(
+      java.util.List<LinearTokenSequencePlan.Op> ops, int optionalIndex) {
+    if (optionalIndex + 1 >= ops.size()) return false;
+    LinearTokenSequencePlan.Op optional = ops.get(optionalIndex);
+    LinearTokenSequencePlan.Op successor = ops.get(optionalIndex + 1);
+    if (successor.kind() != LinearTokenSequencePlan.OpKind.LITERAL
+        || !successor.literal().startsWith("\"")
+        || optional.children().size() != 2) return false;
+    LinearTokenSequencePlan.Op prefix = optional.children().get(0);
+    LinearTokenSequencePlan.Op version = optional.children().get(1);
+    return prefix.kind() == LinearTokenSequencePlan.OpKind.LITERAL
+        && " HTTP/".equals(prefix.literal())
+        && version.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_DECIMAL_NUMBER;
+  }
+
+  private static boolean hasDeterministicCaptureBoundaries(
+      java.util.List<LinearTokenSequencePlan.Op> ops, LinearTokenSequencePlan.Op successor) {
+    if (!hasDeterministicCaptureBoundaries(ops)) return false;
+    if (successor == null || ops.isEmpty()) return true;
+    LinearTokenSequencePlan.Op last = ops.get(ops.size() - 1);
+    return !isVariableWidth(last) || isSafeBoundary(last, successor);
+  }
+
+  private static boolean isVariableWidth(LinearTokenSequencePlan.Op op) {
+    return switch (op.kind()) {
+      case CAPTURE_NON_SPACE,
+          CAPTURE_DIGITS,
+          CAPTURE_SIGNED_INTEGER,
+          CAPTURE_DECIMAL_NUMBER,
+          CAPTURE_SIGNED_DECIMAL_NUMBER,
+          CAPTURE_WORD,
+          CAPTURE_UNTIL_DELIMITER,
+          CAPTURE_QUOTED_UNTIL_DELIMITER,
+          CAPTURE_QUOTED_NON_SPACE,
+          CAPTURE_IP_OR_HOST,
+          CAPTURE_SIGNED_INTEGER_OR_DASH,
+          CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH,
+          CAPTURE_BRACKETED_WORD_AFTER_SKIP,
+          WHITESPACE_PLUS,
+          SKIP_ANY,
+          SKIP_ANY_EXCEPT_NEWLINE ->
+          true;
+      default -> false;
+    };
+  }
+
+  private static boolean isSafeBoundary(
+      LinearTokenSequencePlan.Op variable, LinearTokenSequencePlan.Op next) {
+    if (next.kind() == LinearTokenSequencePlan.OpKind.WHITESPACE_PLUS) {
+      return consumesNonWhitespace(variable);
+    }
+    return next.kind() == LinearTokenSequencePlan.OpKind.LITERAL
+        && isSafeLiteralBoundary(variable, next.literal());
+  }
+
+  private static boolean isSafeLiteralBoundary(
+      LinearTokenSequencePlan.Op variable, String literal) {
+    if (literal == null || literal.isEmpty()) return false;
+    char boundary = literal.charAt(0);
+    return switch (variable.kind()) {
+      case CAPTURE_NON_SPACE, CAPTURE_IP_OR_HOST, CAPTURE_QUOTED_NON_SPACE ->
+          isWhitespace(boundary);
+      case CAPTURE_DIGITS,
+          CAPTURE_SIGNED_INTEGER,
+          CAPTURE_SIGNED_INTEGER_OR_DASH,
+          CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH ->
+          !isDigit(boundary);
+      case CAPTURE_DECIMAL_NUMBER, CAPTURE_SIGNED_DECIMAL_NUMBER ->
+          !isDigit(boundary) && boundary != '.';
+      case CAPTURE_WORD -> !isWord(boundary);
+      case WHITESPACE_PLUS -> !isWhitespace(boundary);
+      case CAPTURE_UNTIL_DELIMITER -> boundary == variable.delimiter();
+      case CAPTURE_QUOTED_UNTIL_DELIMITER, CAPTURE_BRACKETED_WORD_AFTER_SKIP -> true;
+      default -> false;
+    };
+  }
+
+  private static boolean consumesNonWhitespace(LinearTokenSequencePlan.Op op) {
+    return switch (op.kind()) {
+      case CAPTURE_NON_SPACE,
+          CAPTURE_DIGITS,
+          CAPTURE_SIGNED_INTEGER,
+          CAPTURE_DECIMAL_NUMBER,
+          CAPTURE_SIGNED_DECIMAL_NUMBER,
+          CAPTURE_WORD,
+          CAPTURE_IP_OR_HOST,
+          CAPTURE_SIGNED_INTEGER_OR_DASH,
+          CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH,
+          CAPTURE_QUOTED_NON_SPACE ->
+          true;
+      default -> false;
+    };
+  }
+
+  private static boolean isWhitespace(char ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\u000B' || ch == '\f' || ch == '\r';
+  }
+
+  private static boolean isDigit(char ch) {
+    return ch >= '0' && ch <= '9';
+  }
+
+  private static boolean isWord(char ch) {
+    return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || isDigit(ch) || ch == '_';
+  }
+
+  private static boolean isBoundary(LinearTokenSequencePlan.Op op) {
+    return op.kind() == LinearTokenSequencePlan.OpKind.WHITESPACE_PLUS
+        || op.kind() == LinearTokenSequencePlan.OpKind.LITERAL && !op.literal().isEmpty();
   }
 
   static NamedOnlyLtsCompilation tryCompileNamedOnlyLinearTokenSequence(String source, int flags) {
