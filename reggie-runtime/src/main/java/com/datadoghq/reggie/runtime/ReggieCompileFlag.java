@@ -17,7 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import com.datadoghq.reggie.ReggieFlags;
 
-/** Flags supported by the native named linear-token-sequence compilation profile. */
+/** Flags supported by the native full-capture linear-token-sequence compilation profile. */
 public enum ReggieCompileFlag {
   NONE(ReggieFlags.NONE),
   DOTALL(ReggieFlags.DOTALL);

@@ -17,7 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import java.util.Objects;
 
-/** Immutable outcome of a native named linear-token-sequence compilation request. */
+/** Immutable outcome of a native full-capture linear-token-sequence compilation request. */
 public final class ReggieCompilationResult {
   private final ReggieCompiledPattern pattern;
   private final ReggieCompilationRejection rejection;

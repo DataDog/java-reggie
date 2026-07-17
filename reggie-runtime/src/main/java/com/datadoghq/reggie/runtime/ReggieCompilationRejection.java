@@ -15,7 +15,7 @@
  */
 package com.datadoghq.reggie.runtime;
 
-/** Reason the native named linear-token-sequence profile did not admit a request. */
+/** Reason the native full-capture linear-token-sequence profile did not admit a request. */
 public enum ReggieCompilationRejection {
   UNSUPPORTED_FLAGS,
   SOURCE_TOO_LONG,
@@ -23,5 +23,6 @@ public enum ReggieCompilationRejection {
   PARSE_FAILURE,
   PLAN_UNAVAILABLE,
   MISSING_NAMED_CAPTURE,
+  MISSING_CAPTURE,
   PROFILE_INELIGIBLE
 }

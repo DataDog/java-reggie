@@ -68,6 +68,25 @@ public final class ReggieMatchState {
     return ends[0];
   }
 
+  /** Returns the number of source capture groups, excluding group zero. */
+  public int groupCount() {
+    return matcher.groupCount();
+  }
+
+  /** Returns the start offset of a numbered source capture group. */
+  public int start(int group) {
+    requireMatched();
+    requireGroupIndex(group);
+    return starts[group];
+  }
+
+  /** Returns the end offset of a numbered source capture group. */
+  public int end(int group) {
+    requireMatched();
+    requireGroupIndex(group);
+    return ends[group];
+  }
+
   public int start(String name) {
     requireMatched();
     return starts[matcher.groupIndex(name)];
@@ -88,6 +107,12 @@ public final class ReggieMatchState {
   private void requireMatched() {
     if (!matched) {
       throw new IllegalStateException("there is no current match");
+    }
+  }
+
+  private void requireGroupIndex(int group) {
+    if (group < 0 || group > matcher.groupCount()) {
+      throw new IndexOutOfBoundsException("invalid group index: " + group);
     }
   }
 }

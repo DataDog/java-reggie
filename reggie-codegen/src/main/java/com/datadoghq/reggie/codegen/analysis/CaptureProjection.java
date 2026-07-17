@@ -19,6 +19,7 @@ import com.datadoghq.reggie.codegen.ast.*;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /** AST-level capture projection utilities. */
@@ -34,6 +35,90 @@ public final class CaptureProjection {
     Set<Integer> semanticGroups = new HashSet<>();
     collectSemanticGroupReferences(ast, semanticGroups);
     return rewrite(ast, semanticGroups);
+  }
+
+  /**
+   * Returns the source capture layout when every numbered capture has one unambiguous source
+   * definition suitable for the conservative native full-capture profile.
+   *
+   * <p>This deliberately declines branch-reset and non-empty alternatives: their numeric capture
+   * layout is not a single canonical source-to-operation mapping.
+   */
+  public static FullCaptureLayout fullCaptureLayout(RegexNode ast) {
+    Objects.requireNonNull(ast, "ast");
+    Set<Integer> indexes = new HashSet<>();
+    if (!collectFullCaptureLayout(ast, indexes)) return null;
+    int groupCount = indexes.stream().mapToInt(Integer::intValue).max().orElse(0);
+    for (int index = 1; index <= groupCount; index++) {
+      if (!indexes.contains(index)) return null;
+    }
+    return new FullCaptureLayout(groupCount, indexes);
+  }
+
+  /** Canonical source group-number layout for the direct native full-capture profile. */
+  public record FullCaptureLayout(int groupCount, Set<Integer> indexes) {
+    public FullCaptureLayout {
+      indexes = Set.copyOf(indexes);
+    }
+  }
+
+  private static boolean collectFullCaptureLayout(RegexNode node, Set<Integer> indexes) {
+    if (node instanceof GroupNode group) {
+      if (!group.capturing) return collectFullCaptureLayout(group.child, indexes);
+      return group.groupNumber > 0
+          && indexes.add(group.groupNumber)
+          && isDirectCaptureSource(group.child);
+    }
+    if (node instanceof ConcatNode concat) {
+      for (RegexNode child : concat.children) {
+        if (!collectFullCaptureLayout(child, indexes)) return false;
+      }
+      return true;
+    }
+    if (node instanceof QuantifierNode quantifier) {
+      return collectFullCaptureLayout(quantifier.child, indexes);
+    }
+    if (node instanceof AlternationNode alternation) {
+      if (alternation.alternatives.size() != 2) return false;
+      RegexNode present = null;
+      for (RegexNode alternative : alternation.alternatives) {
+        if (isEmpty(alternative)) continue;
+        if (present != null) return false;
+        present = alternative;
+      }
+      return present != null && collectFullCaptureLayout(present, indexes);
+    }
+    if (node instanceof BranchResetNode
+        || node instanceof AssertionNode
+        || node instanceof ConditionalNode
+        || node instanceof SubroutineNode
+        || node instanceof BackreferenceNode) return false;
+    return true;
+  }
+
+  private static boolean isDirectCaptureSource(RegexNode node) {
+    if (node instanceof GroupNode group) {
+      return !group.capturing && isDirectCaptureSource(group.child);
+    }
+    if (node instanceof AlternationNode || node instanceof BranchResetNode) return false;
+    return !containsCapture(node);
+  }
+
+  private static boolean containsCapture(RegexNode node) {
+    if (node instanceof GroupNode group) return group.capturing || containsCapture(group.child);
+    if (node instanceof QuantifierNode quantifier) return containsCapture(quantifier.child);
+    if (node instanceof ConcatNode concat) {
+      return concat.children.stream().anyMatch(CaptureProjection::containsCapture);
+    }
+    if (node instanceof AlternationNode alternation) {
+      return alternation.alternatives.stream().anyMatch(CaptureProjection::containsCapture);
+    }
+    return node instanceof BranchResetNode;
+  }
+
+  private static boolean isEmpty(RegexNode node) {
+    return node instanceof LiteralNode literal && literal.ch == 0
+        || node instanceof ConcatNode concat && concat.children.isEmpty();
   }
 
   private static void collectSemanticGroupReferences(RegexNode node, Set<Integer> semanticGroups) {
