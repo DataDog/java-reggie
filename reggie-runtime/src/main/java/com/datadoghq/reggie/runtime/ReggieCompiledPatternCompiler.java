@@ -25,40 +25,74 @@ import java.util.function.Function;
 
 /** Bounded instance-owned cache for native named linear-token-sequence compilation. */
 public final class ReggieCompiledPatternCompiler {
+  private static final ReggieNativeCompileBudget DEFAULT_BUDGET =
+      new ReggieNativeCompileBudget(16_384);
   private final int maximumEntries;
+  private final ReggieNativeCompileBudget budget;
   private final Map<ReggieCompileRequest, ReggieCompiledPattern> cache =
       new LinkedHashMap<>(16, 0.75f, true);
   private final ConcurrentHashMap<ReggieCompileRequest, CompletableFuture<ReggieCompilationResult>>
       inFlight = new ConcurrentHashMap<>();
   private final Function<ReggieCompileRequest, ReggieCompilationResult> admission;
   private final Runnable waiterArrived;
+  private int inFlightRegistrations;
 
+  /**
+   * Creates a compiler with the supplied cache capacity and a 16,384 UTF-16-code-unit source
+   * budget.
+   */
   public ReggieCompiledPatternCompiler(int maximumEntries) {
-    this(maximumEntries, ReggieCompiledPattern::tryCompileNative);
+    this(maximumEntries, DEFAULT_BUDGET, ReggieCompiledPattern::tryCompileNative);
+  }
+
+  public ReggieCompiledPatternCompiler(int maximumEntries, ReggieNativeCompileBudget budget) {
+    this(maximumEntries, budget, ReggieCompiledPattern::tryCompileNative);
   }
 
   ReggieCompiledPatternCompiler(
       int maximumEntries, Function<ReggieCompileRequest, ReggieCompilationResult> admission) {
-    this(maximumEntries, admission, () -> {});
+    this(maximumEntries, DEFAULT_BUDGET, admission, () -> {});
+  }
+
+  ReggieCompiledPatternCompiler(
+      int maximumEntries,
+      ReggieNativeCompileBudget budget,
+      Function<ReggieCompileRequest, ReggieCompilationResult> admission) {
+    this(maximumEntries, budget, admission, () -> {});
   }
 
   ReggieCompiledPatternCompiler(
       int maximumEntries,
       Function<ReggieCompileRequest, ReggieCompilationResult> admission,
       Runnable waiterArrived) {
+    this(maximumEntries, DEFAULT_BUDGET, admission, waiterArrived);
+  }
+
+  ReggieCompiledPatternCompiler(
+      int maximumEntries,
+      ReggieNativeCompileBudget budget,
+      Function<ReggieCompileRequest, ReggieCompilationResult> admission,
+      Runnable waiterArrived) {
     if (maximumEntries <= 0) throw new IllegalArgumentException("maximumEntries must be positive");
     this.maximumEntries = maximumEntries;
+    this.budget = Objects.requireNonNull(budget, "budget");
     this.admission = Objects.requireNonNull(admission, "admission");
     this.waiterArrived = Objects.requireNonNull(waiterArrived, "waiterArrived");
   }
 
   public ReggieCompilationResult tryCompile(ReggieCompileRequest request) {
     Objects.requireNonNull(request, "request");
+    if (request.source().length() > budget.maximumSourceLength()) {
+      return ReggieCompilationResult.rejected(ReggieCompilationRejection.SOURCE_TOO_LONG);
+    }
     synchronized (cache) {
       ReggieCompiledPattern cached = cache.get(request);
       if (cached != null) return ReggieCompilationResult.admitted(cached);
     }
     CompletableFuture<ReggieCompilationResult> mine = new CompletableFuture<>();
+    synchronized (this) {
+      inFlightRegistrations++;
+    }
     CompletableFuture<ReggieCompilationResult> existing = inFlight.putIfAbsent(request, mine);
     if (existing != null) {
       waiterArrived.run();
@@ -101,6 +135,12 @@ public final class ReggieCompiledPatternCompiler {
   public void clearCache() {
     synchronized (cache) {
       cache.clear();
+    }
+  }
+
+  int inFlightRegistrations() {
+    synchronized (this) {
+      return inFlightRegistrations;
     }
   }
 
