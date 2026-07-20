@@ -75,6 +75,14 @@ class LinearTokenSequencePlanTest {
   }
 
   @Test
+  void coverageRecursesThroughMultipleNestedOptionalLevels() throws Exception {
+    LinearTokenSequencePlan plan = planFor("(?:(?:(?:(?<deep>\\d+))|)|)");
+
+    assertTrue(plan.coversCaptureIndexes(List.of(1)));
+    assertFalse(plan.coversCaptureIndexes(List.of(2)));
+  }
+
+  @Test
   void coverageRequiresEveryNamedCaptureNotOnlyTheLargestGroupNumber() throws Exception {
     RegexParser parser = new RegexParser();
     RegexNode ast = parser.parse("(?<outer>(?:-|(?<inner>[+-]?\\d+)))");
