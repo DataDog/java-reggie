@@ -4,8 +4,8 @@ plugins {
     // NoClassDefFoundError on com.sun.tools.javac.tree.JCTree$JCAnyPattern
     // when formatting any file that needs reformatting (JDK 11/17/21 tested).
     // Bump only after confirming spotlessApply works on a real file again.
-    id 'com.diffplug.spotless' version '8.2.1'
-    id 'com.vanniktech.maven.publish' version '0.36.0' apply false
+    id 'com.diffplug.spotless' version '8.8.0'
+    id 'com.vanniktech.maven.publish' version '0.37.0' apply false
     id 'io.github.gradle-nexus.publish-plugin' version '2.0.0'
 }
 
