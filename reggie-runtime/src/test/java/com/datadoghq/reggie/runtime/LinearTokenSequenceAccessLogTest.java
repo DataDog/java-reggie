@@ -375,39 +375,4 @@ class LinearTokenSequenceAccessLogTest {
       throw new AssertionError(e);
     }
   }
-
-  private static final class RangeGuardCharSequence implements CharSequence {
-    private final String value;
-    private final int start;
-    private final int end;
-
-    RangeGuardCharSequence(String value, int start, int end) {
-      this.value = value;
-      this.start = start;
-      this.end = end;
-    }
-
-    @Override
-    public int length() {
-      return value.length();
-    }
-
-    @Override
-    public char charAt(int index) {
-      if (index < start || index >= end) {
-        throw new AssertionError("read outside bounded region: " + index);
-      }
-      return value.charAt(index);
-    }
-
-    @Override
-    public CharSequence subSequence(int start, int end) {
-      throw new AssertionError("subSequence must not be called while matching");
-    }
-
-    @Override
-    public String toString() {
-      throw new AssertionError("toString must not be called while matching");
-    }
-  }
 }

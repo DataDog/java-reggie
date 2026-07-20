@@ -62,6 +62,13 @@ class LinearTokenSequenceMatcherTest {
   }
 
   @Test
+  void quotedDelimiterCaptureFailsWhenClosingDelimiterIsMissing() throws Exception {
+    ReggieMatcher matcher = matcherFor("referer=\"(?<referer>[^\"]*)\"");
+
+    assertNull(matcher.match("referer=\"https://example.com/index.html"));
+  }
+
+  @Test
   void matchReturnsNullWhenSequenceDoesNotMatch() throws Exception {
     ReggieMatcher matcher = matcherFor("host=(?<host>\\S+) status=(?<status>[+-]?\\d+)");
 
@@ -287,6 +294,64 @@ class LinearTokenSequenceMatcherTest {
   }
 
   @Test
+  void matchBoundedMaterializesOnlyTheRequestedRegionOnSuccess() throws Exception {
+    LinearTokenSequenceMatcher matcher =
+        (LinearTokenSequenceMatcher) matcherFor("(?<host>\\S+)(?: (?<status>\\d+)|)", 2);
+    String source = "xxapiyy trailing garbage that must never be read or materialized";
+    int end = 5;
+    CharSequence input = new BoundedRegionCharSequence(source, end);
+
+    MatchResult result = matcher.matchBounded(input, 2, end);
+
+    assertNotNull(result);
+    assertEquals(2, result.start());
+    assertEquals(end, result.end());
+    assertEquals("api", result.group("host"));
+  }
+
+  /**
+   * CharSequence test double that only permits charAt within {@code [0, end)} and only permits
+   * subSequence/toString for exactly {@code [0, end)} — used to prove matchBounded materializes
+   * just the requested region rather than the entire backing sequence.
+   */
+  private static final class BoundedRegionCharSequence implements CharSequence {
+    private final String value;
+    private final int end;
+
+    BoundedRegionCharSequence(String value, int end) {
+      this.value = value;
+      this.end = end;
+    }
+
+    @Override
+    public int length() {
+      return value.length();
+    }
+
+    @Override
+    public char charAt(int index) {
+      if (index < 0 || index >= end) {
+        throw new AssertionError("read outside bounded region: " + index);
+      }
+      return value.charAt(index);
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int subEnd) {
+      if (start != 0 || subEnd != end) {
+        throw new AssertionError(
+            "subSequence outside bounded region: [" + start + ", " + subEnd + ")");
+      }
+      return value.substring(start, subEnd);
+    }
+
+    @Override
+    public String toString() {
+      throw new AssertionError("toString must not be called directly; use subSequence(0, end)");
+    }
+  }
+
+  @Test
   void capturedDashAlternativeRecordsNamedGroupSpan() throws Exception {
     ReggieMatcher matcher = Reggie.compile("(?<bytes>(?:-|[+-]?\\d+))", NAMED_ONLY_OPTIONS);
 
@@ -442,25 +507,6 @@ class LinearTokenSequenceMatcherTest {
     @Override
     public String toString() {
       throw new AssertionError("toString must not be called while matching");
-    }
-  }
-
-  private static final class RangeGuardCharSequence extends ConversionFailingCharSequence {
-    private final int allowedStart;
-    private final int allowedEnd;
-
-    RangeGuardCharSequence(String value, int allowedStart, int allowedEnd) {
-      super(value);
-      this.allowedStart = allowedStart;
-      this.allowedEnd = allowedEnd;
-    }
-
-    @Override
-    public char charAt(int index) {
-      if (index < allowedStart || index >= allowedEnd) {
-        throw new AssertionError("read outside bounded region: " + index);
-      }
-      return super.charAt(index);
     }
   }
 

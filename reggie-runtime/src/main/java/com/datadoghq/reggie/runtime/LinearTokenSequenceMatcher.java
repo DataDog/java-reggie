@@ -25,6 +25,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   private final LinearTokenSequencePlan plan;
   private final int groupCount;
   private final int optionalDepth;
+  private final ThreadLocal<MatchWorkspace> workspaceHolder;
 
   LinearTokenSequenceMatcher(
       String pattern,
@@ -36,6 +37,8 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     this.groupCount = groupCount;
     this.nameToIndex = Map.copyOf(nameToIndex);
     this.optionalDepth = maxOptionalDepth(plan.ops());
+    this.workspaceHolder =
+        ThreadLocal.withInitial(() -> new MatchWorkspace(this.groupCount, this.optionalDepth));
   }
 
   @Override
@@ -46,7 +49,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   @Override
   public boolean matches(String input) {
     Objects.requireNonNull(input, "input");
-    return matchesAt(input, 0, input.length(), newWorkspace(), true);
+    return matchesAt(input, 0, input.length(), workspaceHolder.get(), true);
   }
 
   @Override
@@ -58,7 +61,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public int findFrom(String input, int start) {
     Objects.requireNonNull(input, "input");
     if (start < 0 || start > input.length()) return -1;
-    MatchWorkspace workspace = newWorkspace();
+    MatchWorkspace workspace = workspaceHolder.get();
     for (int pos = start; pos <= input.length(); pos++) {
       if (matchesAt(input, pos, input.length(), workspace, false)) return pos;
     }
@@ -68,7 +71,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   @Override
   public MatchResult match(String input) {
     Objects.requireNonNull(input, "input");
-    MatchWorkspace workspace = newWorkspace();
+    MatchWorkspace workspace = workspaceHolder.get();
     if (!matchesAt(input, 0, input.length(), workspace, true)) return null;
     return toMatchResult(input, workspace);
   }
@@ -77,16 +80,16 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public boolean matchesBounded(CharSequence input, int start, int end) {
     Objects.requireNonNull(input, "input");
     if (!isValidRegion(input, start, end)) return false;
-    return matchesAt(input, start, end, newWorkspace(), true);
+    return matchesAt(input, start, end, workspaceHolder.get(), true);
   }
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
     Objects.requireNonNull(input, "input");
     if (!isValidRegion(input, start, end)) return null;
-    MatchWorkspace workspace = newWorkspace();
+    MatchWorkspace workspace = workspaceHolder.get();
     if (!matchesAt(input, start, end, workspace, true)) return null;
-    return toMatchResult(input.toString(), workspace);
+    return toMatchResult(input.subSequence(0, end).toString(), workspace);
   }
 
   @Override
@@ -98,7 +101,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public MatchResult findMatchFrom(String input, int start) {
     Objects.requireNonNull(input, "input");
     if (start < 0 || start > input.length()) return null;
-    MatchWorkspace workspace = newWorkspace();
+    MatchWorkspace workspace = workspaceHolder.get();
     for (int pos = start; pos <= input.length(); pos++) {
       if (!matchesAt(input, pos, input.length(), workspace, false)) {
         continue;
@@ -122,7 +125,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     if (groupStarts.length <= groupCount || groupEnds.length <= groupCount) {
       throw new IndexOutOfBoundsException("group arrays too small for " + groupCount + " groups");
     }
-    MatchWorkspace workspace = newWorkspace();
+    MatchWorkspace workspace = workspaceHolder.get();
     if (!matchesAt(input, start, end, workspace, true)) return false;
     System.arraycopy(workspace.starts, 0, groupStarts, 0, groupCount + 1);
     System.arraycopy(workspace.ends, 0, groupEnds, 0, groupCount + 1);
@@ -130,11 +133,14 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private MatchResult toMatchResult(String input, MatchWorkspace workspace) {
+    // workspace is reused across calls on the same thread; MatchResultImpl/NamedMatchResultImpl
+    // hold onto the arrays they're given, so a defensive copy is required here.
+    int[] starts = Arrays.copyOf(workspace.starts, workspace.starts.length);
+    int[] ends = Arrays.copyOf(workspace.ends, workspace.ends.length);
     if (!nameToIndex.isEmpty()) {
-      return new NamedMatchResultImpl(
-          input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
     }
-    return new MatchResultImpl(input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
   }
 
   private static void validateRegion(CharSequence input, int start, int end) {
@@ -145,10 +151,6 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   private static boolean isValidRegion(CharSequence input, int start, int end) {
     return start >= 0 && end >= start && end <= input.length();
-  }
-
-  private MatchWorkspace newWorkspace() {
-    return new MatchWorkspace(groupCount, optionalDepth);
   }
 
   private boolean matchesAt(
@@ -499,6 +501,9 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   private static boolean startsWith(CharSequence input, int pos, int regionEnd, String prefix) {
     if (pos < 0 || pos + prefix.length() > regionEnd) return false;
+    if (input instanceof String s) {
+      return s.startsWith(prefix, pos);
+    }
     for (int i = 0; i < prefix.length(); i++) {
       if (input.charAt(pos + i) != prefix.charAt(i)) return false;
     }
@@ -506,6 +511,10 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static int findChar(CharSequence input, int pos, int regionEnd, char target) {
+    if (input instanceof String s) {
+      int idx = s.indexOf(target, pos);
+      return idx >= 0 && idx < regionEnd ? idx : regionEnd;
+    }
     for (int i = pos; i < regionEnd; i++) {
       if (input.charAt(i) == target) return i;
     }
@@ -513,6 +522,12 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static int findLastLiteral(CharSequence input, int start, int end, String literal) {
+    if (input instanceof String s) {
+      int fromIndex = end - literal.length();
+      if (fromIndex < start) return -1;
+      int idx = s.lastIndexOf(literal, fromIndex);
+      return idx >= start ? idx : -1;
+    }
     int last = -1;
     for (int pos = start; pos + literal.length() <= end; pos++) {
       if (startsWith(input, pos, end, literal)) last = pos;
@@ -521,6 +536,12 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static int consumeToEnd(CharSequence input, int pos, int regionEnd) {
+    // String#charAt has no observable side effects, so the validation walk below — which exists
+    // to surface CharSequence implementations that throw or misbehave on out-of-range access —
+    // is unnecessary overhead for the common String case.
+    if (input instanceof String) {
+      return regionEnd;
+    }
     while (pos < regionEnd) {
       input.charAt(pos++);
     }
