@@ -94,11 +94,8 @@ class LinearTokenSequenceMatcherConcurrencyTest {
             });
       }
 
-      try {
-        assertTrue(ready.await(10, TimeUnit.SECONDS), "workers did not become ready");
-      } finally {
-        start.countDown();
-      }
+      assertTrue(ready.await(10, TimeUnit.SECONDS), "workers did not become ready");
+      start.countDown();
       assertTrue(done.await(30, TimeUnit.SECONDS), "workers did not finish");
     }
     assertTrue(failures.isEmpty(), () -> "concurrent LTS failure: " + failures.peek());
@@ -153,11 +150,8 @@ class LinearTokenSequenceMatcherConcurrencyTest {
             });
       }
 
-      try {
-        assertTrue(ready.await(10, TimeUnit.SECONDS), "workers did not become ready");
-      } finally {
-        start.countDown();
-      }
+      assertTrue(ready.await(10, TimeUnit.SECONDS), "workers did not become ready");
+      start.countDown();
       assertTrue(done.await(30, TimeUnit.SECONDS), "workers did not finish");
     }
     assertTrue(
