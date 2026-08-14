@@ -25,6 +25,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   private final LinearTokenSequencePlan plan;
   private final int groupCount;
   private final int optionalDepth;
+  private final ThreadLocal<MatchWorkspace> workspace;
+
+  private MatchWorkspace workspace() {
+    return workspace.get();
+  }
 
   LinearTokenSequenceMatcher(
       String pattern,
@@ -36,6 +41,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     this.groupCount = groupCount;
     this.nameToIndex = Map.copyOf(nameToIndex);
     this.optionalDepth = maxOptionalDepth(plan.ops());
+    this.workspace = ThreadLocal.withInitial(() -> new MatchWorkspace(groupCount, optionalDepth));
   }
 
   @Override
@@ -46,7 +52,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   @Override
   public boolean matches(String input) {
     Objects.requireNonNull(input, "input");
-    return matchesAt(input, 0, newWorkspace(), true);
+    return matchesAt(input, 0, workspace(), true);
   }
 
   @Override
@@ -58,9 +64,9 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public int findFrom(String input, int start) {
     Objects.requireNonNull(input, "input");
     if (start < 0 || start > input.length()) return -1;
-    MatchWorkspace workspace = newWorkspace();
+    MatchWorkspace ws = workspace();
     for (int pos = start; pos <= input.length(); pos++) {
-      if (matchesAt(input, pos, workspace, false)) return pos;
+      if (matchesAt(input, pos, ws, false)) return pos;
     }
     return -1;
   }
@@ -68,13 +74,14 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   @Override
   public MatchResult match(String input) {
     Objects.requireNonNull(input, "input");
-    MatchWorkspace workspace = newWorkspace();
-    if (!matchesAt(input, 0, workspace, true)) return null;
+    MatchWorkspace ws = workspace();
+    if (!matchesAt(input, 0, ws, true)) return null;
+    int[] starts = Arrays.copyOf(ws.starts, groupCount + 1);
+    int[] ends = Arrays.copyOf(ws.ends, groupCount + 1);
     if (!nameToIndex.isEmpty()) {
-      return new NamedMatchResultImpl(
-          input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
     }
-    return new MatchResultImpl(input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
   }
 
   @Override
@@ -102,16 +109,17 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public MatchResult findMatchFrom(String input, int start) {
     Objects.requireNonNull(input, "input");
     if (start < 0 || start > input.length()) return null;
-    MatchWorkspace workspace = newWorkspace();
+    MatchWorkspace ws = workspace();
     for (int pos = start; pos <= input.length(); pos++) {
-      if (!matchesAt(input, pos, workspace, false)) {
+      if (!matchesAt(input, pos, ws, false)) {
         continue;
       }
+      int[] starts = Arrays.copyOf(ws.starts, groupCount + 1);
+      int[] ends = Arrays.copyOf(ws.ends, groupCount + 1);
       if (!nameToIndex.isEmpty()) {
-        return new NamedMatchResultImpl(
-            input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+        return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
       }
-      return new MatchResultImpl(input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+      return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
     }
     return null;
   }
@@ -124,15 +132,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     if (groupStarts.length <= groupCount || groupEnds.length <= groupCount) {
       throw new IndexOutOfBoundsException("group arrays too small for " + groupCount + " groups");
     }
-    MatchWorkspace workspace = newWorkspace();
-    if (!matchesAt(input, 0, workspace, true)) return false;
-    System.arraycopy(workspace.starts, 0, groupStarts, 0, groupCount + 1);
-    System.arraycopy(workspace.ends, 0, groupEnds, 0, groupCount + 1);
+    MatchWorkspace ws = workspace();
+    if (!matchesAt(input, 0, ws, true)) return false;
+    System.arraycopy(ws.starts, 0, groupStarts, 0, groupCount + 1);
+    System.arraycopy(ws.ends, 0, groupEnds, 0, groupCount + 1);
     return true;
-  }
-
-  private MatchWorkspace newWorkspace() {
-    return new MatchWorkspace(groupCount, optionalDepth);
   }
 
   private boolean matchesAt(String input, int offset, MatchWorkspace workspace, boolean fullMatch) {
