@@ -666,7 +666,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static boolean isJdkWhitespace(char ch) {
-    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\u000B' || ch == '\f' || ch == '\r';
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\f' || ch == '\r';
   }
 
   private static boolean isDigit(char ch) {

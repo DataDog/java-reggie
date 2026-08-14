@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.datadoghq.reggie.Reggie;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -77,14 +78,11 @@ class ReggieCompiledPatternTest {
     assertThrows(NullPointerException.class, () -> new ReggieCompileRequest("pattern", null));
 
     ReggieMatchState state =
-        ReggieCompiledPattern.tryCompile(
-                new ReggieCompileRequest(
-                    ".* \\[(?<logger>\\b\\w+\\b)\\] .*", ReggieCompileFlag.DOTALL))
+        ReggieCompiledPattern.tryCompile(new ReggieCompileRequest(".*", ReggieCompileFlag.DOTALL))
             .pattern()
             .newState();
-    assertTrue(state.matches(new GuardedCharSequence("before\n [nginx] after"), 0, 21));
-    assertEquals(9, state.start("logger"));
-    assertEquals(14, state.end("logger"));
+    assertTrue(state.matches(new GuardedCharSequence("before\nafter"), 0, 12));
+    assertEquals(0, state.groupCount());
   }
 
   @Test
@@ -103,12 +101,35 @@ class ReggieCompiledPatternTest {
   }
 
   @Test
-  void usesTheNamedCaptureAfterAnUnnamedProjectedGroup() {
-    ReggieMatchState state = admitted("(x)(?<value>\\S+)").pattern().newState();
+  void exposesEverySourceNumericCaptureAndRetainsNamedAccess() {
+    String source = "(\\S+) (?<value>\\d+)";
+    String input = "host 200";
+    java.util.regex.Matcher jdk = java.util.regex.Pattern.compile(source).matcher(input);
+    assertTrue(jdk.matches());
+    ReggieMatchState state = admitted(source).pattern().newState();
 
-    assertTrue(state.matches(new GuardedCharSequence("xvalue"), 0, 6));
-    assertEquals(1, state.start("value"));
-    assertEquals(6, state.end("value"));
+    assertTrue(state.matches(new GuardedCharSequence(input), 0, input.length()));
+    assertEquals(jdk.groupCount(), state.groupCount());
+    for (int group = 0; group <= state.groupCount(); group++) {
+      assertEquals(jdk.start(group), state.start(group));
+      assertEquals(jdk.end(group), state.end(group));
+    }
+    assertEquals(jdk.start("value"), state.start("value"));
+    assertEquals(jdk.end("value"), state.end("value"));
+  }
+
+  @Test
+  void reportsUnmatchedOptionalNumericCaptureSpans() {
+    String source = "\"(?<method>\\w+)(?: HTTP/(\\d+\\.\\d+)|)\"";
+    ReggieMatchState state = admitted(source).pattern().newState();
+
+    assertTrue(state.matches(new GuardedCharSequence("\"GET\""), 0, 5));
+    assertEquals(2, state.groupCount());
+    assertEquals(-1, state.start(2));
+    assertEquals(-1, state.end(2));
+    assertTrue(state.matches(new GuardedCharSequence("\"GET HTTP/1.1\""), 0, 14));
+    assertEquals(10, state.start(2));
+    assertEquals(13, state.end(2));
   }
 
   @Test
@@ -126,6 +147,11 @@ class ReggieCompiledPatternTest {
     assertThrows(IllegalStateException.class, state::end);
     assertThrows(NullPointerException.class, () -> state.matches(null, 0, 0));
     assertThrows(IllegalStateException.class, () -> state.end("value"));
+    assertThrows(IllegalStateException.class, () -> state.start(0));
+
+    assertTrue(state.matches(new GuardedCharSequence("value"), 0, 5));
+    assertThrows(IndexOutOfBoundsException.class, () -> state.start(-1));
+    assertThrows(IndexOutOfBoundsException.class, () -> state.end(state.groupCount() + 1));
   }
 
   @Test
@@ -139,6 +165,68 @@ class ReggieCompiledPatternTest {
     assertEquals(-1, state.start("version"));
     assertEquals(-1, state.end("version"));
     assertThrows(IllegalArgumentException.class, () -> state.start("missing"));
+  }
+
+  @Test
+  void rejectsCaptureLayoutsAndBoundariesThatCannotBeProven() {
+    assertRejected("((\\S+))");
+    assertRejected("(?:(\\S+)|(\\d+))");
+    assertRejected("(?|(\\S+)|(\\d+))");
+    assertRejected("(?<left>\\S+)(?<right>\\S+)");
+    assertRejected("(\\d+)(\\d+)");
+    assertRejected("(\\S+)(\\d+)");
+    assertRejected("(?<left>\\S+)x");
+    assertRejected("(?<left>\\d+)1");
+    assertRejected("\\S+(?<right>\\S+)");
+    assertRejected("\\S+(?:x|)x");
+    assertRejected("(?<a>\\S+)(?: (?<b>\\S+)|)x");
+    assertRejected("(?:a|)(\\S+)");
+    assertRejected("(?:\\S+|)\\S+");
+    assertRejected("\\[(foo)\\]");
+    assertRejected(".* \\[(?<logger>\\b\\w+\\b)\\] .*");
+    assertRejected("(?<client>[A-Za-z0-9.-]+)");
+  }
+
+  @Test
+  void dotAllUsesTheEffectiveInternalSourceWhileInlineModifiersReject() {
+    assertRejected(".*");
+    ReggieMatchState dotAll =
+        ReggieCompiledPattern.tryCompile(new ReggieCompileRequest(".*", ReggieCompileFlag.DOTALL))
+            .pattern()
+            .newState();
+    assertTrue(dotAll.matches(new GuardedCharSequence("before\nafter"), 0, 12));
+    assertRejected("(?s).*");
+    assertRejected("(?s:.*)");
+  }
+
+  @Test
+  void directFullCaptureCompilationDoesNotUseLegacyCaches() {
+    String source = "(\\S+) (?<value>\\d+)";
+    int patterns = RuntimeCompiler.cacheSize();
+    int structures = RuntimeCompiler.structuralCacheSize();
+
+    assertTrue(admitted(source).pattern() != null);
+    assertEquals(patterns, RuntimeCompiler.cacheSize());
+    assertEquals(structures, RuntimeCompiler.structuralCacheSize());
+    Reggie.compile(source);
+    int legacyPatterns = RuntimeCompiler.cacheSize();
+    int legacyStructures = RuntimeCompiler.structuralCacheSize();
+    assertTrue(admitted(source).pattern() != null);
+    assertEquals(legacyPatterns, RuntimeCompiler.cacheSize());
+    assertEquals(legacyStructures, RuntimeCompiler.structuralCacheSize());
+  }
+
+  @Test
+  void retainsOnlySpansWhenTheCallerMutatesItsCharSequence() {
+    ReggieMatchState state = admitted("(\\S+) (?<value>\\d+)").pattern().newState();
+    MutableGuardedCharSequence input = new MutableGuardedCharSequence("host 200");
+
+    assertTrue(state.matches(input, 0, input.length()));
+    input.replace("changed 999");
+    assertEquals(0, state.start(1));
+    assertEquals(4, state.end(1));
+    assertEquals(5, state.start(2));
+    assertEquals(8, state.end(2));
   }
 
   @Test
@@ -176,6 +264,12 @@ class ReggieCompiledPatternTest {
     return result;
   }
 
+  private static void assertRejected(String source) {
+    ReggieCompilationResult result =
+        ReggieCompiledPattern.tryCompile(new ReggieCompileRequest(source, ReggieCompileFlag.NONE));
+    assertFalse(result.isAdmitted(), () -> "unexpected admission: " + source);
+  }
+
   private static final class GuardedCharSequence implements CharSequence {
     private final String value;
 
@@ -201,6 +295,38 @@ class ReggieCompiledPatternTest {
     @Override
     public String toString() {
       throw new AssertionError("matching must not materialize the input");
+    }
+  }
+
+  private static final class MutableGuardedCharSequence implements CharSequence {
+    private String value;
+
+    private MutableGuardedCharSequence(String value) {
+      this.value = value;
+    }
+
+    void replace(String value) {
+      this.value = value;
+    }
+
+    @Override
+    public int length() {
+      return value.length();
+    }
+
+    @Override
+    public char charAt(int index) {
+      return value.charAt(index);
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      throw new AssertionError("matching must not materialize a subsequence");
+    }
+
+    @Override
+    public String toString() {
+      throw new AssertionError("matching must not materialize input");
     }
   }
 }

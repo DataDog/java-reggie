@@ -19,7 +19,8 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Immutable native compiled pattern for the named linear-token-sequence profile.
+ * Immutable native compiled pattern for the conservative full-capture linear-token-sequence
+ * profile.
  *
  * <p>This API never selects another Reggie strategy and never delegates to the JDK.
  */
@@ -44,8 +45,8 @@ public final class ReggieCompiledPattern {
   }
 
   static ReggieCompilationResult tryCompileNative(ReggieCompileRequest request) {
-    RuntimeCompiler.NamedOnlyLtsCompilation compilation =
-        RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence(
+    RuntimeCompiler.FullCaptureLtsCompilation compilation =
+        RuntimeCompiler.tryCompileFullCaptureLinearTokenSequence(
             request.source(), request.flag().reggieFlags());
     if (compilation.matcher() != null) {
       return ReggieCompilationResult.admitted(new ReggieCompiledPattern(compilation.matcher()));

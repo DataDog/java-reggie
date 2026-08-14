@@ -15,9 +15,12 @@
  */
 package com.datadoghq.reggie.runtime;
 
-/** Capabilities explicitly guaranteed by a native named linear-token-sequence compiled pattern. */
+/** Capabilities explicitly guaranteed by a native full-capture linear-token-sequence pattern. */
 public enum ReggieNativeCapability {
-  /** Compiles and matches only through Reggie's native named-LTS profile, never a JDK fallback. */
+  /**
+   * Compiles and matches only through Reggie's native full-capture LTS profile, never a JDK
+   * fallback.
+   */
   NATIVE_ONLY,
 
   /**

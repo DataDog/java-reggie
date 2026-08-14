@@ -314,8 +314,10 @@ class LinearTokenSequenceMatcherTest {
     assertDelegateType(nonWhitespace, LinearTokenSequenceMatcher.class);
     Pattern jdkWhitespace = Pattern.compile("\\s+");
     Pattern jdkNonWhitespace = Pattern.compile("\\S+");
+    // LTS \s mirrors CharSet.WHITESPACE (no \u000B); JDK \s includes \u000B.
+    // Verify consistency for the five characters both agree on.
 
-    for (char ch : new char[] {' ', '\t', '\n', '\u000B', '\f', '\r'}) {
+    for (char ch : new char[] {' ', '\t', '\n', '\f', '\r'}) {
       String input = String.valueOf(ch);
       assertEquals(
           jdkWhitespace.matcher(input).matches(),
