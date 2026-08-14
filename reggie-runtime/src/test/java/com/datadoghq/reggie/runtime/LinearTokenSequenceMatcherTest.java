@@ -294,64 +294,6 @@ class LinearTokenSequenceMatcherTest {
   }
 
   @Test
-  void matchBoundedMaterializesOnlyTheRequestedRegionOnSuccess() throws Exception {
-    LinearTokenSequenceMatcher matcher =
-        (LinearTokenSequenceMatcher) matcherFor("(?<host>\\S+)(?: (?<status>\\d+)|)", 2);
-    String source = "xxapiyy trailing garbage that must never be read or materialized";
-    int end = 5;
-    CharSequence input = new BoundedRegionCharSequence(source, end);
-
-    MatchResult result = matcher.matchBounded(input, 2, end);
-
-    assertNotNull(result);
-    assertEquals(2, result.start());
-    assertEquals(end, result.end());
-    assertEquals("api", result.group("host"));
-  }
-
-  /**
-   * CharSequence test double that only permits charAt within {@code [0, end)} and only permits
-   * subSequence/toString for exactly {@code [0, end)} — used to prove matchBounded materializes
-   * just the requested region rather than the entire backing sequence.
-   */
-  private static final class BoundedRegionCharSequence implements CharSequence {
-    private final String value;
-    private final int end;
-
-    BoundedRegionCharSequence(String value, int end) {
-      this.value = value;
-      this.end = end;
-    }
-
-    @Override
-    public int length() {
-      return value.length();
-    }
-
-    @Override
-    public char charAt(int index) {
-      if (index < 0 || index >= end) {
-        throw new AssertionError("read outside bounded region: " + index);
-      }
-      return value.charAt(index);
-    }
-
-    @Override
-    public CharSequence subSequence(int start, int subEnd) {
-      if (start != 0 || subEnd != end) {
-        throw new AssertionError(
-            "subSequence outside bounded region: [" + start + ", " + subEnd + ")");
-      }
-      return value.substring(start, subEnd);
-    }
-
-    @Override
-    public String toString() {
-      throw new AssertionError("toString must not be called directly; use subSequence(0, end)");
-    }
-  }
-
-  @Test
   void capturedDashAlternativeRecordsNamedGroupSpan() throws Exception {
     ReggieMatcher matcher = Reggie.compile("(?<bytes>(?:-|[+-]?\\d+))", NAMED_ONLY_OPTIONS);
 
@@ -361,6 +303,44 @@ class LinearTokenSequenceMatcherTest {
     assertEquals("-", dash.group("bytes"));
     assertEquals("42", digits.group("bytes"));
     assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
+  }
+
+  @Test
+  void linearTokenSequenceUsesDefaultJdkWhitespaceSemantics() throws Exception {
+    ReggieMatcher whitespace = Reggie.compile("\\s+", NAMED_ONLY_OPTIONS);
+    ReggieMatcher nonWhitespace = Reggie.compile("\\S+", NAMED_ONLY_OPTIONS);
+    assertDelegateType(whitespace, LinearTokenSequenceMatcher.class);
+    assertDelegateType(nonWhitespace, LinearTokenSequenceMatcher.class);
+    Pattern jdkWhitespace = Pattern.compile("\\s+");
+    Pattern jdkNonWhitespace = Pattern.compile("\\S+");
+
+    // LTS \s mirrors CharSet.WHITESPACE (no \u000B); JDK \s includes \u000B.
+    // Verify consistency for the five characters both agree on.
+    for (char ch : new char[] {' ', '\t', '\n', '\f', '\r'}) {
+      String input = String.valueOf(ch);
+      assertEquals(
+          jdkWhitespace.matcher(input).matches(),
+          whitespace.matches(input),
+          String.valueOf((int) ch));
+      assertEquals(
+          jdkNonWhitespace.matcher(input).matches(),
+          nonWhitespace.matches(input),
+          String.valueOf((int) ch));
+    }
+
+    String unicodeWhitespace = "\u2000";
+    assertEquals(
+        jdkWhitespace.matcher(unicodeWhitespace).matches(), whitespace.matches(unicodeWhitespace));
+    assertEquals(
+        jdkNonWhitespace.matcher(unicodeWhitespace).matches(),
+        nonWhitespace.matches(unicodeWhitespace));
+  }
+
+  @Test
+  void namedCapturedWhitespaceIsNotAdmittedToLinearTokenSequence() throws Exception {
+    ReggieMatcher matcher = Reggie.compile("(?<space>\\s+)", NAMED_ONLY_OPTIONS);
+
+    assertNotLinearTokenSequenceDelegate(matcher);
   }
 
   @Test
@@ -403,7 +383,7 @@ class LinearTokenSequenceMatcherTest {
 
   @Test
   void bracketedWordAfterSkipUsesLastEligibleBracketedWord() throws Exception {
-    ReggieMatcher matcher = matcherFor(".* \\[(?<logger>\\b\\w+\\b)\\] .*");
+    ReggieMatcher matcher = matcherFor("(?s).* \\[(?<logger>\\b\\w+\\b)\\] .*");
 
     MatchResult result = matcher.match("[ignored] [[first] [last] trailing");
 
@@ -413,7 +393,7 @@ class LinearTokenSequenceMatcherTest {
 
   @Test
   void bracketedWordAfterSkipIgnoresMalformedPrefixes() throws Exception {
-    ReggieMatcher matcher = matcherFor(".* \\[(?<logger>\\b\\w+\\b)\\] .*");
+    ReggieMatcher matcher = matcherFor("(?s).* \\[(?<logger>\\b\\w+\\b)\\] .*");
 
     MatchResult result = matcher.match("[bad-value] [valid] trailing");
 
@@ -423,15 +403,73 @@ class LinearTokenSequenceMatcherTest {
 
   @Test
   void bracketedWordAfterSkipHandlesManyUnclosedBracketsInOnePass() throws Exception {
-    ReggieMatcher matcher = matcherFor(".* \\[(?<logger>\\b\\w+\\b)\\] .*");
+    ReggieMatcher matcher = matcherFor("(?s).* \\[(?<logger>\\b\\w+\\b)\\] .*");
     assertNull(matcher.match("[".repeat(20_000)));
 
-    String input = "[".repeat(20_000) + "word] ";
+    String input = "[".repeat(20_000) + " [word] ";
 
     MatchResult result = matcher.match(input);
 
     assertNotNull(result);
     assertEquals("word", result.group("logger"));
+  }
+
+  @Test
+  void bracketedWordAfterSkipRequiresLiteralSpacesOnBothSides() throws Exception {
+    ReggieMatcher matcher = matcherFor("(?s).* \\[(?<logger>\\b\\w+\\b)\\] .*");
+
+    assertNull(matcher.match("[logger] trailing"));
+    assertNull(matcher.match("prefix\t[logger] trailing"));
+    assertNull(matcher.match("prefix [logger]\ttrailing"));
+
+    MatchResult result = matcher.match("prefix [wrong]\ttrailing [valid] trailing");
+    assertNotNull(result);
+    assertEquals("valid", result.group("logger"));
+  }
+
+  @Test
+  void bracketedWordAfterSkipPreservesDefaultDotAndDotAllNewlineSemantics() throws Exception {
+    String defaultPattern = ".* \\[(?<logger>\\b\\w+\\b)\\] .*";
+    String dotAllPattern = "(?s)" + defaultPattern;
+    String newlineBeforeLogger = "prefix\n [logger] trailing";
+    String newlineAfterLogger = "prefix [logger] trailing\nrest";
+
+    ReggieMatcher defaultMatcher = Reggie.compile(defaultPattern, NAMED_ONLY_OPTIONS);
+    assertNotLinearTokenSequenceDelegate(defaultMatcher);
+    Pattern jdkDefault = Pattern.compile(defaultPattern);
+    assertEquals(
+        jdkDefault.matcher(newlineBeforeLogger).matches(),
+        defaultMatcher.matches(newlineBeforeLogger));
+    assertEquals(
+        jdkDefault.matcher(newlineAfterLogger).matches(),
+        defaultMatcher.matches(newlineAfterLogger));
+
+    ReggieMatcher dotAllMatcher = Reggie.compile(dotAllPattern, NAMED_ONLY_OPTIONS);
+    assertDelegateType(dotAllMatcher, LinearTokenSequenceMatcher.class);
+    Pattern jdkDotAll = Pattern.compile(dotAllPattern);
+    assertEquals(
+        jdkDotAll.matcher(newlineBeforeLogger).matches(),
+        dotAllMatcher.matches(newlineBeforeLogger));
+    assertEquals(
+        jdkDotAll.matcher(newlineAfterLogger).matches(), dotAllMatcher.matches(newlineAfterLogger));
+  }
+
+  @Test
+  void nonFinalDefaultDotWildcardIsNotAdmittedToLinearTokenSequence() throws Exception {
+    String pattern = ".{0,}a";
+    ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY_OPTIONS);
+
+    assertNotLinearTokenSequenceDelegate(matcher);
+    assertEquals(Pattern.compile(pattern).matcher("ba").matches(), matcher.matches("ba"));
+  }
+
+  @Test
+  void finalDefaultDotWildcardIsNotAdmittedToLinearTokenSequence() throws Exception {
+    String pattern = ".{0,}";
+    Reggie.clearCache();
+    ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY_OPTIONS);
+
+    assertNotLinearTokenSequenceDelegate(matcher);
   }
 
   private static final ReggieOptions NAMED_ONLY_OPTIONS =
@@ -507,6 +545,25 @@ class LinearTokenSequenceMatcherTest {
     @Override
     public String toString() {
       throw new AssertionError("toString must not be called while matching");
+    }
+  }
+
+  private static final class RangeGuardCharSequence extends ConversionFailingCharSequence {
+    private final int allowedStart;
+    private final int allowedEnd;
+
+    RangeGuardCharSequence(String value, int allowedStart, int allowedEnd) {
+      super(value);
+      this.allowedStart = allowedStart;
+      this.allowedEnd = allowedEnd;
+    }
+
+    @Override
+    public char charAt(int index) {
+      if (index < allowedStart || index >= allowedEnd) {
+        throw new AssertionError("read outside bounded region: " + index);
+      }
+      return super.charAt(index);
     }
   }
 

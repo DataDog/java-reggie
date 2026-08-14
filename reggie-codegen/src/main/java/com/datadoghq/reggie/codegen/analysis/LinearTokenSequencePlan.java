@@ -43,6 +43,7 @@ public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
     CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH,
     CAPTURE_BRACKETED_WORD_AFTER_SKIP,
     SKIP_ANY,
+    SKIP_ANY_EXCEPT_NEWLINE,
     ANCHOR,
     OPTIONAL_SEQUENCE
   }
@@ -166,6 +167,7 @@ public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
           Op.captureUntil(
               OpKind.CAPTURE_QUOTED_UNTIL_DELIMITER, atom.groupNumber(), atom.delimiter());
       case ANY_STAR -> Op.uncaptured(OpKind.SKIP_ANY);
+      case ANY_STAR_EXCEPT_NEWLINE -> Op.uncaptured(OpKind.SKIP_ANY_EXCEPT_NEWLINE);
       case ANCHOR -> Op.uncaptured(OpKind.ANCHOR);
       case OPTIONAL_SEQUENCE -> optionalOpFor(atom);
       case COMPLEX_ALTERNATION -> null;
