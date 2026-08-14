@@ -75,7 +75,6 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -930,6 +929,55 @@ public class RuntimeCompiler {
     }
   }
 
+  enum NamedOnlyLtsRejection {
+    UNSUPPORTED_FLAGS,
+    SOURCE_INLINE_MODIFIER,
+    PARSE_FAILURE,
+    PLAN_UNAVAILABLE,
+    MISSING_NAMED_CAPTURE,
+    PROFILE_INELIGIBLE
+  }
+
+  record NamedOnlyLtsCompilation(
+      LinearTokenSequenceMatcher matcher, NamedOnlyLtsRejection rejection) {
+    NamedOnlyLtsCompilation {
+      if ((matcher == null) == (rejection == null)) {
+        throw new IllegalArgumentException("exactly one of matcher or rejection is required");
+      }
+    }
+
+    static NamedOnlyLtsCompilation admitted(LinearTokenSequenceMatcher matcher) {
+      return new NamedOnlyLtsCompilation(matcher, null);
+    }
+
+    static NamedOnlyLtsCompilation rejected(NamedOnlyLtsRejection rejection) {
+      return new NamedOnlyLtsCompilation(null, rejection);
+    }
+  }
+
+  static NamedOnlyLtsCompilation tryCompileNamedOnlyLinearTokenSequence(String source, int flags) {
+    if (flags != 0 && flags != ReggieFlags.DOTALL) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.UNSUPPORTED_FLAGS);
+    }
+    if (hasSourceInlineModifier(source)) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.SOURCE_INLINE_MODIFIER);
+    }
+    boolean dotAll = flags == ReggieFlags.DOTALL;
+    String parsePattern = dotAll ? "(?s)" + source : source;
+    try {
+      RegexParser parser = new RegexParser();
+      RegexNode ast =
+          CaptureProjection.preserveNamedAndSemanticCaptures(parser.parse(parsePattern));
+      Map<String, Integer> nameMap = parser.getGroupNameMap();
+      return admitNamedOnlyLinearTokenSequence(
+          source, ast, nameMap, new LinearTokenSequenceAdmission(true, dotAll));
+    } catch (RegexParser.ParseException e) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PARSE_FAILURE);
+    } catch (UnsupportedOperationException | IllegalStateException e) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
+    }
+  }
+
   private static ReggieMatcher tryCompileLinearTokenSequence(
       String pattern,
       RegexNode ast,
@@ -938,24 +986,34 @@ public class RuntimeCompiler {
     if (!admission.isEligible()) {
       return null;
     }
-    return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
-        .filter(plan -> plan.coversCaptureIndexes(nameMap.values()))
-        .filter(plan -> isRuntimeExecutableLinearTokenSequence(admission.isDotAll(), plan))
-        .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
-        .map(m -> m.embedsNameMap() ? m : new NameEnrichingMatcher(m))
-        .orElse(null);
+    return admitNamedOnlyLinearTokenSequence(pattern, ast, nameMap, admission).matcher();
+  }
+
+  private static NamedOnlyLtsCompilation admitNamedOnlyLinearTokenSequence(
+      String pattern,
+      RegexNode ast,
+      Map<String, Integer> nameMap,
+      LinearTokenSequenceAdmission admission) {
+    LinearTokenSequencePlan plan =
+        LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElse(null);
+    if (plan == null) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
+    }
+    if (!plan.coversCaptureIndexes(nameMap.values())) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.MISSING_NAMED_CAPTURE);
+    }
+    if (!isRuntimeExecutableLinearTokenSequence(admission.isDotAll(), plan)) {
+      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PROFILE_INELIGIBLE);
+    }
+    return NamedOnlyLtsCompilation.admitted(
+        new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap));
   }
 
   private static boolean isRuntimeExecutableLinearTokenSequence(
       boolean dotAll, LinearTokenSequencePlan plan) {
-    return validateOps(dotAll, plan.ops(), true);
-  }
-
-  private static boolean validateOps(
-      boolean dotAll, List<LinearTokenSequencePlan.Op> ops, boolean isTopLevel) {
     boolean requiresDotAll = false;
-    for (int i = 0; i < ops.size(); i++) {
-      LinearTokenSequencePlan.Op op = ops.get(i);
+    for (int i = 0; i < plan.ops().size(); i++) {
+      LinearTokenSequencePlan.Op op = plan.ops().get(i);
       if (op.kind() == LinearTokenSequencePlan.OpKind.ANCHOR) return false;
       if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE) return false;
       if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
@@ -964,39 +1022,16 @@ public class RuntimeCompiler {
       }
       if ((op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
               || op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE)
-          && i != ops.size() - 1) {
+          && i != plan.ops().size() - 1) {
         return false;
       }
-      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE) {
-        if (!validateOps(dotAll, op.children(), false)) return false;
-        // An optional sequence containing a wildcard (SKIP_ANY or SKIP_ANY_EXCEPT_NEWLINE)
-        // cannot backtrack: the present branch greedily consumes all remaining input,
-        // so any ops following the optional sequence would fail. Reject when there are
-        // more ops after the optional.
-        if (isTopLevel && i + 1 < ops.size() && containsWildcard(op)) {
-          return false;
-        }
-        if (isTopLevel
-            && i + 1 < ops.size()
-            && canOptionalPresentBranchStealFollowingInput(op, ops.get(i + 1))) {
-          return false;
-        }
+      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
+          && i + 1 < plan.ops().size()
+          && canOptionalPresentBranchStealFollowingInput(op, plan.ops().get(i + 1))) {
+        return false;
       }
     }
     return !requiresDotAll || dotAll;
-  }
-
-  private static boolean containsWildcard(LinearTokenSequencePlan.Op optional) {
-    for (LinearTokenSequencePlan.Op child : optional.children()) {
-      if (child.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
-          || child.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE) {
-        return true;
-      }
-      if (!child.children().isEmpty() && containsWildcard(child)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   private static boolean canOptionalPresentBranchStealFollowingInput(
