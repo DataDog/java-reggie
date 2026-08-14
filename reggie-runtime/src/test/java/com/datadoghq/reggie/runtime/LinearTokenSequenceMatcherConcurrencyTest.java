@@ -67,37 +67,37 @@ class LinearTokenSequenceMatcherConcurrencyTest {
 
     int threads = 16;
     int iterations = 1_000;
-    ExecutorService executor = Executors.newFixedThreadPool(threads);
     CountDownLatch ready = new CountDownLatch(threads);
     CountDownLatch start = new CountDownLatch(1);
     CountDownLatch done = new CountDownLatch(threads);
     ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
 
-    for (int thread = 0; thread < threads; thread++) {
-      executor.execute(
-          () -> {
-            ready.countDown();
-            try {
-              start.await();
-              for (int iteration = 0; iteration < iterations; iteration++) {
-                assertMatchWithOptionalCaptures(shared, groupNumbers);
-                assertMatchWithoutOptionalCaptures(shared, groupNumbers);
-                assertFailedMatchLeavesArraysUntouched(shared, groupCount);
-                assertTrue(shared.find("noise " + WITH_OPTIONAL_CAPTURES));
-                assertFalse(shared.find("noise malformed access log"));
+    try (ExecutorService executor = Executors.newFixedThreadPool(threads)) {
+      for (int thread = 0; thread < threads; thread++) {
+        executor.execute(
+            () -> {
+              ready.countDown();
+              try {
+                start.await();
+                for (int iteration = 0; iteration < iterations; iteration++) {
+                  assertMatchWithOptionalCaptures(shared, groupNumbers);
+                  assertMatchWithoutOptionalCaptures(shared, groupNumbers);
+                  assertFailedMatchLeavesArraysUntouched(shared, groupCount);
+                  assertTrue(shared.find("noise " + WITH_OPTIONAL_CAPTURES));
+                  assertFalse(shared.find("noise malformed access log"));
+                }
+              } catch (Throwable failure) {
+                failures.add(failure);
+              } finally {
+                done.countDown();
               }
-            } catch (Throwable failure) {
-              failures.add(failure);
-            } finally {
-              done.countDown();
-            }
-          });
-    }
+            });
+      }
 
-    assertTrue(ready.await(10, TimeUnit.SECONDS), "workers did not become ready");
-    start.countDown();
-    assertTrue(done.await(30, TimeUnit.SECONDS), "workers did not finish");
-    executor.shutdownNow();
+      assertTrue(ready.await(10, TimeUnit.SECONDS), "workers did not become ready");
+      start.countDown();
+      assertTrue(done.await(30, TimeUnit.SECONDS), "workers did not finish");
+    }
     assertTrue(failures.isEmpty(), () -> "concurrent LTS failure: " + failures.peek());
   }
 

@@ -15,13 +15,10 @@
  */
 package com.datadoghq.reggie.runtime;
 
-/** Reason the native named linear-token-sequence profile did not admit a request. */
-public enum ReggieCompilationRejection {
-  UNSUPPORTED_FLAGS,
-  SOURCE_TOO_LONG,
-  SOURCE_INLINE_MODIFIER,
-  PARSE_FAILURE,
-  PLAN_UNAVAILABLE,
-  MISSING_NAMED_CAPTURE,
-  PROFILE_INELIGIBLE
+/** Native compilation budget measured in UTF-16 source code units. */
+public record ReggieNativeCompileBudget(int maximumSourceLength) {
+  public ReggieNativeCompileBudget {
+    if (maximumSourceLength <= 0)
+      throw new IllegalArgumentException("maximumSourceLength must be positive");
+  }
 }
