@@ -19,12 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOptions;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -121,32 +119,24 @@ class NamedOnlyLtsAdmissionTest {
   void admittedMatchersRemainIndependentUnderConcurrentUse() throws Exception {
     LinearTokenSequenceMatcher shared =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0).matcher();
-    int threads = 4;
-    CountDownLatch done = new CountDownLatch(threads);
-    ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
-    try (ExecutorService executor = Executors.newFixedThreadPool(threads)) {
-      for (int thread = 0; thread < threads; thread++) {
-        int id = thread;
-        executor.execute(
-            () -> {
-              try {
-                LinearTokenSequenceMatcher independent =
-                    RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0)
-                        .matcher();
-                for (int iteration = 0; iteration < 100; iteration++) {
-                  assertEquals("shared", shared.match("shared").group("value"));
-                  assertEquals("value" + id, independent.match("value" + id).group("value"));
-                }
-              } catch (Throwable failure) {
-                failures.add(failure);
-              } finally {
-                done.countDown();
-              }
-            });
-      }
-      assertTrue(done.await(10, TimeUnit.SECONDS), "workers did not finish");
+    ExecutorService executor = Executors.newFixedThreadPool(4);
+    CountDownLatch done = new CountDownLatch(4);
+    for (int thread = 0; thread < 4; thread++) {
+      int id = thread;
+      executor.execute(
+          () -> {
+            LinearTokenSequenceMatcher independent =
+                RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0)
+                    .matcher();
+            for (int iteration = 0; iteration < 100; iteration++) {
+              assertEquals("shared", shared.match("shared").group("value"));
+              assertEquals("value" + id, independent.match("value" + id).group("value"));
+            }
+            done.countDown();
+          });
     }
-    assertTrue(failures.isEmpty(), () -> "concurrent admission failure: " + failures.peek());
+    assertEquals(true, done.await(10, TimeUnit.SECONDS));
+    executor.shutdownNow();
   }
 
   private static void assertRejected(
