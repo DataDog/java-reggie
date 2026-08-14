@@ -169,6 +169,7 @@ public final class CharSet {
               new Range(' ', ' '),
               new Range('\t', '\t'),
               new Range('\n', '\n'),
+              new Range('\u000B', '\u000B'),
               new Range('\r', '\r'),
               new Range('\f', '\f')));
 

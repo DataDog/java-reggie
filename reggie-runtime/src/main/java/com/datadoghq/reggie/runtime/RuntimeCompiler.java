@@ -75,6 +75,7 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -267,16 +268,30 @@ public class RuntimeCompiler {
       return compile(pattern, options);
     }
     String normalizedPattern = normalizePatternFlags(pattern, flags);
-    return compile(normalizedPattern, options, cacheKeyForFlags(pattern, flags, options), pattern);
+    return compile(
+        normalizedPattern,
+        options,
+        cacheKeyForFlags(pattern, flags, options),
+        pattern,
+        LinearTokenSequenceAdmission.forFlags(pattern, flags));
   }
 
   /** Compile pattern with runtime compilation options. */
   public static ReggieMatcher compile(String pattern, ReggieOptions options) {
-    return compile(pattern, options, cacheKeyFor(pattern, options), pattern);
+    return compile(
+        pattern,
+        options,
+        cacheKeyFor(pattern, options),
+        pattern,
+        LinearTokenSequenceAdmission.forSource(pattern));
   }
 
   private static ReggieMatcher compile(
-      String pattern, ReggieOptions options, Object cacheKey, String reportedPattern) {
+      String pattern,
+      ReggieOptions options,
+      Object cacheKey,
+      String reportedPattern,
+      LinearTokenSequenceAdmission linearTokenSequenceAdmission) {
 
     // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
@@ -307,7 +322,11 @@ public class RuntimeCompiler {
     // PATTERN_CACHE is already fully initialized and is never mutated again after publication.
     ReggieMatcher compiled =
         PATTERN_CACHE.computeIfAbsent(
-            cacheKey, k -> reportPattern(compileInternal(pattern, options, k), reportedPattern));
+            cacheKey,
+            k ->
+                reportPattern(
+                    compileInternal(pattern, options, k, linearTokenSequenceAdmission),
+                    reportedPattern));
 
     // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
     // remove it from L1 and return a fresh matcher so callers never share mutable state.
@@ -510,11 +529,13 @@ public class RuntimeCompiler {
    * cache (level 2) checked here
    */
   private static ReggieMatcher compileInternal(String pattern) {
-    return compileInternal(pattern, ReggieOptions.DEFAULT, pattern);
+    return compileInternal(
+        pattern, ReggieOptions.DEFAULT, pattern, LinearTokenSequenceAdmission.forSource(pattern));
   }
 
   private static ReggieMatcher compileInternal(String pattern, ReggieOptions options) {
-    return compileInternal(pattern, options, pattern);
+    return compileInternal(
+        pattern, options, pattern, LinearTokenSequenceAdmission.forSource(pattern));
   }
 
   private static String cacheKeyFor(String pattern, ReggieOptions options) {
@@ -531,6 +552,99 @@ public class RuntimeCompiler {
   }
 
   private record FlaggedCacheKey(String pattern, int flags, String optionsKey) {}
+
+  /**
+   * Carries the source-level semantic profile used only to admit the named-capture LTS shortcut.
+   *
+   * <p>The normalized pattern cannot supply this information: explicit {@link ReggieFlags#DOTALL}
+   * is encoded as a leading {@code (?s)}, while the same text may have been present in the caller's
+   * original source.
+   */
+  private record LinearTokenSequenceAdmission(boolean isEligible, boolean isDotAll) {
+    private static LinearTokenSequenceAdmission forSource(String source) {
+      return new LinearTokenSequenceAdmission(!hasSourceInlineModifier(source), false);
+    }
+
+    private static LinearTokenSequenceAdmission forFlags(String source, int flags) {
+      boolean isDotAll = flags == ReggieFlags.DOTALL;
+      return new LinearTokenSequenceAdmission(
+          isDotAll && !hasSourceInlineModifier(source), isDotAll);
+    }
+  }
+
+  static boolean hasSourceInlineModifier(String source) {
+    boolean inCharacterClass = false;
+    int index = 0;
+    while (index < source.length()) {
+      char ch = source.charAt(index);
+      if (ch == '\\') {
+        if (index + 1 < source.length() && source.charAt(index + 1) == 'Q') {
+          index += 2;
+          while (index < source.length()) {
+            if (source.charAt(index) == '\\'
+                && index + 1 < source.length()
+                && source.charAt(index + 1) == 'E') {
+              index += 2;
+              break;
+            }
+            index++;
+          }
+        } else {
+          index += 2;
+        }
+        continue;
+      }
+      if (inCharacterClass) {
+        if (ch == ']') {
+          inCharacterClass = false;
+        }
+        index++;
+        continue;
+      }
+      if (ch == '[') {
+        inCharacterClass = true;
+        index++;
+        // In Java regex, ']' as the first character of a class (or first after '^')
+        // is a literal, not the class terminator. Skip it so the scanner does not
+        // exit the class prematurely.
+        if (index < source.length() && source.charAt(index) == '^') {
+          index++;
+        }
+        if (index < source.length() && source.charAt(index) == ']') {
+          index++;
+        }
+        continue;
+      }
+      if (ch == '(' && index + 1 < source.length() && source.charAt(index + 1) == '?') {
+        int modifierStart = index + 2;
+        if (modifierStart < source.length() && source.charAt(modifierStart) == '#') {
+          index = modifierStart + 1;
+          while (index < source.length() && source.charAt(index) != ')') {
+            index++;
+          }
+          if (index < source.length()) {
+            index++;
+          }
+          continue;
+        }
+        int cursor = modifierStart;
+        while (cursor < source.length() && isInlineModifierCharacter(source.charAt(cursor))) {
+          cursor++;
+        }
+        if (cursor > modifierStart
+            && cursor < source.length()
+            && (source.charAt(cursor) == ':' || source.charAt(cursor) == ')')) {
+          return true;
+        }
+      }
+      index++;
+    }
+    return false;
+  }
+
+  private static boolean isInlineModifierCharacter(char ch) {
+    return ch == 'i' || ch == 'm' || ch == 's' || ch == 'x' || ch == '-';
+  }
 
   private static FlaggedCacheKey cacheKeyForFlags(
       String pattern, int flags, ReggieOptions options) {
@@ -576,7 +690,10 @@ public class RuntimeCompiler {
    * return a fresh instance on every subsequent call.
    */
   private static ReggieMatcher compileInternal(
-      String pattern, ReggieOptions options, Object cacheKey) {
+      String pattern,
+      ReggieOptions options,
+      Object cacheKey,
+      LinearTokenSequenceAdmission linearTokenSequenceAdmission) {
     try {
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
@@ -585,7 +702,7 @@ public class RuntimeCompiler {
       if (options.has(ReggieOption.CAPTURE_NAMED_ONLY)) {
         ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
         ReggieMatcher linearTokenSequenceMatcher =
-            tryCompileLinearTokenSequence(pattern, ast, nameMap);
+            tryCompileLinearTokenSequence(pattern, ast, nameMap, linearTokenSequenceAdmission);
         if (linearTokenSequenceMatcher != null) {
           return linearTokenSequenceMatcher;
         }
@@ -814,20 +931,31 @@ public class RuntimeCompiler {
   }
 
   private static ReggieMatcher tryCompileLinearTokenSequence(
-      String pattern, RegexNode ast, Map<String, Integer> nameMap) {
+      String pattern,
+      RegexNode ast,
+      Map<String, Integer> nameMap,
+      LinearTokenSequenceAdmission admission) {
+    if (!admission.isEligible()) {
+      return null;
+    }
     return LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast))
         .filter(plan -> plan.coversCaptureIndexes(nameMap.values()))
-        .filter(plan -> isRuntimeExecutableLinearTokenSequence(pattern, plan))
+        .filter(plan -> isRuntimeExecutableLinearTokenSequence(admission.isDotAll(), plan))
         .map(plan -> new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap))
         .map(m -> m.embedsNameMap() ? m : new NameEnrichingMatcher(m))
         .orElse(null);
   }
 
   private static boolean isRuntimeExecutableLinearTokenSequence(
-      String pattern, LinearTokenSequencePlan plan) {
+      boolean dotAll, LinearTokenSequencePlan plan) {
+    return validateOps(dotAll, plan.ops(), true);
+  }
+
+  private static boolean validateOps(
+      boolean dotAll, List<LinearTokenSequencePlan.Op> ops, boolean isTopLevel) {
     boolean requiresDotAll = false;
-    for (int i = 0; i < plan.ops().size(); i++) {
-      LinearTokenSequencePlan.Op op = plan.ops().get(i);
+    for (int i = 0; i < ops.size(); i++) {
+      LinearTokenSequencePlan.Op op = ops.get(i);
       if (op.kind() == LinearTokenSequencePlan.OpKind.ANCHOR) return false;
       if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE) return false;
       if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
@@ -836,16 +964,39 @@ public class RuntimeCompiler {
       }
       if ((op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
               || op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE)
-          && i != plan.ops().size() - 1) {
+          && i != ops.size() - 1) {
         return false;
       }
-      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
-          && i + 1 < plan.ops().size()
-          && canOptionalPresentBranchStealFollowingInput(op, plan.ops().get(i + 1))) {
-        return false;
+      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE) {
+        if (!validateOps(dotAll, op.children(), false)) return false;
+        // An optional sequence containing a wildcard (SKIP_ANY or SKIP_ANY_EXCEPT_NEWLINE)
+        // cannot backtrack: the present branch greedily consumes all remaining input,
+        // so any ops following the optional sequence would fail. Reject when there are
+        // more ops after the optional.
+        if (isTopLevel && i + 1 < ops.size() && containsWildcard(op)) {
+          return false;
+        }
+        if (isTopLevel
+            && i + 1 < ops.size()
+            && canOptionalPresentBranchStealFollowingInput(op, ops.get(i + 1))) {
+          return false;
+        }
       }
     }
-    return !requiresDotAll || pattern.startsWith("(?s)");
+    return !requiresDotAll || dotAll;
+  }
+
+  private static boolean containsWildcard(LinearTokenSequencePlan.Op optional) {
+    for (LinearTokenSequencePlan.Op child : optional.children()) {
+      if (child.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
+          || child.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE) {
+        return true;
+      }
+      if (!child.children().isEmpty() && containsWildcard(child)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static boolean canOptionalPresentBranchStealFollowingInput(

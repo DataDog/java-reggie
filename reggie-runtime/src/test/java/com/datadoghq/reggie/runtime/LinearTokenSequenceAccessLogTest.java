@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.IOException;
@@ -46,7 +47,7 @@ class LinearTokenSequenceAccessLogTest {
 
   @Test
   void matchesCombinedAccessLogWithDelimiterAwareCaptures() {
-    ReggieMatcher matcher = Reggie.compile(COMBINED_ACCESS_LOG_PATTERN, NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(COMBINED_ACCESS_LOG_PATTERN);
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
             + "200 17888 \"https://example.com/index.html\" \"Mozilla/5.0 Test\" \"-\" "
@@ -75,7 +76,7 @@ class LinearTokenSequenceAccessLogTest {
   @Test
   void routesRealExpandedCommonAccessLogPatternThroughLinearTokenSequenceMatcher()
       throws Exception {
-    ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-1.regex"), NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(testResource("logs-grok-pattern-1.regex"));
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
             + "200 17888";
@@ -95,7 +96,7 @@ class LinearTokenSequenceAccessLogTest {
   @Test
   void routesRealExpandedCombinedAccessLogPatternThroughLinearTokenSequenceMatcher()
       throws Exception {
-    ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-2.regex"), NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(testResource("logs-grok-pattern-2.regex"));
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
             + "200 17888 \"https://example.com/index.html\" \"Mozilla/5.0 Test\" \"-\" "
@@ -211,7 +212,7 @@ class LinearTokenSequenceAccessLogTest {
 
   @Test
   void leavesCallerArraysUnchangedOnNoMatch() {
-    ReggieMatcher matcher = Reggie.compile(COMBINED_ACCESS_LOG_PATTERN, NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(COMBINED_ACCESS_LOG_PATTERN);
     int[] starts = new int[17];
     int[] ends = new int[17];
     starts[1] = 123;
@@ -227,13 +228,20 @@ class LinearTokenSequenceAccessLogTest {
     assertEquals(value, input.substring(starts[group], ends[group]));
   }
 
+  private static ReggieMatcher compileNamedOnly(String pattern) {
+    if (pattern.startsWith("(?s)")) {
+      return Reggie.compile(pattern.substring("(?s)".length()), ReggieFlags.DOTALL, NAMED_ONLY);
+    }
+    return Reggie.compile(pattern, NAMED_ONLY);
+  }
+
   private static void assertNamedCaptureBoundariesEquivalent(String pattern, String... inputs)
       throws Exception {
     RegexParser parser = new RegexParser();
     parser.parse(pattern);
     Map<String, Integer> nameToIndex = parser.getGroupNameMap();
     Pattern jdkPattern = Pattern.compile(pattern);
-    ReggieMatcher reggieMatcher = Reggie.compile(pattern, NAMED_ONLY);
+    ReggieMatcher reggieMatcher = compileNamedOnly(pattern);
     assertDelegateTypeUnchecked(reggieMatcher, LinearTokenSequenceMatcher.class);
 
     for (String input : inputs) {
@@ -270,7 +278,7 @@ class LinearTokenSequenceAccessLogTest {
 
   private static void assertBoundedFixtureUsesOnlyItsRegion(
       String pattern, String matchingInput, String failingInput) throws Exception {
-    ReggieMatcher matcher = Reggie.compile(pattern, NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(pattern);
     assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
     LinearTokenSequenceMatcher ltsMatcher = (LinearTokenSequenceMatcher) matcher;
     int groupCount = Pattern.compile(pattern).matcher("").groupCount();
