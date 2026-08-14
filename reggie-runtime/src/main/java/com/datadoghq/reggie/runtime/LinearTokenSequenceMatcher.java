@@ -167,6 +167,18 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     return true;
   }
 
+  boolean matchIntoBoundedInterruptibly(
+      InterruptibleCharSequence input,
+      int start,
+      int end,
+      int[] groupStarts,
+      int[] groupEnds,
+      MatchWorkspace workspace) {
+    input.checkInterrupted();
+    return matchIntoBounded(
+        new CheckpointingCharSequence(input), start, end, groupStarts, groupEnds, workspace);
+  }
+
   private MatchResult toMatchResult(String input, MatchWorkspace workspace) {
     if (!nameToIndex.isEmpty()) {
       return new NamedMatchResultImpl(
@@ -528,6 +540,42 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       ends = new int[groupCount + 1];
       optionalStarts = new int[optionalDepth][groupCount + 1];
       optionalEnds = new int[optionalDepth][groupCount + 1];
+    }
+  }
+
+  private static final class CheckpointingCharSequence implements CharSequence {
+    private static final int CHECK_INTERVAL = 256;
+
+    private final InterruptibleCharSequence delegate;
+    private int charactersUntilCheck = CHECK_INTERVAL;
+
+    private CheckpointingCharSequence(InterruptibleCharSequence delegate) {
+      this.delegate = Objects.requireNonNull(delegate, "input");
+    }
+
+    @Override
+    public int length() {
+      return delegate.length();
+    }
+
+    @Override
+    public char charAt(int index) {
+      char value = delegate.charAt(index);
+      if (--charactersUntilCheck == 0) {
+        delegate.checkInterrupted();
+        charactersUntilCheck = CHECK_INTERVAL;
+      }
+      return value;
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      throw new AssertionError("native matching must not materialize a subsequence");
+    }
+
+    @Override
+    public String toString() {
+      throw new AssertionError("native matching must not materialize input");
     }
   }
 

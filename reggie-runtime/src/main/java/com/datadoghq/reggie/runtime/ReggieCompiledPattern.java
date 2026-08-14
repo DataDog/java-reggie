@@ -40,23 +40,12 @@ public final class ReggieCompiledPattern {
     if (compilation.matcher() != null) {
       return ReggieCompilationResult.admitted(new ReggieCompiledPattern(compilation.matcher()));
     }
-    return ReggieCompilationResult.rejected(mapRejection(compilation.rejection()));
+    return ReggieCompilationResult.rejected(
+        ReggieCompilationRejection.valueOf(compilation.rejection().name()));
   }
 
   /** Creates a new single-thread-confined state object for matching this immutable pattern. */
   public ReggieMatchState newState() {
     return new ReggieMatchState(matcher);
-  }
-
-  private static ReggieCompilationRejection mapRejection(
-      RuntimeCompiler.NamedOnlyLtsRejection rejection) {
-    return switch (rejection) {
-      case UNSUPPORTED_FLAGS -> ReggieCompilationRejection.UNSUPPORTED_FLAGS;
-      case SOURCE_INLINE_MODIFIER -> ReggieCompilationRejection.SOURCE_INLINE_MODIFIER;
-      case PARSE_FAILURE -> ReggieCompilationRejection.PARSE_FAILURE;
-      case PLAN_UNAVAILABLE -> ReggieCompilationRejection.PLAN_UNAVAILABLE;
-      case MISSING_NAMED_CAPTURE -> ReggieCompilationRejection.MISSING_NAMED_CAPTURE;
-      case PROFILE_INELIGIBLE -> ReggieCompilationRejection.PROFILE_INELIGIBLE;
-    };
   }
 }
