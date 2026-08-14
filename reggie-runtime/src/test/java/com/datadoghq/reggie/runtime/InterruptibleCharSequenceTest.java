@@ -73,6 +73,20 @@ class InterruptibleCharSequenceTest {
   }
 
   @Test
+  void interruptionChecksRunOnTheMatchingCallerThread() {
+    Thread caller = Thread.currentThread();
+    ReggieMatchState state = stateFor("(?<value>\\S+)");
+    Probe input =
+        new Probe("value", 1) {
+          @Override
+          void check() {
+            assertEquals(caller, Thread.currentThread());
+          }
+        };
+    assertTrue(state.matches(input, 0, input.length()));
+  }
+
+  @Test
   void checkpointsOptionalHttpAndIpOrHostValidationPaths() {
     String target = "a".repeat(600);
     ReggieMatchState optionalHttp =

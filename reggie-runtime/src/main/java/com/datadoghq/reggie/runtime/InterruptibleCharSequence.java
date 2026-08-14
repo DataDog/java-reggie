@@ -18,10 +18,8 @@ package com.datadoghq.reggie.runtime;
 /**
  * A character sequence that can cooperatively interrupt a native Reggie match.
  *
- * <p>{@link #checkInterrupted()} is invoked synchronously on the matching caller thread. The
- * matching state ({@link ReggieMatchState}) is single-thread-confined and must not be shared across
- * threads; the {@link InterruptibleCharSequence} itself may be freely reused across independent
- * match calls.
+ * <p>{@link #checkInterrupted()} is invoked synchronously on the matching caller thread. Matching
+ * state remains single-thread-confined; implementations must not concurrently reuse a state.
  */
 public interface InterruptibleCharSequence extends CharSequence {
   /**

@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.runtime;
 
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Immutable native compiled pattern for the named linear-token-sequence profile.
@@ -23,6 +24,11 @@ import java.util.Objects;
  * <p>This API never selects another Reggie strategy and never delegates to the JDK.
  */
 public final class ReggieCompiledPattern {
+  private static final Set<ReggieNativeCapability> CAPABILITIES =
+      Set.of(
+          ReggieNativeCapability.NATIVE_ONLY,
+          ReggieNativeCapability.LINEAR_TIME,
+          ReggieNativeCapability.INTERRUPTIBLE_CHAR_SEQUENCE);
   private final LinearTokenSequenceMatcher matcher;
 
   private ReggieCompiledPattern(LinearTokenSequenceMatcher matcher) {
@@ -38,14 +44,14 @@ public final class ReggieCompiledPattern {
   }
 
   static ReggieCompilationResult tryCompileNative(ReggieCompileRequest request) {
-    Objects.requireNonNull(request, "request");
     RuntimeCompiler.NamedOnlyLtsCompilation compilation =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence(
             request.source(), request.flag().reggieFlags());
     if (compilation.matcher() != null) {
       return ReggieCompilationResult.admitted(new ReggieCompiledPattern(compilation.matcher()));
     }
-    return ReggieCompilationResult.rejected(mapRejection(compilation.rejection()));
+    return ReggieCompilationResult.rejected(
+        ReggieCompilationRejection.valueOf(compilation.rejection().name()));
   }
 
   /** Creates a new single-thread-confined state object for matching this immutable pattern. */
@@ -53,15 +59,8 @@ public final class ReggieCompiledPattern {
     return new ReggieMatchState(matcher);
   }
 
-  private static ReggieCompilationRejection mapRejection(
-      RuntimeCompiler.NamedOnlyLtsRejection rejection) {
-    return switch (rejection) {
-      case UNSUPPORTED_FLAGS -> ReggieCompilationRejection.UNSUPPORTED_FLAGS;
-      case SOURCE_INLINE_MODIFIER -> ReggieCompilationRejection.SOURCE_INLINE_MODIFIER;
-      case PARSE_FAILURE -> ReggieCompilationRejection.PARSE_FAILURE;
-      case PLAN_UNAVAILABLE -> ReggieCompilationRejection.PLAN_UNAVAILABLE;
-      case MISSING_NAMED_CAPTURE -> ReggieCompilationRejection.MISSING_NAMED_CAPTURE;
-      case PROFILE_INELIGIBLE -> ReggieCompilationRejection.PROFILE_INELIGIBLE;
-    };
+  /** Returns the immutable capabilities of this native named-LTS compiled pattern. */
+  public Set<ReggieNativeCapability> capabilities() {
+    return CAPABILITIES;
   }
 }

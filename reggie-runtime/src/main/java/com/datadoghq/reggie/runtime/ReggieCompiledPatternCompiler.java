@@ -96,13 +96,7 @@ public final class ReggieCompiledPatternCompiler {
     CompletableFuture<ReggieCompilationResult> existing = inFlight.putIfAbsent(request, mine);
     if (existing != null) {
       waiterArrived.run();
-      try {
-        return await(existing);
-      } finally {
-        synchronized (this) {
-          inFlightRegistrations--;
-        }
-      }
+      return await(existing);
     }
     try {
       synchronized (cache) {
@@ -129,9 +123,6 @@ public final class ReggieCompiledPatternCompiler {
       throw new RuntimeException(failure);
     } finally {
       inFlight.remove(request, mine);
-      synchronized (this) {
-        inFlightRegistrations--;
-      }
     }
   }
 
