@@ -658,6 +658,22 @@ public class BitStateBytecodeGenerator {
    * {@code public int findFrom(String input, int start)} — returns the position of the first anchor
    * point (line start under {@code multiline}, else only position 0) at or after {@code start}
    * where {@code tryMatchAt} succeeds, or {@code -1}.
+   *
+   * <p>Advance under {@code multiline}: the next candidate anchor is normally the line start after
+   * the next {@code '\n'} at/after {@code lineStart}. When the pattern has the optional keyword
+   * prefix, a failed attempt's {@code skipLeadingWs} scan already walked every character from
+   * {@code lineStart} up to the first non-ws position {@code wsRunEnd}, so every line start
+   * strictly between {@code lineStart} and {@code wsRunEnd} is provably dead and the loop jumps to
+   * the first line start at or after {@code wsRunEnd} instead. Two facts make the skipped attempts
+   * dead: (a) the prefix attempt from any interior line start scans the same whitespace run to the
+   * same {@code wsRunEnd} and then runs the identical keyword/separator/mandatory sequence, so it
+   * fails the same way the attempt at {@code lineStart} did; (b) the mandatory-at-start attempt
+   * fails immediately because an interior line start is a leading-ws character, and the detector
+   * rejects any plan whose {@code mandatoryCharSet} intersects {@code leadingWsCharSet}. Without
+   * the jump, an input of n blank lines costs O(n) per line start — {@code \s} includes {@code \n},
+   * so the ws scan consumes the whole remaining input before the keyword check fails — across n
+   * line starts, i.e. O(n^2) for one {@code findFrom}; with it, each whitespace run is scanned a
+   * constant number of times and the whole find is O(n).
    */
   public void generateFindFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
@@ -796,9 +812,46 @@ public class BitStateBytecodeGenerator {
       mv.visitInsn(IRETURN);
       mv.visitLabel(noMatch);
 
+      // int searchFrom = lineStart;
+      // if (hasOptionalPrefix) {
+      //   int wsRunEnd = skipLeadingWs(input, lineStart, n);
+      //   if (wsRunEnd > lineStart) searchFrom = wsRunEnd - 1;
+      // }
+      // (searchFrom - 1 is a ws char when the run is non-empty, so indexOf('\n', searchFrom) + 1
+      // is exactly the first line start at or after wsRunEnd; the empty-run case keeps the
+      // plain advance and still makes progress.)
+      int searchFromVar = allocator.allocate();
+      mv.visitVarInsn(ILOAD, lineStartVar);
+      mv.visitVarInsn(ISTORE, searchFromVar);
+      if (info.hasOptionalPrefix()) {
+        int wsRunEndVar = allocator.allocate();
+        Label shortRun = new Label();
+        Label searchFromSet = new Label();
+
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitVarInsn(ILOAD, lineStartVar);
+        mv.visitVarInsn(ILOAD, nVar);
+        mv.visitMethodInsn(
+            INVOKESTATIC, cn(className), "skipLeadingWs", "(Ljava/lang/String;II)I", false);
+        mv.visitVarInsn(ISTORE, wsRunEndVar);
+
+        mv.visitVarInsn(ILOAD, wsRunEndVar);
+        mv.visitVarInsn(ILOAD, lineStartVar);
+        mv.visitJumpInsn(IF_ICMPLE, shortRun);
+        mv.visitVarInsn(ILOAD, wsRunEndVar);
+        pushInt(mv, 1);
+        mv.visitInsn(ISUB);
+        mv.visitVarInsn(ISTORE, searchFromVar);
+        mv.visitJumpInsn(GOTO, searchFromSet);
+        mv.visitLabel(shortRun);
+        mv.visitVarInsn(ILOAD, lineStartVar);
+        mv.visitVarInsn(ISTORE, searchFromVar);
+        mv.visitLabel(searchFromSet);
+      }
+
       mv.visitVarInsn(ALOAD, inputVar);
       pushInt(mv, '\n');
-      mv.visitVarInsn(ILOAD, lineStartVar);
+      mv.visitVarInsn(ILOAD, searchFromVar);
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
       mv.visitVarInsn(ISTORE, nlVar);
       mv.visitVarInsn(ILOAD, nlVar);

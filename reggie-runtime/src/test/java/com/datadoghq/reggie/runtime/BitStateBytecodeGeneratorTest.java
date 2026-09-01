@@ -172,6 +172,74 @@ public class BitStateBytecodeGeneratorTest {
     assertEquals(jm.group(1), r.group(1));
   }
 
+  /**
+   * Exercise findFrom's whitespace-run line-start skip: after a failed attempt whose leading-ws
+   * scan walked a run containing newlines, every line start strictly inside the run is provably
+   * dead (identical prefix attempt, mandatory attempt fails on a ws char), so the generated loop
+   * jumps to the first line start at or after the run end. Each input below was checked against JDK
+   * 21's actual find() result; the assertions compare against the live JDK matcher, not against
+   * hand-computed expectations.
+   */
+  @Test
+  public void testMultilineWsRunSkipsDeadLineStarts() {
+    ReggieMatcher matcher = RuntimeCompiler.compile(COMMAND_PATTERN);
+    Pattern jdk = Pattern.compile(COMMAND_PATTERN);
+    // "\n\n\nls extra\n": the match begins exactly at the ws run end - a live line start that
+    // the jump must still land on (it is the first line start at or after the run end).
+    // "\n  \n  ls\n": the run crosses a newline but every line start is dead - no match anywhere.
+    // "\n\nx\n": single-line ws run, match at the run end via the mandatory attempt alone.
+    // "\n\n\n": all blank, the pathological drain payload - no match anywhere.
+    String[] inputs = {"\n\n\nls extra\n", "\n  \n  ls\n", "\n\nx\n", "\n\n\n"};
+    for (String input : inputs) {
+      Matcher jm = jdk.matcher(input);
+      boolean jdkFound = jm.find();
+      MatchResult r = matcher.findMatch(input);
+      if (jdkFound) {
+        assertTrue(r != null, "findMatch for input [" + input + "]");
+        assertEquals(jm.start(), r.start(), "find start for input [" + input + "]");
+        assertEquals(jm.end(), r.end(), "find end for input [" + input + "]");
+        assertEquals(jm.group(0), r.group(0), "group(0) for input [" + input + "]");
+        assertEquals(jm.group(1), r.group(1), "group(1) for input [" + input + "]");
+        assertEquals(jm.start(), matcher.findFrom(input, 0), "findFrom for input [" + input + "]");
+      } else {
+        assertEquals(null, r, "expected no match for input [" + input + "]");
+        assertEquals(-1, matcher.findFrom(input, 0), "findFrom for input [" + input + "]");
+      }
+    }
+  }
+
+  /**
+   * Drain parity (find ALL matches, advancing past each) on a blank-line-heavy payload - the IAST
+   * tokenizer drain shape that motivated the line-start skip. Compares the full match list (start,
+   * end, group 1) against java.util.regex's find() loop.
+   */
+  @Test
+  public void testDrainOverBlankLinePayloadMatchesJdkFindAll() {
+    ReggieMatcher matcher = RuntimeCompiler.compile(COMMAND_PATTERN);
+    Pattern jdk = Pattern.compile(COMMAND_PATTERN);
+    String input = "\n\n\nls one\n\n\nsudo ls two\n\n\n\n";
+
+    java.util.List<String> expected = new java.util.ArrayList<>();
+    Matcher jm = jdk.matcher(input);
+    while (jm.find()) {
+      expected.add(jm.start() + "-" + jm.end() + "-" + jm.group(1));
+    }
+
+    java.util.List<String> actual = new java.util.ArrayList<>();
+    int len = input.length();
+    int pos = 0;
+    while (pos <= len) {
+      MatchResult r = matcher.findMatchFrom(input, pos);
+      if (r == null) {
+        break;
+      }
+      actual.add(r.start() + "-" + r.end() + "-" + r.group(1));
+      pos = r.end() > r.start() ? r.end() : r.end() + 1;
+    }
+
+    assertEquals(expected, actual);
+  }
+
   @Test
   public void testMultilineOptionalPrefixAbsorbsLeadingNewline() {
     ReggieMatcher matcher = RuntimeCompiler.compile(COMMAND_PATTERN);
