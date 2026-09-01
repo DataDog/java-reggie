@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.IOException;
@@ -46,7 +47,7 @@ class LinearTokenSequenceAccessLogTest {
 
   @Test
   void matchesCombinedAccessLogWithDelimiterAwareCaptures() {
-    ReggieMatcher matcher = Reggie.compile(COMBINED_ACCESS_LOG_PATTERN, NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(COMBINED_ACCESS_LOG_PATTERN);
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
             + "200 17888 \"https://example.com/index.html\" \"Mozilla/5.0 Test\" \"-\" "
@@ -75,7 +76,7 @@ class LinearTokenSequenceAccessLogTest {
   @Test
   void routesRealExpandedCommonAccessLogPatternThroughLinearTokenSequenceMatcher()
       throws Exception {
-    ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-1.regex"), NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(testResource("logs-grok-pattern-1.regex"));
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
             + "200 17888";
@@ -95,7 +96,7 @@ class LinearTokenSequenceAccessLogTest {
   @Test
   void routesRealExpandedCombinedAccessLogPatternThroughLinearTokenSequenceMatcher()
       throws Exception {
-    ReggieMatcher matcher = Reggie.compile(testResource("logs-grok-pattern-2.regex"), NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(testResource("logs-grok-pattern-2.regex"));
     String input =
         "10.202.82.195 - - [15/Mar/2019:19:45:35 -0700]  \"POST /config?x=y HTTP/1.1\" "
             + "200 17888 \"https://example.com/index.html\" \"Mozilla/5.0 Test\" \"-\" "
@@ -174,8 +175,44 @@ class LinearTokenSequenceAccessLogTest {
   }
 
   @Test
+  void realExpandedPatternsUseOnlyTheBoundedCharSequenceRegion() throws Exception {
+    assertBoundedFixtureUsesOnlyItsRegion(
+        testResource("logs-grok-pattern-1.regex"),
+        commonMessage("10.202.82.195", "POST ", "/config?x=y", " HTTP/1.1", "17888"),
+        commonMessage("10.202.82.195", "POST ", "/config?x=y", " HTTP/1.1", "not-a-number"));
+    assertBoundedFixtureUsesOnlyItsRegion(
+        testResource("logs-grok-pattern-2.regex"),
+        combinedMessage(
+            "10.202.82.195",
+            "POST ",
+            "/config?x=y",
+            " HTTP/1.1",
+            "17888",
+            "https://example.com/index.html",
+            "Mozilla/5.0 Test",
+            "-",
+            "tracking-id",
+            "0.024",
+            "0.024",
+            "[decoy] . [nginx_access]  [not-the-logger]"),
+        combinedMessage(
+            "10.202.82.195",
+            "POST ",
+            "/config?x=y",
+            " HTTP/1.1",
+            "not-a-number",
+            "https://example.com/index.html",
+            "Mozilla/5.0 Test",
+            "-",
+            "tracking-id",
+            "0.024",
+            "0.024",
+            "[decoy] . [nginx_access]  [not-the-logger]"));
+  }
+
+  @Test
   void leavesCallerArraysUnchangedOnNoMatch() {
-    ReggieMatcher matcher = Reggie.compile(COMBINED_ACCESS_LOG_PATTERN, NAMED_ONLY);
+    ReggieMatcher matcher = compileNamedOnly(COMBINED_ACCESS_LOG_PATTERN);
     int[] starts = new int[17];
     int[] ends = new int[17];
     starts[1] = 123;
@@ -191,13 +228,20 @@ class LinearTokenSequenceAccessLogTest {
     assertEquals(value, input.substring(starts[group], ends[group]));
   }
 
+  private static ReggieMatcher compileNamedOnly(String pattern) {
+    if (pattern.startsWith("(?s)")) {
+      return Reggie.compile(pattern.substring("(?s)".length()), ReggieFlags.DOTALL, NAMED_ONLY);
+    }
+    return Reggie.compile(pattern, NAMED_ONLY);
+  }
+
   private static void assertNamedCaptureBoundariesEquivalent(String pattern, String... inputs)
       throws Exception {
     RegexParser parser = new RegexParser();
     parser.parse(pattern);
     Map<String, Integer> nameToIndex = parser.getGroupNameMap();
     Pattern jdkPattern = Pattern.compile(pattern);
-    ReggieMatcher reggieMatcher = Reggie.compile(pattern, NAMED_ONLY);
+    ReggieMatcher reggieMatcher = compileNamedOnly(pattern);
     assertDelegateTypeUnchecked(reggieMatcher, LinearTokenSequenceMatcher.class);
 
     for (String input : inputs) {
@@ -229,6 +273,43 @@ class LinearTokenSequenceAccessLogTest {
               entry.getKey() + " value: " + input);
         }
       }
+    }
+  }
+
+  private static void assertBoundedFixtureUsesOnlyItsRegion(
+      String pattern, String matchingInput, String failingInput) throws Exception {
+    ReggieMatcher matcher = compileNamedOnly(pattern);
+    assertDelegateType(matcher, LinearTokenSequenceMatcher.class);
+    LinearTokenSequenceMatcher ltsMatcher = (LinearTokenSequenceMatcher) matcher;
+    int groupCount = Pattern.compile(pattern).matcher("").groupCount();
+
+    assertBoundedResult(
+        ltsMatcher, groupCount, "before " + matchingInput + " after ", matchingInput, true);
+    assertBoundedResult(
+        ltsMatcher, groupCount, "before " + failingInput + " after ", failingInput, false);
+  }
+
+  private static void assertBoundedResult(
+      LinearTokenSequenceMatcher matcher,
+      int groupCount,
+      String source,
+      String region,
+      boolean expectedMatch) {
+    int start = source.indexOf(region);
+    int end = start + region.length();
+    RangeGuardCharSequence input = new RangeGuardCharSequence(source, start, end);
+    int[] starts = new int[groupCount + 1];
+    int[] ends = new int[groupCount + 1];
+    Arrays.fill(starts, 777);
+    Arrays.fill(ends, 888);
+
+    assertEquals(expectedMatch, matcher.matchIntoBounded(input, start, end, starts, ends));
+    if (expectedMatch) {
+      assertEquals(start, starts[0]);
+      assertEquals(end, ends[0]);
+    } else {
+      assertTrue(Arrays.stream(starts).allMatch(value -> value == 777));
+      assertTrue(Arrays.stream(ends).allMatch(value -> value == 888));
     }
   }
 
@@ -300,6 +381,41 @@ class LinearTokenSequenceAccessLogTest {
       assertDelegateType(matcher, expectedType);
     } catch (Exception e) {
       throw new AssertionError(e);
+    }
+  }
+
+  private static final class RangeGuardCharSequence implements CharSequence {
+    private final String value;
+    private final int start;
+    private final int end;
+
+    RangeGuardCharSequence(String value, int start, int end) {
+      this.value = value;
+      this.start = start;
+      this.end = end;
+    }
+
+    @Override
+    public int length() {
+      return value.length();
+    }
+
+    @Override
+    public char charAt(int index) {
+      if (index < start || index >= end) {
+        throw new AssertionError("read outside bounded region: " + index);
+      }
+      return value.charAt(index);
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      throw new AssertionError("subSequence must not be called while matching");
+    }
+
+    @Override
+    public String toString() {
+      throw new AssertionError("toString must not be called while matching");
     }
   }
 }

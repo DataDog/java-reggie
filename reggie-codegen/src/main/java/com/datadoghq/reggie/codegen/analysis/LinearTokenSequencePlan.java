@@ -16,8 +16,12 @@
 package com.datadoghq.reggie.codegen.analysis;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /** Executable, deterministic plan for a categorized linear-token-sequence regex. */
 public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
@@ -39,6 +43,7 @@ public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
     CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH,
     CAPTURE_BRACKETED_WORD_AFTER_SKIP,
     SKIP_ANY,
+    SKIP_ANY_EXCEPT_NEWLINE,
     ANCHOR,
     OPTIONAL_SEQUENCE
   }
@@ -72,6 +77,37 @@ public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
 
   public LinearTokenSequencePlan {
     ops = List.copyOf(ops);
+  }
+
+  /**
+   * Returns whether this plan has a capture-producing operation for every requested group index.
+   *
+   * <p>The check recurses into optional sequences because an optional capture remains observable
+   * when its present branch matches. It deliberately does not use {@link #groupCount()}: that value
+   * is a top-level construction detail and may omit captures nested in an optional sequence.
+   */
+  public boolean coversCaptureIndexes(Collection<Integer> requiredIndexes) {
+    Objects.requireNonNull(requiredIndexes, "requiredIndexes");
+    Set<Integer> remaining = new HashSet<>();
+    for (Integer index : requiredIndexes) {
+      if (index == null || index <= 0) {
+        throw new IllegalArgumentException("capture group indexes must be positive: " + index);
+      }
+      remaining.add(index);
+    }
+    removeCoveredIndexes(ops, remaining);
+    return remaining.isEmpty();
+  }
+
+  private static void removeCoveredIndexes(List<Op> ops, Set<Integer> remaining) {
+    for (Op op : ops) {
+      if (op.groupNumber() > 0) {
+        remaining.remove(op.groupNumber());
+      }
+      if (!op.children().isEmpty()) {
+        removeCoveredIndexes(op.children(), remaining);
+      }
+    }
   }
 
   /** Converts categorizer atoms into a closed, executable linear-token-sequence plan. */
@@ -131,6 +167,7 @@ public record LinearTokenSequencePlan(List<Op> ops, int groupCount) {
           Op.captureUntil(
               OpKind.CAPTURE_QUOTED_UNTIL_DELIMITER, atom.groupNumber(), atom.delimiter());
       case ANY_STAR -> Op.uncaptured(OpKind.SKIP_ANY);
+      case ANY_STAR_EXCEPT_NEWLINE -> Op.uncaptured(OpKind.SKIP_ANY_EXCEPT_NEWLINE);
       case ANCHOR -> Op.uncaptured(OpKind.ANCHOR);
       case OPTIONAL_SEQUENCE -> optionalOpFor(atom);
       case COMPLEX_ALTERNATION -> null;

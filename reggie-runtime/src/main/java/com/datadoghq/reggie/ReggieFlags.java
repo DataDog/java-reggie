@@ -19,6 +19,7 @@ package com.datadoghq.reggie;
 public final class ReggieFlags {
   // Keep these separate from java.util.regex.Pattern's values so an accidental JDK flag is never
   // silently interpreted as a different Reggie flag.
+  public static final int NONE = 0;
   public static final int CASE_INSENSITIVE = 1 << 24;
   public static final int MULTILINE = 1 << 25;
   public static final int DOTALL = 1 << 26;

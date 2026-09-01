@@ -22,12 +22,13 @@ import java.util.Objects;
 
 /** Generic runtime executor for deterministic linear-token-sequence plans. */
 final class LinearTokenSequenceMatcher extends ReggieMatcher {
+  // Shared with RuntimeCompiler's admission-side HTTP-version-optional-capture shape check so the
+  // two literals can't silently drift.
+  static final String HTTP_VERSION_LITERAL = " HTTP/";
+
   private final LinearTokenSequencePlan plan;
   private final int groupCount;
-  private final int[] scratchStarts;
-  private final int[] scratchEnds;
-  private final int[][] optionalScratchStarts;
-  private final int[][] optionalScratchEnds;
+  private final int optionalDepth;
 
   LinearTokenSequenceMatcher(
       String pattern,
@@ -38,11 +39,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     this.plan = plan;
     this.groupCount = groupCount;
     this.nameToIndex = Map.copyOf(nameToIndex);
-    this.scratchStarts = new int[groupCount + 1];
-    this.scratchEnds = new int[groupCount + 1];
-    int optionalDepth = maxOptionalDepth(plan.ops());
-    this.optionalScratchStarts = new int[optionalDepth][groupCount + 1];
-    this.optionalScratchEnds = new int[optionalDepth][groupCount + 1];
+    this.optionalDepth = maxOptionalDepth(plan.ops());
   }
 
   @Override
@@ -52,7 +49,8 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   @Override
   public boolean matches(String input) {
-    return matchInto(input, scratchStarts, scratchEnds);
+    Objects.requireNonNull(input, "input");
+    return matchesAt(input, 0, input.length(), newWorkspace(), true);
   }
 
   @Override
@@ -64,37 +62,35 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   public int findFrom(String input, int start) {
     Objects.requireNonNull(input, "input");
     if (start < 0 || start > input.length()) return -1;
+    MatchWorkspace workspace = newWorkspace();
     for (int pos = start; pos <= input.length(); pos++) {
-      if (matchesAt(input, pos, scratchStarts, scratchEnds, false)) return pos;
+      if (matchesAt(input, pos, input.length(), workspace, false)) return pos;
     }
     return -1;
   }
 
   @Override
   public MatchResult match(String input) {
-    int[] starts = new int[groupCount + 1];
-    int[] ends = new int[groupCount + 1];
-    if (!matchInto(input, starts, ends)) return null;
-    if (!nameToIndex.isEmpty()) {
-      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
-    }
-    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    Objects.requireNonNull(input, "input");
+    MatchWorkspace workspace = newWorkspace();
+    if (!matchesAt(input, 0, input.length(), workspace, true)) return null;
+    return toMatchResult(input, workspace);
   }
 
   @Override
   public boolean matchesBounded(CharSequence input, int start, int end) {
     Objects.requireNonNull(input, "input");
-    return start >= 0
-        && end >= start
-        && end <= input.length()
-        && matches(input.subSequence(start, end).toString());
+    validateRegion(input, start, end);
+    return matchesAt(input, start, end, newWorkspace(), true);
   }
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
     Objects.requireNonNull(input, "input");
-    if (start < 0 || end < start || end > input.length()) return null;
-    return match(input.subSequence(start, end).toString());
+    validateRegion(input, start, end);
+    MatchWorkspace workspace = newWorkspace();
+    if (!matchesAt(input, start, end, workspace, true)) return null;
+    return toMatchResult(input.toString(), workspace);
   }
 
   @Override
@@ -104,32 +100,115 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult findMatchFrom(String input, int start) {
-    int pos = findFrom(input, start);
-    if (pos < 0) return null;
-    int[] starts = new int[groupCount + 1];
-    int[] ends = new int[groupCount + 1];
-    if (!matchesAt(input, pos, starts, ends, false)) return null;
-    if (!nameToIndex.isEmpty()) {
-      return new NamedMatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    Objects.requireNonNull(input, "input");
+    if (start < 0 || start > input.length()) return null;
+    MatchWorkspace workspace = newWorkspace();
+    for (int pos = start; pos <= input.length(); pos++) {
+      if (!matchesAt(input, pos, input.length(), workspace, false)) {
+        continue;
+      }
+      return toMatchResult(input, workspace);
     }
-    return new MatchResultImpl(input, starts, ends, groupCount, nameToIndex);
+    return null;
   }
 
   @Override
   public boolean matchInto(String input, int[] groupStarts, int[] groupEnds) {
+    return matchIntoBounded(input, 0, input.length(), groupStarts, groupEnds);
+  }
+
+  boolean matchIntoBounded(
+      CharSequence input, int start, int end, int[] groupStarts, int[] groupEnds) {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(groupStarts, "groupStarts");
     Objects.requireNonNull(groupEnds, "groupEnds");
+    validateRegion(input, start, end);
     if (groupStarts.length <= groupCount || groupEnds.length <= groupCount) {
       throw new IndexOutOfBoundsException("group arrays too small for " + groupCount + " groups");
     }
-    if (!matchesAt(input, 0, scratchStarts, scratchEnds, true)) return false;
-    System.arraycopy(scratchStarts, 0, groupStarts, 0, groupCount + 1);
-    System.arraycopy(scratchEnds, 0, groupEnds, 0, groupCount + 1);
+    MatchWorkspace workspace = newWorkspace();
+    if (!matchesAt(input, start, end, workspace, true)) return false;
+    System.arraycopy(workspace.starts, 0, groupStarts, 0, groupCount + 1);
+    System.arraycopy(workspace.ends, 0, groupEnds, 0, groupCount + 1);
     return true;
   }
 
-  private boolean matchesAt(String input, int offset, int[] starts, int[] ends, boolean fullMatch) {
+  MatchWorkspace newMatchWorkspace() {
+    return newWorkspace();
+  }
+
+  int groupCount() {
+    return groupCount;
+  }
+
+  int groupIndex(String name) {
+    Objects.requireNonNull(name, "name");
+    Integer index = nameToIndex.get(name);
+    if (index == null) {
+      throw new IllegalArgumentException("unknown group name: " + name);
+    }
+    return index;
+  }
+
+  boolean matchIntoBounded(
+      CharSequence input,
+      int start,
+      int end,
+      int[] groupStarts,
+      int[] groupEnds,
+      MatchWorkspace workspace) {
+    Objects.requireNonNull(input, "input");
+    Objects.requireNonNull(groupStarts, "groupStarts");
+    Objects.requireNonNull(groupEnds, "groupEnds");
+    Objects.requireNonNull(workspace, "workspace");
+    validateRegion(input, start, end);
+    if (groupStarts.length <= groupCount || groupEnds.length <= groupCount) {
+      throw new IndexOutOfBoundsException("group arrays too small for " + groupCount + " groups");
+    }
+    if (!matchesAt(input, start, end, workspace, true)) return false;
+    System.arraycopy(workspace.starts, 0, groupStarts, 0, groupCount + 1);
+    System.arraycopy(workspace.ends, 0, groupEnds, 0, groupCount + 1);
+    return true;
+  }
+
+  boolean matchIntoBoundedInterruptibly(
+      InterruptibleCharSequence input,
+      int start,
+      int end,
+      int[] groupStarts,
+      int[] groupEnds,
+      MatchWorkspace workspace) {
+    input.checkInterrupted();
+    return matchIntoBounded(
+        workspace.checkpointing(input), start, end, groupStarts, groupEnds, workspace);
+  }
+
+  private MatchResult toMatchResult(String input, MatchWorkspace workspace) {
+    if (!nameToIndex.isEmpty()) {
+      return new NamedMatchResultImpl(
+          input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+    }
+    return new MatchResultImpl(input, workspace.starts, workspace.ends, groupCount, nameToIndex);
+  }
+
+  private static void validateRegion(CharSequence input, int start, int end) {
+    if (!isValidRegion(input, start, end)) {
+      throw new IndexOutOfBoundsException("invalid region [" + start + ", " + end + ")");
+    }
+  }
+
+  private static boolean isValidRegion(CharSequence input, int start, int end) {
+    return start >= 0 && end >= start && end <= input.length();
+  }
+
+  private MatchWorkspace newWorkspace() {
+    return new MatchWorkspace(groupCount, optionalDepth);
+  }
+
+  private boolean matchesAt(
+      CharSequence input, int offset, int regionEnd, MatchWorkspace workspace, boolean fullMatch) {
+    int[] starts = workspace.starts;
+    int[] ends = workspace.ends;
     Arrays.fill(starts, -1);
     Arrays.fill(ends, -1);
     starts[0] = offset;
@@ -139,181 +218,231 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       if (isTargetBeforeOptionalHttpVersion(plan.ops(), i)) {
         pos =
             captureTargetBeforeOptionalHttpVersion(
-                op, plan.ops().get(i + 1), input, pos, starts, ends);
+                op, plan.ops().get(i + 1), input, pos, regionEnd, starts, ends);
         if (pos < 0) return false;
         i++;
         continue;
       }
-      pos = apply(op, input, pos, starts, ends, i == plan.ops().size() - 1, 0);
+      pos =
+          apply(op, input, pos, regionEnd, starts, ends, i == plan.ops().size() - 1, workspace, 0);
       if (pos < 0) return false;
     }
-    if (fullMatch && pos != input.length()) return false;
-    ends[0] = fullMatch ? input.length() : pos;
+    if (fullMatch && pos != regionEnd) return false;
+    ends[0] = fullMatch ? regionEnd : pos;
     return true;
   }
 
   private int apply(
       LinearTokenSequencePlan.Op op,
-      String input,
+      CharSequence input,
       int pos,
+      int regionEnd,
       int[] starts,
       int[] ends,
       boolean lastOp,
+      MatchWorkspace workspace,
       int optionalDepth) {
     return switch (op.kind()) {
-      case LITERAL -> startsWith(input, pos, op.literal()) ? pos + op.literal().length() : -1;
-      case WHITESPACE_PLUS -> skipWhitespace(input, pos);
-      case CAPTURE_NON_SPACE -> captureNonSpace(input, pos, op.groupNumber(), starts, ends);
-      case CAPTURE_DIGITS -> captureDigits(input, pos, op.groupNumber(), starts, ends);
+      case LITERAL ->
+          startsWith(input, pos, regionEnd, op.literal()) ? pos + op.literal().length() : -1;
+      case WHITESPACE_PLUS -> skipWhitespace(input, pos, regionEnd);
+      case CAPTURE_NON_SPACE ->
+          captureNonSpace(input, pos, regionEnd, op.groupNumber(), starts, ends);
+      case CAPTURE_DIGITS -> captureDigits(input, pos, regionEnd, op.groupNumber(), starts, ends);
       case CAPTURE_SIGNED_INTEGER ->
-          captureSignedInteger(input, pos, op.groupNumber(), starts, ends);
+          captureSignedInteger(input, pos, regionEnd, op.groupNumber(), starts, ends);
       case CAPTURE_SIGNED_INTEGER_OR_DASH ->
-          captureSignedIntegerOrDash(input, pos, op.groupNumber(), starts, ends, true);
+          captureSignedIntegerOrDash(input, pos, regionEnd, op.groupNumber(), starts, ends, true);
       case CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH ->
-          captureSignedIntegerOrDash(input, pos, op.groupNumber(), starts, ends, false);
+          captureSignedIntegerOrDash(input, pos, regionEnd, op.groupNumber(), starts, ends, false);
       case CAPTURE_DECIMAL_NUMBER ->
-          captureDecimal(input, pos, op.groupNumber(), starts, ends, false);
+          captureDecimal(input, pos, regionEnd, op.groupNumber(), starts, ends, false);
       case CAPTURE_SIGNED_DECIMAL_NUMBER ->
-          captureDecimal(input, pos, op.groupNumber(), starts, ends, true);
-      case CAPTURE_WORD -> captureWord(input, pos, op.groupNumber(), starts, ends);
+          captureDecimal(input, pos, regionEnd, op.groupNumber(), starts, ends, true);
+      case CAPTURE_WORD -> captureWord(input, pos, regionEnd, op.groupNumber(), starts, ends);
       case CAPTURE_UNTIL_DELIMITER ->
-          captureUntil(input, pos, op.delimiter(), op.groupNumber(), starts, ends);
+          captureUntil(input, pos, regionEnd, op.delimiter(), op.groupNumber(), starts, ends);
       case CAPTURE_QUOTED_UNTIL_DELIMITER ->
-          captureQuotedUntil(input, pos, op.delimiter(), op.groupNumber(), starts, ends, false);
+          captureQuotedUntil(
+              input, pos, regionEnd, op.delimiter(), op.groupNumber(), starts, ends, false);
       case CAPTURE_QUOTED_NON_SPACE ->
-          captureQuotedUntil(input, pos, op.delimiter(), op.groupNumber(), starts, ends, true);
-      case CAPTURE_IP_OR_HOST -> captureIpOrHost(input, pos, op.groupNumber(), starts, ends);
+          captureQuotedUntil(
+              input, pos, regionEnd, op.delimiter(), op.groupNumber(), starts, ends, true);
+      case CAPTURE_IP_OR_HOST ->
+          captureIpOrHost(input, pos, regionEnd, op.groupNumber(), starts, ends);
       case CAPTURE_BRACKETED_WORD_AFTER_SKIP ->
-          captureBracketedWordAfterSkip(input, pos, op.groupNumber(), starts, ends);
-      case SKIP_ANY -> lastOp ? input.length() : -1;
+          captureBracketedWordAfterSkip(input, pos, regionEnd, op.groupNumber(), starts, ends);
+      case SKIP_ANY -> lastOp ? consumeToEnd(input, pos, regionEnd) : -1;
+      case SKIP_ANY_EXCEPT_NEWLINE ->
+          lastOp ? consumeToEndExceptNewline(input, pos, regionEnd) : -1;
       case ANCHOR -> pos;
-      case OPTIONAL_SEQUENCE -> applyOptional(op, input, pos, starts, ends, optionalDepth);
+      case OPTIONAL_SEQUENCE ->
+          applyOptional(op, input, pos, regionEnd, starts, ends, workspace, optionalDepth);
     };
   }
 
-  private static int captureNonSpace(String input, int pos, int group, int[] starts, int[] ends) {
+  private static int captureNonSpace(
+      CharSequence input, int pos, int regionEnd, int group, int[] starts, int[] ends) {
     int start = pos;
-    while (pos < input.length() && !Character.isWhitespace(input.charAt(pos))) pos++;
+    while (pos < regionEnd && !isJdkWhitespace(input.charAt(pos))) pos++;
     if (pos == start) return -1;
     set(starts, ends, group, start, pos);
     return pos;
   }
 
-  private static int captureDigits(String input, int pos, int group, int[] starts, int[] ends) {
+  private static int captureDigits(
+      CharSequence input, int pos, int regionEnd, int group, int[] starts, int[] ends) {
     int start = pos;
-    while (pos < input.length() && isDigit(input.charAt(pos))) pos++;
+    while (pos < regionEnd && isDigit(input.charAt(pos))) pos++;
     if (pos == start) return -1;
     set(starts, ends, group, start, pos);
     return pos;
   }
 
   private static int captureSignedInteger(
-      String input, int pos, int group, int[] starts, int[] ends) {
+      CharSequence input, int pos, int regionEnd, int group, int[] starts, int[] ends) {
     int start = pos;
-    if (pos < input.length() && (input.charAt(pos) == '+' || input.charAt(pos) == '-')) pos++;
+    if (pos < regionEnd && (input.charAt(pos) == '+' || input.charAt(pos) == '-')) pos++;
     int digitStart = pos;
-    while (pos < input.length() && isDigit(input.charAt(pos))) pos++;
+    while (pos < regionEnd && isDigit(input.charAt(pos))) pos++;
     if (pos == digitStart) return -1;
     set(starts, ends, group, start, pos);
     return pos;
   }
 
   private static int captureSignedIntegerOrDash(
-      String input, int pos, int group, int[] starts, int[] ends, boolean captureDash) {
-    if (pos < input.length() && input.charAt(pos) == '-') {
+      CharSequence input,
+      int pos,
+      int regionEnd,
+      int group,
+      int[] starts,
+      int[] ends,
+      boolean captureDash) {
+    if (pos < regionEnd && input.charAt(pos) == '-') {
       if (captureDash) set(starts, ends, group, pos, pos + 1);
       return pos + 1;
     }
-    return captureSignedInteger(input, pos, group, starts, ends);
+    return captureSignedInteger(input, pos, regionEnd, group, starts, ends);
   }
 
   private static int captureDecimal(
-      String input, int pos, int group, int[] starts, int[] ends, boolean signed) {
+      CharSequence input,
+      int pos,
+      int regionEnd,
+      int group,
+      int[] starts,
+      int[] ends,
+      boolean signed) {
     int start = pos;
-    if (signed && pos < input.length() && (input.charAt(pos) == '+' || input.charAt(pos) == '-')) {
+    if (signed && pos < regionEnd && (input.charAt(pos) == '+' || input.charAt(pos) == '-')) {
       pos++;
     }
     int digitStart = pos;
-    while (pos < input.length() && isDigit(input.charAt(pos))) pos++;
+    while (pos < regionEnd && isDigit(input.charAt(pos))) pos++;
     boolean sawLeadingDigits = pos > digitStart;
-    if (pos < input.length() && input.charAt(pos) == '.') {
+    if (pos < regionEnd && input.charAt(pos) == '.') {
       pos++;
       int fractionStart = pos;
-      while (pos < input.length() && isDigit(input.charAt(pos))) pos++;
-      if (!sawLeadingDigits && pos == fractionStart) return -1;
-    } else if (!sawLeadingDigits) {
+      while (pos < regionEnd && isDigit(input.charAt(pos))) pos++;
+      boolean sawFractionDigits = pos > fractionStart;
+      // CAPTURE_DECIMAL_NUMBER (signed=false) is only ever emitted for the exact source shape
+      // \d+\.\d+ (see PatternCategorizer#isDecimalNumber); require the fraction digits so this
+      // executor doesn't admit "1" or "1." for a pattern the categorizer promised was \d+\.\d+.
+      if (!signed && !sawFractionDigits) return -1;
+      if (!sawLeadingDigits && !sawFractionDigits) return -1;
+    } else if (!sawLeadingDigits || !signed) {
       return -1;
     }
     set(starts, ends, group, start, pos);
     return pos;
   }
 
-  private static int captureWord(String input, int pos, int group, int[] starts, int[] ends) {
+  private static int captureWord(
+      CharSequence input, int pos, int regionEnd, int group, int[] starts, int[] ends) {
     int start = pos;
-    while (pos < input.length() && isWord(input.charAt(pos))) pos++;
+    while (pos < regionEnd && isWord(input.charAt(pos))) pos++;
     if (pos == start) return -1;
     set(starts, ends, group, start, pos);
     return pos;
   }
 
   private static int captureUntil(
-      String input, int pos, char delimiter, int group, int[] starts, int[] ends) {
-    int end = input.indexOf(delimiter, pos);
-    if (end < 0) return -1;
+      CharSequence input,
+      int pos,
+      int regionEnd,
+      char delimiter,
+      int group,
+      int[] starts,
+      int[] ends) {
+    int end = findChar(input, pos, regionEnd, delimiter);
+    if (end == regionEnd) return -1;
     set(starts, ends, group, pos, end);
     return end;
   }
 
   private static int captureQuotedUntil(
-      String input,
+      CharSequence input,
       int pos,
+      int regionEnd,
       char delimiter,
       int group,
       int[] starts,
       int[] ends,
       boolean nonSpace) {
-    if (pos >= input.length() || input.charAt(pos) != '"') return -1;
+    if (pos >= regionEnd || input.charAt(pos) != '"') return -1;
     int start = pos + 1;
-    int end = input.indexOf(delimiter, start);
-    if (end < 0) return -1;
+    int end = findChar(input, start, regionEnd, delimiter);
+    if (end == regionEnd) return -1;
     if (nonSpace) {
       for (int i = start; i < end; i++) {
-        if (Character.isWhitespace(input.charAt(i))) return -1;
+        if (isJdkWhitespace(input.charAt(i))) return -1;
       }
     }
     set(starts, ends, group, start, end);
     return end + 1;
   }
 
-  private static int captureIpOrHost(String input, int pos, int group, int[] starts, int[] ends) {
-    int end = captureNonSpace(input, pos, group, starts, ends);
+  private static int captureIpOrHost(
+      CharSequence input, int pos, int regionEnd, int group, int[] starts, int[] ends) {
+    int end = captureNonSpace(input, pos, regionEnd, group, starts, ends);
     return end >= 0 && isIpOrHost(input, pos, end) ? end : -1;
   }
 
   private static int captureBracketedWordAfterSkip(
-      String input, int pos, int group, int[] starts, int[] ends) {
-    int search = pos;
+      CharSequence input, int pos, int regionEnd, int group, int[] starts, int[] ends) {
     int lastStart = -1;
     int lastEnd = -1;
-    while (search < input.length()) {
-      int open = input.indexOf('[', search);
-      if (open < 0) break;
-      int close = input.indexOf(']', open + 1);
-      if (close < 0) break;
-      int wordEnd = open + 1;
-      while (wordEnd < close && isWord(input.charAt(wordEnd))) wordEnd++;
-      if (wordEnd == close
-          && wordEnd > open + 1
-          && close + 1 < input.length()
-          && Character.isWhitespace(input.charAt(close + 1))) {
-        lastStart = open + 1;
-        lastEnd = close;
+    int open = -1;
+    int wordEnd = -1;
+    for (int index = pos; index < regionEnd; index++) {
+      char ch = input.charAt(index);
+      if (ch == '[' && index > pos && input.charAt(index - 1) == ' ') {
+        open = index;
+        wordEnd = index + 1;
+        continue;
       }
-      search = open + 1;
+      if (open < 0) {
+        continue;
+      }
+      if (ch == ']') {
+        if (wordEnd == index
+            && wordEnd > open + 1
+            && index + 1 < regionEnd
+            && input.charAt(index + 1) == ' ') {
+          lastStart = open + 1;
+          lastEnd = index;
+        }
+        open = -1;
+        wordEnd = -1;
+      } else if (wordEnd == index && isWord(ch)) {
+        wordEnd++;
+      } else {
+        wordEnd = -1;
+      }
     }
     if (lastStart < 0) return -1;
     set(starts, ends, group, lastStart, lastEnd);
-    return input.length();
+    return regionEnd;
   }
 
   private static boolean isTargetBeforeOptionalHttpVersion(
@@ -330,23 +459,24 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     LinearTokenSequencePlan.Op prefix = optional.children().get(0);
     LinearTokenSequencePlan.Op version = optional.children().get(1);
     return prefix.kind() == LinearTokenSequencePlan.OpKind.LITERAL
-        && " HTTP/".equals(prefix.literal())
+        && HTTP_VERSION_LITERAL.equals(prefix.literal())
         && version.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_DECIMAL_NUMBER;
   }
 
   private static int captureTargetBeforeOptionalHttpVersion(
       LinearTokenSequencePlan.Op target,
       LinearTokenSequencePlan.Op optionalHttpVersion,
-      String input,
+      CharSequence input,
       int pos,
+      int regionEnd,
       int[] starts,
       int[] ends) {
-    int quote = input.indexOf('"', pos);
-    if (quote < 0 || quote == pos) return -1;
-    int marker = input.lastIndexOf(" HTTP/", quote);
+    int quote = findChar(input, pos, regionEnd, '"');
+    if (quote == regionEnd || quote == pos) return -1;
+    int marker = findLastLiteral(input, pos, quote, HTTP_VERSION_LITERAL);
     if (marker >= pos && isNonSpace(input, pos, marker)) {
       LinearTokenSequencePlan.Op version = optionalHttpVersion.children().get(1);
-      int versionStart = marker + " HTTP/".length();
+      int versionStart = marker + HTTP_VERSION_LITERAL.length();
       int versionEnd = scanDecimal(input, versionStart, quote, false);
       if (versionEnd == quote) {
         set(starts, ends, target.groupNumber(), pos, marker);
@@ -361,13 +491,15 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
 
   private int applyOptional(
       LinearTokenSequencePlan.Op op,
-      String input,
+      CharSequence input,
       int pos,
+      int regionEnd,
       int[] starts,
       int[] ends,
+      MatchWorkspace workspace,
       int optionalDepth) {
-    int[] savedStarts = optionalScratchStarts[optionalDepth];
-    int[] savedEnds = optionalScratchEnds[optionalDepth];
+    int[] savedStarts = workspace.optionalStarts[optionalDepth];
+    int[] savedEnds = workspace.optionalEnds[optionalDepth];
     System.arraycopy(starts, 0, savedStarts, 0, starts.length);
     System.arraycopy(ends, 0, savedEnds, 0, ends.length);
     int next = pos;
@@ -377,9 +509,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
               op.children().get(i),
               input,
               next,
+              regionEnd,
               starts,
               ends,
               i == op.children().size() - 1,
+              workspace,
               optionalDepth + 1);
       if (next < 0) {
         System.arraycopy(savedStarts, 0, starts, 0, starts.length);
@@ -404,14 +538,123 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     return max;
   }
 
-  private static int skipWhitespace(String input, int pos) {
+  static final class MatchWorkspace {
+    final int[] starts;
+    final int[] ends;
+    final int[][] optionalStarts;
+    final int[][] optionalEnds;
+    private CheckpointingCharSequence checkpointingCharSequence;
+
+    MatchWorkspace(int groupCount, int optionalDepth) {
+      starts = new int[groupCount + 1];
+      ends = new int[groupCount + 1];
+      optionalStarts = new int[optionalDepth][groupCount + 1];
+      optionalEnds = new int[optionalDepth][groupCount + 1];
+    }
+
+    /** Reuses (or lazily creates) this workspace's checkpointing wrapper for {@code delegate}. */
+    CheckpointingCharSequence checkpointing(InterruptibleCharSequence delegate) {
+      if (checkpointingCharSequence == null) {
+        checkpointingCharSequence = new CheckpointingCharSequence(delegate);
+      } else {
+        checkpointingCharSequence.reset(delegate);
+      }
+      return checkpointingCharSequence;
+    }
+  }
+
+  private static final class CheckpointingCharSequence implements CharSequence {
+    private static final int CHECK_INTERVAL = 256;
+
+    private InterruptibleCharSequence delegate;
+    private int charactersUntilCheck = CHECK_INTERVAL;
+
+    private CheckpointingCharSequence(InterruptibleCharSequence delegate) {
+      reset(delegate);
+    }
+
+    private void reset(InterruptibleCharSequence delegate) {
+      this.delegate = Objects.requireNonNull(delegate, "input");
+      this.charactersUntilCheck = CHECK_INTERVAL;
+    }
+
+    @Override
+    public int length() {
+      return delegate.length();
+    }
+
+    @Override
+    public char charAt(int index) {
+      char value = delegate.charAt(index);
+      if (--charactersUntilCheck == 0) {
+        delegate.checkInterrupted();
+        charactersUntilCheck = CHECK_INTERVAL;
+      }
+      return value;
+    }
+
+    /**
+     * Bulk equivalent of skipping {@code count} characters one {@link #charAt} call at a time:
+     * accounts for the skipped length against the interruption-check counter with at most one
+     * {@link InterruptibleCharSequence#checkInterrupted()} call.
+     */
+    void advance(int count) {
+      charactersUntilCheck -= count;
+      if (charactersUntilCheck <= 0) {
+        delegate.checkInterrupted();
+        charactersUntilCheck = CHECK_INTERVAL;
+      }
+    }
+
+    @Override
+    public CharSequence subSequence(int start, int end) {
+      throw new AssertionError("native matching must not materialize a subsequence");
+    }
+
+    @Override
+    public String toString() {
+      throw new AssertionError("native matching must not materialize input");
+    }
+  }
+
+  private static int skipWhitespace(CharSequence input, int pos, int regionEnd) {
     int start = pos;
-    while (pos < input.length() && Character.isWhitespace(input.charAt(pos))) pos++;
+    while (pos < regionEnd && isJdkWhitespace(input.charAt(pos))) pos++;
     return pos == start ? -1 : pos;
   }
 
-  private static boolean startsWith(String input, int pos, String prefix) {
-    return pos >= 0 && pos + prefix.length() <= input.length() && input.startsWith(prefix, pos);
+  private static boolean startsWith(CharSequence input, int pos, int regionEnd, String prefix) {
+    if (pos < 0 || pos + prefix.length() > regionEnd) return false;
+    for (int i = 0; i < prefix.length(); i++) {
+      if (input.charAt(pos + i) != prefix.charAt(i)) return false;
+    }
+    return true;
+  }
+
+  private static int findChar(CharSequence input, int pos, int regionEnd, char target) {
+    for (int i = pos; i < regionEnd; i++) {
+      if (input.charAt(i) == target) return i;
+    }
+    return regionEnd;
+  }
+
+  private static int findLastLiteral(CharSequence input, int start, int end, String literal) {
+    for (int pos = end - literal.length(); pos >= start; pos--) {
+      if (startsWith(input, pos, end, literal)) return pos;
+    }
+    return -1;
+  }
+
+  private static int consumeToEnd(CharSequence input, int pos, int regionEnd) {
+    if (input instanceof CheckpointingCharSequence checkpointing) {
+      checkpointing.advance(regionEnd - pos);
+    }
+    return regionEnd;
+  }
+
+  private static int consumeToEndExceptNewline(CharSequence input, int pos, int regionEnd) {
+    while (pos < regionEnd && input.charAt(pos) != '\n') pos++;
+    return pos;
   }
 
   private static void set(int[] starts, int[] ends, int group, int start, int end) {
@@ -421,7 +664,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     }
   }
 
-  private static boolean isIpOrHost(String input, int start, int end) {
+  private static boolean isIpOrHost(CharSequence input, int start, int end) {
     for (int i = start; i < end; i++) {
       char ch = input.charAt(i);
       if (!isAsciiAlphaNum(ch) && ch != '-' && ch != '_' && ch != '.' && ch != ':' && ch != '%') {
@@ -431,15 +674,15 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     return end > start;
   }
 
-  private static boolean isNonSpace(String input, int start, int end) {
+  private static boolean isNonSpace(CharSequence input, int start, int end) {
     if (end <= start) return false;
     for (int i = start; i < end; i++) {
-      if (Character.isWhitespace(input.charAt(i))) return false;
+      if (isJdkWhitespace(input.charAt(i))) return false;
     }
     return true;
   }
 
-  private static int scanDecimal(String input, int pos, int limit, boolean signed) {
+  private static int scanDecimal(CharSequence input, int pos, int limit, boolean signed) {
     if (signed && pos < limit && (input.charAt(pos) == '+' || input.charAt(pos) == '-')) {
       pos++;
     }
@@ -455,6 +698,10 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       return -1;
     }
     return pos;
+  }
+
+  private static boolean isJdkWhitespace(char ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\u000B' || ch == '\f' || ch == '\r';
   }
 
   private static boolean isDigit(char ch) {
