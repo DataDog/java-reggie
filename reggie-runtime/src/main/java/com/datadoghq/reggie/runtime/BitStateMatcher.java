@@ -126,7 +126,11 @@ final class BitStateMatcher extends ReggieMatcher {
   // Single-char SIMD fast-reject (mirrors PikeVMMatcher.singleFirstCharAscii): when exactly one
   // ASCII char can begin a match, String.indexOf() gives a SIMD-accelerated scan that rejects
   // no-match inputs without running the DFS at every position. -1 when zero or multiple chars
-  // qualify, or when the pattern can match the empty string.
+  // qualify, when the pattern can match the empty string, or when a non-ASCII char can begin a
+  // match (computeFirstByteFilter then declines, since this filter only sees chars 0..127). Used
+  // by the unanchored find family AND — since a match under matches()/match()/matchesBounded()/
+  // matchBounded() must begin at the region start — by the anchored entry points, which need only
+  // compare input.charAt(regionStart) instead of scanning for the char.
   private final int singleFirstCharAscii;
 
   // General multi-prefix fast-reject (mirrors PikeVMMatcher.rejectDfa/rejectStep, built by the
@@ -230,9 +234,6 @@ final class BitStateMatcher extends ReggieMatcher {
   }
 
   /**
-   * Test-only: whether {@link #find}/{@link #findFrom}/{@link #findMatchFrom} carry either
-   * fast-reject filter (single-char {@code indexOf} prefilter or the general reject-DFA). Used to
-   * pin the presence of these optimizations against silent regression (see {@code
    * IastPatternRoutingTest}'s sibling fast-reject test) — routing alone doesn't guarantee the
    * filter is still wired once a pattern reaches {@code BitStateMatcher}.
    */
@@ -246,6 +247,13 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public boolean matches(String input) {
+    // Anchored single-char fast-reject: singleFirstCharAscii >= 0 means exactly that char can
+    // begin a match and the empty string cannot match, so a whole-input match must begin at pos 0
+    // with input.charAt(0) == singleFirstCharAscii. One compare instead of the full DFS setup
+    // (visited-generation bump, caps fill, seed push, epsilon-closure walk) on no-match inputs.
+    if (singleFirstCharAscii >= 0 && (input.isEmpty() || input.charAt(0) != singleFirstCharAscii)) {
+      return false;
+    }
     if (exceedsBudget(input.length())) {
       if (laurikari != null) {
         laurikariCount++;
@@ -307,6 +315,10 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult match(String input) {
+    // Anchored single-char fast-reject, same soundness argument as matches() above.
+    if (singleFirstCharAscii >= 0 && (input.isEmpty() || input.charAt(0) != singleFirstCharAscii)) {
+      return null;
+    }
     if (exceedsBudget(input.length())) {
       if (laurikari != null) {
         laurikariCount++;
@@ -351,6 +363,12 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public boolean matchesBounded(CharSequence input, int start, int end) {
+    // Anchored single-char fast-reject on the region's first char, same soundness argument as
+    // matches() above: a region match must begin at the region start.
+    if (singleFirstCharAscii >= 0
+        && (start == end || input.charAt(start) != singleFirstCharAscii)) {
+      return false;
+    }
     if (exceedsBudget(end - start)) {
       fallbackCount++;
       return fallback().matchesBounded(input, start, end);
@@ -361,6 +379,12 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
+    // Anchored single-char fast-reject on the region's first char, same soundness argument as
+    // matches() above: a region match must begin at the region start.
+    if (singleFirstCharAscii >= 0
+        && (start == end || input.charAt(start) != singleFirstCharAscii)) {
+      return null;
+    }
     if (exceedsBudget(end - start)) {
       fallbackCount++;
       return fallback().matchBounded(input, start, end);
