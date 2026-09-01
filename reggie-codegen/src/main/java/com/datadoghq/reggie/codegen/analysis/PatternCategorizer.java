@@ -433,6 +433,7 @@ public final class PatternCategorizer {
     }
 
     private static boolean isDotAllAnyStar(RegexNode node) {
+      node = stripNonCapturingGroup(node);
       if (!(node instanceof QuantifierNode quantifier)
           || quantifier.min != 0
           || quantifier.max != -1

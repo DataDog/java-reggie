@@ -22,6 +22,10 @@ import java.util.Objects;
 
 /** Generic runtime executor for deterministic linear-token-sequence plans. */
 final class LinearTokenSequenceMatcher extends ReggieMatcher {
+  // Shared with RuntimeCompiler's admission-side HTTP-version-optional-capture shape check so the
+  // two literals can't silently drift.
+  static final String HTTP_VERSION_LITERAL = " HTTP/";
+
   private final LinearTokenSequencePlan plan;
   private final int groupCount;
   private final int optionalDepth;
@@ -76,14 +80,14 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   @Override
   public boolean matchesBounded(CharSequence input, int start, int end) {
     Objects.requireNonNull(input, "input");
-    if (!isValidRegion(input, start, end)) return false;
+    validateRegion(input, start, end);
     return matchesAt(input, start, end, newWorkspace(), true);
   }
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
     Objects.requireNonNull(input, "input");
-    if (!isValidRegion(input, start, end)) return null;
+    validateRegion(input, start, end);
     MatchWorkspace workspace = newWorkspace();
     if (!matchesAt(input, start, end, workspace, true)) return null;
     return toMatchResult(input.toString(), workspace);
@@ -176,7 +180,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       MatchWorkspace workspace) {
     input.checkInterrupted();
     return matchIntoBounded(
-        new CheckpointingCharSequence(input), start, end, groupStarts, groupEnds, workspace);
+        workspace.checkpointing(input), start, end, groupStarts, groupEnds, workspace);
   }
 
   private MatchResult toMatchResult(String input, MatchWorkspace workspace) {
@@ -340,8 +344,13 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       pos++;
       int fractionStart = pos;
       while (pos < regionEnd && isDigit(input.charAt(pos))) pos++;
-      if (!sawLeadingDigits && pos == fractionStart) return -1;
-    } else if (!sawLeadingDigits) {
+      boolean sawFractionDigits = pos > fractionStart;
+      // CAPTURE_DECIMAL_NUMBER (signed=false) is only ever emitted for the exact source shape
+      // \d+\.\d+ (see PatternCategorizer#isDecimalNumber); require the fraction digits so this
+      // executor doesn't admit "1" or "1." for a pattern the categorizer promised was \d+\.\d+.
+      if (!signed && !sawFractionDigits) return -1;
+      if (!sawLeadingDigits && !sawFractionDigits) return -1;
+    } else if (!sawLeadingDigits || !signed) {
       return -1;
     }
     set(starts, ends, group, start, pos);
@@ -450,7 +459,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     LinearTokenSequencePlan.Op prefix = optional.children().get(0);
     LinearTokenSequencePlan.Op version = optional.children().get(1);
     return prefix.kind() == LinearTokenSequencePlan.OpKind.LITERAL
-        && " HTTP/".equals(prefix.literal())
+        && HTTP_VERSION_LITERAL.equals(prefix.literal())
         && version.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_DECIMAL_NUMBER;
   }
 
@@ -464,10 +473,10 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       int[] ends) {
     int quote = findChar(input, pos, regionEnd, '"');
     if (quote == regionEnd || quote == pos) return -1;
-    int marker = findLastLiteral(input, pos, quote, " HTTP/");
+    int marker = findLastLiteral(input, pos, quote, HTTP_VERSION_LITERAL);
     if (marker >= pos && isNonSpace(input, pos, marker)) {
       LinearTokenSequencePlan.Op version = optionalHttpVersion.children().get(1);
-      int versionStart = marker + " HTTP/".length();
+      int versionStart = marker + HTTP_VERSION_LITERAL.length();
       int versionEnd = scanDecimal(input, versionStart, quote, false);
       if (versionEnd == quote) {
         set(starts, ends, target.groupNumber(), pos, marker);
@@ -534,6 +543,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
     final int[] ends;
     final int[][] optionalStarts;
     final int[][] optionalEnds;
+    private CheckpointingCharSequence checkpointingCharSequence;
 
     MatchWorkspace(int groupCount, int optionalDepth) {
       starts = new int[groupCount + 1];
@@ -541,16 +551,31 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
       optionalStarts = new int[optionalDepth][groupCount + 1];
       optionalEnds = new int[optionalDepth][groupCount + 1];
     }
+
+    /** Reuses (or lazily creates) this workspace's checkpointing wrapper for {@code delegate}. */
+    CheckpointingCharSequence checkpointing(InterruptibleCharSequence delegate) {
+      if (checkpointingCharSequence == null) {
+        checkpointingCharSequence = new CheckpointingCharSequence(delegate);
+      } else {
+        checkpointingCharSequence.reset(delegate);
+      }
+      return checkpointingCharSequence;
+    }
   }
 
   private static final class CheckpointingCharSequence implements CharSequence {
     private static final int CHECK_INTERVAL = 256;
 
-    private final InterruptibleCharSequence delegate;
+    private InterruptibleCharSequence delegate;
     private int charactersUntilCheck = CHECK_INTERVAL;
 
     private CheckpointingCharSequence(InterruptibleCharSequence delegate) {
+      reset(delegate);
+    }
+
+    private void reset(InterruptibleCharSequence delegate) {
       this.delegate = Objects.requireNonNull(delegate, "input");
+      this.charactersUntilCheck = CHECK_INTERVAL;
     }
 
     @Override
@@ -566,6 +591,19 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
         charactersUntilCheck = CHECK_INTERVAL;
       }
       return value;
+    }
+
+    /**
+     * Bulk equivalent of skipping {@code count} characters one {@link #charAt} call at a time:
+     * accounts for the skipped length against the interruption-check counter with at most one
+     * {@link InterruptibleCharSequence#checkInterrupted()} call.
+     */
+    void advance(int count) {
+      charactersUntilCheck -= count;
+      if (charactersUntilCheck <= 0) {
+        delegate.checkInterrupted();
+        charactersUntilCheck = CHECK_INTERVAL;
+      }
     }
 
     @Override
@@ -601,25 +639,22 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static int findLastLiteral(CharSequence input, int start, int end, String literal) {
-    int last = -1;
-    for (int pos = start; pos + literal.length() <= end; pos++) {
-      if (startsWith(input, pos, end, literal)) last = pos;
+    for (int pos = end - literal.length(); pos >= start; pos--) {
+      if (startsWith(input, pos, end, literal)) return pos;
     }
-    return last;
+    return -1;
   }
 
   private static int consumeToEnd(CharSequence input, int pos, int regionEnd) {
-    while (pos < regionEnd) {
-      input.charAt(pos++);
+    if (input instanceof CheckpointingCharSequence checkpointing) {
+      checkpointing.advance(regionEnd - pos);
     }
     return regionEnd;
   }
 
   private static int consumeToEndExceptNewline(CharSequence input, int pos, int regionEnd) {
-    while (pos < regionEnd) {
-      if (input.charAt(pos++) == '\n') return -1;
-    }
-    return regionEnd;
+    while (pos < regionEnd && input.charAt(pos) != '\n') pos++;
+    return pos;
   }
 
   private static void set(int[] starts, int[] ends, int group, int start, int end) {
@@ -666,7 +701,7 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static boolean isJdkWhitespace(char ch) {
-    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\f' || ch == '\r';
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\u000B' || ch == '\f' || ch == '\r';
   }
 
   private static boolean isDigit(char ch) {

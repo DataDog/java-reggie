@@ -63,37 +63,88 @@ public final class CaptureProjection {
   }
 
   private static boolean collectFullCaptureLayout(RegexNode node, Set<Integer> indexes) {
-    if (node instanceof GroupNode group) {
-      if (!group.capturing) return collectFullCaptureLayout(group.child, indexes);
-      return group.groupNumber > 0
-          && indexes.add(group.groupNumber)
-          && isDirectCaptureSource(group.child);
+    return node.accept(new FullCaptureLayoutVisitor(indexes));
+  }
+
+  private static final class FullCaptureLayoutVisitor implements RegexVisitor<Boolean> {
+    private final Set<Integer> indexes;
+
+    FullCaptureLayoutVisitor(Set<Integer> indexes) {
+      this.indexes = indexes;
     }
-    if (node instanceof ConcatNode concat) {
-      for (RegexNode child : concat.children) {
-        if (!collectFullCaptureLayout(child, indexes)) return false;
+
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      for (RegexNode child : node.children) {
+        if (!child.accept(this)) return false;
       }
       return true;
     }
-    if (node instanceof QuantifierNode quantifier) {
-      return collectFullCaptureLayout(quantifier.child, indexes);
-    }
-    if (node instanceof AlternationNode alternation) {
-      if (alternation.alternatives.size() != 2) return false;
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      if (node.alternatives.size() != 2) return false;
       RegexNode present = null;
-      for (RegexNode alternative : alternation.alternatives) {
+      for (RegexNode alternative : node.alternatives) {
         if (isEmpty(alternative)) continue;
         if (present != null) return false;
         present = alternative;
       }
-      return present != null && collectFullCaptureLayout(present, indexes);
+      return present != null && present.accept(this);
     }
-    if (node instanceof BranchResetNode
-        || node instanceof AssertionNode
-        || node instanceof ConditionalNode
-        || node instanceof SubroutineNode
-        || node instanceof BackreferenceNode) return false;
-    return true;
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      if (!node.capturing) return node.child.accept(this);
+      return node.groupNumber > 0
+          && indexes.add(node.groupNumber)
+          && isDirectCaptureSource(node.child);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return false;
+    }
   }
 
   private static boolean isDirectCaptureSource(RegexNode node) {
@@ -110,15 +161,69 @@ public final class CaptureProjection {
   }
 
   private static boolean containsCapture(RegexNode node) {
-    if (node instanceof GroupNode group) return group.capturing || containsCapture(group.child);
-    if (node instanceof QuantifierNode quantifier) return containsCapture(quantifier.child);
-    if (node instanceof ConcatNode concat) {
-      return concat.children.stream().anyMatch(CaptureProjection::containsCapture);
-    }
-    if (node instanceof AlternationNode alternation) {
-      return alternation.alternatives.stream().anyMatch(CaptureProjection::containsCapture);
-    }
-    return node instanceof BranchResetNode;
+    return node.accept(
+        new RegexVisitor<Boolean>() {
+          @Override
+          public Boolean visitLiteral(LiteralNode node) {
+            return false;
+          }
+
+          @Override
+          public Boolean visitCharClass(CharClassNode node) {
+            return false;
+          }
+
+          @Override
+          public Boolean visitConcat(ConcatNode node) {
+            return node.children.stream().anyMatch(child -> child.accept(this));
+          }
+
+          @Override
+          public Boolean visitAlternation(AlternationNode node) {
+            return node.alternatives.stream().anyMatch(child -> child.accept(this));
+          }
+
+          @Override
+          public Boolean visitQuantifier(QuantifierNode node) {
+            return node.child.accept(this);
+          }
+
+          @Override
+          public Boolean visitGroup(GroupNode node) {
+            return node.capturing || node.child.accept(this);
+          }
+
+          @Override
+          public Boolean visitAnchor(AnchorNode node) {
+            return false;
+          }
+
+          @Override
+          public Boolean visitBackreference(BackreferenceNode node) {
+            return false;
+          }
+
+          @Override
+          public Boolean visitAssertion(AssertionNode node) {
+            return node.subPattern.accept(this);
+          }
+
+          @Override
+          public Boolean visitSubroutine(SubroutineNode node) {
+            return true;
+          }
+
+          @Override
+          public Boolean visitConditional(ConditionalNode node) {
+            return node.thenBranch.accept(this)
+                || (node.elseBranch != null && node.elseBranch.accept(this));
+          }
+
+          @Override
+          public Boolean visitBranchReset(BranchResetNode node) {
+            return true;
+          }
+        });
   }
 
   private static boolean isEmpty(RegexNode node) {

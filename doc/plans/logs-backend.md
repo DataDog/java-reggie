@@ -85,7 +85,8 @@ The route now has the following properties:
   required because Grok extracts captures by number and shadow comparison checks every group.
 - Admission is fail-closed. It requires a direct source capture layout, one matching plan operation
   per group, deterministic non-backtracking boundaries, and the supported `NONE`/`DOTALL` flag
-  profile. Existing named-only routing and global compiler caches are unchanged.
+  profile. A leading `(?s)` is now DOTALL-equivalent for the named-only route as well; other source
+  inline modifiers remain ineligible. The global compiler caches are unchanged.
 - The L1l implementation was independently plan-validated and code-reviewed, and passed
   `:reggie-runtime:test` (2,542 tests; 29 skipped).
 
@@ -111,7 +112,9 @@ Next work, after the Reggie PR stack lands:
 
 The remaining performance target applies only once the logs adapter has a native-primary cohort:
 
-Historic target benchmark after scratch-state reuse (`-wi 2 -i 3 -f 2 -prof gc`):
+Historic target benchmark, pre-L1l baseline (`-wi 2 -i 3 -f 2 -prof gc`). Recorded before the L1l
+per-`ReggieMatchState` workspace/checkpointing-sequence reuse; the allocation column above does not
+reflect that change and needs re-measurement:
 
 | Engine | Score | Allocation |
 |---|---:|---:|

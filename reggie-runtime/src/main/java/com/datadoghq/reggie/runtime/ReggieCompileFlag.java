@@ -17,10 +17,21 @@ package com.datadoghq.reggie.runtime;
 
 import com.datadoghq.reggie.ReggieFlags;
 
-/** Flags supported by the native full-capture linear-token-sequence compilation profile. */
+/**
+ * Flags supported by the native full-capture linear-token-sequence compilation profile.
+ *
+ * <p>This enum is intentionally closed to exactly {@code NONE} and {@code DOTALL}; it is not a
+ * wrapper around the {@link ReggieFlags} bitmask.
+ */
 public enum ReggieCompileFlag {
   NONE(ReggieFlags.NONE),
   DOTALL(ReggieFlags.DOTALL);
+
+  static final int SUPPORTED = NONE.reggieFlags() | DOTALL.reggieFlags();
+
+  static {
+    assert ReggieFlags.areSupported(SUPPORTED) : "ReggieCompileFlag drifted from ReggieFlags";
+  }
 
   private final int reggieFlags;
 

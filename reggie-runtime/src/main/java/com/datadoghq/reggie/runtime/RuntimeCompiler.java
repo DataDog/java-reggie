@@ -22,6 +22,7 @@ import com.datadoghq.reggie.ReggieOption;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.UnsupportedPatternException;
 import com.datadoghq.reggie.codegen.analysis.BackreferencePatternInfo;
+import com.datadoghq.reggie.codegen.analysis.CaptureBoundaryAnalysis;
 import com.datadoghq.reggie.codegen.analysis.CaptureProjection;
 import com.datadoghq.reggie.codegen.analysis.ConcatGreedyGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.ConcatQuantifiedGroupsInfo;
@@ -75,6 +76,7 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -272,7 +274,7 @@ public class RuntimeCompiler {
         options,
         cacheKeyForFlags(pattern, flags, options),
         pattern,
-        LinearTokenSequenceAdmission.forFlags(pattern, flags));
+        () -> LinearTokenSequenceAdmission.forFlags(pattern, flags));
   }
 
   /** Compile pattern with runtime compilation options. */
@@ -282,7 +284,7 @@ public class RuntimeCompiler {
         options,
         cacheKeyFor(pattern, options),
         pattern,
-        LinearTokenSequenceAdmission.forSource(pattern));
+        () -> LinearTokenSequenceAdmission.forSource(pattern));
   }
 
   private static ReggieMatcher compile(
@@ -290,7 +292,7 @@ public class RuntimeCompiler {
       ReggieOptions options,
       Object cacheKey,
       String reportedPattern,
-      LinearTokenSequenceAdmission linearTokenSequenceAdmission) {
+      java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
 
     // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
@@ -324,7 +326,7 @@ public class RuntimeCompiler {
             cacheKey,
             k ->
                 reportPattern(
-                    compileInternal(pattern, options, k, linearTokenSequenceAdmission),
+                    compileInternal(pattern, options, k, linearTokenSequenceAdmission.get()),
                     reportedPattern));
 
     // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
@@ -560,17 +562,35 @@ public class RuntimeCompiler {
    * original source.
    */
   private record LinearTokenSequenceAdmission(boolean isEligible, boolean isDotAll) {
+    private static final String LEADING_DOTALL_MODIFIER = "(?s)";
+
     private static LinearTokenSequenceAdmission forSource(String source) {
-      return new LinearTokenSequenceAdmission(!hasSourceInlineModifier(source), false);
+      if (!hasSourceInlineModifier(source)) {
+        return new LinearTokenSequenceAdmission(true, false);
+      }
+      // A leading "(?s)" with no OTHER inline modifier is equivalent to passing
+      // ReggieFlags.DOTALL, so admit it the same way forFlags() would.
+      if (source.startsWith(LEADING_DOTALL_MODIFIER)
+          && !hasSourceInlineModifier(source.substring(LEADING_DOTALL_MODIFIER.length()))) {
+        return new LinearTokenSequenceAdmission(true, true);
+      }
+      return new LinearTokenSequenceAdmission(false, false);
     }
 
     private static LinearTokenSequenceAdmission forFlags(String source, int flags) {
       boolean isDotAll = flags == ReggieFlags.DOTALL;
-      return new LinearTokenSequenceAdmission(
-          isDotAll && !hasSourceInlineModifier(source), isDotAll);
+      boolean isEligible = (flags == 0 || isDotAll) && !hasSourceInlineModifier(source);
+      return new LinearTokenSequenceAdmission(isEligible, isDotAll);
     }
   }
 
+  /**
+   * Intentionally re-implements a minimal lexical scan (character-class, {@code \Q...\E}, and
+   * {@code (?#...)}-comment awareness) independently of {@link RegexParser}'s tokenizer, purely to
+   * gate native-route admission. Any future change to how {@link RegexParser} recognizes character
+   * classes, quoting, or comment groups must be mirrored here, or admission can silently diverge
+   * from the real parser.
+   */
   static boolean hasSourceInlineModifier(String source) {
     boolean inCharacterClass = false;
     int index = 0;
@@ -603,15 +623,6 @@ public class RuntimeCompiler {
       if (ch == '[') {
         inCharacterClass = true;
         index++;
-        // In Java regex, ']' as the first character of a class (or first after '^')
-        // is a literal, not the class terminator. Skip it so the scanner does not
-        // exit the class prematurely.
-        if (index < source.length() && source.charAt(index) == '^') {
-          index++;
-        }
-        if (index < source.length() && source.charAt(index) == ']') {
-          index++;
-        }
         continue;
       }
       if (ch == '(' && index + 1 < source.length() && source.charAt(index + 1) == '?') {
@@ -947,37 +958,20 @@ public class RuntimeCompiler {
     PROFILE_INELIGIBLE
   }
 
-  record NamedOnlyLtsCompilation(
-      LinearTokenSequenceMatcher matcher, NamedOnlyLtsRejection rejection) {
-    NamedOnlyLtsCompilation {
+  /** Result of a linear-token-sequence admission attempt: exactly one of matcher/rejection. */
+  record Compilation<R>(LinearTokenSequenceMatcher matcher, R rejection) {
+    Compilation {
       if ((matcher == null) == (rejection == null)) {
         throw new IllegalArgumentException("exactly one of matcher or rejection is required");
       }
     }
 
-    static NamedOnlyLtsCompilation admitted(LinearTokenSequenceMatcher matcher) {
-      return new NamedOnlyLtsCompilation(matcher, null);
+    static <R> Compilation<R> admitted(LinearTokenSequenceMatcher matcher) {
+      return new Compilation<>(matcher, null);
     }
 
-    static NamedOnlyLtsCompilation rejected(NamedOnlyLtsRejection rejection) {
-      return new NamedOnlyLtsCompilation(null, rejection);
-    }
-  }
-
-  record FullCaptureLtsCompilation(
-      LinearTokenSequenceMatcher matcher, FullCaptureLtsRejection rejection) {
-    FullCaptureLtsCompilation {
-      if ((matcher == null) == (rejection == null)) {
-        throw new IllegalArgumentException("exactly one of matcher or rejection is required");
-      }
-    }
-
-    static FullCaptureLtsCompilation admitted(LinearTokenSequenceMatcher matcher) {
-      return new FullCaptureLtsCompilation(matcher, null);
-    }
-
-    static FullCaptureLtsCompilation rejected(FullCaptureLtsRejection rejection) {
-      return new FullCaptureLtsCompilation(null, rejection);
+    static <R> Compilation<R> rejected(R rejection) {
+      return new Compilation<>(null, rejection);
     }
   }
 
@@ -986,13 +980,15 @@ public class RuntimeCompiler {
    * represented by one deterministic plan operation. This path must not use general compilation or
    * its caches.
    */
-  static FullCaptureLtsCompilation tryCompileFullCaptureLinearTokenSequence(
+  static Compilation<FullCaptureLtsRejection> tryCompileFullCaptureLinearTokenSequence(
       String source, int flags) {
     if (flags != 0 && flags != ReggieFlags.DOTALL) {
-      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.UNSUPPORTED_FLAGS);
+      return Compilation.<FullCaptureLtsRejection>rejected(
+          FullCaptureLtsRejection.UNSUPPORTED_FLAGS);
     }
     if (hasSourceInlineModifier(source)) {
-      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.SOURCE_INLINE_MODIFIER);
+      return Compilation.<FullCaptureLtsRejection>rejected(
+          FullCaptureLtsRejection.SOURCE_INLINE_MODIFIER);
     }
     boolean dotAll = flags == ReggieFlags.DOTALL;
     try {
@@ -1000,218 +996,48 @@ public class RuntimeCompiler {
       RegexNode ast = parser.parse(dotAll ? "(?s)" + source : source);
       CaptureProjection.FullCaptureLayout layout = CaptureProjection.fullCaptureLayout(ast);
       if (layout == null) {
-        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.MISSING_CAPTURE);
+        return Compilation.<FullCaptureLtsRejection>rejected(
+            FullCaptureLtsRejection.MISSING_CAPTURE);
       }
       LinearTokenSequencePlan plan =
           LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElse(null);
       if (plan == null) {
-        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PLAN_UNAVAILABLE);
+        return Compilation.<FullCaptureLtsRejection>rejected(
+            FullCaptureLtsRejection.PLAN_UNAVAILABLE);
       }
-      if (!hasExactCaptureLayout(plan, layout.indexes()) || !hasOnlyDirectCaptureOps(plan)) {
-        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.MISSING_CAPTURE);
+      if (!CaptureBoundaryAnalysis.hasExactCaptureLayout(plan, layout.indexes())
+          || !CaptureBoundaryAnalysis.hasOnlyDirectCaptureOps(plan)) {
+        return Compilation.<FullCaptureLtsRejection>rejected(
+            FullCaptureLtsRejection.MISSING_CAPTURE);
       }
-      if (!hasDeterministicCaptureBoundaries(plan)
+      if (!CaptureBoundaryAnalysis.hasDeterministicCaptureBoundaries(
+              plan, LinearTokenSequenceMatcher.HTTP_VERSION_LITERAL)
           || !isRuntimeExecutableLinearTokenSequence(dotAll, plan)) {
-        return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PROFILE_INELIGIBLE);
+        return Compilation.<FullCaptureLtsRejection>rejected(
+            FullCaptureLtsRejection.PROFILE_INELIGIBLE);
       }
-      return FullCaptureLtsCompilation.admitted(
+      return Compilation.<FullCaptureLtsRejection>admitted(
           new LinearTokenSequenceMatcher(
               source, plan, layout.groupCount(), parser.getGroupNameMap()));
     } catch (RegexParser.ParseException e) {
-      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PARSE_FAILURE);
+      return Compilation.<FullCaptureLtsRejection>rejected(FullCaptureLtsRejection.PARSE_FAILURE);
     } catch (UnsupportedOperationException | IllegalStateException e) {
-      return FullCaptureLtsCompilation.rejected(FullCaptureLtsRejection.PLAN_UNAVAILABLE);
+      return Compilation.<FullCaptureLtsRejection>rejected(
+          FullCaptureLtsRejection.PLAN_UNAVAILABLE);
+    } catch (StackOverflowError e) {
+      return Compilation.<FullCaptureLtsRejection>rejected(
+          FullCaptureLtsRejection.PLAN_UNAVAILABLE);
     }
   }
 
-  private static boolean hasExactCaptureLayout(
-      LinearTokenSequencePlan plan, Set<Integer> requiredIndexes) {
-    if (!plan.coversCaptureIndexes(requiredIndexes)) return false;
-    Map<Integer, Integer> occurrences = new java.util.HashMap<>();
-    countCaptureOperations(plan.ops(), occurrences);
-    if (occurrences.size() != requiredIndexes.size()) return false;
-    for (int index : requiredIndexes) {
-      if (occurrences.getOrDefault(index, 0) != 1) return false;
-    }
-    return true;
-  }
-
-  private static void countCaptureOperations(
-      java.util.List<LinearTokenSequencePlan.Op> ops, Map<Integer, Integer> occurrences) {
-    for (LinearTokenSequencePlan.Op op : ops) {
-      if (op.groupNumber() > 0) occurrences.merge(op.groupNumber(), 1, Integer::sum);
-      countCaptureOperations(op.children(), occurrences);
-    }
-  }
-
-  /** Declines categorizer transforms that do not retain a direct source-group boundary witness. */
-  private static boolean hasOnlyDirectCaptureOps(LinearTokenSequencePlan plan) {
-    return hasOnlyDirectCaptureOps(plan.ops());
-  }
-
-  private static boolean hasOnlyDirectCaptureOps(java.util.List<LinearTokenSequencePlan.Op> ops) {
-    for (LinearTokenSequencePlan.Op op : ops) {
-      if (op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_UNTIL_DELIMITER
-          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_QUOTED_UNTIL_DELIMITER
-          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_QUOTED_NON_SPACE
-          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_BRACKETED_WORD_AFTER_SKIP
-          || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_IP_OR_HOST) {
-        return false;
-      }
-      if (!hasOnlyDirectCaptureOps(op.children())) return false;
-    }
-    return true;
-  }
-
-  private static boolean hasDeterministicCaptureBoundaries(LinearTokenSequencePlan plan) {
-    return hasDeterministicCaptureBoundaries(plan.ops());
-  }
-
-  private static boolean hasDeterministicCaptureBoundaries(
-      java.util.List<LinearTokenSequencePlan.Op> ops) {
-    for (int index = 0; index < ops.size(); index++) {
-      LinearTokenSequencePlan.Op op = ops.get(index);
-      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE) {
-        LinearTokenSequencePlan.Op successor = index + 1 < ops.size() ? ops.get(index + 1) : null;
-        if (!isProvenOptionalHttpVersion(ops, index)
-            || !hasDeterministicCaptureBoundaries(op.children(), successor)) return false;
-        continue;
-      }
-      if (!op.children().isEmpty() && !hasDeterministicCaptureBoundaries(op.children()))
-        return false;
-      if (!isVariableWidth(op) || index == ops.size() - 1) continue;
-      LinearTokenSequencePlan.Op next = ops.get(index + 1);
-      if (next.groupNumber() > 0) return false;
-      if (next.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE) {
-        if (next.children().isEmpty()
-            || next.children().get(0).kind() != LinearTokenSequencePlan.OpKind.LITERAL
-            || index + 2 == ops.size()
-            || !isBoundary(ops.get(index + 2))
-            || !isSafeLiteralBoundary(op, next.children().get(0).literal())) return false;
-      } else if (!isSafeBoundary(op, next)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  private static boolean isProvenOptionalHttpVersion(
-      java.util.List<LinearTokenSequencePlan.Op> ops, int optionalIndex) {
-    if (optionalIndex + 1 >= ops.size()) return false;
-    LinearTokenSequencePlan.Op optional = ops.get(optionalIndex);
-    LinearTokenSequencePlan.Op successor = ops.get(optionalIndex + 1);
-    if (successor.kind() != LinearTokenSequencePlan.OpKind.LITERAL
-        || !successor.literal().startsWith("\"")
-        || optional.children().size() != 2) return false;
-    LinearTokenSequencePlan.Op prefix = optional.children().get(0);
-    LinearTokenSequencePlan.Op version = optional.children().get(1);
-    return prefix.kind() == LinearTokenSequencePlan.OpKind.LITERAL
-        && " HTTP/".equals(prefix.literal())
-        && version.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_DECIMAL_NUMBER;
-  }
-
-  private static boolean hasDeterministicCaptureBoundaries(
-      java.util.List<LinearTokenSequencePlan.Op> ops, LinearTokenSequencePlan.Op successor) {
-    if (!hasDeterministicCaptureBoundaries(ops)) return false;
-    if (successor == null || ops.isEmpty()) return true;
-    LinearTokenSequencePlan.Op last = ops.get(ops.size() - 1);
-    return !isVariableWidth(last) || isSafeBoundary(last, successor);
-  }
-
-  private static boolean isVariableWidth(LinearTokenSequencePlan.Op op) {
-    return switch (op.kind()) {
-      case CAPTURE_NON_SPACE,
-          CAPTURE_DIGITS,
-          CAPTURE_SIGNED_INTEGER,
-          CAPTURE_DECIMAL_NUMBER,
-          CAPTURE_SIGNED_DECIMAL_NUMBER,
-          CAPTURE_WORD,
-          CAPTURE_UNTIL_DELIMITER,
-          CAPTURE_QUOTED_UNTIL_DELIMITER,
-          CAPTURE_QUOTED_NON_SPACE,
-          CAPTURE_IP_OR_HOST,
-          CAPTURE_SIGNED_INTEGER_OR_DASH,
-          CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH,
-          CAPTURE_BRACKETED_WORD_AFTER_SKIP,
-          WHITESPACE_PLUS,
-          SKIP_ANY,
-          SKIP_ANY_EXCEPT_NEWLINE ->
-          true;
-      default -> false;
-    };
-  }
-
-  private static boolean isSafeBoundary(
-      LinearTokenSequencePlan.Op variable, LinearTokenSequencePlan.Op next) {
-    if (next.kind() == LinearTokenSequencePlan.OpKind.WHITESPACE_PLUS) {
-      return consumesNonWhitespace(variable);
-    }
-    return next.kind() == LinearTokenSequencePlan.OpKind.LITERAL
-        && isSafeLiteralBoundary(variable, next.literal());
-  }
-
-  private static boolean isSafeLiteralBoundary(
-      LinearTokenSequencePlan.Op variable, String literal) {
-    if (literal == null || literal.isEmpty()) return false;
-    char boundary = literal.charAt(0);
-    return switch (variable.kind()) {
-      case CAPTURE_NON_SPACE, CAPTURE_IP_OR_HOST, CAPTURE_QUOTED_NON_SPACE ->
-          isWhitespace(boundary);
-      case CAPTURE_DIGITS,
-          CAPTURE_SIGNED_INTEGER,
-          CAPTURE_SIGNED_INTEGER_OR_DASH,
-          CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH ->
-          !isDigit(boundary);
-      case CAPTURE_DECIMAL_NUMBER, CAPTURE_SIGNED_DECIMAL_NUMBER ->
-          !isDigit(boundary) && boundary != '.';
-      case CAPTURE_WORD -> !isWord(boundary);
-      case WHITESPACE_PLUS -> !isWhitespace(boundary);
-      case CAPTURE_UNTIL_DELIMITER -> boundary == variable.delimiter();
-      case CAPTURE_QUOTED_UNTIL_DELIMITER, CAPTURE_BRACKETED_WORD_AFTER_SKIP -> true;
-      default -> false;
-    };
-  }
-
-  private static boolean consumesNonWhitespace(LinearTokenSequencePlan.Op op) {
-    return switch (op.kind()) {
-      case CAPTURE_NON_SPACE,
-          CAPTURE_DIGITS,
-          CAPTURE_SIGNED_INTEGER,
-          CAPTURE_DECIMAL_NUMBER,
-          CAPTURE_SIGNED_DECIMAL_NUMBER,
-          CAPTURE_WORD,
-          CAPTURE_IP_OR_HOST,
-          CAPTURE_SIGNED_INTEGER_OR_DASH,
-          CAPTURE_SIGNED_INTEGER_OR_UNCAPTURED_DASH,
-          CAPTURE_QUOTED_NON_SPACE ->
-          true;
-      default -> false;
-    };
-  }
-
-  private static boolean isWhitespace(char ch) {
-    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\u000B' || ch == '\f' || ch == '\r';
-  }
-
-  private static boolean isDigit(char ch) {
-    return ch >= '0' && ch <= '9';
-  }
-
-  private static boolean isWord(char ch) {
-    return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || isDigit(ch) || ch == '_';
-  }
-
-  private static boolean isBoundary(LinearTokenSequencePlan.Op op) {
-    return op.kind() == LinearTokenSequencePlan.OpKind.WHITESPACE_PLUS
-        || op.kind() == LinearTokenSequencePlan.OpKind.LITERAL && !op.literal().isEmpty();
-  }
-
-  static NamedOnlyLtsCompilation tryCompileNamedOnlyLinearTokenSequence(String source, int flags) {
+  static Compilation<NamedOnlyLtsRejection> tryCompileNamedOnlyLinearTokenSequence(
+      String source, int flags) {
     if (flags != 0 && flags != ReggieFlags.DOTALL) {
-      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.UNSUPPORTED_FLAGS);
+      return Compilation.<NamedOnlyLtsRejection>rejected(NamedOnlyLtsRejection.UNSUPPORTED_FLAGS);
     }
     if (hasSourceInlineModifier(source)) {
-      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.SOURCE_INLINE_MODIFIER);
+      return Compilation.<NamedOnlyLtsRejection>rejected(
+          NamedOnlyLtsRejection.SOURCE_INLINE_MODIFIER);
     }
     boolean dotAll = flags == ReggieFlags.DOTALL;
     String parsePattern = dotAll ? "(?s)" + source : source;
@@ -1223,9 +1049,11 @@ public class RuntimeCompiler {
       return admitNamedOnlyLinearTokenSequence(
           source, ast, nameMap, new LinearTokenSequenceAdmission(true, dotAll));
     } catch (RegexParser.ParseException e) {
-      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PARSE_FAILURE);
+      return Compilation.<NamedOnlyLtsRejection>rejected(NamedOnlyLtsRejection.PARSE_FAILURE);
     } catch (UnsupportedOperationException | IllegalStateException e) {
-      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
+      return Compilation.<NamedOnlyLtsRejection>rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
+    } catch (StackOverflowError e) {
+      return Compilation.<NamedOnlyLtsRejection>rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
     }
   }
 
@@ -1237,10 +1065,14 @@ public class RuntimeCompiler {
     if (!admission.isEligible()) {
       return null;
     }
-    return admitNamedOnlyLinearTokenSequence(pattern, ast, nameMap, admission).matcher();
+    ReggieMatcher m = admitNamedOnlyLinearTokenSequence(pattern, ast, nameMap, admission).matcher();
+    if (m != null && !m.embedsNameMap()) {
+      m = new NameEnrichingMatcher(m);
+    }
+    return m;
   }
 
-  private static NamedOnlyLtsCompilation admitNamedOnlyLinearTokenSequence(
+  private static Compilation<NamedOnlyLtsRejection> admitNamedOnlyLinearTokenSequence(
       String pattern,
       RegexNode ast,
       Map<String, Integer> nameMap,
@@ -1248,41 +1080,55 @@ public class RuntimeCompiler {
     LinearTokenSequencePlan plan =
         LinearTokenSequencePlan.from(PatternCategorizer.categorize(ast)).orElse(null);
     if (plan == null) {
-      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
+      return Compilation.<NamedOnlyLtsRejection>rejected(NamedOnlyLtsRejection.PLAN_UNAVAILABLE);
     }
     if (!plan.coversCaptureIndexes(nameMap.values())) {
-      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.MISSING_NAMED_CAPTURE);
+      return Compilation.<NamedOnlyLtsRejection>rejected(
+          NamedOnlyLtsRejection.MISSING_NAMED_CAPTURE);
     }
     if (!isRuntimeExecutableLinearTokenSequence(admission.isDotAll(), plan)) {
-      return NamedOnlyLtsCompilation.rejected(NamedOnlyLtsRejection.PROFILE_INELIGIBLE);
+      return Compilation.<NamedOnlyLtsRejection>rejected(NamedOnlyLtsRejection.PROFILE_INELIGIBLE);
     }
-    return NamedOnlyLtsCompilation.admitted(
+    return Compilation.<NamedOnlyLtsRejection>admitted(
         new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap));
   }
 
   private static boolean isRuntimeExecutableLinearTokenSequence(
       boolean dotAll, LinearTokenSequencePlan plan) {
-    boolean requiresDotAll = false;
-    for (int i = 0; i < plan.ops().size(); i++) {
-      LinearTokenSequencePlan.Op op = plan.ops().get(i);
+    RuntimeExecutability executability = new RuntimeExecutability();
+    if (!isRuntimeExecutableLinearTokenSequence(plan.ops(), executability)) return false;
+    return !executability.requiresDotAll || dotAll;
+  }
+
+  private static final class RuntimeExecutability {
+    boolean requiresDotAll;
+  }
+
+  private static boolean isRuntimeExecutableLinearTokenSequence(
+      List<LinearTokenSequencePlan.Op> ops, RuntimeExecutability executability) {
+    for (int i = 0; i < ops.size(); i++) {
+      LinearTokenSequencePlan.Op op = ops.get(i);
       if (op.kind() == LinearTokenSequencePlan.OpKind.ANCHOR) return false;
-      if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE) return false;
       if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
           || op.kind() == LinearTokenSequencePlan.OpKind.CAPTURE_BRACKETED_WORD_AFTER_SKIP) {
-        requiresDotAll = true;
+        executability.requiresDotAll = true;
       }
       if ((op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY
               || op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE)
-          && i != plan.ops().size() - 1) {
+          && i != ops.size() - 1) {
         return false;
       }
-      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE
-          && i + 1 < plan.ops().size()
-          && canOptionalPresentBranchStealFollowingInput(op, plan.ops().get(i + 1))) {
+      if (op.kind() == LinearTokenSequencePlan.OpKind.SKIP_ANY_EXCEPT_NEWLINE && ops.size() == 1) {
         return false;
+      }
+      if (op.kind() == LinearTokenSequencePlan.OpKind.OPTIONAL_SEQUENCE) {
+        if (i + 1 < ops.size() && canOptionalPresentBranchStealFollowingInput(op, ops.get(i + 1))) {
+          return false;
+        }
+        if (!isRuntimeExecutableLinearTokenSequence(op.children(), executability)) return false;
       }
     }
-    return !requiresDotAll || dotAll;
+    return true;
   }
 
   private static boolean canOptionalPresentBranchStealFollowingInput(

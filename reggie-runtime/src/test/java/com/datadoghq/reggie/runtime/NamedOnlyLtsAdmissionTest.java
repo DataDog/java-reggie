@@ -19,10 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOptions;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,7 +44,7 @@ class NamedOnlyLtsAdmissionTest {
     int patternCacheSize = RuntimeCompiler.cacheSize();
     int structuralCacheSize = RuntimeCompiler.structuralCacheSize();
 
-    RuntimeCompiler.NamedOnlyLtsCompilation compilation =
+    RuntimeCompiler.Compilation<RuntimeCompiler.NamedOnlyLtsRejection> compilation =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence(
             ".* \\[(?<logger>\\b\\w+\\b)\\] .*", ReggieFlags.DOTALL);
 
@@ -86,9 +88,9 @@ class NamedOnlyLtsAdmissionTest {
 
   @Test
   void repeatedAdmissionsReturnIndependentMatchers() {
-    RuntimeCompiler.NamedOnlyLtsCompilation first =
+    RuntimeCompiler.Compilation<RuntimeCompiler.NamedOnlyLtsRejection> first =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0);
-    RuntimeCompiler.NamedOnlyLtsCompilation second =
+    RuntimeCompiler.Compilation<RuntimeCompiler.NamedOnlyLtsRejection> second =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0);
 
     assertNotNull(first.matcher());
@@ -101,7 +103,7 @@ class NamedOnlyLtsAdmissionTest {
   @Test
   void preservesOriginalNamedIndexWhileProjectingAnUnnamedCapture() {
     String pattern = "(x)(?<value>\\S+)";
-    RuntimeCompiler.NamedOnlyLtsCompilation direct =
+    RuntimeCompiler.Compilation<RuntimeCompiler.NamedOnlyLtsRejection> direct =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence(pattern, 0);
     ReggieMatcher legacy = Reggie.compile(pattern, ReggieOptions.builder().namedOnly().build());
 
@@ -121,27 +123,34 @@ class NamedOnlyLtsAdmissionTest {
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0).matcher();
     ExecutorService executor = Executors.newFixedThreadPool(4);
     CountDownLatch done = new CountDownLatch(4);
+    ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
     for (int thread = 0; thread < 4; thread++) {
       int id = thread;
       executor.execute(
           () -> {
-            LinearTokenSequenceMatcher independent =
-                RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0)
-                    .matcher();
-            for (int iteration = 0; iteration < 100; iteration++) {
-              assertEquals("shared", shared.match("shared").group("value"));
-              assertEquals("value" + id, independent.match("value" + id).group("value"));
+            try {
+              LinearTokenSequenceMatcher independent =
+                  RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence("(?<value>\\S+)", 0)
+                      .matcher();
+              for (int iteration = 0; iteration < 100; iteration++) {
+                assertEquals("shared", shared.match("shared").group("value"));
+                assertEquals("value" + id, independent.match("value" + id).group("value"));
+              }
+            } catch (Throwable failure) {
+              failures.add(failure);
+            } finally {
+              done.countDown();
             }
-            done.countDown();
           });
     }
-    assertEquals(true, done.await(10, TimeUnit.SECONDS));
+    assertTrue(done.await(10, TimeUnit.SECONDS), "workers did not finish");
     executor.shutdownNow();
+    assertTrue(failures.isEmpty(), () -> "concurrent LTS failure: " + failures.peek());
   }
 
   private static void assertRejected(
       String source, int flags, RuntimeCompiler.NamedOnlyLtsRejection expected) {
-    RuntimeCompiler.NamedOnlyLtsCompilation compilation =
+    RuntimeCompiler.Compilation<RuntimeCompiler.NamedOnlyLtsRejection> compilation =
         RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence(source, flags);
     assertNull(compilation.matcher());
     assertEquals(expected, compilation.rejection());

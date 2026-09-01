@@ -19,18 +19,29 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 /** Bounded instance-owned cache for native named linear-token-sequence compilation. */
 public final class ReggieCompiledPatternCompiler {
-  private static final ReggieNativeCompileBudget DEFAULT_BUDGET =
-      new ReggieNativeCompileBudget(16_384);
+  static final ReggieNativeCompileBudget DEFAULT_BUDGET = new ReggieNativeCompileBudget(16_384);
+
+  /**
+   * Number of independently-locked cache segments used once {@code maximumEntries} is large enough
+   * to make striping worthwhile. Splitting the cache into stripes means concurrent lookups for keys
+   * in different segments never contend on the same monitor, unlike a single global lock guarding
+   * one access-ordered {@link LinkedHashMap}. Below this threshold a single segment is used
+   * instead, since a segment holding only one or two entries would defeat the point of caching
+   * (frequent evictions from key collisions across segments).
+   */
+  private static final int STRIPE_COUNT = 16;
+
   private final int maximumEntries;
   private final ReggieNativeCompileBudget budget;
-  private final Map<ReggieCompileRequest, ReggieCompiledPattern> cache =
-      new LinkedHashMap<>(16, 0.75f, true);
+  private final Segment[] segments;
   private final ConcurrentHashMap<ReggieCompileRequest, CompletableFuture<ReggieCompilationResult>>
       inFlight = new ConcurrentHashMap<>();
   private final Function<ReggieCompileRequest, ReggieCompilationResult> admission;
@@ -42,11 +53,11 @@ public final class ReggieCompiledPatternCompiler {
    * budget.
    */
   public ReggieCompiledPatternCompiler(int maximumEntries) {
-    this(maximumEntries, DEFAULT_BUDGET, ReggieCompiledPattern::tryCompileNative);
+    this(maximumEntries, DEFAULT_BUDGET, ReggieCompiledPattern::tryCompileNative, () -> {});
   }
 
   public ReggieCompiledPatternCompiler(int maximumEntries, ReggieNativeCompileBudget budget) {
-    this(maximumEntries, budget, ReggieCompiledPattern::tryCompileNative);
+    this(maximumEntries, budget, ReggieCompiledPattern::tryCompileNative, () -> {});
   }
 
   ReggieCompiledPatternCompiler(
@@ -78,6 +89,16 @@ public final class ReggieCompiledPatternCompiler {
     this.budget = Objects.requireNonNull(budget, "budget");
     this.admission = Objects.requireNonNull(admission, "admission");
     this.waiterArrived = Objects.requireNonNull(waiterArrived, "waiterArrived");
+    int stripeCount = maximumEntries >= STRIPE_COUNT ? STRIPE_COUNT : 1;
+    int perSegmentCapacity = (maximumEntries + stripeCount - 1) / stripeCount;
+    this.segments = new Segment[stripeCount];
+    for (int i = 0; i < stripeCount; i++) {
+      segments[i] = new Segment(perSegmentCapacity);
+    }
+  }
+
+  private Segment segmentFor(ReggieCompileRequest request) {
+    return segments[Math.floorMod(request.hashCode(), segments.length)];
   }
 
   public ReggieCompilationResult tryCompile(ReggieCompileRequest request) {
@@ -85,10 +106,9 @@ public final class ReggieCompiledPatternCompiler {
     if (request.source().length() > budget.maximumSourceLength()) {
       return ReggieCompilationResult.rejected(ReggieCompilationRejection.SOURCE_TOO_LONG);
     }
-    synchronized (cache) {
-      ReggieCompiledPattern cached = cache.get(request);
-      if (cached != null) return ReggieCompilationResult.admitted(cached);
-    }
+    Segment segment = segmentFor(request);
+    ReggieCompiledPattern cached = segment.get(request);
+    if (cached != null) return ReggieCompilationResult.admitted(cached);
     CompletableFuture<ReggieCompilationResult> mine = new CompletableFuture<>();
     synchronized (this) {
       inFlightRegistrations++;
@@ -99,20 +119,15 @@ public final class ReggieCompiledPatternCompiler {
       return await(existing);
     }
     try {
-      synchronized (cache) {
-        ReggieCompiledPattern cached = cache.get(request);
-        if (cached != null) {
-          ReggieCompilationResult result = ReggieCompilationResult.admitted(cached);
-          mine.complete(result);
-          return result;
-        }
+      cached = segment.get(request);
+      if (cached != null) {
+        ReggieCompilationResult result = ReggieCompilationResult.admitted(cached);
+        mine.complete(result);
+        return result;
       }
       ReggieCompilationResult result = admission.apply(request);
       if (result.isAdmitted()) {
-        synchronized (cache) {
-          cache.put(request, result.pattern());
-          while (cache.size() > maximumEntries) cache.remove(cache.keySet().iterator().next());
-        }
+        segment.put(request, result.pattern());
       }
       mine.complete(result);
       return result;
@@ -127,14 +142,16 @@ public final class ReggieCompiledPatternCompiler {
   }
 
   public int cacheSize() {
-    synchronized (cache) {
-      return cache.size();
+    int size = 0;
+    for (Segment segment : segments) {
+      size += segment.size();
     }
+    return size;
   }
 
   public void clearCache() {
-    synchronized (cache) {
-      cache.clear();
+    for (Segment segment : segments) {
+      segment.clear();
     }
   }
 
@@ -144,14 +161,49 @@ public final class ReggieCompiledPatternCompiler {
     }
   }
 
+  private static final long AWAIT_TIMEOUT_SECONDS = 30;
+
   private static ReggieCompilationResult await(CompletableFuture<ReggieCompilationResult> future) {
     try {
-      return future.join();
-    } catch (CompletionException e) {
+      return future.get(AWAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    } catch (ExecutionException e) {
       Throwable cause = e.getCause();
       if (cause instanceof RuntimeException runtimeException) throw runtimeException;
       if (cause instanceof Error error) throw error;
       throw new RuntimeException(cause);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException("interrupted while awaiting in-flight compilation", e);
+    } catch (TimeoutException e) {
+      throw new RuntimeException("timed out awaiting in-flight compilation", e);
+    }
+  }
+
+  /** One independently-locked, bounded, access-ordered LRU shard of the compilation cache. */
+  private static final class Segment {
+    private final int capacity;
+    private final Map<ReggieCompileRequest, ReggieCompiledPattern> entries =
+        new LinkedHashMap<>(16, 0.75f, true);
+
+    Segment(int capacity) {
+      this.capacity = capacity;
+    }
+
+    synchronized ReggieCompiledPattern get(ReggieCompileRequest request) {
+      return entries.get(request);
+    }
+
+    synchronized void put(ReggieCompileRequest request, ReggieCompiledPattern pattern) {
+      entries.put(request, pattern);
+      while (entries.size() > capacity) entries.remove(entries.keySet().iterator().next());
+    }
+
+    synchronized int size() {
+      return entries.size();
+    }
+
+    synchronized void clear() {
+      entries.clear();
     }
   }
 }

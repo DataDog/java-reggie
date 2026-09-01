@@ -528,7 +528,6 @@ class LinearTokenSequenceMatcherTest {
         new String[] {
           "(?i)(?<value>\\S+)",
           "(?m)(?<value>\\S+)",
-          "(?s)(?<value>\\S+)",
           "(?x)(?<value>\\S+)",
           "(?-i)(?<value>\\S+)",
           "(?im)(?<value>\\S+)",
@@ -537,6 +536,16 @@ class LinearTokenSequenceMatcherTest {
       Reggie.clearCache();
       assertNotLinearTokenSequenceDelegate(Reggie.compile(pattern, NAMED_ONLY_OPTIONS));
     }
+  }
+
+  @Test
+  void linearTokenSequenceAdmitsLeadingSourceDotAllModifierAsDotAllEquivalent() throws Exception {
+    // A leading "(?s)" with no other inline modifier is DOTALL-equivalent for the named-only
+    // route (see doc/plans/logs-backend.md), so it is admitted the same way an explicit
+    // ReggieFlags.DOTALL would be.
+    Reggie.clearCache();
+    assertDelegateType(
+        Reggie.compile("(?s)(?<value>\\S+)", NAMED_ONLY_OPTIONS), LinearTokenSequenceMatcher.class);
   }
 
   @Test

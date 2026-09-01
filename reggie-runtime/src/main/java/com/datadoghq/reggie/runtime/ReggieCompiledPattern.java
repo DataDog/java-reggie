@@ -45,14 +45,25 @@ public final class ReggieCompiledPattern {
   }
 
   static ReggieCompilationResult tryCompileNative(ReggieCompileRequest request) {
-    RuntimeCompiler.FullCaptureLtsCompilation compilation =
+    if (request.source().length()
+        > ReggieCompiledPatternCompiler.DEFAULT_BUDGET.maximumSourceLength()) {
+      return ReggieCompilationResult.rejected(ReggieCompilationRejection.SOURCE_TOO_LONG);
+    }
+    RuntimeCompiler.Compilation<RuntimeCompiler.FullCaptureLtsRejection> compilation =
         RuntimeCompiler.tryCompileFullCaptureLinearTokenSequence(
             request.source(), request.flag().reggieFlags());
     if (compilation.matcher() != null) {
       return ReggieCompilationResult.admitted(new ReggieCompiledPattern(compilation.matcher()));
     }
     return ReggieCompilationResult.rejected(
-        ReggieCompilationRejection.valueOf(compilation.rejection().name()));
+        switch (compilation.rejection()) {
+          case UNSUPPORTED_FLAGS -> ReggieCompilationRejection.UNSUPPORTED_FLAGS;
+          case SOURCE_INLINE_MODIFIER -> ReggieCompilationRejection.SOURCE_INLINE_MODIFIER;
+          case PARSE_FAILURE -> ReggieCompilationRejection.PARSE_FAILURE;
+          case PLAN_UNAVAILABLE -> ReggieCompilationRejection.PLAN_UNAVAILABLE;
+          case MISSING_CAPTURE -> ReggieCompilationRejection.MISSING_CAPTURE;
+          case PROFILE_INELIGIBLE -> ReggieCompilationRejection.PROFILE_INELIGIBLE;
+        });
   }
 
   /** Creates a new single-thread-confined state object for matching this immutable pattern. */
@@ -60,7 +71,13 @@ public final class ReggieCompiledPattern {
     return new ReggieMatchState(matcher);
   }
 
-  /** Returns the immutable capabilities of this native named-LTS compiled pattern. */
+  /**
+   * Returns the immutable capabilities of this native named-LTS compiled pattern.
+   *
+   * <p>This set is the same constant for every instance: it documents guarantees this compiled
+   * pattern always holds (native-only execution, linear time, interruptible char sequences), not a
+   * per-instance signal callers should branch on.
+   */
   public Set<ReggieNativeCapability> capabilities() {
     return CAPABILITIES;
   }
