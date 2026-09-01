@@ -7133,6 +7133,238 @@ public class PatternAnalyzer {
   }
 
   /**
+   * Pattern description for the deterministic chain family ({@code DETERMINISTIC_CHAIN_BYTECODE},
+   * see {@link #detectDeterministicChain} and
+   * doc/2026-09-01-deterministic-chain-bytecode-design.md): a top-level alternation of chains —
+   * flat sequences of literals, single-consume char classes, greedy/lazy char-class loops, optional
+   * sub-chains, bounded literal alternations, and capturing groups over sub-chains — with
+   * per-branch anchor flags and the branch first-consumed-char set the generated find() scan gates
+   * on. All admission rules (greedy-loop no-give-back disjointness, unanchored min-width ≥ 1,
+   * bounds) are enforced by the detector before this is constructed.
+   */
+  public static final class DeterministicChainInfo implements PatternInfo {
+
+    /** One element kind in a chain sequence. */
+    public enum ElemKind {
+      /** Multi-char literal (merged adjacent literal chars). */
+      LITERAL,
+      /** Exactly one char consumed from a char class. */
+      CLASS1,
+      /** Greedy char-class loop, min 0 or 1, max unbounded, no give-back (admission-checked). */
+      GREEDY_LOOP,
+      /** Lazy char-class scan loop, min 0, max unbounded (scan-try-tail). */
+      LAZY_LOOP,
+      /** Bounded literal alternation, sequential tries in priority order. */
+      LIT_ALT,
+      /** Optional sub-chain, greedy two-attempt (with-prefix first, restart on fail). */
+      OPT,
+      /** Capturing group over a sub-chain. */
+      CAPTURE
+    }
+
+    /** One element. Field meaning per {@link ElemKind} — others null/0. */
+    public static final class ChainElem {
+      public final ElemKind kind;
+
+      /** LITERAL: the literal text. */
+      public final String literal;
+
+      /** CLASS1/GREEDY_LOOP/LAZY_LOOP: the resolved char set. */
+      public final CharSet charSet;
+
+      /** GREEDY_LOOP: min repetitions (0 or 1). */
+      public final int min;
+
+      /** LIT_ALT: alternatives in priority order. */
+      public final List<String> literals;
+
+      /** OPT/CAPTURE: the nested sub-chain. */
+      public final ChainSeq nested;
+
+      /** CAPTURE: group number. */
+      public final int groupNumber;
+
+      ChainElem(String literal) {
+        this.kind = ElemKind.LITERAL;
+        this.literal = literal;
+        this.charSet = null;
+        this.min = 0;
+        this.literals = null;
+        this.nested = null;
+        this.groupNumber = 0;
+      }
+
+      ChainElem(ElemKind kind, CharSet charSet) { // CLASS1
+        this.kind = kind;
+        this.literal = null;
+        this.charSet = charSet;
+        this.min = 0;
+        this.literals = null;
+        this.nested = null;
+        this.groupNumber = 0;
+      }
+
+      ChainElem(CharSet charSet, int min) { // GREEDY_LOOP
+        this.kind = ElemKind.GREEDY_LOOP;
+        this.literal = null;
+        this.charSet = charSet;
+        this.min = min;
+        this.literals = null;
+        this.nested = null;
+        this.groupNumber = 0;
+      }
+
+      ChainElem(CharSet charSet) { // LAZY_LOOP
+        this.kind = ElemKind.LAZY_LOOP;
+        this.literal = null;
+        this.charSet = charSet;
+        this.min = 0;
+        this.literals = null;
+        this.nested = null;
+        this.groupNumber = 0;
+      }
+
+      ChainElem(List<String> literals) { // LIT_ALT
+        this.kind = ElemKind.LIT_ALT;
+        this.literal = null;
+        this.charSet = null;
+        this.min = 0;
+        this.literals = literals;
+        this.nested = null;
+        this.groupNumber = 0;
+      }
+
+      ChainElem(ChainSeq nested) { // OPT
+        this.kind = ElemKind.OPT;
+        this.literal = null;
+        this.charSet = null;
+        this.min = 0;
+        this.literals = null;
+        this.nested = nested;
+        this.groupNumber = 0;
+      }
+
+      ChainElem(int groupNumber, ChainSeq nested) { // CAPTURE
+        this.kind = ElemKind.CAPTURE;
+        this.literal = null;
+        this.charSet = null;
+        this.min = 0;
+        this.literals = null;
+        this.nested = nested;
+        this.groupNumber = groupNumber;
+      }
+    }
+
+    /** A flat sequence of elements. */
+    public static final class ChainSeq {
+      /** Sentinel returned for transparent (non-capturing) groups parsed inline. */
+      static final ChainSeq EMPTY_SEQ = new ChainSeq(java.util.Collections.emptyList());
+
+      public final List<ChainElem> elems;
+
+      ChainSeq(List<ChainElem> elems) {
+        this.elems = elems;
+      }
+    }
+
+    /** One alternation branch (a chain with its anchor flags and first-consumed-char set). */
+    public static final class ChainBranch {
+      /** Leading {@code ^} (non-multiline): the branch is only tried at scan position 0. */
+      public final boolean startAnchored;
+
+      /** Trailing {@code $}. */
+      public final boolean endAnchored;
+
+      /** The trailing {@code $} was multiline ({@code (?m)$: end-of-input or before a {@code \n}). */
+      public final boolean multilineEnd;
+
+      /** The chain body (anchor flags excluded). */
+      public final ChainSeq seq;
+
+      /** First-consumed-char bitmap over ASCII 0..127 for the generated find() scan gate. */
+      public final boolean[] firstSetAscii;
+
+      /** Some qualifying first char is above ASCII: unanchored branches decline on this. */
+      public final boolean firstSetHasNonAscii;
+
+      /** Minimum match width; unanchored branches require ≥ 1. */
+      public final int minWidth;
+
+      ChainBranch(
+          boolean startAnchored,
+          boolean endAnchored,
+          boolean multilineEnd,
+          ChainSeq seq,
+          boolean[] firstSetAscii,
+          boolean firstSetHasNonAscii,
+          int minWidth) {
+        this.startAnchored = startAnchored;
+        this.endAnchored = endAnchored;
+        this.multilineEnd = multilineEnd;
+        this.seq = seq;
+        this.firstSetAscii = firstSetAscii;
+        this.firstSetHasNonAscii = firstSetHasNonAscii;
+        this.minWidth = minWidth;
+      }
+    }
+
+    public final List<ChainBranch> branches;
+
+    public DeterministicChainInfo(List<ChainBranch> branches) {
+      this.branches = branches;
+    }
+
+    @Override
+    public int structuralHashCode() {
+      int hash = getClass().getName().hashCode();
+      hash = 31 * hash + branches.size();
+      for (ChainBranch b : branches) {
+        hash = 31 * hash + (b.startAnchored ? 1 : 0);
+        hash = 31 * hash + (b.endAnchored ? 2 : 0);
+        hash = 31 * hash + (b.multilineEnd ? 4 : 0);
+        hash = 31 * hash + b.minWidth;
+        hash = 31 * chainSeqHashCode(b.seq, hash);
+      }
+      return hash;
+    }
+
+    private int chainSeqHashCode(ChainSeq seq, int seed) {
+      int hash = seed;
+      hash = 31 * hash + seq.elems.size();
+      for (ChainElem e : seq.elems) {
+        hash = 31 * hash + e.kind.ordinal();
+        if (e.literal != null) {
+          hash = 31 * hash + e.literal.hashCode();
+        }
+        if (e.charSet != null) {
+          hash = 31 * hash + chainCharSetHashCode(e.charSet);
+        }
+        hash = 31 * hash + e.min;
+        if (e.literals != null) {
+          hash = 31 * hash + e.literals.size();
+          for (String alt : e.literals) {
+            hash = 31 * hash + alt.hashCode();
+          }
+        }
+        hash = 31 * hash + e.groupNumber;
+        if (e.nested != null) {
+          hash = 31 * chainSeqHashCode(e.nested, hash);
+        }
+      }
+      return hash;
+    }
+
+    private int chainCharSetHashCode(CharSet cs) {
+      int hash = 0;
+      for (CharSet.Range r : cs.getRanges()) {
+        hash = 31 * hash + r.start;
+        hash = 31 * hash + r.end;
+      }
+      return hash;
+    }
+  }
+
+  /**
    * Information about stateless pattern that doesn't require state tracking. These patterns can be
    * matched using simple loops without BitSet/SparseSet overhead.
    *
@@ -9093,6 +9325,554 @@ public class PatternAnalyzer {
         tailCharSet,
         tailGroup.groupNumber,
         multiline);
+  }
+
+  // =======================================================================================
+  // Deterministic chain family (DETERMINISTIC_CHAIN_BYTECODE) — see
+  // doc/2026-09-01-deterministic-chain-bytecode-design.md. Bounds keep the generated class
+  // size (and the detector's own work) capped; every bound below is a decline, not a truncation.
+  // =======================================================================================
+
+  private static final int MAX_CHAIN_BRANCHES = 32;
+  private static final int MAX_CHAIN_SEQ_ELEMENTS = 64;
+  private static final int MAX_CHAIN_DEPTH = 8;
+  private static final int MAX_CHAIN_LITERAL_LEN = 256;
+  private static final int MAX_CHAIN_LIT_ALT = 16;
+
+  /**
+   * Detects the "deterministic chain" structural family: a top-level alternation of chains (or a
+   * single chain), where each chain is a flat sequence of literals, single-consume char classes,
+   * greedy char-class loops ({@code class+}/{@code class*}), one lazy char-class scan loop ({@code
+   * class*?}), optional sub-chains ({@code (?:X)?}), bounded literal alternations, and capturing
+   * groups over sub-chains — optionally {@code ^}-anchored at the chain start and {@code
+   * $}-anchored at the chain end. See doc/2026-09-01-deterministic-chain-bytecode-design.md for the
+   * grammar and the linearity argument for each admission rule.
+   *
+   * <p>Not yet wired into strategy routing — the code generator is built in later stages of the
+   * design doc's implementation plan. Exposed for unit tests of the detector itself.
+   *
+   * @return the parsed family description, or null when the pattern declines (any construct outside
+   *     the grammar, a greedy loop that would need give-back, an unanchored branch that can match
+   *     empty, or a bound exceeded).
+   */
+  public DeterministicChainInfo detectDeterministicChain(RegexNode ast) {
+    List<RegexNode> alts;
+    if (ast instanceof AlternationNode) {
+      alts = ((AlternationNode) ast).alternatives;
+    } else {
+      alts = new ArrayList<>();
+      alts.add(ast);
+    }
+    if (alts.isEmpty() || alts.size() > MAX_CHAIN_BRANCHES) {
+      return null;
+    }
+    List<DeterministicChainInfo.ChainBranch> branches = new ArrayList<>(alts.size());
+    for (RegexNode alt : alts) {
+      DeterministicChainInfo.ChainBranch branch = parseChainBranch(alt, 0);
+      if (branch == null) {
+        return null;
+      }
+      branches.add(branch);
+    }
+    // Unanchored-branch admission: the generated find() scan gates positions on the branch's
+    // ASCII first-set bitmap and relies on a failing try consuming a bounded amount — an
+    // empty-matching branch (min-width 0) would match at every position, and a non-ASCII first
+    // char cannot be gated by the 128-bit bitmap. Anchored branches are tried only at position 0
+    // and need neither.
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (!b.startAnchored && (b.minWidth < 1 || b.firstSetHasNonAscii)) {
+        return null;
+      }
+    }
+    return new DeterministicChainInfo(branches);
+  }
+
+  /** Parses one alternation branch as a chain; returns null on any decline. */
+  private DeterministicChainInfo.ChainBranch parseChainBranch(RegexNode node, int depth) {
+    if (depth > MAX_CHAIN_DEPTH) {
+      return null;
+    }
+    List<RegexNode> children = new ArrayList<>();
+    if (node instanceof ConcatNode) {
+      children.addAll(((ConcatNode) node).children);
+    } else {
+      children.add(node);
+    }
+    boolean startAnchored = false;
+    boolean endAnchored = false;
+    boolean multilineEnd = false;
+    int from = 0;
+    int to = children.size();
+    if (children.get(0) instanceof AnchorNode) {
+      AnchorNode a = (AnchorNode) children.get(0);
+      if (a.type == AnchorNode.Type.START && !a.multiline) {
+        startAnchored = true;
+        from = 1;
+      } else {
+        return null; // multiline ^, \A, or any other leading anchor: outside the family (v1)
+      }
+    }
+    if (to > from && children.get(to - 1) instanceof AnchorNode) {
+      AnchorNode a = (AnchorNode) children.get(to - 1);
+      if (a.type == AnchorNode.Type.END) {
+        endAnchored = true;
+        multilineEnd = a.multiline;
+        to -= 1;
+      } else {
+        return null;
+      }
+    }
+    if (to - from < 1) {
+      return null; // anchors-only or empty chain
+    }
+    DeterministicChainInfo.ChainSeq seq = parseChainSeq(children, from, to, depth + 1);
+    if (seq == null) {
+      return null;
+    }
+    // Admission checks: greedy-loop no-give-back disjointness (right-to-left, nothing follows
+    // the branch), then the branch first-consumed-char set (left-to-right — only elements every
+    // element to the left of which can match empty contribute, which is exactly the set the
+    // generated find() scan gates positions on).
+    if (!checkChainDisjoint(seq, new boolean[128], false)) {
+      return null;
+    }
+    boolean[] firstSet = new boolean[128];
+    boolean[] nonAscii = new boolean[1];
+    computeChainFirst(seq, firstSet, nonAscii);
+    int minWidth = chainSeqMinWidth(seq);
+    return new DeterministicChainInfo.ChainBranch(
+        startAnchored, endAnchored, multilineEnd, seq, firstSet, nonAscii[0], minWidth);
+  }
+
+  // =======================================================================================
+  // Deterministic chain parsing. parseChainSeq always consumes [from, to) of `children` —
+  // pass from=0/to=size for a bare single node wrapped by the callers.
+  // =======================================================================================
+
+  /** Parses children[from, to) as a chain element sequence; returns null on any decline. */
+  private DeterministicChainInfo.ChainSeq parseChainSeq(
+      List<RegexNode> children, int from, int to, int depth) {
+    if (depth > MAX_CHAIN_DEPTH) {
+      return null;
+    }
+    List<DeterministicChainInfo.ChainElem> elems = new ArrayList<>();
+    StringBuilder literal = new StringBuilder();
+    for (int i = from; i < to; i++) {
+      RegexNode child = children.get(i);
+      if (child instanceof LiteralNode) {
+        literal.append(((LiteralNode) child).ch);
+        if (literal.length() > MAX_CHAIN_LITERAL_LEN) {
+          return null;
+        }
+        continue;
+      }
+      // Any non-literal node ends the current literal run.
+      flushChainLiteral(literal, elems);
+      if (child instanceof CharClassNode) {
+        elems.add(
+            new DeterministicChainInfo.ChainElem(
+                DeterministicChainInfo.ElemKind.CLASS1, effectiveCharSet((CharClassNode) child)));
+      } else if (child instanceof QuantifierNode) {
+        DeterministicChainInfo.ChainElem e = parseChainQuantifier((QuantifierNode) child, depth);
+        if (e == null) {
+          return null;
+        }
+        elems.add(e);
+      } else if (child instanceof GroupNode) {
+        DeterministicChainInfo.ChainSeq nested = parseChainGroup((GroupNode) child, depth, elems);
+        if (nested == null) {
+          return null;
+        }
+        // nested == EMPTY_SEQ means the group's content was appended inline into elems
+      } else if (child instanceof AlternationNode) {
+        List<String> literals = extractChainLitAlt((AlternationNode) child);
+        if (literals == null) {
+          return null;
+        }
+        elems.add(new DeterministicChainInfo.ChainElem(literals));
+      } else {
+        // AnchorNode mid-sequence, AssertionNode, BackreferenceNode, BranchResetNode,
+        // ConditionalNode, SubroutineNode, or anything else: outside the family.
+        return null;
+      }
+      if (elems.size() > MAX_CHAIN_SEQ_ELEMENTS) {
+        return null;
+      }
+    }
+    flushChainLiteral(literal, elems);
+    if (elems.isEmpty()) {
+      return null;
+    }
+    return new DeterministicChainInfo.ChainSeq(elems);
+  }
+
+  private void flushChainLiteral(
+      StringBuilder literal, List<DeterministicChainInfo.ChainElem> elems) {
+    if (literal.length() > 0) {
+      elems.add(new DeterministicChainInfo.ChainElem(literal.toString()));
+      literal.setLength(0);
+    }
+  }
+
+  /** Parses a quantified node into GREEDY_LOOP / LAZY_LOOP / OPT; null on decline. */
+  private DeterministicChainInfo.ChainElem parseChainQuantifier(QuantifierNode q, int depth) {
+    RegexNode inner = q.child;
+    CharSet cs;
+    if (inner instanceof CharClassNode) {
+      cs = effectiveCharSet((CharClassNode) inner);
+    } else if (inner instanceof LiteralNode) {
+      cs = CharSet.of(((LiteralNode) inner).ch);
+    } else if (q.min == 0 && q.max == 1 && q.greedy && inner instanceof GroupNode) {
+      GroupNode g = (GroupNode) inner;
+      if (g.capturing || g.atomic) {
+        return null; // (X)? capturing or atomic optional group: outside the family (v1)
+      }
+      DeterministicChainInfo.ChainSeq nested = parseChainSeqContent(g.child, depth + 1);
+      if (nested == null) {
+        return null;
+      }
+      return new DeterministicChainInfo.ChainElem(nested);
+    } else {
+      return null;
+    }
+    if (q.greedy && q.max == -1 && (q.min == 0 || q.min == 1)) {
+      return new DeterministicChainInfo.ChainElem(cs, q.min);
+    }
+    if (!q.greedy && q.max == -1 && q.min == 0) {
+      return new DeterministicChainInfo.ChainElem(cs);
+    }
+    // Optional single consume ([-+]?): modeled as OPT over a one-element nested seq so the
+    // generator has exactly one optional construct to emit.
+    if (q.greedy && q.min == 0 && q.max == 1) {
+      List<DeterministicChainInfo.ChainElem> one = new ArrayList<>(1);
+      one.add(
+          inner instanceof LiteralNode
+              ? new DeterministicChainInfo.ChainElem(String.valueOf(((LiteralNode) inner).ch))
+              : new DeterministicChainInfo.ChainElem(DeterministicChainInfo.ElemKind.CLASS1, cs));
+      return new DeterministicChainInfo.ChainElem(new DeterministicChainInfo.ChainSeq(one));
+    }
+    return null; // bounded repetitions (x{2,4}), lazy min>=1 (x+?), possessive, etc.
+  }
+
+  /**
+   * Parses a group: capturing groups become CAPTURE elements (appended by the caller via {@code
+   * elems}); non-capturing groups are transparent — their content is appended inline into {@code
+   * elems} and the EMPTY_SEQ sentinel is returned.
+   *
+   * @return the nested seq for capturing groups, EMPTY_SEQ for transparent groups, null on decline
+   */
+  private DeterministicChainInfo.ChainSeq parseChainGroup(
+      GroupNode g, int depth, List<DeterministicChainInfo.ChainElem> elems) {
+    if (g.atomic) {
+      return null;
+    }
+    if (g.capturing) {
+      DeterministicChainInfo.ChainSeq nested = parseChainSeqContent(g.child, depth + 1);
+      if (nested == null) {
+        return null;
+      }
+      elems.add(new DeterministicChainInfo.ChainElem(g.groupNumber, nested));
+      return DeterministicChainInfo.ChainSeq.EMPTY_SEQ;
+    }
+    // Transparent non-capturing group: inline the content.
+    if (g.child instanceof AlternationNode) {
+      List<String> literals = extractChainLitAlt((AlternationNode) g.child);
+      if (literals == null) {
+        return null;
+      }
+      elems.add(new DeterministicChainInfo.ChainElem(literals));
+      return DeterministicChainInfo.ChainSeq.EMPTY_SEQ;
+    }
+    // Concat or single node: re-parse via a single-element window. parseChainSeq over a bare
+    // non-concat node handles CharClassNode/QuantifierNode/LiteralNode/GroupNode/AlternationNode;
+    // the anchor/mid-sequence declines apply unchanged.
+    DeterministicChainInfo.ChainSeq inline = parseChainSeqContent(g.child, depth + 1);
+    if (inline == null) {
+      return null;
+    }
+    elems.addAll(inline.elems);
+    return DeterministicChainInfo.ChainSeq.EMPTY_SEQ;
+  }
+
+  /** Parses a node (concat, single element, or literal alternation) as a seq; null on decline. */
+  private DeterministicChainInfo.ChainSeq parseChainSeqContent(RegexNode node, int depth) {
+    if (node instanceof ConcatNode) {
+      List<RegexNode> cs = ((ConcatNode) node).children;
+      return parseChainSeq(cs, 0, cs.size(), depth);
+    }
+    if (node instanceof AlternationNode) {
+      List<String> literals = extractChainLitAlt((AlternationNode) node);
+      if (literals == null) {
+        return null;
+      }
+      List<DeterministicChainInfo.ChainElem> one = new ArrayList<>(1);
+      one.add(new DeterministicChainInfo.ChainElem(literals));
+      return new DeterministicChainInfo.ChainSeq(one);
+    }
+    List<RegexNode> single = new ArrayList<>(1);
+    single.add(node);
+    return parseChainSeq(single, 0, 1, depth);
+  }
+
+  /**
+   * Extracts a bounded literal alternation ({@code a|bc|def}) — every alternative must be a
+   * non-empty pure literal. Sequential tries in list order preserve Perl priority and are a bounded
+   * retry (the linearity admission), so overlapping first chars (a|ab|abc) are fine.
+   */
+  private List<String> extractChainLitAlt(AlternationNode alt) {
+    if (alt.alternatives.size() > MAX_CHAIN_LIT_ALT) {
+      return null;
+    }
+    List<String> literals = new ArrayList<>(alt.alternatives.size());
+    StringBuilder sb = new StringBuilder();
+    for (RegexNode a : alt.alternatives) {
+      sb.setLength(0);
+      if (!appendChainLiteral(a, sb) || sb.length() == 0 || sb.length() > MAX_CHAIN_LITERAL_LEN) {
+        return null;
+      }
+      literals.add(sb.toString());
+    }
+    return literals;
+  }
+
+  /** Flattens a pure-literal node (LiteralNode or concat thereof) into {@code out}. */
+  private boolean appendChainLiteral(RegexNode node, StringBuilder out) {
+    if (node instanceof LiteralNode) {
+      out.append(((LiteralNode) node).ch);
+      return true;
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (!appendChainLiteral(c, out)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // =======================================================================================
+  // Deterministic chain first-set + admission checks (right-to-left with threaded suffix sets).
+  // =======================================================================================
+
+  /**
+   * Walks {@code seq} right-to-left, threading the first-set of the remainder (plus whatever
+   * follows the seq in the parent, {@code after}/{@code afterNonAscii}) into each element. Enforces
+   * the greedy-loop no-give-back admission (loopClass ∩ first(rest) = ∅) at every GREEDY_LOOP,
+   * recursing into OPT/CAPTURE nested seqs with the correct suffix.
+   *
+   * @return false when a greedy loop would need give-back (decline)
+   */
+  private boolean checkChainDisjoint(
+      DeterministicChainInfo.ChainSeq seq, boolean[] afterIn, boolean afterNonAsciiIn) {
+    boolean[] after = afterIn.clone();
+    boolean afterNonAscii = afterNonAsciiIn;
+    for (int i = seq.elems.size() - 1; i >= 0; i--) {
+      DeterministicChainInfo.ChainElem e = seq.elems.get(i);
+      boolean[] elemFirst = new boolean[128];
+      boolean[] elemNonAscii = new boolean[1];
+      switch (e.kind) {
+        case LITERAL:
+          addChainFirstChar(elemFirst, e.literal.charAt(0), elemNonAscii);
+          break;
+        case CLASS1:
+          addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
+          break;
+        case GREEDY_LOOP:
+          // Admission rule 1: the maximal run is the only candidate — the loop class must not
+          // accept any char that can start the remainder, or the generated code would need to
+          // give characters back (unbounded give-back = ReDoS territory, and the whole point of
+          // the family is a provably single scan).
+          if (chainClassIntersects(e.charSet, after, afterNonAscii)) {
+            return false;
+          }
+          addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
+          if (e.min == 0) {
+            orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii); // can match empty
+          }
+          break;
+        case LAZY_LOOP:
+          // Lazy scan loop: the loop class itself can start a match, or the loop can be skipped.
+          addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
+          orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+          break;
+        case LIT_ALT:
+          for (String alt : e.literals) {
+            addChainFirstChar(elemFirst, alt.charAt(0), elemNonAscii);
+          }
+          break;
+        case OPT:
+          {
+            boolean[] nestedFirst = new boolean[128];
+            if (!checkChainDisjoint(e.nested, after, afterNonAscii)) {
+              return false;
+            }
+            computeChainFirst(e.nested, nestedFirst, elemNonAscii);
+            // The optional sub-chain can be skipped: its first-set union the suffix's.
+            orChainFirst(elemFirst, elemNonAscii, nestedFirst, elemNonAscii[0]);
+            orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+            break;
+          }
+        case CAPTURE:
+          {
+            boolean[] nestedFirst = new boolean[128];
+            if (!checkChainDisjoint(e.nested, after, afterNonAscii)) {
+              return false;
+            }
+            computeChainFirst(e.nested, nestedFirst, elemNonAscii);
+            orChainFirst(elemFirst, elemNonAscii, nestedFirst, elemNonAscii[0]);
+            if (chainSeqMinWidth(e.nested) == 0) {
+              orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii); // empty content possible
+            }
+            break;
+          }
+        default:
+          return false;
+      }
+      after = elemFirst;
+      afterNonAscii = elemNonAscii[0];
+    }
+    return true;
+  }
+
+  /**
+   * Computes the seq's first-consumed-char set into {@code firstOut} (ASCII bitmap) and {@code
+   * nonAsciiOut[0]}: left-to-right, an element's own first-set contributes only while every element
+   * to its left can match empty — the first chars a match starting at the seq's start can begin
+   * with, which is exactly what the generated find() scan gates positions on.
+   */
+  private void computeChainFirst(
+      DeterministicChainInfo.ChainSeq seq, boolean[] firstOut, boolean[] nonAsciiOut) {
+    boolean emptyPrefix = true;
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      if (!emptyPrefix) {
+        return;
+      }
+      switch (e.kind) {
+        case LITERAL:
+          addChainFirstChar(firstOut, e.literal.charAt(0), nonAsciiOut);
+          emptyPrefix = false;
+          break;
+        case CLASS1:
+          addChainFirstSet(firstOut, e.charSet, nonAsciiOut);
+          emptyPrefix = false;
+          break;
+        case GREEDY_LOOP:
+          addChainFirstSet(firstOut, e.charSet, nonAsciiOut);
+          if (e.min > 0) {
+            emptyPrefix = false;
+          }
+          break;
+        case LAZY_LOOP:
+          addChainFirstSet(firstOut, e.charSet, nonAsciiOut);
+          break; // min == 0: can be skipped
+        case LIT_ALT:
+          for (String alt : e.literals) {
+            addChainFirstChar(firstOut, alt.charAt(0), nonAsciiOut);
+          }
+          emptyPrefix = false;
+          break;
+        case OPT:
+          computeChainFirst(e.nested, firstOut, nonAsciiOut);
+          break; // skippable — prefix stays empty-matchable
+        case CAPTURE:
+          computeChainFirst(e.nested, firstOut, nonAsciiOut);
+          if (chainSeqMinWidth(e.nested) > 0) {
+            emptyPrefix = false;
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  private void addChainFirstChar(boolean[] set, char c, boolean[] nonAscii) {
+    if (c < 128) {
+      set[c] = true;
+    } else {
+      nonAscii[0] = true;
+    }
+  }
+
+  private void addChainFirstSet(boolean[] set, CharSet cs, boolean[] nonAscii) {
+    for (CharSet.Range r : cs.getRanges()) {
+      if (r.end > 127) {
+        nonAscii[0] = true;
+        if (r.start < 128) {
+          for (int c = r.start; c < 128; c++) {
+            set[c] = true;
+          }
+        }
+      } else {
+        for (int c = r.start; c <= r.end; c++) {
+          set[c] = true;
+        }
+      }
+    }
+  }
+
+  private void orChainFirst(
+      boolean[] into, boolean[] intoNonAscii, boolean[] from, boolean fromNonAscii) {
+    for (int c = 0; c < 128; c++) {
+      into[c] |= from[c];
+    }
+    intoNonAscii[0] |= fromNonAscii;
+  }
+
+  /** True when {@code cs} accepts any char in the first-set ({@code set} + non-ASCII flag). */
+  private boolean chainClassIntersects(CharSet cs, boolean[] set, boolean setNonAscii) {
+    for (CharSet.Range r : cs.getRanges()) {
+      if (r.end > 127 && setNonAscii) {
+        return true; // conservative: a non-ASCII first char may lie in cs's above-127 range
+      }
+      int lo = Math.max(r.start, 0);
+      int hi = Math.min(r.end, 127);
+      for (int c = lo; c <= hi; c++) {
+        if (set[c]) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Minimal match width of a seq (for the unanchored min-width>=1 admission). */
+  private int chainSeqMinWidth(DeterministicChainInfo.ChainSeq seq) {
+    int w = 0;
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      switch (e.kind) {
+        case LITERAL:
+          w += e.literal.length();
+          break;
+        case CLASS1:
+          w += 1;
+          break;
+        case GREEDY_LOOP:
+          w += e.min;
+          break;
+        case LAZY_LOOP:
+          break; // min == 0
+        case LIT_ALT:
+          int minAlt = Integer.MAX_VALUE;
+          for (String alt : e.literals) {
+            minAlt = Math.min(minAlt, alt.length());
+          }
+          w += minAlt;
+          break;
+        case OPT:
+          break; // can be skipped
+        case CAPTURE:
+          w += chainSeqMinWidth(e.nested); // the capture consumes its content's min width
+        default:
+          break;
+      }
+      if (w > MAX_CHAIN_LITERAL_LEN * MAX_CHAIN_SEQ_ELEMENTS) {
+        return w; // overflow guard — any width satisfies the checks we run
+      }
+    }
+    return w;
   }
 
   /** Resolves a {@link CharClassNode}'s effective runtime {@link CharSet}, applying negation. */
