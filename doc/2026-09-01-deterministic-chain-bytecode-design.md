@@ -125,22 +125,25 @@ Expected per-char cost on the winning path: literal/class checks identical in sh
 compiled nodes plus one budget-counter increment — target ≤ ~1–2 ns/char (vs 5.4–6.4 fast-pathed
 BitState, 0.3–0.9 JDK).
 
-## 6. Coverage of the measured JDK losses
+## 6. Coverage of the measured JDK losses (as measured after stage 5)
 
-| Benchmark family | Admitted? | Notes |
+| Benchmark family | Admitted? | Measured result (reg/jdk, vs pre-strategy reference) |
 |---|---|---|
-| IastRegexp UrlAuth/UrlQuery/Ldap/SqlAnsi/SqlMysql/SqlPostgres/QueryObfuscator Find+Capture (27 losses) | yes | the motivating shapes: deterministic class loops, lazy `.*?` scan, disjoint/bounded literal alternations, `^`/`$`/`(?m)$` guards |
-| NFAFallback XmlTags (`(<\w+>).*?(</\w+>)`) | yes | lazy scan + `\w+` loop |
-| ComplexNFABenchmark MultipleStars `(a*b*c*d*e*)` | no (v1) | empty-matching chain (min-width 0) → stays on fast-pathed BitState |
+| IastRegexp UrlAuth Find/Capture | yes | **5.56 / 3.65** — was 0.31/0.18; the routed family is now faster than JDK, not merely at parity |
+| IastRegexp UrlQuery Find/Capture | yes | **10.59 / 9.45** — was 0.24/0.23 |
+| IastRegexp Ldap Find | yes | **2.80** — was 0.10 |
+| IastRegexp Sql* Find / QueryObfuscator Find | no (v1) — V2 targets | 0.41–0.64, unchanged: branch-1 compound alternation + `\b` + string-literal loops (`(?:''|[^'])*`) and greedy give-back loops are outside the v1 grammar — see §10 |
+| NFAFallback XmlTags (`(<\w+>).*(</\w+>)`, greedy) | no (v1) — V2 target | ~0.30, unchanged: non-terminal greedy loop needs give-back. (The lazy IAST variant `.*?` **is** admitted — it is what the Ldap/XmlTags routing tests pin.) |
+| ComplexNFABenchmark MultipleStars `(a*b*c*d*e*)` | no (v1) | ~0.29–0.33: terminal-only greedy loops mean every `x*` here is non-terminal (next `b*` follows) — stays on fast-pathed BitState by design |
 | SmokeBenchmark DfaSwitch `(abc|…|789)+` | no (v1) | quantified group over alternation → stays on BitState |
-| AnchorPlacement UserPattern `$[^a-zA-Z0-9]\|^[0-9]` | yes | two single-element branches, `^`/`$` guards |
-| ComplexEmail, LookaheadNoBoyerMoore | no | lookaround → HYBRID_DFA_LOOKAHEAD |
-| RepeatedWordAdversarial | no | backreference |
+| AnchorPlacement UserPattern `$…\|^[0-9]` | no (v1) | 0.13–0.39, unchanged: mid-chain `$` is not a branch guard — decline |
+| ComplexEmail, LookaheadNoBoyerMoore | no | lookaround → HYBRID_DFA_LOOKAHEAD; RE2J also refuses these patterns (lookahead is outside RE2's regular-language set) |
+| RepeatedWordAdversarial | no | backreference (RE2J refuses it too) |
 | BitParallelGlushkov p1/p2 | no | different family, already specialized |
-| StateExplosion AlternationHeavy/OptionalSequence Match | yes* | `LitAlternation` with overlapping prefixes is admitted as bounded sequential tries (9 tries max), so these matches() losses are covered too |
+| StateExplosion AlternationHeavy / LargeAlternationWithStar / OverlappingAlternation | no | quantified group over alternation → fallback/BitState, unchanged |
 | DFATable.Matches / SplitBenchmark / specializedConcatGreedyGroup | individually at detection time | not the motivation; whatever the grammar admits |
 
-Estimated: ~34 of the 52 losses addressed.
+v1 as measured: ~12 of the 52 losses eliminated (all as wins, several 3–10× over JDK); ~25 remain, of which the V2 grammar (§10) targets the Sql\*/QueryObfuscator/XmlTags-greedy family (~5 scenarios).
 
 ## 7. Wiring (dual-path, structural hash)
 
@@ -175,11 +178,67 @@ Estimated: ~34 of the 52 losses addressed.
 - Benchmarks: workspace-jb, the loss-class JMH filter, before/after against the reference run
   (`/tmp/reggie-jdkloss-ref-results.json` on completion of the in-flight rerun).
 
-## 9. Staged implementation
+## 9. Staged implementation (v1 — complete)
 
-1. `DeterministicChainInfo` + detector + declines (+ `StructuralHash`).
-2. Generator v1: single chain (no alternation), no captures — prove the per-char shape on
-   `[a-z]+@`-style patterns locally.
-3. Captures + `LitAlternation` + `OptChain` + lazy scan + `^`/`$`.
-4. Alternation of chains + find() first-set gates + budget/fallback.
-5. Dual-path wiring, routing tests, parity tests, benchmark on workspace-jb.
+1. `DeterministicChainInfo` + detector + declines (+ `StructuralHash`) — `8efdb80`.
+2. Generator v1: single chain (no alternation), no captures — proved the per-char shape
+   locally (0.53–1.05 ns/char, at/below JDK) — `e4d6d3d`.
+3. Captures + `LitAlternation` + `OptChain` + lazy scan + `^`/`$` — `d1d40f7`.
+4. Alternation of chains + find() first-set gates + budget/PikeVM fallback — `02549f5`.
+5. Dual-path wiring, routing tests, parity tests, workspace-jb benchmark — `6490610`;
+   fuzz gate 27 ≤ 28 known-findings budget (the reroute fixed one pre-existing divergence),
+   smoke sweep 0. Benchmark verdict: routed family 2.8–10.6× faster than JDK.
+
+## 10. V2 grammar — greedy give-back, ALT_CHAIN, LOOP_ALT (design; targets Sql\*, QueryObfuscator, XmlTags-greedy)
+
+All four V2 targets decline today (detector-verified). Case-insensitivity is not a gap — the
+parser normalizes `(?i)` letters to two-range `CharClassNode`s at parse time, which v1
+`CLASS1` already handles.
+
+### Elements
+
+- **E1 WORD_BOUNDARY** — `\b` parses to `AnchorNode(WORD_BOUNDARY)`. Zero-width check
+  `isWord(prev) != isWord(cur)` with bounds; ASCII word set `[a-zA-Z0-9_]` (JDK without
+  `UNICODE_CHARACTER_CLASS`; the fuzz oracle polices parity).
+- **E2 ALT_CHAIN** — generalizes `LIT_ALT`: mid-sequence alternation whose alternatives are
+  chain sequences (OPTs/loops allowed), sharing the downstream tail through the existing
+  alt-index dispatcher + path flag + `effFail` retry-chain. Terminal variant (alternation ends
+  the seq) emits per-alt success with no shared tail.
+- **E3 GIVEBACK_LOOP (single-char body)** — non-terminal greedy loop over a single-char
+  set/disjunction: consume to max, then give back one position at a time retrying the whole
+  downstream tail — exactly JDK's backtracking order (one iteration per step, which for
+  single-char bodies is `pos--`). Budget charged per give-back retry; overflow → the existing
+  PikeVM parse-at-overflow fallback. Covers XmlTags `.*`, Sql `\/*[\s\S]*\*\/`, and
+  single-char LOOP_ALT bodies.
+- **E4 LOOP_ALT + journal give-back** — loop body is an ALT_CHAIN of 1–2-char alternatives
+  (`''`, `%3D`). When non-terminal, an iteration-boundary **journal** (int[] of iteration-end
+  positions) is recorded during consumption; give-back pops the journal. This matches JDK's
+  retry-at-each-successive-shorter-boundary exactly.
+
+### Journal buffer (D1: journal, ThreadLocal scratch — no per-call allocation)
+
+Chain matchers are method-local-only by the concurrency contract, so generated instances are
+shared and concurrently used — the journal cannot be an instance field. It is a scratch buffer
+behind a `ThreadLocal<int[]>` on the runtime side (`ReggieMatcher.scratch(int minLen)`-style
+static accessor; one `INVOKESTATIC` per `findBoundsFrom`), grown to the next power of two ≥
+`len+1` and kept cached — steady-state zero allocation, no malloc-arena churn. Only classes
+whose admitted shape contains a multi-char give-back loop touch it (admission-time flag).
+Re-entrancy is safe: matching makes no calls into user code, and the PikeVM fallback path does
+not use the journal.
+
+### Emitter composition
+
+Give-back retries wrap the shared tail emission with a re-entry label and suspend through the
+same `ctx.retryFail`/`effFail`/`TailLevel` continuation walk the v1 retry-chain uses, so nested
+retries (LIT_ALT/OPT inside the tail) unwind correctly. Capture ends of downstream groups are
+rewritten by the tail re-run (v3 mechanism); the journal is dead once the call returns.
+
+### Stages (D2: two increments, V2-C is the goal)
+
+- **V2-α**: E1 + terminal E2 + E3. Unlocks XmlTagsMatch (greedy), Sql branch-1 numeric
+  alternation, Sql block comments. Benchmark checkpoint after landing.
+- **V2-β**: E4 (journal) + mid-seq E2. Unlocks Sql string literals (all dialects) + QueryObfuscator.
+  Gets its own fuzz window; budget/journal interactions are the correctness hot spot.
+
+`StructuralHash`: new `ChainElem` kinds fold via the stage-1 `structuralHashCode` pattern —
+remember at implementation time.
