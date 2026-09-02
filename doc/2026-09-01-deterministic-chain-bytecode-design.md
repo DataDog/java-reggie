@@ -244,10 +244,17 @@ rewritten by the tail re-run (v3 mechanism); the journal is dead once the call r
   emitOpt re-enters the nested's live retry before the skip path) — the give-back composition
   exposed them, and the fuzz gate corpus shift (fewer compile-rejects shift the shared window
   RNGs) was recalibrated 28 → 37 with every raw finding verified non-chain.
-- **V2-β**: E4 (journal) + mid-seq E2 + the per-body slot pre-initialization (two-pass emission or
-  a scratch local bank) that lifts the flat-body restriction. Unlocks Sql string literals (all
-  dialects) + Sql branch-1 numerics + QueryObfuscator. Gets its own fuzz window; budget/journal
-  interactions are the correctness hot spot.
+- **V2-β (landed, `0a597f0`)**: E4 (journal via `ReggieMatcher.chainScratch`, the per-thread
+  scratch buffer — the concurrency contract makes chain matchers shared across threads, so no
+  instance fields and no per-call allocation) + mid-seq E2 + the two-pass slot pre-initialization
+  (`measureSeqSlots` dry pass on a no-op MethodVisitor; zero-init of the measured span before the
+  dispatcher — the verifier merges shared-rest failure frames across sibling/skip paths, and the
+  altRestFail/nestedRetry dispatches read locals that would be TOP on those paths). Also lifted the
+  flat-body and terminal-only restrictions, and admitted bounded/higher-min class loops
+  (`-{5}`, `{13}`, `{100,}` — `ChainElem.max` with a consume cap; `{0,1}` stays OPT-modeled).
+  Unlocks: all three SQL dialects + QueryObfuscator (routed, see the IastPatternRoutingTest pins).
+  Fuzz: the corpus shifted again with the wider admission but stayed within the 37 budget, smoke 0 —
+  zero new divergences.
 
 `StructuralHash`: new `ChainElem` kinds fold via the stage-1 `structuralHashCode` pattern —
 remember at implementation time.
