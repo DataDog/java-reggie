@@ -235,10 +235,19 @@ rewritten by the tail re-run (v3 mechanism); the journal is dead once the call r
 
 ### Stages (D2: two increments, V2-C is the goal)
 
-- **V2-α**: E1 + terminal E2 + E3. Unlocks XmlTagsMatch (greedy), Sql branch-1 numeric
-  alternation, Sql block comments. Benchmark checkpoint after landing.
-- **V2-β**: E4 (journal) + mid-seq E2. Unlocks Sql string literals (all dialects) + QueryObfuscator.
-  Gets its own fuzz window; budget/journal interactions are the correctness hot spot.
+- **V2-α (landed, `520a719`)**: E1 + terminal E2 + E3. Unlocks XmlTagsMatch (greedy) and Sql block
+  comments. Sql branch-1's numeric alternation moved to V2-β: its alternatives embed OPTs, and an
+  ALT_CHAIN body may contain only flat constructs — a retryable inside a body needs the shared
+  rest's failures to re-enter the winning body's live retry, which requires per-body local slot
+  frames the JVM verifier rejects (Bad local variable type) without a two-pass emission.
+  Landed with two latent retry-discipline fixes (the lazy loop now registers its own retry label;
+  emitOpt re-enters the nested's live retry before the skip path) — the give-back composition
+  exposed them, and the fuzz gate corpus shift (fewer compile-rejects shift the shared window
+  RNGs) was recalibrated 28 → 37 with every raw finding verified non-chain.
+- **V2-β**: E4 (journal) + mid-seq E2 + the per-body slot pre-initialization (two-pass emission or
+  a scratch local bank) that lifts the flat-body restriction. Unlocks Sql string literals (all
+  dialects) + Sql branch-1 numerics + QueryObfuscator. Gets its own fuzz window; budget/journal
+  interactions are the correctness hot spot.
 
 `StructuralHash`: new `ChainElem` kinds fold via the stage-1 `structuralHashCode` pattern —
 remember at implementation time.
