@@ -261,6 +261,82 @@ class DeterministicChainV4BytecodeTest {
   }
 
   // =====================================================================================
+  // Fuzz-found regressions (AlgorithmicFuzzTest) — pinned.
+  // =====================================================================================
+
+  @Test
+  void emptyAlternationBranchDeclines() throws Exception {
+    // "a|": the empty branch parses to the parser's NUL placeholder; the chain must decline
+    // (zero-width everywhere-matching is outside the grammar).
+    RegexNode ast = new com.datadoghq.reggie.codegen.parsing.RegexParser().parse("a|");
+    PatternAnalyzer analyzer =
+        new PatternAnalyzer(
+            ast, new com.datadoghq.reggie.codegen.automaton.ThompsonBuilder().build(ast, 0));
+    assertNull(
+        analyzer.detectDeterministicChain(ast), "a| must decline (empty branch placeholder)");
+    // "()" parses the group content to the same placeholder — must decline too.
+    ast = new com.datadoghq.reggie.codegen.parsing.RegexParser().parse("^.|()b");
+    analyzer =
+        new PatternAnalyzer(
+            ast, new com.datadoghq.reggie.codegen.automaton.ThompsonBuilder().build(ast, 0));
+    assertNull(analyzer.detectDeterministicChain(ast), "^.|()b must decline (empty group)");
+  }
+
+  @Test
+  void anchoredBranchMatchesAtPositionZeroPastTheUnanchoredBound() throws Exception {
+    // "^[c]?|a" on "": the anchored zero-width-able branch matches at 0 even though the
+    // unanchored minWidth (1) exceeds the input length; the scan bound and union gate must not
+    // skip position 0 when an anchored branch exists.
+    Compiled c = compileChain("^[c]?|a");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("^[c]?|a");
+    // Sanity: the pattern really routes to the chain family and the detector admitted it.
+    assertEquals(0, c.m.findFrom("", 0));
+    assertTrue(c.m.find(""));
+    for (String input : new String[] {"", "a", "c", "x", "ca", "1a"}) {
+      String at = "input=\"" + input + "\"";
+      java.util.regex.Matcher jm = jdk.matcher(input);
+      int expected = jm.find() ? jm.start() : -1;
+      assertEquals(expected, c.m.findFrom(input, 0), at);
+      assertEquals(jdk.matcher(input).find(), c.m.find(input), at + ": find boolean");
+    }
+  }
+
+  @Test
+  void endAnchoredLazyBranchAdvancesItsOwnScan() throws Exception {
+    // "0[^0]*?$|-": branch 1's lazy loop must keep advancing until the tail-end is a valid $
+    // position — the per-branch lazy predicate — even though branch 2 is NOT $-anchored
+    // (a method-wide predicate would accept the loop's first empty tail and lose the match).
+    Compiled c = compileChain("0[^0]*?$|-");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("0[^0]*?$|-");
+    for (String input : new String[] {"", "0", "0a", "-", "x-", "00", "0-", "01-2"}) {
+      String at = "input=\"" + input + "\"";
+      java.util.regex.Matcher jm = jdk.matcher(input);
+      int expected = jm.find() ? jm.start() : -1;
+      assertEquals(expected, c.m.findFrom(input, 0), at);
+      assertEquals(jdk.matcher(input).find(), c.m.find(input), at + ": find boolean");
+    }
+  }
+
+  @Test
+  void nonMultilineDollarMatchesBeforeFinalLineTerminator() throws Exception {
+    // Java's non-multiline $ matches at end-of-input OR just before the final line terminator —
+    // a lone terminator at len-1 or a CR-LF pair at len-2 (fuzz-found via "0[^0]*?$|-0+").
+    Compiled c = compileChain("[0-9]+$|x");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("[0-9]+$|x");
+    for (String input :
+        new String[] {
+          "1", "1\n", "12\r\n", "a1\n", "1\n\n", "1\r", "x", "x\n", "", "\n", "1\u0085", "1\u2028"
+        }) {
+      String real = input.replace("\\n", "\n").replace("\\r", "\r");
+      String at = "input=" + real.replace("\n", "\\n").replace("\r", "\\r");
+      java.util.regex.Matcher jm = jdk.matcher(real);
+      int expected = jm.find() ? jm.start() : -1;
+      assertEquals(expected, c.m.findFrom(real, 0), at);
+      assertEquals(jdk.matcher(real).find(), c.m.find(real), at + ": find boolean");
+    }
+  }
+
+  // =====================================================================================
   // Work budget + PikeVM fallback.
   // =====================================================================================
 

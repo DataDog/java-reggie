@@ -55,6 +55,7 @@ import com.datadoghq.reggie.codegen.codegen.CountingGlushkovBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DeterministicChainBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyBacktrackBytecodeGenerator;
@@ -76,6 +77,7 @@ import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -404,6 +406,36 @@ public class RuntimeCompiler {
    * strategy re-analysis. The NFA is still built by the canonical runtime builder; only the routing
    * decision and name map are carried from compile time. Used by generated delegating stubs.
    */
+  /**
+   * Constructs the PikeVM fallback matcher used by DETERMINISTIC_CHAIN_BYTECODE generated classes
+   * on find-budget overflow (doc/2026-09-01-deterministic-chain-bytecode-design.md §4). Public and
+   * static because the generated classes live in any package (the annotation-processor path emits
+   * them into the user's package) while {@link PikeVMMatcher} is package-private. The construction
+   * happens lazily at first overflow — parse-at-overflow keeps the generated class constructor
+   * signature pattern-only, so the runtime and annotation-processor generators emit byte-identical
+   * classes.
+   *
+   * <p>The lazy-aware NFA builder is required: chain-family patterns with lazy quantifiers keep
+   * their priority semantics only through {@code ThompsonBuilder(true)}.
+   *
+   * @param pattern the pattern this matcher was generated for
+   * @param nameToIndex the named-group map of the generated instance (for group(name) on fallback
+   *     results); may be empty
+   */
+  public static ReggieMatcher createChainFallback(
+      String pattern, Map<String, Integer> nameToIndex) {
+    try {
+      RegexParser parser = new RegexParser();
+      RegexNode ast = parser.parse(pattern);
+      NFA nfa = new ThompsonBuilder(true).build(ast, countGroups(pattern));
+      PikeVMMatcher m = new PikeVMMatcher(nfa, pattern);
+      m.setNameToIndex(nameToIndex == null ? Collections.emptyMap() : nameToIndex);
+      return m;
+    } catch (RegexParser.ParseException e) {
+      throw new java.util.regex.PatternSyntaxException(e.getMessage(), pattern, -1);
+    }
+  }
+
   public static ReggieMatcher compilePikeVm(String pattern, String encodedNames) {
     PikeVMEntry entry = PIKEVM_NFA_CACHE.get(pattern);
     if (entry != null) {
@@ -1397,6 +1429,21 @@ public class RuntimeCompiler {
         BitStateBytecodeGenerator bitStateGen =
             new BitStateBytecodeGenerator(prefixGuardedInfo, nfa.getGroupCount());
         bitStateGen.generateAll(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case DETERMINISTIC_CHAIN_BYTECODE:
+        PatternAnalyzer.DeterministicChainInfo chainInfo =
+            (PatternAnalyzer.DeterministicChainInfo) result.patternInfo;
+        DeterministicChainBytecodeGenerator chainGen =
+            new DeterministicChainBytecodeGenerator(chainInfo, nfa.getGroupCount());
+        chainGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFallbackSupport(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case SPECIALIZED_MULTI_GROUP_GREEDY:

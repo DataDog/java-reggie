@@ -38,6 +38,7 @@ import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DeterministicChainBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyCharClassBytecodeGenerator;
@@ -355,6 +356,21 @@ public class ReggieMatcherBytecodeGenerator {
         BitStateBytecodeGenerator bitStateGen =
             new BitStateBytecodeGenerator(prefixGuardedInfo, nfa.getGroupCount());
         bitStateGen.generateAll(cw, getJavaClassName());
+        break;
+
+      case DETERMINISTIC_CHAIN_BYTECODE:
+        PatternAnalyzer.DeterministicChainInfo chainInfo =
+            (PatternAnalyzer.DeterministicChainInfo) result.patternInfo;
+        DeterministicChainBytecodeGenerator chainGen =
+            new DeterministicChainBytecodeGenerator(chainInfo, nfa.getGroupCount());
+        chainGen.generateMatchesMethod(cw, getJavaClassName());
+        chainGen.generateMatchMethod(cw, getJavaClassName());
+        chainGen.generateFindMethod(cw, getJavaClassName());
+        chainGen.generateFindFromMethod(cw, getJavaClassName());
+        chainGen.generateFindMatchMethod(cw, getJavaClassName());
+        chainGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        chainGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+        chainGen.generateFallbackSupport(cw, getJavaClassName());
         break;
 
       case SPECIALIZED_FIXED_SEQUENCE:

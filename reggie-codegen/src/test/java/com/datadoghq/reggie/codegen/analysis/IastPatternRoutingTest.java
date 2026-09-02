@@ -83,12 +83,14 @@ class IastPatternRoutingTest {
   }
 
   @Test
-  void urlRoutesToBitstateCapture() throws Exception {
+  void urlRoutesToDeterministicChainBytecode() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(URL).strategy,
-        "URL pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "URL pattern routing changed — the deterministic-chain generator is the only route to JDK"
+            + " parity on this shape (BitState measured 0.09x reg/jdk even with the greedy-loop"
+            + " fast path); before rerouting verify its first-set gates + budget + PikeVM"
+            + " overflow fallback still cover this pattern");
   }
 
   @Test
@@ -120,13 +122,14 @@ class IastPatternRoutingTest {
   }
 
   @Test
-  void ldapRoutesToBitstateCapture() throws Exception {
+  void ldapRoutesToDeterministicChainBytecode() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(LDAP).strategy,
-        "LDAP pattern routing changed — this pattern regressed 15x->0.15x on no-match once"
-            + " routed off PikeVMMatcher's SIMD fast-reject; verify BitStateMatcher still carries"
-            + " the singleFirstCharAscii fast-reject before updating this pin");
+        "LDAP pattern routing changed — the deterministic-chain generator is the only route to"
+            + " JDK parity on this shape (BitState measured 0.10x reg/jdk even with the"
+            + " greedy-loop fast path); before rerouting verify its lazy-scan tail, bounded"
+            + " LIT_ALT tries and budget + PikeVM overflow fallback still cover this pattern");
   }
 
   @Test

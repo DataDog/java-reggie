@@ -332,9 +332,33 @@ public class PatternAnalyzer {
     replaced.guardTrace.addAll(result.guardTrace);
 
     // Second substitution: narrower than BITSTATE_CAPTURE eligibility. Patterns matching the
-    // "prefix-guarded scan" structural family (see doc/2026-07-08-bitstate-bytecode-generator-
-    // design.md) can be compiled to pure straight-line, always-native bytecode instead of the
-    // BitState interpreter.
+    // "deterministic chain" structural family (see
+    // doc/2026-09-01-deterministic-chain-bytecode-design.md) compile to per-char straight-line
+    // bytecode with bounded backtracking and a find() budget + PikeVM fallback — the BitState
+    // interpreter loses 5-50x vs JDK on these shapes, generated code reaches parity.
+    DeterministicChainInfo chainInfo = detectDeterministicChain(ast);
+    if (chainInfo != null) {
+      MatchingStrategyResult chainResult =
+          new MatchingStrategyResult(
+              MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
+              replaced.dfa,
+              chainInfo,
+              replaced.useTaggedDFA,
+              replaced.requiredLiterals,
+              replaced.lookaheadGreedyInfo,
+              replaced.usePosixLastMatch);
+      chainResult.alternationPriorityConflict = replaced.alternationPriorityConflict;
+      chainResult.captureAmbiguous = replaced.captureAmbiguous;
+      chainResult.anchorConditionDiluted = replaced.anchorConditionDiluted;
+      chainResult.hasAtomicGroups = replaced.hasAtomicGroups;
+      chainResult.lazyNfa = replaced.lazyNfa;
+      chainResult.guardTrace.addAll(replaced.guardTrace);
+      return chainResult;
+    }
+
+    // Third substitution: patterns matching the "prefix-guarded scan" structural family (see
+    // doc/2026-07-08-bitstate-bytecode-generator-design.md) can be compiled to pure
+    // straight-line, always-native bytecode instead of the BitState interpreter.
     PrefixGuardedScanInfo prefixGuardedScanInfo = detectPrefixGuardedScan(ast);
     if (prefixGuardedScanInfo != null) {
       MatchingStrategyResult bytecodeResult =
@@ -3449,6 +3473,16 @@ public class PatternAnalyzer {
      * doc/2026-07-08-bitstate-bytecode-generator-design.md).
      */
     BITSTATE_BYTECODE,
+
+    /**
+     * Always-native straight-line bytecode for the "deterministic chain" structural family
+     * recognized by {@link #detectDeterministicChain}: a top-level alternation of deterministic
+     * literal/char-class chains (URL authority, LDAP literal, XML tag shapes) with bounded
+     * backtracking and a find() work budget + PikeVM fallback (see
+     * doc/2026-09-01-deterministic-chain-bytecode-design.md). Selected instead of {@link
+     * #BITSTATE_CAPTURE} by {@link #routeBitState} when the pattern matches this shape.
+     */
+    DETERMINISTIC_CHAIN_BYTECODE,
 
     /** PikeVM NFA-with-capture: O(n·m) native group extraction, leftmost-greedy, ReDoS-safe. */
     PIKEVM_CAPTURE
@@ -9366,6 +9400,19 @@ public class PatternAnalyzer {
     if (alts.isEmpty() || alts.size() > MAX_CHAIN_BRANCHES) {
       return null;
     }
+    // Empty-pattern placeholder guard: the parser represents an EMPTY pattern (and an empty
+    // alternation branch, e.g. "a|") as a single space LiteralNode — indistinguishable in the
+    // AST from a literal space, but its semantics are zero-width, which the chain grammar cannot
+    // express. Decline any single-space literal branch (and any single-space LIT_ALT
+    // alternative, see extractChainLitAlt); those patterns stay on BitState/PikeVM, which are
+    // correct for them.
+    if (ast instanceof AlternationNode) {
+      for (RegexNode alt : alts) {
+        if (isEmptyPatternPlaceholder(alt)) {
+          return null;
+        }
+      }
+    }
     List<DeterministicChainInfo.ChainBranch> branches = new ArrayList<>(alts.size());
     for (RegexNode alt : alts) {
       DeterministicChainInfo.ChainBranch branch = parseChainBranch(alt, 0);
@@ -9385,6 +9432,20 @@ public class PatternAnalyzer {
       }
     }
     return new DeterministicChainInfo(branches);
+  }
+
+  /**
+   * True when {@code node} is the parser's empty-pattern placeholder: a single space literal. An
+   * empty alternation branch parses to this, but so does a pattern genuinely matching one space —
+   * the AST cannot distinguish, and the empty semantics (zero-width match) are outside the chain
+   * grammar, so both decline.
+   */
+  private static boolean isEmptyPatternPlaceholder(RegexNode node) {
+    if (node instanceof LiteralNode && ((LiteralNode) node).ch == '\0') {
+      return true;
+    }
+    // An empty concat is unambiguous — no placeholder involved — but also outside the grammar.
+    return node instanceof ConcatNode && ((ConcatNode) node).children.isEmpty();
   }
 
   /** Parses one alternation branch as a chain; returns null on any decline. */
@@ -9460,7 +9521,14 @@ public class PatternAnalyzer {
     for (int i = from; i < to; i++) {
       RegexNode child = children.get(i);
       if (child instanceof LiteralNode) {
-        literal.append(((LiteralNode) child).ch);
+        char ch = ((LiteralNode) child).ch;
+        // The parser's empty-pattern placeholder is a NUL literal (an empty group "()" parses to
+        // it, indistinguishable from a genuine NUL literal): zero-width semantics the chain
+        // grammar cannot express — decline (BitState/PikeVM handle both correctly).
+        if (ch == '\0') {
+          return null;
+        }
+        literal.append(ch);
         if (literal.length() > MAX_CHAIN_LITERAL_LEN) {
           return null;
         }
@@ -9628,6 +9696,11 @@ public class PatternAnalyzer {
     for (RegexNode a : alt.alternatives) {
       sb.setLength(0);
       if (!appendChainLiteral(a, sb) || sb.length() == 0 || sb.length() > MAX_CHAIN_LITERAL_LEN) {
+        return null;
+      }
+      // Single-NUL alternative: indistinguishable from an empty branch's placeholder (see
+      // detectDeterministicChain's guard) — decline.
+      if (sb.length() == 1 && sb.charAt(0) == '\0') {
         return null;
       }
       literals.add(sb.toString());

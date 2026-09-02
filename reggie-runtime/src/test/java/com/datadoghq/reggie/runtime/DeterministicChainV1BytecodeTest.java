@@ -143,8 +143,8 @@ class DeterministicChainV1BytecodeTest {
     assertEquals(-1, m.findFrom("", 0));
     assertEquals(-1, m.findFrom("abc@", 4));
     assertEquals(-1, m.findFrom("abc@", 5));
-    // Negative start: Reggie's findFrom convention returns -1 (JDK Matcher.find would throw).
-    assertEquals(-1, m.findFrom("abc@", -1));
+    // Negative start clamps to 0 (runtime convention: PikeVM/BitState clamp; JDK throws).
+    assertEquals(0, m.findFrom("abc@", -1));
   }
 
   @Test

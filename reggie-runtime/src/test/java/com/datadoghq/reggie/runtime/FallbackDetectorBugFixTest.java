@@ -350,15 +350,23 @@ public class FallbackDetectorBugFixTest {
     assertFalse(
         m instanceof JavaRegexFallbackMatcher,
         "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
-    // BITSTATE_CAPTURE is now substituted in for PIKEVM_CAPTURE where eligible (see
-    // PatternAnalyzer#isBitStateEligible); either native capture engine is correct here — the
-    // intent of this guard is "not the old JDK fallback", not "specifically PikeVMMatcher".
+    // BITSTATE_CAPTURE substitutes in for PIKEVM_CAPTURE where eligible (see
+    // PatternAnalyzer#isBitStateEligible), and DETERMINISTIC_CHAIN_BYTECODE substitutes
+    // BITSTATE_CAPTURE where the chain detector admits the shape. All are native capture
+    // engines — the intent of this guard is "not the old JDK fallback".
+    com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy strategy =
+        StrategyCorrectnessMetaTest.routeOf(pat);
     assertTrue(
-        m instanceof PikeVMMatcher || m instanceof BitStateMatcher,
-        "Expected PikeVMMatcher or BitStateMatcher for: "
-            + pat
-            + " but got: "
-            + m.getClass().getSimpleName());
+        strategy
+                == com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy
+                    .PIKEVM_CAPTURE
+            || strategy
+                == com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy
+                    .BITSTATE_CAPTURE
+            || strategy
+                == com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy
+                    .DETERMINISTIC_CHAIN_BYTECODE,
+        "Expected a native capture strategy for " + pat + " but got " + strategy);
   }
 
   static Stream<Arguments> greedyPrefixNullableSiblingBackref() {

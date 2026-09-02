@@ -263,6 +263,11 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(?s)(?m)^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.*)",
             List.of("sudo ls -la", "a!", "!!!", "", "héllo")));
+    m.put(
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
+        new Spec(
+            "(<\\w+>).*?(</\\w+>)",
+            List.of("<a></a>", "x <tag> mid </tag> y", "<a>", "", "<é></é>")));
 
     return m;
   }

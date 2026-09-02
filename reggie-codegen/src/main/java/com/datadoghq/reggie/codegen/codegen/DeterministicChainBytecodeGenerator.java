@@ -156,10 +156,10 @@ public class DeterministicChainBytecodeGenerator {
     final int[] capStart;
 
     final int[] capEnd;
-    final LazyPredicate lazyPredicate;
+    LazyPredicate lazyPredicate;
 
     /** The $-anchor mode for the lazy END_ANCHOR predicate (see emitEndAnchorCheck). */
-    final boolean lazyMultiline;
+    boolean lazyMultiline;
 
     /**
      * Innermost enclosing retry label (a LIT_ALT downstreamFail or an OPT optRetry) for the current
@@ -492,13 +492,14 @@ public class DeterministicChainBytecodeGenerator {
     Label failLabel = new Label();
     Label overflowLabel = new Label();
 
-    // Guards: null input / negative or too-large start (Reggie convention: fail value, JDK throws).
+    // Guards: null input / start past the end. Negative start CLAMPS to 0 — the runtime
+    // convention (PikeVMMatcher/BitStateMatcher findFrom clamp; JDK Matcher.find would throw).
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitJumpInsn(IFNULL, failLabel);
-    mv.visitVarInsn(ILOAD, startVar);
-    mv.visitJumpInsn(IFLT, failLabel);
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+    mv.visitVarInsn(ILOAD, lenVar);
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitJumpInsn(IF_ICMPLT, failLabel);
     mv.visitJumpInsn(GOTO, checksPass);
@@ -506,10 +507,16 @@ public class DeterministicChainBytecodeGenerator {
     emitFailShape(mv, failShape);
     mv.visitLabel(checksPass);
 
-    mv.visitVarInsn(ALOAD, inputVar);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitVarInsn(ISTORE, lenVar);
+    // p = Math.max(0, start)
+    Label startPos = new Label();
+    Label storeP = new Label();
     mv.visitVarInsn(ILOAD, startVar);
+    mv.visitJumpInsn(IFGE, startPos);
+    mv.visitInsn(ICONST_0);
+    mv.visitJumpInsn(GOTO, storeP);
+    mv.visitLabel(startPos);
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitLabel(storeP);
     mv.visitVarInsn(ISTORE, pVar);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, workVar);
@@ -565,12 +572,29 @@ public class DeterministicChainBytecodeGenerator {
       Label gateFail = tryFail; // gate skip and branch failures merge at the advance block
       mv.visitLabel(scanTop);
       // while (p <= len - minUnanchoredMinWidth) — the cheapest unanchored branch needs its
-      // minWidth chars from p.
-      mv.visitVarInsn(ILOAD, pVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      pushInt(mv, minUnanchoredMinWidth);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPGT, scanEnd);
+      // minWidth chars from p. Position 0 is exempt when any branch is ^-anchored: an anchored
+      // branch can match there even when the unanchored minWidth does not fit (e.g. ^[c]?|a on
+      // "" matches [c]? zero-width at 0).
+      if (hasAnchored) {
+        Label boundCheck = new Label();
+        Label afterBound = new Label();
+        mv.visitVarInsn(ILOAD, pVar);
+        mv.visitJumpInsn(IFNE, boundCheck);
+        mv.visitJumpInsn(GOTO, afterBound);
+        mv.visitLabel(boundCheck);
+        mv.visitVarInsn(ILOAD, pVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        pushInt(mv, minUnanchoredMinWidth);
+        mv.visitInsn(ISUB);
+        mv.visitJumpInsn(IF_ICMPGT, scanEnd);
+        mv.visitLabel(afterBound);
+      } else {
+        mv.visitVarInsn(ILOAD, pVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        pushInt(mv, minUnanchoredMinWidth);
+        mv.visitInsn(ISUB);
+        mv.visitJumpInsn(IF_ICMPGT, scanEnd);
+      }
 
       // pos = p first: a gate-skipped position charges a clean +1 (pos == p) in the advance block.
       mv.visitVarInsn(ILOAD, pVar);
@@ -688,7 +712,12 @@ public class DeterministicChainBytecodeGenerator {
         mv.visitJumpInsn(IFNE, branchFail);
       } else {
         // Per-branch first-set gate: O(1) reject of positions this branch cannot start at.
+        // Bounds first: p == len is reachable at position 0 (the anchored-branch bound/gate
+        // exception), where no branch can start (unanchored minWidth >= 1).
         List<int[]> runs = firstSetRuns(b.firstSetAscii);
+        mv.visitVarInsn(ILOAD, pVar);
+        mv.visitVarInsn(ILOAD, ctx.lenVar);
+        mv.visitJumpInsn(IF_ICMPGE, branchFail);
         mv.visitVarInsn(ALOAD, ctx.inputVar);
         mv.visitVarInsn(ILOAD, pVar);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
@@ -700,6 +729,19 @@ public class DeterministicChainBytecodeGenerator {
       mv.visitVarInsn(ILOAD, pVar);
       mv.visitVarInsn(ISTORE, posVar);
       emitResetCaptures(mv, ctx);
+
+      // Per-branch lazy predicate: a $-anchored branch's lazy loops advance until the tail end
+      // is a valid $ position (the post-try $-check then passes); an unanchored branch's loops
+      // accept the first successful tail (find semantics).
+      if (b.endAnchored) {
+        ctx.lazyPredicate = LazyPredicate.END_ANCHOR;
+        ctx.lazyMultiline = b.multilineEnd;
+      } else {
+        ctx.lazyPredicate =
+            ctx.lazyPredicate == LazyPredicate.POS_EQ_LEN
+                ? LazyPredicate.POS_EQ_LEN
+                : LazyPredicate.NONE;
+      }
 
       emitChainTry(ctx, b.seq, 0, List.of(), branchFail, List.of());
       if (b.endAnchored) {
@@ -796,49 +838,22 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 0);
     mv.visitFieldInsn(GETFIELD, internal, "fb", "Lcom/datadoghq/reggie/runtime/ReggieMatcher;");
     mv.visitJumpInsn(IFNONNULL, done);
-    // fb = new PikeVMMatcher(new ThompsonBuilder().build(new RegexParser().parse(pattern),
-    // groupCount), pattern)
+    // fb = RuntimeCompiler.createChainFallback(this.pattern, this.nameToIndex) — the factory is
+    // public static (the generated class can live in any package; PikeVMMatcher is
+    // package-private). Parse-at-overflow keeps the constructor signature pattern-only across
+    // the dual paths.
     mv.visitVarInsn(ALOAD, 0);
-    // NEW+DUP keeps the fallback ref under the construction operands: <init> pops the top
-    // [dup, NFA, pattern] (void — pushes nothing back), then PUTFIELD consumes [this, init].
-    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/PikeVMMatcher");
-    mv.visitInsn(DUP);
-    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/codegen/parsing/RegexParser");
-    mv.visitInsn(DUP);
-    mv.visitMethodInsn(
-        INVOKESPECIAL, "com/datadoghq/reggie/codegen/parsing/RegexParser", "<init>", "()V", false);
     mv.visitVarInsn(ALOAD, 0);
-    mv.visitFieldInsn(GETFIELD, internal, "pattern", "Ljava/lang/String;");
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        "com/datadoghq/reggie/codegen/parsing/RegexParser",
-        "parse",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/codegen/ast/RegexNode;",
-        false);
-    mv.visitVarInsn(ASTORE, 1); // scratch local for the AST
-    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/codegen/automaton/ThompsonBuilder");
-    mv.visitInsn(DUP);
-    mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "com/datadoghq/reggie/codegen/automaton/ThompsonBuilder",
-        "<init>",
-        "()V",
-        false);
-    mv.visitVarInsn(ALOAD, 1);
-    pushInt(mv, groupCount);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        "com/datadoghq/reggie/codegen/automaton/ThompsonBuilder",
-        "build",
-        "(Lcom/datadoghq/reggie/codegen/ast/RegexNode;I)Lcom/datadoghq/reggie/codegen/automaton/NFA;",
-        false);
+    mv.visitFieldInsn(
+        GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "pattern", "Ljava/lang/String;");
     mv.visitVarInsn(ALOAD, 0);
-    mv.visitFieldInsn(GETFIELD, internal, "pattern", "Ljava/lang/String;");
+    mv.visitFieldInsn(
+        GETFIELD, "com/datadoghq/reggie/runtime/ReggieMatcher", "nameToIndex", "Ljava/util/Map;");
     mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "com/datadoghq/reggie/runtime/PikeVMMatcher",
-        "<init>",
-        "(Lcom/datadoghq/reggie/codegen/automaton/NFA;Ljava/lang/String;)V",
+        INVOKESTATIC,
+        "com/datadoghq/reggie/runtime/RuntimeCompiler",
+        "createChainFallback",
+        "(Ljava/lang/String;Ljava/util/Map;)Lcom/datadoghq/reggie/runtime/ReggieMatcher;",
         false);
     mv.visitFieldInsn(PUTFIELD, internal, "fb", "Lcom/datadoghq/reggie/runtime/ReggieMatcher;");
     mv.visitLabel(done);
@@ -963,6 +978,44 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitVarInsn(ILOAD, ctx.posVar);
     mv.visitVarInsn(ILOAD, ctx.lenVar);
     mv.visitJumpInsn(IF_ICMPEQ, ok);
+    if (!multilineEnd) {
+      // Non-multiline $ also matches just before the input's FINAL line terminator — a lone
+      // terminator at pos == len-1, or a CR-LF pair at pos == len-2 (Java Matcher semantics:
+      // "x\n" matches /x$/ at len-1, "x\r\n" matches /x$/ at len-2).
+      Label tryLastTerm = new Label();
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      pushInt(mv, 1);
+      mv.visitInsn(ISUB);
+      mv.visitJumpInsn(IF_ICMPNE, tryLastTerm);
+      // pos == len-1: charAt(pos) must be a line terminator
+      emitCharAt(ctx, ctx.posVar, ctx.cVar);
+      int[] terminators = {'\n', '\r', '\u0085', '\u2028', '\u2029'};
+      for (int t : terminators) {
+        mv.visitVarInsn(ILOAD, ctx.cVar);
+        pushInt(mv, t);
+        mv.visitJumpInsn(IF_ICMPEQ, ok);
+      }
+      mv.visitLabel(tryLastTerm);
+      // pos == len-2: must be CR at pos followed by LF at pos+1
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      pushInt(mv, 2);
+      mv.visitInsn(ISUB);
+      mv.visitJumpInsn(IF_ICMPNE, failTarget);
+      emitCharAt(ctx, ctx.posVar, ctx.cVar);
+      mv.visitVarInsn(ILOAD, ctx.cVar);
+      pushInt(mv, '\r');
+      mv.visitJumpInsn(IF_ICMPNE, failTarget);
+      mv.visitVarInsn(ALOAD, ctx.inputVar);
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      pushInt(mv, 1);
+      mv.visitInsn(IADD);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      pushInt(mv, '\n');
+      mv.visitJumpInsn(IF_ICMPNE, failTarget);
+      mv.visitJumpInsn(GOTO, ok);
+    }
     if (multilineEnd) {
       // pos < len here: check charAt(pos) against the JDK line-terminator set.
       mv.visitVarInsn(ALOAD, ctx.inputVar);

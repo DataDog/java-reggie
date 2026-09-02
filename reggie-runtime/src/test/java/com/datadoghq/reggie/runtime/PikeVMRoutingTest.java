@@ -121,10 +121,14 @@ class PikeVMRoutingTest {
     // ((?:a|ab))((?:c|bcd)) — same Class E shape as (a|ab)(c|bcd) but alternations
     // are wrapped in a transparent non-capturing group; capturingGroupAlternation must
     // unwrap the NCG layer to detect the interacting variable-length alternations.
+    // Chain-admitted: captures over bounded literal alternations route to the deterministic-
+    // chain generator (same priority semantics, generated); the capture-correct test below
+    // then guards the chain's spans.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         StrategyCorrectnessMetaTest.routeOf("((?:a|ab))((?:c|bcd))"),
-        "((?:a|ab))((?:c|bcd)) must route to BITSTATE_CAPTURE (Class E via NCG unwrap)");
+        "((?:a|ab))((?:c|bcd)) must route to DETERMINISTIC_CHAIN_BYTECODE (chain-admitted "
+            + "Class E shape; BITSTATE keeps it if the chain detector declines)");
   }
 
   @Test
@@ -152,18 +156,19 @@ class PikeVMRoutingTest {
   void groupAbsentFromAlt_dotThenGroup_routesToPikevm() throws Exception {
     // Group 1 `(_)` only in alt 2.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         StrategyCorrectnessMetaTest.routeOf("_.|(_)"),
-        "_.|(_) must route to BITSTATE_CAPTURE (A2: group absent from alt 2)");
+        "_.|(_) routes to DETERMINISTIC_CHAIN_BYTECODE (chain-admitted A2 shape; the "
+            + "per-branch capture reset keeps groups outside the winning branch unmatched)");
   }
 
   @Test
   void groupAbsentFromAlt_groupFirstAlt_routesToPikevm() throws Exception {
     // Group 1 `(1)` only in alt 1; DFA binds group 1 when alt 2 wins.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         StrategyCorrectnessMetaTest.routeOf("(1)c|10"),
-        "(1)c|10 must route to BITSTATE_CAPTURE (A2: group absent from alt 2)");
+        "(1)c|10 routes to DETERMINISTIC_CHAIN_BYTECODE (chain-admitted A2 shape)");
   }
 
   // ── A2 regression: patterns that MUST stay on DFA_UNROLLED_WITH_GROUPS ────
