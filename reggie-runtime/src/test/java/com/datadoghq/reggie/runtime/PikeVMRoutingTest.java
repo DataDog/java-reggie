@@ -332,20 +332,23 @@ class PikeVMRoutingTest {
   @Test
   void variableLengthAltInGroup_routesToPikevm() throws Exception {
     // ([1]|1.)[b]_: group 1 has alternation with branch lengths 1 and 2 — variable-length (B5).
+    // Chain-admitted (v2-alpha terminal ALT_CHAIN inside the capture, [b] threads as after):
+    // the chain generator now carries the same priority semantics.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         StrategyCorrectnessMetaTest.routeOf("([1]|1.)[b]_"),
-        "([1]|1.)[b]_ must route to BITSTATE_CAPTURE (B5: variable-length alt in group)");
+        "([1]|1.)[b]_ routes to DETERMINISTIC_CHAIN_BYTECODE (B5 shape, chain-admitted)");
   }
 
   @Test
   void variableLengthAltWrappedInNonCapturing_routesToPikevm() throws Exception {
     // ((?:[1]|1.))[b]_ — the alternation is wrapped in a non-capturing group inside the capture.
-    // B5 detection must unwrap the non-capturing wrapper before checking for AlternationNode.
+    // B5 detection must unwrap the non-capturing wrapper before checking for AlternationNode;
+    // the shape is chain-admitted (v2-alpha terminal ALT_CHAIN, transparent-group inlined).
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         StrategyCorrectnessMetaTest.routeOf("((?:[1]|1.))[b]_"),
-        "((?:[1]|1.))[b]_ must route to BITSTATE_CAPTURE (B5: non-capturing wrapper around alt)");
+        "((?:[1]|1.))[b]_ routes to DETERMINISTIC_CHAIN_BYTECODE (B5 shape, chain-admitted)");
   }
 
   @Test

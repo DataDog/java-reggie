@@ -92,6 +92,14 @@ public class DeterministicChainBytecodeGenerator {
   /** True when at least one branch is ^-anchored (position 0 skips the union gate). */
   private final boolean hasAnchored;
 
+  /**
+   * True when any GREEDY_LOOP in the chain tree is a give-back loop (its class intersects the
+   * remainder first-set). Only then can a single matches()/match() try do unbounded re-work
+   * (give-back retries), so only those patterns carry a work budget in the anchored entry points;
+   * everything else keeps v1's budget-free single try.
+   */
+  private final boolean hasGiveBack;
+
   public DeterministicChainBytecodeGenerator(DeterministicChainInfo info, int groupCount) {
     this.branches = info.branches;
     this.groupCount = groupCount;
@@ -117,6 +125,33 @@ public class DeterministicChainBytecodeGenerator {
     this.allAnchored = all;
     this.hasAnchored = anyStartAnchored(branches);
     this.minUnanchoredMinWidth = all ? 0 : minW;
+    boolean giveBack = false;
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (anyGiveBack(b.seq)) {
+        giveBack = true;
+        break;
+      }
+    }
+    this.hasGiveBack = giveBack;
+  }
+
+  private static boolean anyGiveBack(DeterministicChainInfo.ChainSeq seq) {
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      if (e.kind == DeterministicChainInfo.ElemKind.GREEDY_LOOP && e.giveBack) {
+        return true;
+      }
+      if (e.nested != null && anyGiveBack(e.nested)) {
+        return true;
+      }
+      if (e.alts != null) {
+        for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+          if (anyGiveBack(alt)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   /** Total element count of a chain tree (the budget constant's scale factor). */
@@ -126,6 +161,11 @@ public class DeterministicChainBytecodeGenerator {
       n++;
       if (e.nested != null) {
         n += countElems(e.nested);
+      }
+      if (e.alts != null) {
+        for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+          n += countElems(alt);
+        }
       }
     }
     return n;
@@ -162,6 +202,15 @@ public class DeterministicChainBytecodeGenerator {
     boolean lazyMultiline;
 
     /**
+     * Work-budget accumulator slot; -1 when this method carries no budget (matches/match without
+     * give-back loops — a single try is linear there).
+     */
+    final int workVar;
+
+    /** Budget-overflow target — the fb() delegation (null when {@code workVar} is -1). */
+    final Label overflowLabel;
+
+    /**
      * Innermost enclosing retry label (a LIT_ALT downstreamFail or an OPT optRetry) for the current
      * emission point — JDK backtracking retries the bounded alternatives of the innermost retryable
      * construct on any downstream failure, so element failures and the method-level end checks
@@ -179,7 +228,9 @@ public class DeterministicChainBytecodeGenerator {
         int cVar,
         int groupCount,
         LazyPredicate lazyPredicate,
-        boolean lazyMultiline) {
+        boolean lazyMultiline,
+        int workVar,
+        Label overflowLabel) {
       this.mv = mv;
       this.alloc = alloc;
       this.inputVar = inputVar;
@@ -188,6 +239,8 @@ public class DeterministicChainBytecodeGenerator {
       this.cVar = cVar;
       this.lazyPredicate = lazyPredicate;
       this.lazyMultiline = lazyMultiline;
+      this.workVar = workVar;
+      this.overflowLabel = overflowLabel;
       if (groupCount > 0) {
         this.capStart = new int[groupCount + 1];
         this.capEnd = new int[groupCount + 1];
@@ -227,6 +280,11 @@ public class DeterministicChainBytecodeGenerator {
     int posVar = allocator.allocate();
     int lenVar = allocator.allocate();
     int cVar = allocator.allocate();
+    // Give-back loops make even this single try potentially non-linear (bounded downstream
+    // backtracking, budget-charged per retry) — carry the work budget; anything else keeps
+    // v1's budget-free single try.
+    int workVar = hasGiveBack ? allocator.allocate() : -1;
+    Label overflowLabel = hasGiveBack ? new Label() : null;
 
     Label notNull = new Label();
     mv.visitVarInsn(ALOAD, inputVar);
@@ -240,6 +298,11 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitVarInsn(ISTORE, lenVar);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, posVar);
+    if (hasGiveBack) {
+      // The accumulator counts consumed work UP toward (len+1)*budgetConst — start at 0.
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, workVar);
+    }
 
     EmitCtx ctx =
         new EmitCtx(
@@ -251,7 +314,9 @@ public class DeterministicChainBytecodeGenerator {
             cVar,
             groupCount,
             LazyPredicate.POS_EQ_LEN,
-            false);
+            false,
+            workVar,
+            overflowLabel);
     Label fail = new Label();
     // Branch tries in pattern (priority) order — a failed branch's inner retries are dead, so
     // the retry chain is suspended per branch; the whole-input check failure first retries the
@@ -278,6 +343,12 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
 
+    // Budget overflow: delegate the whole call to the PikeVM fallback (linear, correct).
+    if (hasGiveBack) {
+      mv.visitLabel(overflowLabel);
+      emitOverflowDelegate(mv, className, inputVar, "matches", "(Ljava/lang/String;)Z", false);
+    }
+
     mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
@@ -298,6 +369,8 @@ public class DeterministicChainBytecodeGenerator {
     int posVar = allocator.allocate();
     int lenVar = allocator.allocate();
     int cVar = allocator.allocate();
+    int workVar = hasGiveBack ? allocator.allocate() : -1;
+    Label overflowLabel = hasGiveBack ? new Label() : null;
 
     Label notNull = new Label();
     mv.visitVarInsn(ALOAD, inputVar);
@@ -311,6 +384,11 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitVarInsn(ISTORE, lenVar);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, posVar);
+    if (hasGiveBack) {
+      // The accumulator counts consumed work UP toward (len+1)*budgetConst — start at 0.
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, workVar);
+    }
 
     EmitCtx ctx =
         new EmitCtx(
@@ -322,7 +400,9 @@ public class DeterministicChainBytecodeGenerator {
             cVar,
             groupCount,
             LazyPredicate.POS_EQ_LEN,
-            false);
+            false,
+            workVar,
+            overflowLabel);
     Label fail = new Label();
     // Branch tries in pattern (priority) order; whole-input failure retries the innermost
     // alternative inside the current branch first, then the next branch.
@@ -344,6 +424,17 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitLabel(fail);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
+
+    if (hasGiveBack) {
+      mv.visitLabel(overflowLabel);
+      emitOverflowDelegate(
+          mv,
+          className,
+          inputVar,
+          "match",
+          "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
+          true);
+    }
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -549,7 +640,17 @@ public class DeterministicChainBytecodeGenerator {
     boolean lazyMultiline = anyEndAnchored && uniformMultiline && branches.get(0).multilineEnd;
     EmitCtx ctx =
         new EmitCtx(
-            mv, allocator, inputVar, lenVar, posVar, cVar, groupCount, predicate, lazyMultiline);
+            mv,
+            allocator,
+            inputVar,
+            lenVar,
+            posVar,
+            cVar,
+            groupCount,
+            predicate,
+            lazyMultiline,
+            workVar,
+            overflowLabel);
     Label scanEnd = new Label();
     Label tryFail = new Label();
 
@@ -1105,8 +1206,19 @@ public class DeterministicChainBytecodeGenerator {
           emitClass1(ctx, e.charSet, elemFail);
           break;
         case GREEDY_LOOP:
+          if (e.giveBack) {
+            // Give-back loop (v2-alpha): consume the maximal run, then retry the downstream tail
+            // at each successively shorter boundary — JDK backtracking order, budget-charged.
+            return emitGivebackLoop(ctx, e, seq, i, closingAtEnd, contLevels, elemFail);
+          }
           emitGreedyLoop(ctx, e.charSet, e.min, elemFail);
           break;
+        case WORDB:
+          emitWordBoundary(ctx, elemFail);
+          break;
+        case ALT_CHAIN:
+          // The alt machinery consumed the seq rest (and the continuation, when covered).
+          return emitAltChain(ctx, e, seq, i, closingAtEnd, contLevels, elemFail);
         case LIT_ALT:
           // The alt machinery consumed the seq rest (and the continuation, when covered).
           return emitLitAlt(ctx, e, seq, i, closingAtEnd, contLevels, elemFail);
@@ -1192,6 +1304,281 @@ public class DeterministicChainBytecodeGenerator {
   }
 
   /**
+   * WORDB (v2-alpha): the ASCII word-boundary check at the current position — {@code prevWord ==
+   * curWord} fails (JDK {@code \b} without {@code UNICODE_CHARACTER_CLASS} uses the ASCII word set
+   * {@code [a-zA-Z0-9_]}; positions 0/len count as non-word).
+   */
+  private void emitWordBoundary(EmitCtx ctx, Label failLabel) {
+    MethodVisitor mv = ctx.mv;
+    int prevVar = ctx.alloc.allocate();
+    int curVar = ctx.alloc.allocate();
+    int cVar = ctx.cVar;
+    Label prevFalse = new Label();
+    Label prevDone = new Label();
+    Label curFalse = new Label();
+    Label curDone = new Label();
+
+    // prev = pos > 0 && isWord(charAt(pos - 1))
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitJumpInsn(IFLE, prevFalse);
+    mv.visitVarInsn(ALOAD, ctx.inputVar);
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, cVar);
+    emitCharInRuns(mv, cVar, WORD_RUNS, prevFalse);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, prevVar);
+    mv.visitJumpInsn(GOTO, prevDone);
+    mv.visitLabel(prevFalse);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, prevVar);
+    mv.visitLabel(prevDone);
+
+    // cur = pos < len && isWord(charAt(pos))
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ILOAD, ctx.lenVar);
+    mv.visitJumpInsn(IF_ICMPGE, curFalse);
+    emitCharAt(ctx, ctx.posVar, cVar);
+    emitCharInRuns(mv, cVar, WORD_RUNS, curFalse);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, curVar);
+    mv.visitJumpInsn(GOTO, curDone);
+    mv.visitLabel(curFalse);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, curVar);
+    mv.visitLabel(curDone);
+
+    // A word boundary sits exactly where the word-ness flips.
+    mv.visitVarInsn(ILOAD, prevVar);
+    mv.visitVarInsn(ILOAD, curVar);
+    mv.visitJumpInsn(IF_ICMPEQ, failLabel);
+  }
+
+  /** The ASCII word set {@code [0-9A-Za-z_]} as {@link #emitCharInRuns} runs. */
+  private static final List<int[]> WORD_RUNS =
+      List.of(new int[] {48, 57}, new int[] {65, 90}, new int[] {95, 95}, new int[] {97, 122});
+
+  /**
+   * ALT_CHAIN (v2-alpha): the compound generalization of LIT_ALT — sequential tries of the
+   * alternative sub-chains in JDK priority order with downstream backtracking through the same
+   * alt-index dispatcher + shared-rest pattern. Each alternative body completes the seq (the
+   * detector admits ALT_CHAIN only in the terminal position), so bodies carry the seq's {@code
+   * closingAtEnd} and jump to the shared rest; a lazy loop at an alternative's end reaches the rest
+   * via a jump level (the OPT machinery's pattern). Exhausted alternatives fail the enclosing retry
+   * chain.
+   */
+  private boolean emitAltChain(
+      EmitCtx ctx,
+      DeterministicChainInfo.ChainElem e,
+      DeterministicChainInfo.ChainSeq seq,
+      int i,
+      List<Integer> closingAtEnd,
+      List<TailLevel> contLevels,
+      Label failLabel) {
+    MethodVisitor mv = ctx.mv;
+    Label upstream = effFail(ctx, failLabel);
+    int backupVar = ctx.alloc.allocate();
+    int altVar = ctx.alloc.allocate();
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ISTORE, backupVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, altVar);
+
+    int n = e.alts.size();
+    Label retryLoop = new Label();
+    Label downstreamFail = new Label();
+    Label altRestFail = new Label();
+    Label restStart = new Label();
+    Label[] altLabels = new Label[n];
+    for (int k = 0; k < n; k++) {
+      altLabels[k] = new Label();
+    }
+
+    // Dispatcher: altVar in [0, n) → alternative body; beyond → upstream failure.
+    mv.visitLabel(retryLoop);
+    for (int k = 0; k < n; k++) {
+      mv.visitVarInsn(ILOAD, altVar);
+      pushInt(mv, k);
+      mv.visitJumpInsn(IF_ICMPEQ, altLabels[k]);
+    }
+    mv.visitJumpInsn(GOTO, upstream);
+
+    // Alternative bodies: try the sub-chain, jump to the (shared) rest on success. The body's
+    // continuation is a pure jump level: a lazy loop at the alternative's end scans its own seq
+    // and jumps to restStart when the alternative completes. Each body starts with a clean retry
+    // chain: its internal retries (give-back loops, nested LIT_ALT/OPT) must exhaust into
+    // downstreamFail (the NEXT alternative), never into a sibling body's retry label — a
+    // sibling's handler reads its own locals, unreachable-with-garbage from here.
+    // The innermost retry label each body leaves live is recorded (null when the body has no
+    // retryables): a failure in the SHARED rest must first re-enter the WINNING body's live
+    // retry — JDK backtracking retries the innermost unresolved decision (the body's
+    // give-back/lazy/OPT) before the next alternative.
+    Label[] bodyRetry = new Label[n];
+    for (int k = 0; k < n; k++) {
+      mv.visitLabel(altLabels[k]);
+      ctx.retryFail = null;
+      emitChainTry(
+          ctx, e.alts.get(k), 0, closingAtEnd, downstreamFail, List.of(TailLevel.jump(restStart)));
+      bodyRetry[k] = ctx.retryFail;
+      mv.visitJumpInsn(GOTO, restStart);
+    }
+
+    // Downstream failure: restore the position, next alternative, redispatch.
+    mv.visitLabel(downstreamFail);
+    mv.visitVarInsn(ILOAD, backupVar);
+    mv.visitVarInsn(ISTORE, ctx.posVar);
+    mv.visitIincInsn(altVar, 1);
+    mv.visitJumpInsn(GOTO, retryLoop);
+
+    // A rest failure dispatches to the winning body's live retry first (altVar still holds it —
+    // only downstreamFail advances it); a body without retryables falls to the next
+    // alternative. The body's own retry handler restores/overwrites the position, so no restore
+    // is needed here; its exhaustion routes into downstreamFail (its captured upstream).
+    mv.visitLabel(altRestFail);
+    for (int k = 0; k < n; k++) {
+      if (bodyRetry[k] != null) {
+        mv.visitVarInsn(ILOAD, altVar);
+        pushInt(mv, k);
+        mv.visitJumpInsn(IF_ICMPEQ, bodyRetry[k]);
+      }
+    }
+    mv.visitJumpInsn(GOTO, downstreamFail);
+
+    // The rest of the seq (empty — ALT_CHAIN is terminal — then the continuation levels),
+    // emitted once; its failures re-enter the winning body's retry chain through altRestFail.
+    mv.visitLabel(restStart);
+    ctx.retryFail = altRestFail;
+    return emitTailWalk(
+        ctx, prepend(new TailLevel(seq, i + 1, closingAtEnd, null), contLevels), altRestFail);
+  }
+
+  /**
+   * GIVEBACK_LOOP (v2-alpha): a greedy single-char-body loop whose class intersects the remainder
+   * first-set. Consumption is the plain greedy run; then the downstream tail is retried at each
+   * successively shorter loop boundary (JDK give-back order: one iteration at a time). The retry
+   * wraps the shared tail through the same {@code retryFail} discipline as LIT_ALT/OPT — any
+   * failure inside the tail first retries the innermost construct, then the give-back, then the
+   * enclosing retry chain. Each retry charges the work budget (scan methods and, when give-back
+   * loops exist, matches/match); overflow delegates to the PikeVM fallback. The give-back floor is
+   * {@code loopStart + min} (the loop must keep its minimum iterations).
+   *
+   * @return the tail walk's coverage, per the LIT_ALT/OPT pattern
+   */
+  private boolean emitGivebackLoop(
+      EmitCtx ctx,
+      DeterministicChainInfo.ChainElem e,
+      DeterministicChainInfo.ChainSeq seq,
+      int i,
+      List<Integer> closingAtEnd,
+      List<TailLevel> contLevels,
+      Label failLabel) {
+    MethodVisitor mv = ctx.mv;
+    Label upstream = effFail(ctx, failLabel);
+    int loopStartVar = ctx.alloc.allocate();
+    int loopMaxVar = ctx.alloc.allocate();
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ISTORE, loopStartVar);
+
+    // Consume the maximal run (single-char body): while (pos < len && class) pos++.
+    Label consumeTop = new Label();
+    Label consumeEnd = new Label();
+    mv.visitLabel(consumeTop);
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ILOAD, ctx.lenVar);
+    mv.visitJumpInsn(IF_ICMPGE, consumeEnd);
+    emitCharAt(ctx, ctx.posVar, ctx.cVar);
+    emitCharSetCheck(ctx, e.charSet, ctx.cVar, consumeEnd);
+    mv.visitIincInsn(ctx.posVar, 1);
+    mv.visitJumpInsn(GOTO, consumeTop);
+    mv.visitLabel(consumeEnd);
+    if (e.min > 0) {
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, loopStartVar);
+      mv.visitInsn(ISUB);
+      pushInt(mv, e.min);
+      mv.visitJumpInsn(IF_ICMPLT, upstream);
+    }
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ISTORE, loopMaxVar);
+
+    // The tail walk is emitted after the give-back retry block; the first entry (from the
+    // consumption) jumps over the block to it. The walk is inside the retry region: every
+    // re-entry re-executes its closing writes (last write wins) — the same discipline as the
+    // lazy scan loop.
+    Label tailStart = new Label();
+    Label giveBackRetry = new Label();
+    mv.visitJumpInsn(GOTO, tailStart);
+    mv.visitLabel(giveBackRetry);
+    emitBudgetCharge(ctx);
+    // Exhausted when the last try was at the floor (loopStart + min).
+    mv.visitVarInsn(ILOAD, loopMaxVar);
+    mv.visitVarInsn(ILOAD, loopStartVar);
+    pushInt(mv, e.min);
+    mv.visitInsn(IADD);
+    mv.visitJumpInsn(IF_ICMPEQ, upstream);
+    mv.visitIincInsn(loopMaxVar, -1);
+    mv.visitVarInsn(ILOAD, loopMaxVar);
+    mv.visitVarInsn(ISTORE, ctx.posVar);
+    mv.visitJumpInsn(GOTO, tailStart);
+    mv.visitLabel(tailStart);
+    ctx.retryFail = giveBackRetry;
+    return emitTailWalk(
+        ctx, prepend(new TailLevel(seq, i + 1, closingAtEnd, null), contLevels), giveBackRetry);
+  }
+
+  /**
+   * Charges one unit of work and jumps to the overflow delegation when the budget is exhausted —
+   * the same accumulator form as the scan's per-try charge, so both share the threshold {@code
+   * budgetConst * (len + 1)}.
+   */
+  private void emitBudgetCharge(EmitCtx ctx) {
+    if (ctx.workVar < 0) {
+      return; // budget-free method (matches/match without give-back loops)
+    }
+    MethodVisitor mv = ctx.mv;
+    mv.visitVarInsn(ILOAD, ctx.workVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ISTORE, ctx.workVar);
+    mv.visitVarInsn(ILOAD, ctx.workVar);
+    mv.visitVarInsn(ILOAD, ctx.lenVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    pushInt(mv, budgetConst);
+    mv.visitInsn(IMUL);
+    mv.visitJumpInsn(IF_ICMPGT, ctx.overflowLabel);
+  }
+
+  /**
+   * The anchored entry points' overflow delegation: fbCount++ then {@code return fb().<method>} for
+   * the boolean/MatchResult shapes of matches/match.
+   */
+  private void emitOverflowDelegate(
+      MethodVisitor mv,
+      String className,
+      int inputVar,
+      String methodName,
+      String methodDesc,
+      boolean referenceReturn) {
+    String internal = className.replace('.', '/');
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitInsn(DUP);
+    mv.visitFieldInsn(GETFIELD, internal, "fbCount", "J");
+    mv.visitInsn(LCONST_1);
+    mv.visitInsn(LADD);
+    mv.visitFieldInsn(PUTFIELD, internal, "fbCount", "J");
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, internal, "fb", "()Lcom/datadoghq/reggie/runtime/ReggieMatcher;", false);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/ReggieMatcher", methodName, methodDesc, false);
+    mv.visitInsn(referenceReturn ? ARETURN : IRETURN);
+  }
+
+  /**
    * LIT_ALT: bounded sequential tries in JDK priority order with downstream backtracking — an
    * alternative is committed only when the REST of the chain also matches; a downstream failure
    * restores the position and tries the next alternative (JDK {@code (a|ab|abc)(1|12|123)} on "a12"
@@ -1224,6 +1611,7 @@ public class DeterministicChainBytecodeGenerator {
     int n = e.literals.size();
     Label retryLoop = new Label();
     Label downstreamFail = new Label();
+    Label altRestFail = new Label();
     Label restStart = new Label();
     Label[] altLabels = new Label[n];
     for (int k = 0; k < n; k++) {
@@ -1306,6 +1694,10 @@ public class DeterministicChainBytecodeGenerator {
         isLast ? closingAtEnd : List.of(),
         skipStart,
         List.of(TailLevel.jump(optWithDone)));
+    // The nested region's innermost live retry (null when the nested has no retryables): a
+    // failure in the OPT's own rest must re-enter it before the OPT's skip path — JDK
+    // backtracking order (the nested's decisions were made most recently).
+    Label nestedRetry = ctx.retryFail;
     ctx.retryFail = savedRetry;
     mv.visitJumpInsn(GOTO, optWithDone);
 
@@ -1338,10 +1730,16 @@ public class DeterministicChainBytecodeGenerator {
     // The rest matched: done. Only rest failures jump to the optRetry block below.
     mv.visitJumpInsn(GOTO, optDone);
 
-    // optRetry: with-path failure → skip path (once); skip-path failure → upstream retry chain.
+    // optRetry: with-path failure → the nested region's live retry first (when it has one),
+    // then the skip path (once); skip-path failure → upstream retry chain. The nested retry's
+    // own exhaustion routes into skipStart — its captured upstream (retryFail was null inside
+    // the nested region) — so the chain unwinds in exactly JDK order.
     mv.visitLabel(optRetry);
     mv.visitVarInsn(ILOAD, skipFlagVar);
     mv.visitJumpInsn(IFNE, upstream);
+    if (nestedRetry != null) {
+      mv.visitJumpInsn(GOTO, nestedRetry);
+    }
     mv.visitJumpInsn(GOTO, skipStart);
     mv.visitLabel(optDone);
     return covered;
@@ -1383,6 +1781,11 @@ public class DeterministicChainBytecodeGenerator {
     }
     mv.visitVarInsn(ILOAD, ctx.posVar);
     mv.visitVarInsn(ISTORE, backupVar);
+    // The lazy scan is a live decision point for everything it wraps: a tail failure retries
+    // HERE (advance one loop-class char) before any enclosing retry — the innermost-retry-first
+    // order JDK backtracking guarantees. Without this, effFail would route tail failures to an
+    // enclosing LIT_ALT/OPT/give-back retry and the scan could never advance.
+    ctx.retryFail = tailFail;
     emitTailWalk(ctx, prepend(new TailLevel(seq, i + 1, closingAtEnd, null), contLevels), tailFail);
     switch (ctx.lazyPredicate) {
       case NONE:

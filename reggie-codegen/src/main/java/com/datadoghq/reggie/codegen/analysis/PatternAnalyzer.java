@@ -7193,7 +7193,14 @@ public class PatternAnalyzer {
       /** Optional sub-chain, greedy two-attempt (with-prefix first, restart on fail). */
       OPT,
       /** Capturing group over a sub-chain. */
-      CAPTURE
+      CAPTURE,
+      /** Zero-width word boundary \b (v2-alpha: ASCII word set, JDK without UNICODE flags). */
+      WORDB,
+      /**
+       * Terminal alternation of chain sub-sequences (v2-alpha; LIT_ALT is its pure-literal fast
+       * path).
+       */
+      ALT_CHAIN
     }
 
     /** One element. Field meaning per {@link ElemKind} — others null/0. */
@@ -7215,6 +7222,17 @@ public class PatternAnalyzer {
       /** OPT/CAPTURE: the nested sub-chain. */
       public final ChainSeq nested;
 
+      /** ALT_CHAIN: the alternative sub-chains in priority order. */
+      public final List<ChainSeq> alts;
+
+      /**
+       * GREEDY_LOOP: true when the loop class intersects the remainder first-set, i.e. the
+       * generated code must give characters back (one boundary at a time, JDK give-back order)
+       * while the downstream tail is retried (v2-alpha). Derived by the admission walk, a pure
+       * function of the tree — not folded into the structural hash.
+       */
+      public boolean giveBack;
+
       /** CAPTURE: group number. */
       public final int groupNumber;
 
@@ -7225,6 +7243,7 @@ public class PatternAnalyzer {
         this.min = 0;
         this.literals = null;
         this.nested = null;
+        this.alts = null;
         this.groupNumber = 0;
       }
 
@@ -7235,6 +7254,7 @@ public class PatternAnalyzer {
         this.min = 0;
         this.literals = null;
         this.nested = null;
+        this.alts = null;
         this.groupNumber = 0;
       }
 
@@ -7245,6 +7265,7 @@ public class PatternAnalyzer {
         this.min = min;
         this.literals = null;
         this.nested = null;
+        this.alts = null;
         this.groupNumber = 0;
       }
 
@@ -7255,6 +7276,7 @@ public class PatternAnalyzer {
         this.min = 0;
         this.literals = null;
         this.nested = null;
+        this.alts = null;
         this.groupNumber = 0;
       }
 
@@ -7265,6 +7287,7 @@ public class PatternAnalyzer {
         this.min = 0;
         this.literals = literals;
         this.nested = null;
+        this.alts = null;
         this.groupNumber = 0;
       }
 
@@ -7275,6 +7298,7 @@ public class PatternAnalyzer {
         this.min = 0;
         this.literals = null;
         this.nested = nested;
+        this.alts = null;
         this.groupNumber = 0;
       }
 
@@ -7285,7 +7309,31 @@ public class PatternAnalyzer {
         this.min = 0;
         this.literals = null;
         this.nested = nested;
+        this.alts = null;
         this.groupNumber = groupNumber;
+      }
+
+      ChainElem() { // WORDB
+        this.kind = ElemKind.WORDB;
+        this.literal = null;
+        this.charSet = null;
+        this.min = 0;
+        this.literals = null;
+        this.nested = null;
+        this.alts = null;
+        this.groupNumber = 0;
+      }
+
+      @SuppressWarnings("SameParameterValue")
+      ChainElem(java.util.Collection<ChainSeq> alts) { // ALT_CHAIN
+        this.kind = ElemKind.ALT_CHAIN;
+        this.literal = null;
+        this.charSet = null;
+        this.min = 0;
+        this.literals = null;
+        this.nested = null;
+        this.alts = new ArrayList<>(alts);
+        this.groupNumber = 0;
       }
     }
 
@@ -7383,6 +7431,12 @@ public class PatternAnalyzer {
         hash = 31 * hash + e.groupNumber;
         if (e.nested != null) {
           hash = 31 * chainSeqHashCode(e.nested, hash);
+        }
+        if (e.alts != null) {
+          hash = 31 * hash + e.alts.size();
+          for (ChainSeq alt : e.alts) {
+            hash = 31 * chainSeqHashCode(alt, hash);
+          }
         }
       }
       return hash;
@@ -9464,13 +9518,15 @@ public class PatternAnalyzer {
     boolean multilineEnd = false;
     int from = 0;
     int to = children.size();
+    // The strip anchors are ^/$ only. A leading/trailing \b is a seq WORDB element (v2-alpha),
+    // parsed inside the seq; every other anchor in these positions is outside the family.
     if (children.get(0) instanceof AnchorNode) {
       AnchorNode a = (AnchorNode) children.get(0);
       if (a.type == AnchorNode.Type.START && !a.multiline) {
         startAnchored = true;
         from = 1;
-      } else {
-        return null; // multiline ^, \A, or any other leading anchor: outside the family (v1)
+      } else if (a.type != AnchorNode.Type.WORD_BOUNDARY) {
+        return null; // multiline ^, \A, \B, or any other leading anchor: outside the family
       }
     }
     if (to > from && children.get(to - 1) instanceof AnchorNode) {
@@ -9479,7 +9535,7 @@ public class PatternAnalyzer {
         endAnchored = true;
         multilineEnd = a.multiline;
         to -= 1;
-      } else {
+      } else if (a.type != AnchorNode.Type.WORD_BOUNDARY) {
         return null;
       }
     }
@@ -9553,11 +9609,27 @@ public class PatternAnalyzer {
         }
         // nested == EMPTY_SEQ means the group's content was appended inline into elems
       } else if (child instanceof AlternationNode) {
+        // Pure-literal alternation stays the LIT_ALT fast path; a compound one is ALT_CHAIN,
+        // admitted only in the terminal position (v2-alpha) — it ends the seq, each alternative
+        // reaching the seq's continuation/success on its own.
         List<String> literals = extractChainLitAlt((AlternationNode) child);
-        if (literals == null) {
+        if (literals != null) {
+          elems.add(new DeterministicChainInfo.ChainElem(literals));
+        } else if (i == to - 1) {
+          List<DeterministicChainInfo.ChainSeq> alts =
+              parseChainAltChain((AlternationNode) child, depth);
+          if (alts == null) {
+            return null;
+          }
+          elems.add(new DeterministicChainInfo.ChainElem(alts));
+        } else {
           return null;
         }
-        elems.add(new DeterministicChainInfo.ChainElem(literals));
+      } else if (child instanceof AnchorNode
+          && ((AnchorNode) child).type == AnchorNode.Type.WORD_BOUNDARY) {
+        // \b (v2-alpha): zero-width ASCII word-boundary check. Other anchors mid-sequence (\B,
+        // \A, \Z, \z, \K, multiline ^) stay outside the family.
+        elems.add(new DeterministicChainInfo.ChainElem());
       } else {
         // AnchorNode mid-sequence, AssertionNode, BackreferenceNode, BranchResetNode,
         // ConditionalNode, SubroutineNode, or anything else: outside the family.
@@ -9571,7 +9643,34 @@ public class PatternAnalyzer {
     if (elems.isEmpty()) {
       return null;
     }
+    // ALT_CHAIN (possibly inlined from a transparent group) is admitted only in the terminal
+    // position of the seq it lands in (v2-alpha).
+    for (int j = 0; j < elems.size(); j++) {
+      if (elems.get(j).kind == DeterministicChainInfo.ElemKind.ALT_CHAIN && j != elems.size() - 1) {
+        return null;
+      }
+    }
     return new DeterministicChainInfo.ChainSeq(elems);
+  }
+
+  /**
+   * Parses the alternatives of a terminal ALT_CHAIN: each alternative is a chain seq (compound —
+   * pure-literal alternations were already taken by the LIT_ALT fast path). Sequential tries in
+   * pattern order preserve Perl priority, bounded by {@link #MAX_CHAIN_LIT_ALT}.
+   */
+  private List<DeterministicChainInfo.ChainSeq> parseChainAltChain(AlternationNode alt, int depth) {
+    if (alt.alternatives.size() > MAX_CHAIN_LIT_ALT) {
+      return null;
+    }
+    List<DeterministicChainInfo.ChainSeq> alts = new ArrayList<>(alt.alternatives.size());
+    for (RegexNode a : alt.alternatives) {
+      DeterministicChainInfo.ChainSeq seq = parseChainSeqContent(a, depth + 1);
+      if (seq == null) {
+        return null;
+      }
+      alts.add(seq);
+    }
+    return alts;
   }
 
   private void flushChainLiteral(
@@ -9642,13 +9741,21 @@ public class PatternAnalyzer {
       elems.add(new DeterministicChainInfo.ChainElem(g.groupNumber, nested));
       return DeterministicChainInfo.ChainSeq.EMPTY_SEQ;
     }
-    // Transparent non-capturing group: inline the content.
+    // Transparent non-capturing group: inline the content. A pure-literal alternation becomes
+    // LIT_ALT; a compound one becomes an ALT_CHAIN (parseChainSeqContent handles both — the
+    // terminal-position validation happens in the seq that receives the elements).
     if (g.child instanceof AlternationNode) {
       List<String> literals = extractChainLitAlt((AlternationNode) g.child);
-      if (literals == null) {
+      if (literals != null) {
+        elems.add(new DeterministicChainInfo.ChainElem(literals));
+        return DeterministicChainInfo.ChainSeq.EMPTY_SEQ;
+      }
+      List<DeterministicChainInfo.ChainSeq> alts =
+          parseChainAltChain((AlternationNode) g.child, depth + 1);
+      if (alts == null) {
         return null;
       }
-      elems.add(new DeterministicChainInfo.ChainElem(literals));
+      elems.add(new DeterministicChainInfo.ChainElem(alts));
       return DeterministicChainInfo.ChainSeq.EMPTY_SEQ;
     }
     // Concat or single node: re-parse via a single-element window. parseChainSeq over a bare
@@ -9670,11 +9777,18 @@ public class PatternAnalyzer {
     }
     if (node instanceof AlternationNode) {
       List<String> literals = extractChainLitAlt((AlternationNode) node);
-      if (literals == null) {
+      if (literals != null) {
+        List<DeterministicChainInfo.ChainElem> one = new ArrayList<>(1);
+        one.add(new DeterministicChainInfo.ChainElem(literals));
+        return new DeterministicChainInfo.ChainSeq(one);
+      }
+      List<DeterministicChainInfo.ChainSeq> alts =
+          parseChainAltChain((AlternationNode) node, depth);
+      if (alts == null) {
         return null;
       }
       List<DeterministicChainInfo.ChainElem> one = new ArrayList<>(1);
-      one.add(new DeterministicChainInfo.ChainElem(literals));
+      one.add(new DeterministicChainInfo.ChainElem(alts));
       return new DeterministicChainInfo.ChainSeq(one);
     }
     List<RegexNode> single = new ArrayList<>(1);
@@ -9753,18 +9867,51 @@ public class PatternAnalyzer {
           addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
           break;
         case GREEDY_LOOP:
-          // Admission rule 1: the maximal run is the only candidate — the loop class must not
-          // accept any char that can start the remainder, or the generated code would need to
-          // give characters back (unbounded give-back = ReDoS territory, and the whole point of
-          // the family is a provably single scan).
+          // Admission rule 1 (v1) was a flat decline when the loop class accepts a char that can
+          // start the remainder — the generated code would need to give characters back. v2-alpha
+          // admits that shape instead: the loop is marked giveBack and the generator emits the
+          // bounded give-back retry (one boundary at a time, JDK give-back order, work-budget
+          // charged per retry, PikeVM fallback at overflow). A disjoint loop keeps the single
+          // scan — the giveBack flag stays false and the emission is the plain loop.
           if (chainClassIntersects(e.charSet, after, afterNonAscii)) {
-            return false;
+            e.giveBack = true;
           }
           addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
           if (e.min == 0) {
             orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii); // can match empty
           }
           break;
+        case WORDB:
+          // Zero-width: transparent to the remainder walk.
+          orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+          break;
+        case ALT_CHAIN:
+          {
+            // Terminal alternation: every alternative must satisfy the admission rules against
+            // the same remainder `after` (an alternative's own remainder is `after` — the
+            // alternation ends the seq). An alternative that can match empty lets the
+            // continuation start right here, so the element's first-set unions `after` then.
+            boolean anyAltEmpty = false;
+            for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+              boolean[] altFirst = new boolean[128];
+              boolean[] altNonAscii = new boolean[1];
+              if (!checkChainDisjoint(alt, after, afterNonAscii)) {
+                return false;
+              }
+              if (!altChainBodyIsFlat(alt)) {
+                return false;
+              }
+              computeChainFirst(alt, altFirst, altNonAscii);
+              orChainFirst(elemFirst, elemNonAscii, altFirst, altNonAscii[0]);
+              if (chainSeqMinWidth(alt) == 0) {
+                anyAltEmpty = true;
+              }
+            }
+            if (anyAltEmpty) {
+              orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+            }
+            break;
+          }
         case LAZY_LOOP:
           // Lazy scan loop: the loop class itself can start a match, or the loop can be skipped.
           addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
@@ -9810,6 +9957,40 @@ public class PatternAnalyzer {
   }
 
   /**
+   * v2-alpha admission: an ALT_CHAIN body may contain only flat constructs — LITERAL, CLASS1,
+   * WORDB, a disjoint GREEDY_LOOP, or a CAPTURE over flat content. A retryable inside a body
+   * (give-back loop, lazy loop, OPT, nested alternation) would need the SHARED rest's failures to
+   * re-enter the winning body's live retry label; the JVM verifier merges the rest's incoming
+   * frames across bodies, so the per-body dispatch reads locals that are uninitialized on the
+   * sibling bodies' paths (VerifyError: Bad local variable type). Solving that needs per-body slot
+   * pre-initialization (two-pass emission or a scratch bank) — v2-beta territory; the flat
+   * restriction keeps everything the ALT_CHAIN emitter generates verifier-clean.
+   */
+  private boolean altChainBodyIsFlat(DeterministicChainInfo.ChainSeq seq) {
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      switch (e.kind) {
+        case LITERAL:
+        case CLASS1:
+        case WORDB:
+          break;
+        case GREEDY_LOOP:
+          if (e.giveBack) {
+            return false;
+          }
+          break;
+        case CAPTURE:
+          if (!altChainBodyIsFlat(e.nested)) {
+            return false;
+          }
+          break;
+        default:
+          return false; // LAZY_LOOP, OPT, LIT_ALT, ALT_CHAIN: retryables — v2-beta
+      }
+    }
+    return true;
+  }
+
+  /**
    * Computes the seq's first-consumed-char set into {@code firstOut} (ASCII bitmap) and {@code
    * nonAsciiOut[0]}: left-to-right, an element's own first-set contributes only while every element
    * to its left can match empty — the first chars a match starting at the seq's start can begin
@@ -9845,6 +10026,20 @@ public class PatternAnalyzer {
             addChainFirstChar(firstOut, alt.charAt(0), nonAsciiOut);
           }
           emptyPrefix = false;
+          break;
+        case WORDB:
+          break; // zero-width: contributes nothing, the prefix stays empty-matchable
+        case ALT_CHAIN:
+          boolean anyAltEmpty = false;
+          for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+            computeChainFirst(alt, firstOut, nonAsciiOut);
+            if (chainSeqMinWidth(alt) == 0) {
+              anyAltEmpty = true;
+            }
+          }
+          if (!anyAltEmpty) {
+            emptyPrefix = false;
+          }
           break;
         case OPT:
           computeChainFirst(e.nested, firstOut, nonAsciiOut);
@@ -9938,6 +10133,15 @@ public class PatternAnalyzer {
           break; // can be skipped
         case CAPTURE:
           w += chainSeqMinWidth(e.nested); // the capture consumes its content's min width
+        case WORDB:
+          break; // zero-width
+        case ALT_CHAIN:
+          int minAltW = Integer.MAX_VALUE;
+          for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+            minAltW = Math.min(minAltW, chainSeqMinWidth(alt));
+          }
+          w += minAltW;
+          break;
         default:
           break;
       }

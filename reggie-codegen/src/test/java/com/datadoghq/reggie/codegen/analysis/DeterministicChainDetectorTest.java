@@ -17,6 +17,7 @@ package com.datadoghq.reggie.codegen.analysis;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -156,6 +157,72 @@ class DeterministicChainDetectorTest {
   }
 
   @Test
+  void v2AlphaWordBoundaryAdmitted() throws Exception {
+    // \b parses as a WORDB element at any seq position; the first-set stays the next
+    // element's (zero-width, prefix stays empty-matchable).
+    DeterministicChainInfo info = detect("\\b\\d+x");
+    assertNotNull(info);
+    assertEquals(ElemKind.WORDB, info.branches.get(0).seq.elems.get(0).kind);
+    assertEquals(2, info.branches.get(0).minWidth); // \\b (0) + \\d+ (1) + x (1)
+    for (int c = 0; c < 128; c++) {
+      boolean isDigit = c >= '0' && c <= '9';
+      assertEquals(isDigit, info.branches.get(0).firstSetAscii[c], "first set char " + c);
+    }
+    assertNotNull(detect("a\\bb"));
+    assertNotNull(detect("[0-9]+\\b"));
+    assertNotNull(detect("\\bword\\b"));
+  }
+
+  @Test
+  void v2AlphaGreedyGivebackFlagged() throws Exception {
+    // A greedy loop whose class intersects the remainder first-set is admitted WITH the
+    // giveBack flag (v2-alpha); a disjoint loop keeps the flag false.
+    DeterministicChainInfo xmlTags = detect("(<\\w+>).*(</\\w+>)");
+    assertNotNull(xmlTags);
+    ChainSeq seq = xmlTags.branches.get(0).seq;
+    assertEquals(ElemKind.GREEDY_LOOP, seq.elems.get(1).kind);
+    assertTrue(seq.elems.get(1).giveBack, "the .* against </\\w+> needs give-back");
+    assertFalse(seq.elems.get(0).nested.elems.get(1).giveBack, "\\w+ vs '>' stays disjoint");
+
+    DeterministicChainInfo disjoint = detect("a[0-9]+x");
+    assertNotNull(disjoint);
+    assertFalse(disjoint.branches.get(0).seq.elems.get(1).giveBack);
+  }
+
+  @Test
+  void v2AlphaMultipleStarsStillDeclines() throws Exception {
+    // (a*b*c*d*e*) keeps min-width 0: the unanchored empty-match admission is unchanged.
+    assertNull(detect("(a*b*c*d*e*)"));
+  }
+
+  @Test
+  void v2AlphaTerminalAltChainAdmitted() throws Exception {
+    DeterministicChainInfo info = detect("q(?:x[0-9]+[fd]|[0-9]+\\.[0-9]+)");
+    assertNotNull(info);
+    ChainSeq seq = info.branches.get(0).seq;
+    assertEquals(2, seq.elems.size());
+    assertEquals(ElemKind.LITERAL, seq.elems.get(0).kind);
+    assertEquals(ElemKind.ALT_CHAIN, seq.elems.get(1).kind);
+    assertEquals(2, seq.elems.get(1).alts.size());
+    // alt0 = x [0-9]+ [fd]: LITERAL, GREEDY_LOOP, CLASS1
+    assertEquals(3, seq.elems.get(1).alts.get(0).elems.size());
+    assertEquals(ElemKind.GREEDY_LOOP, seq.elems.get(1).alts.get(0).elems.get(1).kind);
+    assertEquals(ElemKind.CLASS1, seq.elems.get(1).alts.get(0).elems.get(2).kind);
+    // alt1 = [0-9]+ \.[0-9]+: GREEDY_LOOP, LITERAL ".", GREEDY_LOOP
+    assertEquals(3, seq.elems.get(1).alts.get(1).elems.size());
+    assertEquals(ElemKind.GREEDY_LOOP, seq.elems.get(1).alts.get(1).elems.get(2).kind);
+  }
+
+  @Test
+  void v2AlphaAltChainStructuralHashDistinct() throws Exception {
+    // The structural cache keys on the alts: two patterns differing only in an alternative's
+    // literal must not collide (the generated classes differ).
+    String a = "q(?:x[0-9]+[f]|[0-9]+\\.[0-9]+)";
+    String b = "q(?:x[0-9]+[d]|[0-9]+\\.[0-9]+)";
+    assertNotEquals(detect(a).structuralHashCode(), detect(b).structuralHashCode());
+  }
+
+  @Test
   void optionalSingleClassParsesAsOpt() throws Exception {
     DeterministicChainInfo info = detect("[-+]?[0-9]+");
     assertNotNull(info);
@@ -186,12 +253,9 @@ class DeterministicChainDetectorTest {
   @ParameterizedTest
   @ValueSource(
       strings = {
-        // Unbounded give-back: loop class overlaps the remainder's first set (ReDoS territory
-        // in generated code — a+a would need to try every give-back position).
-        "a+a",
-        "\\d*\\d+",
-        // (?i) folding creates the same overlap: [a-z]+ now accepts 'Z' which the tail needs.
-        "(?i)[a-z]+z",
+        // (v1 declined the greedy give-back loops a+a / \\d*\\d+ / (?i)[a-z]+z here; v2-alpha
+        // admits them WITH the giveBack flag — see v2AlphaGreedyGivebackFlagged. They are not
+        // in this decline list anymore.)
         // Unanchored branch can match empty: the find() scan cannot gate or bound it.
         "(a*b*c*d*e*)",
         // Quantified capturing group: capture re-binding across iterations (v1 scope).
@@ -203,18 +267,25 @@ class DeterministicChainDetectorTest {
         // Assertions / backreferences / boundaries: not this family.
         "(?=x)y",
         "(a)\\1",
-        "\\bx+",
-        "x\\b",
-        // Anchors outside the two admissible positions: multiline ^, \\A/\\z, leading $.
-        "(?m)^x",
+        // \\B, \\A/\\z mid-chain: still outside the family (v2-alpha admits \\b only).
+        "\\Bx",
         "\\Ax",
         "x\\z",
+        // Anchors outside the two admissible positions: multiline ^, leading $.
+        "(?m)^x",
         "$[^a-zA-Z0-9]|^[0-9]",
-        // Loop over an alternation body: SQL quote shape '(?:''|[^'])*' — v2 grammar territory.
+        // NOTE: v1 declined greedy give-back loops (a+a, \\d*\\d+, (?i)[a-z]+z); v2-alpha
+        // admits them with the giveBack flag — see v2AlphaGreedyGivebackFlagged.
+        // Loop over an alternation body: SQL quote shape '(?:''|[^'])*' — v2-beta territory.
         "'(?:''|[^'])*'",
-        // Nested alternation of mixed chains inside a branch: SQL number shape — v2 territory.
-        "[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+)",
-        // Lazy min >= 1 (x+?) — not admitted v1.
+        // Non-terminal compound alternation — v2-beta territory (v2-alpha admits terminal only).
+        "(?:x'[0-9a-f]+'|0x[0-9a-f]+)z",
+        // Retryable inside an ALT_CHAIN body (give-back loop / OPT) — v2-beta territory: the
+        // shared rest's failures must re-enter the winning body's retry, which the verifier
+        // rejects without per-body slot pre-initialization.
+        "q(?:x[0-9x]+x|[0-9]+\\.[0-9]+)",
+        "q(?:\\b\\d+(?:E[+-]?\\d+)?|[a-z]+)",
+        // Lazy min >= 1 (x+?) — not admitted.
         "a+?x",
         // Possessive/atomic — hard decline.
         "(?>a+)x",

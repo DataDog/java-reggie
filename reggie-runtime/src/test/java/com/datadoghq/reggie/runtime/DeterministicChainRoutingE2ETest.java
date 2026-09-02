@@ -165,6 +165,21 @@ class DeterministicChainRoutingE2ETest {
   }
 
   @Test
+  void greedyXmlTagsRoutesToChain() throws Exception {
+    // The NFAFallbackBenchmark XmlTags shape: the greedy .* needs give-back (v2-alpha E3), so
+    // this previously-declined pattern now routes to the chain generator.
+    String greedy = "(<\\w+>).*(</\\w+>)";
+    com.datadoghq.reggie.runtime.ReggieMatcher m =
+        (com.datadoghq.reggie.runtime.ReggieMatcher) Reggie.compile(greedy);
+    assertFalse(m instanceof BitStateMatcher, "greedy XmlTags must route off the BitState");
+    assertFalse(m instanceof PikeVMMatcher, "greedy XmlTags must route off the PikeVM");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(greedy);
+    for (String in : new String[] {"<a>x</a>", "y <t> m </t> z", "<a></a>", "<a>", ""}) {
+      assertParity(m, jdk, in);
+    }
+  }
+
+  @Test
   void generatedClassIsDeterministicChainNotInterpreter() {
     // Sanity: the compiled matcher is NOT a BitStateMatcher/PikeVMMatcher instance (the routing
     // substitution actually took effect for the runtime path).
