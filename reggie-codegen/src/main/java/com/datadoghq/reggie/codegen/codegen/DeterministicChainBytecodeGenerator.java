@@ -100,6 +100,12 @@ public class DeterministicChainBytecodeGenerator {
    */
   private final boolean hasGiveBack;
 
+  /**
+   * True when any LOOP_ALT in the chain tree needs its iteration-boundary journal: the entry points
+   * then acquire the per-thread scratch buffer (ReggieMatcher.chainScratch) once per call.
+   */
+  private final boolean hasLoopAltGiveBack;
+
   public DeterministicChainBytecodeGenerator(DeterministicChainInfo info, int groupCount) {
     this.branches = info.branches;
     this.groupCount = groupCount;
@@ -133,11 +139,40 @@ public class DeterministicChainBytecodeGenerator {
       }
     }
     this.hasGiveBack = giveBack;
+    boolean loopAltJournal = false;
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (anyLoopAltGiveBack(b.seq)) {
+        loopAltJournal = true;
+        break;
+      }
+    }
+    this.hasLoopAltGiveBack = loopAltJournal;
+  }
+
+  private static boolean anyLoopAltGiveBack(DeterministicChainInfo.ChainSeq seq) {
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      if (e.kind == DeterministicChainInfo.ElemKind.LOOP_ALT && e.giveBack) {
+        return true;
+      }
+      if (e.nested != null && anyLoopAltGiveBack(e.nested)) {
+        return true;
+      }
+      if (e.alts != null) {
+        for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+          if (anyLoopAltGiveBack(alt)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   private static boolean anyGiveBack(DeterministicChainInfo.ChainSeq seq) {
     for (DeterministicChainInfo.ChainElem e : seq.elems) {
-      if (e.kind == DeterministicChainInfo.ElemKind.GREEDY_LOOP && e.giveBack) {
+      if ((e.kind == DeterministicChainInfo.ElemKind.GREEDY_LOOP
+              || e.kind == DeterministicChainInfo.ElemKind.LOOP_ALT)
+          && e.giveBack) {
         return true;
       }
       if (e.nested != null && anyGiveBack(e.nested)) {
@@ -211,6 +246,12 @@ public class DeterministicChainBytecodeGenerator {
     final Label overflowLabel;
 
     /**
+     * Local slot holding the per-thread chain scratch int[] (the LOOP_ALT give-back journal), or -1
+     * when no method-local journal exists (no give-back LOOP_ALT in this chain).
+     */
+    final int journalVar;
+
+    /**
      * Innermost enclosing retry label (a LIT_ALT downstreamFail or an OPT optRetry) for the current
      * emission point — JDK backtracking retries the bounded alternatives of the innermost retryable
      * construct on any downstream failure, so element failures and the method-level end checks
@@ -230,7 +271,8 @@ public class DeterministicChainBytecodeGenerator {
         LazyPredicate lazyPredicate,
         boolean lazyMultiline,
         int workVar,
-        Label overflowLabel) {
+        Label overflowLabel,
+        int journalVar) {
       this.mv = mv;
       this.alloc = alloc;
       this.inputVar = inputVar;
@@ -241,6 +283,7 @@ public class DeterministicChainBytecodeGenerator {
       this.lazyMultiline = lazyMultiline;
       this.workVar = workVar;
       this.overflowLabel = overflowLabel;
+      this.journalVar = journalVar;
       if (groupCount > 0) {
         this.capStart = new int[groupCount + 1];
         this.capEnd = new int[groupCount + 1];
@@ -285,6 +328,7 @@ public class DeterministicChainBytecodeGenerator {
     // v1's budget-free single try.
     int workVar = hasGiveBack ? allocator.allocate() : -1;
     Label overflowLabel = hasGiveBack ? new Label() : null;
+    int journalVar = hasLoopAltGiveBack ? allocator.allocate() : -1;
 
     Label notNull = new Label();
     mv.visitVarInsn(ALOAD, inputVar);
@@ -303,6 +347,9 @@ public class DeterministicChainBytecodeGenerator {
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, workVar);
     }
+    if (hasLoopAltGiveBack) {
+      emitJournalAcquire(mv, inputVar, lenVar, journalVar);
+    }
 
     EmitCtx ctx =
         new EmitCtx(
@@ -316,7 +363,8 @@ public class DeterministicChainBytecodeGenerator {
             LazyPredicate.POS_EQ_LEN,
             false,
             workVar,
-            overflowLabel);
+            overflowLabel,
+            journalVar);
     Label fail = new Label();
     // Branch tries in pattern (priority) order — a failed branch's inner retries are dead, so
     // the retry chain is suspended per branch; the whole-input check failure first retries the
@@ -371,6 +419,7 @@ public class DeterministicChainBytecodeGenerator {
     int cVar = allocator.allocate();
     int workVar = hasGiveBack ? allocator.allocate() : -1;
     Label overflowLabel = hasGiveBack ? new Label() : null;
+    int journalVar = hasLoopAltGiveBack ? allocator.allocate() : -1;
 
     Label notNull = new Label();
     mv.visitVarInsn(ALOAD, inputVar);
@@ -389,6 +438,9 @@ public class DeterministicChainBytecodeGenerator {
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, workVar);
     }
+    if (hasLoopAltGiveBack) {
+      emitJournalAcquire(mv, inputVar, lenVar, journalVar);
+    }
 
     EmitCtx ctx =
         new EmitCtx(
@@ -402,7 +454,8 @@ public class DeterministicChainBytecodeGenerator {
             LazyPredicate.POS_EQ_LEN,
             false,
             workVar,
-            overflowLabel);
+            overflowLabel,
+            journalVar);
     Label fail = new Label();
     // Branch tries in pattern (priority) order; whole-input failure retries the innermost
     // alternative inside the current branch first, then the next branch.
@@ -578,6 +631,7 @@ public class DeterministicChainBytecodeGenerator {
     int posVar = allocator.allocate();
     int cVar = allocator.allocate();
     int workVar = allocator.allocate();
+    int journalScanVar = hasLoopAltGiveBack ? allocator.allocate() : -1;
 
     Label checksPass = new Label();
     Label failLabel = new Label();
@@ -650,7 +704,11 @@ public class DeterministicChainBytecodeGenerator {
             predicate,
             lazyMultiline,
             workVar,
-            overflowLabel);
+            overflowLabel,
+            journalScanVar);
+    if (hasLoopAltGiveBack) {
+      emitJournalAcquire(mv, inputVar, lenVar, journalScanVar);
+    }
     Label scanEnd = new Label();
     Label tryFail = new Label();
 
@@ -1211,7 +1269,7 @@ public class DeterministicChainBytecodeGenerator {
             // at each successively shorter boundary — JDK backtracking order, budget-charged.
             return emitGivebackLoop(ctx, e, seq, i, closingAtEnd, contLevels, elemFail);
           }
-          emitGreedyLoop(ctx, e.charSet, e.min, elemFail);
+          emitGreedyLoop(ctx, e.charSet, e.min, e.max, elemFail);
           break;
         case WORDB:
           emitWordBoundary(ctx, elemFail);
@@ -1219,6 +1277,13 @@ public class DeterministicChainBytecodeGenerator {
         case ALT_CHAIN:
           // The alt machinery consumed the seq rest (and the continuation, when covered).
           return emitAltChain(ctx, e, seq, i, closingAtEnd, contLevels, elemFail);
+        case LOOP_ALT:
+          // A give-back LOOP_ALT consumes the seq rest through the journal machinery (the walk
+          // returns coverage); a disjoint one continues inline with the next element.
+          if (emitLoopAlt(ctx, e, seq, i, closingAtEnd, contLevels, elemFail)) {
+            return true;
+          }
+          break;
         case LIT_ALT:
           // The alt machinery consumed the seq rest (and the continuation, when covered).
           return emitLitAlt(ctx, e, seq, i, closingAtEnd, contLevels, elemFail);
@@ -1262,6 +1327,7 @@ public class DeterministicChainBytecodeGenerator {
       case CLASS1:
       case GREEDY_LOOP:
       case LIT_ALT:
+      case LOOP_ALT:
         for (int g : closingAtEnd) {
           ctx.mv.visitVarInsn(ILOAD, ctx.posVar);
           ctx.mv.visitVarInsn(ISTORE, ctx.capEnd[g]);
@@ -1396,6 +1462,25 @@ public class DeterministicChainBytecodeGenerator {
       altLabels[k] = new Label();
     }
 
+    // Two-pass slot pre-initialization (v2-beta): the shared rest's failures re-enter the winning
+    // body's live retry through altRestFail, and the verifier MERGES the rest's incoming frames
+    // across bodies — body-k retry locals read in its handler would be TOP (uninitialized) on the
+    // sibling bodies' paths. A dry pass over a no-op MethodVisitor with a throwaway allocator
+    // measures the local-slot span the bodies allocate (allocation is deterministic), and the
+    // real pass zero-initializes that span before the dispatcher: every body local is a defined
+    // int on every frame reaching altRestFail, so the per-body dispatch verifies. The zero writes
+    // are dead for any body's own path (each body writes its locals before a meaningful read).
+    int realSlotBase = ctx.alloc.peek();
+    int bodySlotSpan = measureAltChainBodySlots(ctx, e);
+
+    // Zero-initialize the bodies' local span once, before the first dispatch (see the two-pass
+    // note above): downstreamFail re-enters the dispatcher directly, so retries never re-zero a
+    // live body's locals, and the altRestFail dispatch reads defined ints on every merged frame.
+    for (int slot = 0; slot < bodySlotSpan; slot++) {
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, realSlotBase + slot);
+    }
+
     // Dispatcher: altVar in [0, n) → alternative body; beyond → upstream failure.
     mv.visitLabel(retryLoop);
     for (int k = 0; k < n; k++) {
@@ -1455,6 +1540,62 @@ public class DeterministicChainBytecodeGenerator {
   }
 
   /**
+   * Dry pass for {@link #emitAltChain}: measures the local-slot span the alternative bodies
+   * allocate (see {@link #measureSeqSlots}).
+   */
+  private int measureAltChainBodySlots(EmitCtx realCtx, DeterministicChainInfo.ChainElem e) {
+    org.objectweb.asm.MethodVisitor noop = new org.objectweb.asm.MethodVisitor(ASM9) {};
+    LocalVarAllocator dryAlloc = new LocalVarAllocator(realCtx.alloc.peek());
+    EmitCtx dry = newDryCtx(realCtx, noop, dryAlloc);
+    int before = dryAlloc.peek();
+    Label dryFail = new Label();
+    for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+      dry.retryFail = null;
+      emitChainTry(dry, alt, 0, List.of(), dryFail, List.of());
+    }
+    return dryAlloc.peek() - before;
+  }
+
+  /**
+   * Measures the local-slot span one chain seq's emission allocates, via a dry pass over a no-op
+   * {@code MethodVisitor} with a throwaway allocator that starts where the real one does.
+   * Allocation order is a pure function of the chain tree, so the real pass allocates exactly this
+   * span. Used by the retry-dispatch constructs (ALT_CHAIN bodies, OPT nested region) to
+   * zero-initialize their span: the JVM verifier MERGES the incoming frames of shared failure
+   * blocks across paths that never ran the region, so a dispatch back into the region's retry
+   * handlers would read TOP (uninitialized) locals from those paths — even when a runtime path flag
+   * guarantees the dispatch only fires on paths that DID run it (the verifier cannot see values).
+   * Pre-zeroing makes every slot a defined int on every frame.
+   */
+  private int measureSeqSlots(EmitCtx realCtx, DeterministicChainInfo.ChainSeq seq) {
+    org.objectweb.asm.MethodVisitor noop = new org.objectweb.asm.MethodVisitor(ASM9) {};
+    LocalVarAllocator dryAlloc = new LocalVarAllocator(realCtx.alloc.peek());
+    EmitCtx dry = newDryCtx(realCtx, noop, dryAlloc);
+    int before = dryAlloc.peek();
+    Label dryFail = new Label();
+    dry.retryFail = null;
+    emitChainTry(dry, seq, 0, List.of(), dryFail, List.of());
+    return dryAlloc.peek() - before;
+  }
+
+  private EmitCtx newDryCtx(
+      EmitCtx realCtx, org.objectweb.asm.MethodVisitor noop, LocalVarAllocator dryAlloc) {
+    return new EmitCtx(
+        noop,
+        dryAlloc,
+        realCtx.inputVar,
+        realCtx.lenVar,
+        realCtx.posVar,
+        realCtx.cVar,
+        groupCount,
+        realCtx.lazyPredicate,
+        realCtx.lazyMultiline,
+        -1,
+        null,
+        -1);
+  }
+
+  /**
    * GIVEBACK_LOOP (v2-alpha): a greedy single-char-body loop whose class intersects the remainder
    * first-set. Consumption is the plain greedy run; then the downstream tail is retried at each
    * successively shorter loop boundary (JDK give-back order: one iteration at a time). The retry
@@ -1485,6 +1626,14 @@ public class DeterministicChainBytecodeGenerator {
     Label consumeTop = new Label();
     Label consumeEnd = new Label();
     mv.visitLabel(consumeTop);
+    if (e.max >= 0) {
+      // Bounded give-back ({2,4}-shaped): consumption caps at max.
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, loopStartVar);
+      mv.visitInsn(ISUB);
+      pushInt(mv, e.max);
+      mv.visitJumpInsn(IF_ICMPGE, consumeEnd);
+    }
     mv.visitVarInsn(ILOAD, ctx.posVar);
     mv.visitVarInsn(ILOAD, ctx.lenVar);
     mv.visitJumpInsn(IF_ICMPGE, consumeEnd);
@@ -1526,6 +1675,147 @@ public class DeterministicChainBytecodeGenerator {
     ctx.retryFail = giveBackRetry;
     return emitTailWalk(
         ctx, prepend(new TailLevel(seq, i + 1, closingAtEnd, null), contLevels), giveBackRetry);
+  }
+
+  /**
+   * Acquires the per-thread chain scratch journal once per method call: {@code journalVar =
+   * ReggieMatcher.chainScratch(len + 1)} — steady-state zero allocation, grown and cached per
+   * thread (see the concurrency contract: chain matchers are shared across threads, so the journal
+   * can never be an instance field).
+   */
+  private static void emitJournalAcquire(
+      MethodVisitor mv, int inputVar, int lenVar, int journalVar) {
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitMethodInsn(
+        INVOKESTATIC, "com/datadoghq/reggie/runtime/ReggieMatcher", "chainScratch", "(I)[I", false);
+    mv.visitVarInsn(ASTORE, journalVar);
+  }
+
+  /**
+   * LOOP_ALT (v2-beta): a greedy loop over a bounded disjunction of single-consume bodies ({@code
+   * (?:''|[^'])*}). Consumption tries the bodies in priority order per position, backing the
+   * position up between tries — and a MID-BODY failure leaves pos advanced, so the LAST body's
+   * failure restores the position before falling to the loop end (a multi-char body dying halfway,
+   * e.g. %20 against %3D, must leave the loop at its END boundary, not one char past it). Each
+   * successful iteration records its end boundary in the per-thread journal. A disjoint loop (no
+   * give-back) ends with the maximal consumption and the enclosing emission continues inline. A
+   * give-back loop retries the downstream tail at each successive journaled boundary,
+   * innermost-first through the retryFail discipline — exactly JDK backtracking order. The floor is
+   * {@code min} iterations (boundary {@code loopStart} when {@code min == 0}); each retry charges
+   * the work budget.
+   *
+   * @return the give-back loop is always consumed from the caller's perspective (the walk emitted
+   *     the seq rest inline, or the continuation flows at a jump level) — false only for the
+   *     disjoint inline-continue case
+   */
+  private boolean emitLoopAlt(
+      EmitCtx ctx,
+      DeterministicChainInfo.ChainElem e,
+      DeterministicChainInfo.ChainSeq seq,
+      int i,
+      List<Integer> closingAtEnd,
+      List<TailLevel> contLevels,
+      Label failLabel) {
+    MethodVisitor mv = ctx.mv;
+    Label upstream = effFail(ctx, failLabel);
+    boolean giveBack = e.giveBack;
+    int n = e.alts.size();
+    int loopStartVar = ctx.alloc.allocate();
+    int backupVar = ctx.alloc.allocate();
+    int jcVar = ctx.alloc.allocate();
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ISTORE, loopStartVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, jcVar);
+
+    Label consumeTop = new Label();
+    Label consumeEnd = new Label();
+    Label[] bodyLabels = new Label[n];
+    for (int k = 0; k < n; k++) {
+      bodyLabels[k] = new Label();
+    }
+    Label consumeFail = new Label();
+    mv.visitLabel(consumeTop);
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ILOAD, ctx.lenVar);
+    mv.visitJumpInsn(IF_ICMPGE, consumeEnd);
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ISTORE, backupVar);
+    for (int k = 0; k < n; k++) {
+      mv.visitLabel(bodyLabels[k]);
+      mv.visitVarInsn(ILOAD, backupVar);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      Label bodyFail = k < n - 1 ? bodyLabels[k + 1] : consumeFail;
+      for (DeterministicChainInfo.ChainElem body : e.alts.get(k).elems) {
+        if (body.kind == DeterministicChainInfo.ElemKind.LITERAL) {
+          emitLiteral(ctx, body.literal, bodyFail);
+        } else {
+          emitClass1(ctx, body.charSet, bodyFail);
+        }
+      }
+      if (giveBack) {
+        mv.visitVarInsn(ALOAD, ctx.journalVar);
+        mv.visitVarInsn(ILOAD, jcVar);
+        mv.visitVarInsn(ILOAD, ctx.posVar);
+        mv.visitInsn(IASTORE);
+      }
+      mv.visitIincInsn(jcVar, 1);
+      mv.visitJumpInsn(GOTO, consumeTop);
+    }
+    mv.visitLabel(consumeFail);
+    mv.visitVarInsn(ILOAD, backupVar);
+    mv.visitVarInsn(ISTORE, ctx.posVar);
+    mv.visitLabel(consumeEnd);
+    if (e.min > 0) {
+      mv.visitVarInsn(ILOAD, jcVar);
+      pushInt(mv, e.min);
+      mv.visitJumpInsn(IF_ICMPLT, upstream);
+    }
+    if (!giveBack) {
+      // Disjoint loop: the maximal run is the only candidate — flow continues with the next
+      // element. A capture's closingAtEnd still flows through the enclosing emission's write.
+      return false;
+    }
+
+    // Journal give-back: the first tail try runs at the maximal end (pos already there); the
+    // handler pops boundaries. Mirrors emitGivebackLoop's layout (handler between the entry GOTO
+    // and the walk label — every re-entry re-executes the walk's closing writes, last wins).
+    Label tailStart = new Label();
+    Label giveBackRetry = new Label();
+    mv.visitJumpInsn(GOTO, tailStart);
+    mv.visitLabel(giveBackRetry);
+    emitBudgetCharge(ctx);
+    mv.visitVarInsn(ILOAD, jcVar);
+    pushInt(mv, e.min);
+    mv.visitJumpInsn(IF_ICMPEQ, upstream);
+    mv.visitIincInsn(jcVar, -1);
+    // pos = jc > 0 ? journal[jc - 1] : loopStart
+    Label useLoopStart = new Label();
+    Label posSet = new Label();
+    mv.visitVarInsn(ILOAD, jcVar);
+    mv.visitJumpInsn(IFLE, useLoopStart);
+    mv.visitVarInsn(ALOAD, ctx.journalVar);
+    mv.visitVarInsn(ILOAD, jcVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitInsn(IALOAD);
+    mv.visitJumpInsn(GOTO, posSet);
+    mv.visitLabel(useLoopStart);
+    mv.visitVarInsn(ILOAD, loopStartVar);
+    mv.visitLabel(posSet);
+    mv.visitVarInsn(ISTORE, ctx.posVar);
+    mv.visitJumpInsn(GOTO, tailStart);
+    mv.visitLabel(tailStart);
+    ctx.retryFail = giveBackRetry;
+    emitTailWalk(
+        ctx, prepend(new TailLevel(seq, i + 1, closingAtEnd, null), contLevels), giveBackRetry);
+    // The give-back loop is always CONSUMED from the caller's perspective: the walk emitted the
+    // seq rest inline (up to a jump level when the continuation flows at the jump target — the
+    // caller's own emission of the remaining elements would DUPLICATE them, so return true
+    // whether or not the walk's coverage reached the end).
+    return true;
   }
 
   /**
@@ -1685,6 +1975,17 @@ public class DeterministicChainBytecodeGenerator {
     // boundary and jumps to optWithDone (the with-path completion) via the continuation jump.
     // The skip path is the immediate retry for the nested region, so the outer retry chain is
     // suspended here (the optRetry below re-links it as the exhausted-skip upstream).
+    // Zero-initialize the nested region's local span (see measureSeqSlots): the skip path's rest
+    // failures merge at optRetry, and the nestedRetry dispatch reads the nested's retry locals —
+    // uninitialized on the skip path (the verifier cannot see that skipFlag==1 never dispatches
+    // there).
+    int optSlotBase = ctx.alloc.peek();
+    int optSlotSpan = measureSeqSlots(ctx, e.nested);
+    for (int slot = 0; slot < optSlotSpan; slot++) {
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, optSlotBase + slot);
+    }
+
     Label savedRetry = ctx.retryFail;
     ctx.retryFail = null;
     emitChainTry(
@@ -1915,16 +2216,25 @@ public class DeterministicChainBytecodeGenerator {
    * detector's disjointness admission guarantees the loop class and the rest of the chain share no
    * first char, so the maximal run is the only candidate — no position restore, no give-back.
    */
-  private void emitGreedyLoop(EmitCtx ctx, CharSet cs, int min, Label failLabel) {
+  private void emitGreedyLoop(EmitCtx ctx, CharSet cs, int min, int max, Label failLabel) {
     MethodVisitor mv = ctx.mv;
     int runStartVar = ctx.alloc.allocate();
-    if (min > 0) {
+    if (min > 0 || max >= 0) { // the bounded cap reads runStart even when min == 0
       mv.visitVarInsn(ILOAD, ctx.posVar);
       mv.visitVarInsn(ISTORE, runStartVar);
     }
     Label loopStart = new Label();
     Label loopEnd = new Label();
     mv.visitLabel(loopStart);
+    if (max >= 0) {
+      // Bounded loop ({5} / {2,4}): consumption caps at max — an extra compare per iteration,
+      // emitted only for bounded loops.
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, runStartVar);
+      mv.visitInsn(ISUB);
+      pushInt(mv, max);
+      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+    }
     mv.visitVarInsn(ILOAD, ctx.posVar);
     mv.visitVarInsn(ILOAD, ctx.lenVar);
     mv.visitJumpInsn(IF_ICMPGE, loopEnd);

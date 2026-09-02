@@ -45,6 +45,33 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   // bug is never completely silent yet never floods the log.
   private static final AtomicBoolean NATIVE_DELEGATE_WARNED = new AtomicBoolean(false);
 
+  /**
+   * Per-thread scratch buffer for the deterministic-chain generator's give-back journals (a
+   * LOOP_ALT whose iteration boundaries must be retried). Generated matchers are method-locals
+   * only, so instances are shared and used concurrently across threads — the journal cannot be an
+   * instance field, and per-call allocation would churn the malloc arenas. The buffer is grown to
+   * the requested length and cached per thread; steady-state matching allocates nothing. Matching
+   * makes no calls into user code, so no re-entrancy hazard exists.
+   */
+  private static final ThreadLocal<int[]> CHAIN_SCRATCH = new ThreadLocal<>();
+
+  /**
+   * Returns the calling thread's chain scratch buffer, at least {@code minLen} ints, grown and
+   * cached on first use (never shrinks — bounded by the longest input seen on the thread).
+   */
+  public static int[] chainScratch(int minLen) {
+    int[] buf = CHAIN_SCRATCH.get();
+    if (buf == null || buf.length < minLen) {
+      int len = Math.max(minLen, 64);
+      while (len < minLen) {
+        len <<= 1;
+      }
+      buf = new int[len];
+      CHAIN_SCRATCH.set(buf);
+    }
+    return buf;
+  }
+
   // Set true by the compiler (runtime or annotation-processor path) when this matcher's strategy
   // was classified NATIVE — i.e. it is expected to fully generate the rich MatchResult API and
   // never build the JDK delegate. If such a matcher ever reaches jdkRichDelegate(), that is a

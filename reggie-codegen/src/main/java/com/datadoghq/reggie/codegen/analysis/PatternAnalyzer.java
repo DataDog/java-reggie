@@ -7200,7 +7200,13 @@ public class PatternAnalyzer {
        * Terminal alternation of chain sub-sequences (v2-alpha; LIT_ALT is its pure-literal fast
        * path).
        */
-      ALT_CHAIN
+      ALT_CHAIN,
+      /**
+       * Greedy loop over a bounded disjunction of single-consume bodies (v2-beta: {@code
+       * (?:''|[^'])*} — the SQL string-literal shape). Iteration boundaries are journaled when the
+       * loop needs give-back.
+       */
+      LOOP_ALT
     }
 
     /** One element. Field meaning per {@link ElemKind} — others null/0. */
@@ -7213,8 +7219,14 @@ public class PatternAnalyzer {
       /** CLASS1/GREEDY_LOOP/LAZY_LOOP: the resolved char set. */
       public final CharSet charSet;
 
-      /** GREEDY_LOOP: min repetitions (0 or 1). */
+      /** GREEDY_LOOP/LOOP_ALT: min repetitions. */
       public final int min;
+
+      /**
+       * GREEDY_LOOP/LOOP_ALT: max repetitions, -1 unbounded. Bounded-exact ({@code x{5}}) is min ==
+       * max; the consumption loop caps at max and the give-back floor keeps min.
+       */
+      public final int max;
 
       /** LIT_ALT: alternatives in priority order. */
       public final List<String> literals;
@@ -7241,6 +7253,7 @@ public class PatternAnalyzer {
         this.literal = literal;
         this.charSet = null;
         this.min = 0;
+        this.max = -1;
         this.literals = null;
         this.nested = null;
         this.alts = null;
@@ -7252,6 +7265,7 @@ public class PatternAnalyzer {
         this.literal = null;
         this.charSet = charSet;
         this.min = 0;
+        this.max = -1;
         this.literals = null;
         this.nested = null;
         this.alts = null;
@@ -7259,10 +7273,15 @@ public class PatternAnalyzer {
       }
 
       ChainElem(CharSet charSet, int min) { // GREEDY_LOOP
+        this(charSet, min, -1);
+      }
+
+      ChainElem(CharSet charSet, int min, int max) { // GREEDY_LOOP (bounded/unbounded)
         this.kind = ElemKind.GREEDY_LOOP;
         this.literal = null;
         this.charSet = charSet;
         this.min = min;
+        this.max = max;
         this.literals = null;
         this.nested = null;
         this.alts = null;
@@ -7274,6 +7293,7 @@ public class PatternAnalyzer {
         this.literal = null;
         this.charSet = charSet;
         this.min = 0;
+        this.max = -1;
         this.literals = null;
         this.nested = null;
         this.alts = null;
@@ -7285,6 +7305,7 @@ public class PatternAnalyzer {
         this.literal = null;
         this.charSet = null;
         this.min = 0;
+        this.max = -1;
         this.literals = literals;
         this.nested = null;
         this.alts = null;
@@ -7296,6 +7317,7 @@ public class PatternAnalyzer {
         this.literal = null;
         this.charSet = null;
         this.min = 0;
+        this.max = -1;
         this.literals = null;
         this.nested = nested;
         this.alts = null;
@@ -7307,6 +7329,7 @@ public class PatternAnalyzer {
         this.literal = null;
         this.charSet = null;
         this.min = 0;
+        this.max = -1;
         this.literals = null;
         this.nested = nested;
         this.alts = null;
@@ -7318,9 +7341,22 @@ public class PatternAnalyzer {
         this.literal = null;
         this.charSet = null;
         this.min = 0;
+        this.max = -1;
         this.literals = null;
         this.nested = null;
         this.alts = null;
+        this.groupNumber = 0;
+      }
+
+      ChainElem(ElemKind kind, java.util.Collection<ChainSeq> alts, int min) { // LOOP_ALT
+        this.kind = kind;
+        this.literal = null;
+        this.charSet = null;
+        this.min = min;
+        this.max = -1;
+        this.literals = null;
+        this.nested = null;
+        this.alts = new ArrayList<>(alts);
         this.groupNumber = 0;
       }
 
@@ -7330,6 +7366,7 @@ public class PatternAnalyzer {
         this.literal = null;
         this.charSet = null;
         this.min = 0;
+        this.max = -1;
         this.literals = null;
         this.nested = null;
         this.alts = new ArrayList<>(alts);
@@ -7422,6 +7459,7 @@ public class PatternAnalyzer {
           hash = 31 * hash + chainCharSetHashCode(e.charSet);
         }
         hash = 31 * hash + e.min;
+        hash = 31 * hash + e.max;
         if (e.literals != null) {
           hash = 31 * hash + e.literals.size();
           for (String alt : e.literals) {
@@ -9427,6 +9465,15 @@ public class PatternAnalyzer {
   private static final int MAX_CHAIN_LITERAL_LEN = 256;
   private static final int MAX_CHAIN_LIT_ALT = 16;
 
+  /** Max total consumed width of one LOOP_ALT body alternative (iteration-boundary journaling). */
+  private static final int MAX_LOOP_ALT_BODY_WIDTH = 4;
+
+  /**
+   * Max min/max of a bounded or higher-min greedy class loop ({100,} in the wild) — floor
+   * arithmetic stays int-safe and the consume cap is one compare per iteration.
+   */
+  private static final int MAX_CHAIN_LOOP_BOUND = 1024;
+
   /**
    * Detects the "deterministic chain" structural family: a top-level alternation of chains (or a
    * single chain), where each chain is a flat sequence of literals, single-consume char classes,
@@ -9609,21 +9656,19 @@ public class PatternAnalyzer {
         }
         // nested == EMPTY_SEQ means the group's content was appended inline into elems
       } else if (child instanceof AlternationNode) {
-        // Pure-literal alternation stays the LIT_ALT fast path; a compound one is ALT_CHAIN,
-        // admitted only in the terminal position (v2-alpha) — it ends the seq, each alternative
-        // reaching the seq's continuation/success on its own.
+        // Pure-literal alternation stays the LIT_ALT fast path; a compound one is ALT_CHAIN at any
+        // seq position (v2-beta lifted the v2-alpha terminal restriction — the generator
+        // pre-initializes the bodies' local slots, so retryables inside bodies verify).
         List<String> literals = extractChainLitAlt((AlternationNode) child);
         if (literals != null) {
           elems.add(new DeterministicChainInfo.ChainElem(literals));
-        } else if (i == to - 1) {
+        } else {
           List<DeterministicChainInfo.ChainSeq> alts =
               parseChainAltChain((AlternationNode) child, depth);
           if (alts == null) {
             return null;
           }
           elems.add(new DeterministicChainInfo.ChainElem(alts));
-        } else {
-          return null;
         }
       } else if (child instanceof AnchorNode
           && ((AnchorNode) child).type == AnchorNode.Type.WORD_BOUNDARY) {
@@ -9642,13 +9687,6 @@ public class PatternAnalyzer {
     flushChainLiteral(literal, elems);
     if (elems.isEmpty()) {
       return null;
-    }
-    // ALT_CHAIN (possibly inlined from a transparent group) is admitted only in the terminal
-    // position of the seq it lands in (v2-alpha).
-    for (int j = 0; j < elems.size(); j++) {
-      if (elems.get(j).kind == DeterministicChainInfo.ElemKind.ALT_CHAIN && j != elems.size() - 1) {
-        return null;
-      }
     }
     return new DeterministicChainInfo.ChainSeq(elems);
   }
@@ -9671,6 +9709,45 @@ public class PatternAnalyzer {
       alts.add(seq);
     }
     return alts;
+  }
+
+  /**
+   * Parses the alternatives of a LOOP_ALT body: each alternative must be a flat run of
+   * single-consume elements (literals/classes merged into plain consumers) whose total width is 1
+   * to {@link #MAX_LOOP_ALT_BODY_WIDTH}. Boundaries of such iterations are backward-recognizable
+   * for the journal give-back; wider or non-flat bodies stay outside the family.
+   */
+  private List<DeterministicChainInfo.ChainSeq> parseChainLoopAltBody(
+      AlternationNode alt, int depth) {
+    if (alt.alternatives.size() > MAX_CHAIN_LIT_ALT) {
+      return null;
+    }
+    List<DeterministicChainInfo.ChainSeq> alts = new ArrayList<>(alt.alternatives.size());
+    for (RegexNode a : alt.alternatives) {
+      DeterministicChainInfo.ChainSeq seq = parseChainSeqContent(a, depth + 1);
+      if (seq == null || !loopAltBodyOk(seq)) {
+        return null;
+      }
+      alts.add(seq);
+    }
+    return alts;
+  }
+
+  private boolean loopAltBodyOk(DeterministicChainInfo.ChainSeq seq) {
+    int width = 0;
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      switch (e.kind) {
+        case LITERAL:
+          width += e.literal.length();
+          break;
+        case CLASS1:
+          width += 1;
+          break;
+        default:
+          return false; // captures, loops, alternations, word boundaries: not a flat body
+      }
+    }
+    return width >= 1 && width <= MAX_LOOP_ALT_BODY_WIDTH;
   }
 
   private void flushChainLiteral(
@@ -9699,11 +9776,44 @@ public class PatternAnalyzer {
         return null;
       }
       return new DeterministicChainInfo.ChainElem(nested);
+    } else if (inner instanceof GroupNode) {
+      // Greedy * / + over a transparent alternation group is LOOP_ALT (v2-beta): each alternative
+      // is a bounded body of single-consume elements (the journal give-back records iteration
+      // boundaries when the union first-set intersects the remainder). Every other quantified
+      // group shape stays outside the family.
+      GroupNode g = (GroupNode) inner;
+      if (q.greedy
+          && q.max == -1
+          && q.min >= 0
+          && q.min <= MAX_CHAIN_LOOP_BOUND
+          && !g.capturing
+          && !g.atomic
+          && g.child instanceof AlternationNode) {
+        List<DeterministicChainInfo.ChainSeq> alts =
+            parseChainLoopAltBody((AlternationNode) g.child, depth + 1);
+        if (alts == null) {
+          return null;
+        }
+        return new DeterministicChainInfo.ChainElem(
+            DeterministicChainInfo.ElemKind.LOOP_ALT, alts, q.min);
+      }
+      return null;
     } else {
       return null;
     }
-    if (q.greedy && q.max == -1 && (q.min == 0 || q.min == 1)) {
-      return new DeterministicChainInfo.ChainElem(cs, q.min);
+    if (q.greedy && q.max == -1 && q.min >= 0 && q.min <= MAX_CHAIN_LOOP_BOUND) {
+      return new DeterministicChainInfo.ChainElem(cs, q.min, -1);
+    }
+    if (q.greedy
+        && q.max >= q.min
+        && !(q.min == 0 && q.max == 1)
+        && q.min >= 0
+        && q.min <= MAX_CHAIN_LOOP_BOUND
+        && q.max <= MAX_CHAIN_LOOP_BOUND) {
+      // Bounded-exact ({5}) and bounded-range ({2,4}) class loops: consumption caps at max, the
+      // give-back floor keeps min — the same machinery as the unbounded loops. The {0,1} case is
+      // EXCLUDED — it keeps the OPT modeling below (the OPT retry machinery, not a loop).
+      return new DeterministicChainInfo.ChainElem(cs, q.min, q.max);
     }
     if (!q.greedy && q.max == -1 && q.min == 0) {
       return new DeterministicChainInfo.ChainElem(cs);
@@ -9898,9 +10008,6 @@ public class PatternAnalyzer {
               if (!checkChainDisjoint(alt, after, afterNonAscii)) {
                 return false;
               }
-              if (!altChainBodyIsFlat(alt)) {
-                return false;
-              }
               computeChainFirst(alt, altFirst, altNonAscii);
               orChainFirst(elemFirst, elemNonAscii, altFirst, altNonAscii[0]);
               if (chainSeqMinWidth(alt) == 0) {
@@ -9908,6 +10015,24 @@ public class PatternAnalyzer {
               }
             }
             if (anyAltEmpty) {
+              orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+            }
+            break;
+          }
+        case LOOP_ALT:
+          {
+            // The loop's effective class is the union of the bodies' first-sets. When that union
+            // intersects the remainder the loop must give back — but iteration boundaries are
+            // arbitrary (1..MAX_LOOP_ALT_BODY_WIDTH chars per body), so the generator journals
+            // them (ThreadLocal scratch, D1) and retries the tail at each journaled boundary, in
+            // JDK give-back order.
+            for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+              computeChainFirst(alt, elemFirst, elemNonAscii);
+            }
+            if (chainSetIntersects(elemFirst, after, afterNonAscii)) {
+              e.giveBack = true;
+            }
+            if (e.min == 0) {
               orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
             }
             break;
@@ -9952,40 +10077,6 @@ public class PatternAnalyzer {
       }
       after = elemFirst;
       afterNonAscii = elemNonAscii[0];
-    }
-    return true;
-  }
-
-  /**
-   * v2-alpha admission: an ALT_CHAIN body may contain only flat constructs — LITERAL, CLASS1,
-   * WORDB, a disjoint GREEDY_LOOP, or a CAPTURE over flat content. A retryable inside a body
-   * (give-back loop, lazy loop, OPT, nested alternation) would need the SHARED rest's failures to
-   * re-enter the winning body's live retry label; the JVM verifier merges the rest's incoming
-   * frames across bodies, so the per-body dispatch reads locals that are uninitialized on the
-   * sibling bodies' paths (VerifyError: Bad local variable type). Solving that needs per-body slot
-   * pre-initialization (two-pass emission or a scratch bank) — v2-beta territory; the flat
-   * restriction keeps everything the ALT_CHAIN emitter generates verifier-clean.
-   */
-  private boolean altChainBodyIsFlat(DeterministicChainInfo.ChainSeq seq) {
-    for (DeterministicChainInfo.ChainElem e : seq.elems) {
-      switch (e.kind) {
-        case LITERAL:
-        case CLASS1:
-        case WORDB:
-          break;
-        case GREEDY_LOOP:
-          if (e.giveBack) {
-            return false;
-          }
-          break;
-        case CAPTURE:
-          if (!altChainBodyIsFlat(e.nested)) {
-            return false;
-          }
-          break;
-        default:
-          return false; // LAZY_LOOP, OPT, LIT_ALT, ALT_CHAIN: retryables — v2-beta
-      }
     }
     return true;
   }
@@ -10087,6 +10178,19 @@ public class PatternAnalyzer {
       into[c] |= from[c];
     }
     intoNonAscii[0] |= fromNonAscii;
+  }
+
+  /** True when the two first-set bitmaps intersect (ASCII part; non-ASCII flags OR together). */
+  private static boolean chainSetIntersects(boolean[] set, boolean[] other, boolean otherNonAscii) {
+    if (otherNonAscii) {
+      return true; // conservative: a non-ASCII first char may lie in the loop's bodies
+    }
+    for (int c = 0; c < 128; c++) {
+      if (set[c] && other[c]) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** True when {@code cs} accepts any char in the first-set ({@code set} + non-ASCII flag). */

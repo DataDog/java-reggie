@@ -96,29 +96,29 @@ class IastPatternRoutingTest {
   @Test
   void sqlAnsiRoutesToBitstateCapture() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(SQL_ANSI).strategy,
-        "SQL_ANSI pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "SQL_ANSI routes to the deterministic chain (v2-beta: LOOP_ALT string literals, bounded"
+            + " hex loops, ALT_CHAIN numerics) — the V2-β benchmark verifies the no-match side");
   }
 
   @Test
   void sqlMysqlRoutesToBitstateCapture() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(SQL_MYSQL).strategy,
-        "SQL_MYSQL pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "SQL_MYSQL routes to the deterministic chain (v2-beta LOOP_ALT for the escaped literals)");
   }
 
   @Test
   void sqlPostgresqlRoutesToBitstateCapture() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(SQL_POSTGRESQL).strategy,
-        "SQL_POSTGRESQL pattern routing changed — this pattern regressed 15x->0.15x on no-match"
-            + " once routed off PikeVMMatcher's SIMD fast-reject; verify BitStateMatcher still"
-            + " carries the singleFirstCharAscii fast-reject before updating this pin");
+        "SQL_POSTGRESQL routes to the deterministic chain (v2-beta). History: this pattern"
+            + " regressed 15x->0.15x on no-match when it moved PikeVM→BitState; the chain's"
+            + " per-branch first-set gates must hold the no-match side — the V2-β benchmark"
+            + " verifies");
   }
 
   @Test
@@ -135,9 +135,9 @@ class IastPatternRoutingTest {
   @Test
   void queryObfuscatorRoutesToBitstateCapture() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(QUERY_OBFUSCATOR).strategy,
-        "QUERY_OBFUSCATOR pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "QUERY_OBFUSCATOR routes to the deterministic chain (v2-beta: LOOP_ALT escapes, bounded"
+            + " {13}/{36}/{100,} loops, mid-seq ALT_CHAIN)");
   }
 }

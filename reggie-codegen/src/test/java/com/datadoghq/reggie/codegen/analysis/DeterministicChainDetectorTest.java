@@ -261,9 +261,8 @@ class DeterministicChainDetectorTest {
         // Quantified capturing group: capture re-binding across iterations (v1 scope).
         "(a)+",
         "(ab)?",
-        // Bounded repetitions are their own strategy family's territory.
-        "x{2,4}",
-        "[0-9]{1,4}",
+        // (v1 declined the bounded class loops x{2,4}/[0-9]{1,4} here — v2-beta admits them with
+        // the min/max floor-and-cap machinery; see the V2Beta bounded-loop tests.)
         // Assertions / backreferences / boundaries: not this family.
         "(?=x)y",
         "(a)\\1",
@@ -276,15 +275,10 @@ class DeterministicChainDetectorTest {
         "$[^a-zA-Z0-9]|^[0-9]",
         // NOTE: v1 declined greedy give-back loops (a+a, \\d*\\d+, (?i)[a-z]+z); v2-alpha
         // admits them with the giveBack flag — see v2AlphaGreedyGivebackFlagged.
-        // Loop over an alternation body: SQL quote shape '(?:''|[^'])*' — v2-beta territory.
-        "'(?:''|[^'])*'",
-        // Non-terminal compound alternation — v2-beta territory (v2-alpha admits terminal only).
-        "(?:x'[0-9a-f]+'|0x[0-9a-f]+)z",
-        // Retryable inside an ALT_CHAIN body (give-back loop / OPT) — v2-beta territory: the
-        // shared rest's failures must re-enter the winning body's retry, which the verifier
-        // rejects without per-body slot pre-initialization.
-        "q(?:x[0-9x]+x|[0-9]+\\.[0-9]+)",
-        "q(?:\\b\\d+(?:E[+-]?\\d+)?|[a-z]+)",
+        // (v2-beta admitted the LOOP_ALT SQL quote shape '(?:''|[^'])*' that v2-alpha declined
+        // here — see the V2Beta journal tests.)
+        // (v2-alpha also declined non-terminal compound alternations and retryable bodies
+        // here; v2-beta's slot pre-initialization lifted both — see the V2Alpha parity tests.)
         // Lazy min >= 1 (x+?) — not admitted.
         "a+?x",
         // Possessive/atomic — hard decline.

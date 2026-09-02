@@ -336,18 +336,62 @@ class DeterministicChainV2AlphaBytecodeTest {
   }
 
   @Test
-  void altChainRetryableBodyDeclines() throws Exception {
-    // A give-back loop or an OPT inside an alternative body is v2-beta territory: the shared
-    // rest's failures would need to re-enter the winning body's live retry, which the JVM
-    // verifier rejects without per-body slot pre-initialization. The detector declines.
-    RegexNode gb = new RegexParser().parse("q(?:x[0-9x]+x|[0-9]+\\.[0-9]+)");
-    assertNull(
-        new PatternAnalyzer(gb, new ThompsonBuilder().build(gb, 0)).detectDeterministicChain(gb),
-        "give-back inside an alt body must decline");
-    RegexNode ob = new RegexParser().parse("q(?:\\b\\d+(?:E[+-]?\\d+)?|[a-z]+)");
-    assertNull(
-        new PatternAnalyzer(ob, new ThompsonBuilder().build(ob, 0)).detectDeterministicChain(ob),
-        "OPT inside an alt body must decline");
+  void altChainWithGivebackInsideParity() throws Exception {
+    // A give-back loop inside an alternative: its retry exhausts into the next alternative
+    // (innermost first, JDK order). Admitted since v2-beta — the generator pre-initializes the
+    // bodies' local slots, so the shared-rest retry dispatch verifies.
+    Compiled c = compileChain("q(?:x[0-9x]+x|[0-9]+\\.[0-9]+)");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("q(?:x[0-9x]+x|[0-9]+\\.[0-9]+)");
+    assertFullParity(c, jdk, "qx12x");
+    assertFullParity(c, jdk, "qx1x2x");
+    assertFullParity(c, jdk, "qx12");
+    assertFullParity(c, jdk, "q3.14");
+    assertFullParity(c, jdk, "qxxxx");
+    assertFullParity(c, jdk, "zqx0x1x");
+    assertFullParity(c, jdk, "qx");
+  }
+
+  @Test
+  void altChainWithOptInsideParity() throws Exception {
+    // An OPT inside an alternative (the SqlAnsi numeric-alternative shape): the OPT's retry is
+    // re-entered by shared-rest failures before the next alternative.
+    Compiled c = compileChain("q(?:\\b\\d+(?:E[+-]?\\d+)?|[a-z]+)");
+    java.util.regex.Pattern jdk =
+        java.util.regex.Pattern.compile("q(?:\\b\\d+(?:E[+-]?\\d+)?|[a-z]+)");
+    assertFullParity(c, jdk, "q42");
+    assertFullParity(c, jdk, "q42E13");
+    assertFullParity(c, jdk, "q42E-3");
+    assertFullParity(c, jdk, "qabc");
+    assertFullParity(c, jdk, "q42x");
+    assertFullParity(c, jdk, "xq42");
+    assertFullParity(c, jdk, "q");
+  }
+
+  @Test
+  void altChainMidSeqParity() throws Exception {
+    // A compound alternation in the MIDDLE of a seq (v2-beta lifted the terminal restriction):
+    // the shared rest below it re-enters the winning body's retry through the dispatch.
+    Compiled c = compileChain("(?:x[0-9a-f]+|0y)[0-9]+z");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("(?:x[0-9a-f]+|0y)[0-9]+z");
+    assertFullParity(c, jdk, "x1f2z");
+    assertFullParity(c, jdk, "0y33z");
+    assertFullParity(c, jdk, "x1f");
+    assertFullParity(c, jdk, "0y");
+    assertFullParity(c, jdk, "z0y1z");
+    assertFullParity(c, jdk, "x0z");
+  }
+
+  @Test
+  void altChainMidSeqGivebackParity() throws Exception {
+    // Mid-seq alternation whose alternative contains a give-back loop: the rest below re-enters
+    // the give-back, then the alternatives, in JDK order.
+    Compiled c = compileChain("(?:x[0-9x]+|0y)xz");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("(?:x[0-9x]+|0y)xz");
+    assertFullParity(c, jdk, "x1xxz");
+    assertFullParity(c, jdk, "0yxz");
+    assertFullParity(c, jdk, "xxxz");
+    assertFullParity(c, jdk, "x1x");
+    assertFullParity(c, jdk, "y0yxz");
   }
 
   @Test

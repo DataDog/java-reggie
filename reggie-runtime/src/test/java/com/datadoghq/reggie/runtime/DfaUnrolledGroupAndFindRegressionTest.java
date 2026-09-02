@@ -107,8 +107,10 @@ public class DfaUnrolledGroupAndFindRegressionTest {
 
   @Test
   void a1_optionalThenDot() throws Exception {
-    // A1 routing: group body starts with nullable a? → BITSTATE_CAPTURE gives correct group spans.
-    assertRoute("-{1}(a?.*).x", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    // A1 routing: group body starts with nullable a? — chain-admitted since v2-beta (bounded
+    // -{1}, OPT, give-back .*); the chain generator carries the JDK priority semantics and the
+    // group-span assertions below remain the oracle.
+    assertRoute("-{1}(a?.*).x", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     // Zero-width group at accepting state: when (a?.*) matches empty and the accept state holds
     // BOTH ENTER and EXIT for the group, group 1 should be [1,1) not the stale [0,1) start.
     // Use a simpler input where the group IS zero-width at the only accepting state.

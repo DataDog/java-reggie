@@ -190,11 +190,14 @@ class PikeVMRoutingTest {
 
   @Test
   void nullableFirstElem_optionalPrefix_routesToPikevm() throws Exception {
-    // Group body `a?.*` starts with `a?` (min=0); TDFA fires group-start too early.
+    // Group body `a?.*` starts with `a?` (min=0); TDFA fires group-start too early. The shape is
+    // chain-admitted since v2-beta (bounded -{1}, OPT over a?, greedy give-back .*): the chain
+    // generator carries the same JDK priority semantics, and the span behavior below is asserted
+    // by DfaUnrolledGroupAndFindRegressionTest.a1_optionalThenDot.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         StrategyCorrectnessMetaTest.routeOf("-{1}(a?.*)"),
-        "-{1}(a?.*) must route to BITSTATE_CAPTURE (A1: nullable first element a?)");
+        "-{1}(a?.*) routes to DETERMINISTIC_CHAIN_BYTECODE (A1 shape, chain-admitted)");
   }
 
   @Test
