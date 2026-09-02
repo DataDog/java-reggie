@@ -87,6 +87,7 @@ class DeterministicChainV3BytecodeTest {
     gen.generateFindMatchMethod(cw, className);
     gen.generateFindMatchFromMethod(cw, className);
     gen.generateFindBoundsFromMethod(cw, className);
+    gen.generateFallbackSupport(cw, className);
     cw.visitEnd();
 
     Class<?> clazz =

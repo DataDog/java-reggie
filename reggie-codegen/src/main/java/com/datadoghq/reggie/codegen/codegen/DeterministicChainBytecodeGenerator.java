@@ -67,19 +67,68 @@ import org.objectweb.asm.MethodVisitor;
  */
 public class DeterministicChainBytecodeGenerator {
 
-  /** The single (v3) chain branch. */
-  private final DeterministicChainInfo.ChainBranch branch;
+  /** The chain branches, in pattern (priority) order. */
+  private final List<DeterministicChainInfo.ChainBranch> branches;
 
   /** Capturing groups in the pattern; slot arrays are sized groupCount+1 (index 0 unused). */
   private final int groupCount;
 
+  /**
+   * Work budget for the find-family scans: {@code (4 + totalElemCount) * (len + 1)} (design §4) —
+   * generous enough that any single linear pass with all its tries never trips it, tight enough
+   * that quadratic re-consumption trips it early.
+   */
+  private final int budgetConst;
+
+  /** Union of the unanchored branches' first-sets — the scan position gate. */
+  private final boolean[] unionFirstSet = new boolean[128];
+
+  /** Minimum match width over the unanchored branches (the scan's trailing-position bound). */
+  private final int minUnanchoredMinWidth;
+
+  /** True when every branch is ^-anchored (no scan loop; one try at position 0). */
+  private final boolean allAnchored;
+
+  /** True when at least one branch is ^-anchored (position 0 skips the union gate). */
+  private final boolean hasAnchored;
+
   public DeterministicChainBytecodeGenerator(DeterministicChainInfo info, int groupCount) {
-    if (info.branches.size() != 1) {
-      throw new IllegalArgumentException(
-          "stage 3 generator handles a single chain branch, got " + info.branches.size());
-    }
-    this.branch = info.branches.get(0);
+    this.branches = info.branches;
     this.groupCount = groupCount;
+    int elems = 0;
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      elems += countElems(b.seq);
+      if (!b.startAnchored) {
+        for (int c = 0; c < 128; c++) {
+          unionFirstSet[c] |= b.firstSetAscii[c];
+        }
+      }
+    }
+    this.budgetConst = 4 + elems;
+    int minW = Integer.MAX_VALUE;
+    boolean all = true;
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (b.startAnchored) {
+        continue;
+      }
+      all = false;
+      minW = Math.min(minW, b.minWidth);
+    }
+    this.allAnchored = all;
+    this.hasAnchored = anyStartAnchored(branches);
+    this.minUnanchoredMinWidth = all ? 0 : minW;
+  }
+
+  /** Total element count of a chain tree (the budget constant's scale factor). */
+  private static int countElems(DeterministicChainInfo.ChainSeq seq) {
+    int n = 0;
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      n++;
+      if (e.nested != null) {
+        n += countElems(e.nested);
+      }
+    }
+    return n;
   }
 
   /**
@@ -109,6 +158,9 @@ public class DeterministicChainBytecodeGenerator {
     final int[] capEnd;
     final LazyPredicate lazyPredicate;
 
+    /** The $-anchor mode for the lazy END_ANCHOR predicate (see emitEndAnchorCheck). */
+    final boolean lazyMultiline;
+
     /**
      * Innermost enclosing retry label (a LIT_ALT downstreamFail or an OPT optRetry) for the current
      * emission point — JDK backtracking retries the bounded alternatives of the innermost retryable
@@ -126,7 +178,8 @@ public class DeterministicChainBytecodeGenerator {
         int posVar,
         int cVar,
         int groupCount,
-        LazyPredicate lazyPredicate) {
+        LazyPredicate lazyPredicate,
+        boolean lazyMultiline) {
       this.mv = mv;
       this.alloc = alloc;
       this.inputVar = inputVar;
@@ -134,6 +187,7 @@ public class DeterministicChainBytecodeGenerator {
       this.posVar = posVar;
       this.cVar = cVar;
       this.lazyPredicate = lazyPredicate;
+      this.lazyMultiline = lazyMultiline;
       if (groupCount > 0) {
         this.capStart = new int[groupCount + 1];
         this.capEnd = new int[groupCount + 1];
@@ -189,16 +243,37 @@ public class DeterministicChainBytecodeGenerator {
 
     EmitCtx ctx =
         new EmitCtx(
-            mv, allocator, inputVar, lenVar, posVar, cVar, groupCount, LazyPredicate.POS_EQ_LEN);
+            mv,
+            allocator,
+            inputVar,
+            lenVar,
+            posVar,
+            cVar,
+            groupCount,
+            LazyPredicate.POS_EQ_LEN,
+            false);
     Label fail = new Label();
-    emitChainTry(ctx, branch.seq, 0, List.of(), fail, List.of());
-
-    // Whole-input check: a failure retries the innermost LIT_ALT/OPT alternative before failing.
-    mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPNE, effFail(ctx, fail));
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IRETURN);
+    // Branch tries in pattern (priority) order — a failed branch's inner retries are dead, so
+    // the retry chain is suspended per branch; the whole-input check failure first retries the
+    // innermost alternative inside the CURRENT branch, then moves to the next branch.
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      Label branchFail = new Label();
+      Label savedRetry = ctx.retryFail;
+      ctx.retryFail = null;
+      // A failed earlier branch leaves a partially consumed pos and stale capture slots: reset
+      // both (groups outside this branch must end unmatched).
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, posVar);
+      emitResetCaptures(mv, ctx);
+      emitChainTry(ctx, b.seq, 0, List.of(), branchFail, List.of());
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPNE, effFail(ctx, branchFail));
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(branchFail);
+      ctx.retryFail = savedRetry;
+    }
     mv.visitLabel(fail);
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
@@ -239,15 +314,33 @@ public class DeterministicChainBytecodeGenerator {
 
     EmitCtx ctx =
         new EmitCtx(
-            mv, allocator, inputVar, lenVar, posVar, cVar, groupCount, LazyPredicate.POS_EQ_LEN);
+            mv,
+            allocator,
+            inputVar,
+            lenVar,
+            posVar,
+            cVar,
+            groupCount,
+            LazyPredicate.POS_EQ_LEN,
+            false);
     Label fail = new Label();
-    emitChainTry(ctx, branch.seq, 0, List.of(), fail, List.of());
-
-    // Whole-input check: a failure retries the innermost LIT_ALT/OPT alternative before failing.
-    mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPNE, effFail(ctx, fail));
-    emitBuildResult(ctx, true, -1);
+    // Branch tries in pattern (priority) order; whole-input failure retries the innermost
+    // alternative inside the current branch first, then the next branch.
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      Label branchFail = new Label();
+      Label savedRetry = ctx.retryFail;
+      ctx.retryFail = null;
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, posVar);
+      emitResetCaptures(mv, ctx);
+      emitChainTry(ctx, b.seq, 0, List.of(), branchFail, List.of());
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPNE, effFail(ctx, branchFail));
+      emitBuildResult(ctx, true, -1);
+      mv.visitLabel(branchFail);
+      ctx.retryFail = savedRetry;
+    }
     mv.visitLabel(fail);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
@@ -384,7 +477,6 @@ public class DeterministicChainBytecodeGenerator {
       ScanReturn successShape,
       ScanReturn failShape,
       String className) {
-    boolean isFindFrom = successShape == ScanReturn.INT_RETURN_POSITION;
     boolean hasBoundsArray = successShape == ScanReturn.BOOL_BOUNDS;
     LocalVarAllocator allocator = new LocalVarAllocator(hasBoundsArray ? 4 : 3);
     int inputVar = 1;
@@ -394,9 +486,11 @@ public class DeterministicChainBytecodeGenerator {
     int pVar = allocator.allocate();
     int posVar = allocator.allocate();
     int cVar = allocator.allocate();
+    int workVar = allocator.allocate();
 
     Label checksPass = new Label();
     Label failLabel = new Label();
+    Label overflowLabel = new Label();
 
     // Guards: null input / negative or too-large start (Reggie convention: fail value, JDK throws).
     mv.visitVarInsn(ALOAD, inputVar);
@@ -417,70 +511,340 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitVarInsn(ISTORE, lenVar);
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitVarInsn(ISTORE, pVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, workVar);
 
+    // A $-anchored branch accepts only a tail try ending at a valid $ position, so the per-try
+    // lazy predicate is END_ANCHOR when ANY branch is $-anchored (per-branch: an unanchored
+    // branch never reaches its predicate with a $-failing end — an unanchored branch's tail try
+    // succeeds on its own; the predicate applies only to $-anchored branch tries... but the
+    // predicate is per-method, so only set it when all branches agree; mixed patterns get the
+    // conservative NONE and rely on the post-try $-check per branch).
+    boolean anyEndAnchored = false;
+    boolean allEndAnchored = true;
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (b.endAnchored) {
+        anyEndAnchored = true;
+      } else {
+        allEndAnchored = false;
+      }
+    }
+    boolean uniformMultiline = true;
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (b.endAnchored && b.multilineEnd != branches.get(0).multilineEnd) {
+        uniformMultiline = false;
+      }
+    }
+    LazyPredicate predicate =
+        allEndAnchored && anyEndAnchored && uniformMultiline
+            ? LazyPredicate.END_ANCHOR
+            : LazyPredicate.NONE;
+    boolean lazyMultiline = anyEndAnchored && uniformMultiline && branches.get(0).multilineEnd;
     EmitCtx ctx =
         new EmitCtx(
-            mv,
-            allocator,
-            inputVar,
-            lenVar,
-            posVar,
-            cVar,
-            groupCount,
-            branch.endAnchored ? LazyPredicate.END_ANCHOR : LazyPredicate.NONE);
+            mv, allocator, inputVar, lenVar, posVar, cVar, groupCount, predicate, lazyMultiline);
     Label scanEnd = new Label();
     Label tryFail = new Label();
 
-    if (branch.startAnchored) {
-      // ^ (non-multiline): the branch matches only at absolute position 0.
+    // The per-scan-position branch-try sequence, shared by the scan loop and the all-anchored
+    // fast path. Anchored branches are tried only at p == 0; each unanchored branch is preceded
+    // by its own first-set gate (O(1) reject). Branch try failures charge the work budget.
+    if (allAnchored) {
+      // Every branch is ^-anchored: no scan; one try at position 0 (start must be 0). Bounded —
+      // no budget needed.
       mv.visitVarInsn(ILOAD, pVar);
       mv.visitJumpInsn(IFNE, scanEnd);
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, posVar);
-      emitChainTry(ctx, branch.seq, 0, List.of(), tryFail, List.of());
-      if (branch.endAnchored) {
-        emitEndAnchorCheck(ctx, effFail(ctx, tryFail));
-      }
-      emitSuccessShape(mv, ctx, pVar, posVar, boundsVar, successShape);
+      emitBranchTries(mv, ctx, pVar, posVar, cVar, boundsVar, successShape, tryFail, scanEnd);
       mv.visitLabel(tryFail);
       mv.visitJumpInsn(GOTO, scanEnd);
     } else {
-      List<int[]> firstSetRuns = firstSetRuns(branch.firstSetAscii);
+      List<int[]> unionRuns = firstSetRuns(unionFirstSet);
       Label scanTop = new Label();
+      Label gateFail = tryFail; // gate skip and branch failures merge at the advance block
       mv.visitLabel(scanTop);
-      // while (p <= len - minWidth) — a match consumes minWidth chars from p at minimum.
+      // while (p <= len - minUnanchoredMinWidth) — the cheapest unanchored branch needs its
+      // minWidth chars from p.
       mv.visitVarInsn(ILOAD, pVar);
       mv.visitVarInsn(ILOAD, lenVar);
-      pushInt(mv, branch.minWidth);
+      pushInt(mv, minUnanchoredMinWidth);
       mv.visitInsn(ISUB);
       mv.visitJumpInsn(IF_ICMPGT, scanEnd);
 
-      // First-set gate: charAt(p) must lie in the branch first-set (necessary condition).
-      mv.visitVarInsn(ALOAD, inputVar);
-      mv.visitVarInsn(ILOAD, pVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      mv.visitVarInsn(ISTORE, cVar);
-      emitCharInRuns(mv, cVar, firstSetRuns, tryFail);
-
-      // Try the chain from p (pos is the working scan cursor; p stays the match start).
+      // pos = p first: a gate-skipped position charges a clean +1 (pos == p) in the advance block.
       mv.visitVarInsn(ILOAD, pVar);
       mv.visitVarInsn(ISTORE, posVar);
-      emitChainTry(ctx, branch.seq, 0, List.of(), tryFail, List.of());
-      if (branch.endAnchored) {
-        emitEndAnchorCheck(ctx, effFail(ctx, tryFail));
-      }
-      emitSuccessShape(mv, ctx, pVar, posVar, boundsVar, successShape);
 
-      // Advance one scan position and retry.
+      // Union first-set gate: no unanchored branch can start at p unless charAt(p) hits.
+      // Position 0 skips the union gate when any branch is ^-anchored — anchored branches are
+      // tried only there and their first chars are not part of the union.
+      if (hasAnchored) {
+        Label gateCheck = new Label();
+        Label afterGate = new Label();
+        mv.visitVarInsn(ILOAD, pVar);
+        mv.visitJumpInsn(IFNE, gateCheck);
+        mv.visitJumpInsn(GOTO, afterGate);
+        mv.visitLabel(gateCheck);
+        emitUnionGate(mv, inputVar, pVar, cVar, unionRuns, gateFail);
+        mv.visitLabel(afterGate);
+      } else {
+        emitUnionGate(mv, inputVar, pVar, cVar, unionRuns, gateFail);
+      }
+
+      emitBranchTries(mv, ctx, pVar, posVar, cVar, boundsVar, successShape, tryFail, scanEnd);
+
+      // Advance one scan position and retry. Branch failures charge (pos - p) + 1 here (pos is
+      // the failed try's consumed end; a clean gate skip leaves pos == p for +1).
       mv.visitLabel(tryFail);
+      mv.visitVarInsn(ILOAD, workVar);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, pVar);
+      mv.visitInsn(ISUB);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ISTORE, workVar);
+      mv.visitVarInsn(ILOAD, workVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      pushInt(mv, budgetConst);
+      mv.visitInsn(IMUL);
+      mv.visitJumpInsn(IF_ICMPGT, overflowLabel);
       mv.visitIincInsn(pVar, 1);
       mv.visitJumpInsn(GOTO, scanTop);
     }
 
-    // Both paths (scan exhausted / anchored try failed) reach the fail shape.
+    // Scan exhausted (or all-anchored try failed): legit no-match.
     mv.visitLabel(scanEnd);
     emitFailShape(mv, failShape);
 
+    // Budget overflow: the whole call is re-run by the lazily-parsed PikeVM fallback (linear,
+    // correct; design §4). fbCount++ then delegate by shape.
+    mv.visitLabel(overflowLabel);
+    emitFallbackDelegation(mv, inputVar, startVar, boundsVar, successShape, className);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /** Emits {@code capStart[g] = capEnd[g] = -1} for every group (a fresh try's unmatched state). */
+  private void emitResetCaptures(MethodVisitor mv, EmitCtx ctx) {
+    if (ctx.capStart == null) {
+      return;
+    }
+    for (int g = 1; g <= groupCount; g++) {
+      mv.visitInsn(ICONST_M1);
+      mv.visitVarInsn(ISTORE, ctx.capStart[g]);
+      mv.visitInsn(ICONST_M1);
+      mv.visitVarInsn(ISTORE, ctx.capEnd[g]);
+    }
+  }
+
+  private static boolean anyStartAnchored(List<DeterministicChainInfo.ChainBranch> branches) {
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (b.startAnchored) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Emits {@code charAt(p) ∈ unionRuns, else goto gateFail}. */
+  private void emitUnionGate(
+      MethodVisitor mv, int inputVar, int pVar, int cVar, List<int[]> unionRuns, Label gateFail) {
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, pVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, cVar);
+    emitCharInRuns(mv, cVar, unionRuns, gateFail);
+  }
+
+  /**
+   * Emits the per-position branch tries in pattern (priority) order. Each branch: ^ guard (p == 0
+   * for anchored branches), first-set gate (unanchored), chain try, $-check, success shape. A
+   * branch's inner retry chain is suspended (its alternatives are dead once the branch failed) and
+   * its failures flow to {@code tryFail} (the scan's advance block).
+   */
+  private void emitBranchTries(
+      MethodVisitor mv,
+      EmitCtx ctx,
+      int pVar,
+      int posVar,
+      int cVar,
+      int boundsVar,
+      ScanReturn successShape,
+      Label tryFail,
+      Label scanEnd) {
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      Label branchFail = new Label();
+      Label savedRetry = ctx.retryFail;
+      ctx.retryFail = null;
+
+      if (b.startAnchored) {
+        // ^ (non-multiline): this branch matches only at absolute scan position 0.
+        mv.visitVarInsn(ILOAD, pVar);
+        mv.visitJumpInsn(IFNE, branchFail);
+      } else {
+        // Per-branch first-set gate: O(1) reject of positions this branch cannot start at.
+        List<int[]> runs = firstSetRuns(b.firstSetAscii);
+        mv.visitVarInsn(ALOAD, ctx.inputVar);
+        mv.visitVarInsn(ILOAD, pVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitVarInsn(ISTORE, cVar);
+        emitCharInRuns(mv, cVar, runs, branchFail);
+      }
+      // Reset the try: a failed earlier branch leaves a partially consumed pos and stale
+      // capture slots (groups outside this branch must end unmatched).
+      mv.visitVarInsn(ILOAD, pVar);
+      mv.visitVarInsn(ISTORE, posVar);
+      emitResetCaptures(mv, ctx);
+
+      emitChainTry(ctx, b.seq, 0, List.of(), branchFail, List.of());
+      if (b.endAnchored) {
+        emitEndAnchorCheck(ctx, effFail(ctx, branchFail), b.multilineEnd);
+      }
+      emitSuccessShape(mv, ctx, pVar, posVar, boundsVar, successShape);
+      mv.visitLabel(branchFail);
+      ctx.retryFail = savedRetry;
+    }
+  }
+
+  /** Emits the overflow-path delegation to the lazily-parsed PikeVM fallback, per return shape. */
+  private void emitFallbackDelegation(
+      MethodVisitor mv,
+      int inputVar,
+      int startVar,
+      int boundsVar,
+      ScanReturn successShape,
+      String className) {
+    String internal = className.replace('.', '/');
+    // fbCount++
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitInsn(DUP);
+    mv.visitFieldInsn(GETFIELD, internal, "fbCount", "J");
+    mv.visitInsn(LCONST_1);
+    mv.visitInsn(LADD);
+    mv.visitFieldInsn(PUTFIELD, internal, "fbCount", "J");
+    // return fb().<method>(args...)
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, internal, "fb", "()Lcom/datadoghq/reggie/runtime/ReggieMatcher;", false);
+    mv.visitVarInsn(ALOAD, inputVar);
+    switch (successShape) {
+      case INT_RETURN_POSITION:
+        mv.visitVarInsn(ILOAD, startVar);
+        mv.visitMethodInsn(
+            INVOKEVIRTUAL,
+            "com/datadoghq/reggie/runtime/ReggieMatcher",
+            "findFrom",
+            "(Ljava/lang/String;I)I",
+            false);
+        mv.visitInsn(IRETURN);
+        break;
+      case BOOL_BOUNDS:
+        mv.visitVarInsn(ILOAD, startVar);
+        mv.visitVarInsn(ALOAD, boundsVar);
+        mv.visitMethodInsn(
+            INVOKEVIRTUAL,
+            "com/datadoghq/reggie/runtime/ReggieMatcher",
+            "findBoundsFrom",
+            "(Ljava/lang/String;I[I)Z",
+            false);
+        mv.visitInsn(IRETURN);
+        break;
+      case MATCH_RESULT:
+        mv.visitVarInsn(ILOAD, startVar);
+        mv.visitMethodInsn(
+            INVOKEVIRTUAL,
+            "com/datadoghq/reggie/runtime/ReggieMatcher",
+            "findMatchFrom",
+            "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
+            false);
+        mv.visitInsn(ARETURN);
+        break;
+      default:
+        throw new IllegalStateException(successShape.toString());
+    }
+  }
+
+  /**
+   * Generates the fallback support: {@code fb} / {@code fbCount} fields, the lazy {@code fb()}
+   * (parse-at-overflow: this.pattern -> RegexParser -> ThompsonBuilder -> PikeVMMatcher, cold path,
+   * once per matcher instance — keeps the generated constructor signature identical across the dual
+   * paths), and the observable {@code fallbackCount()}.
+   */
+  public void generateFallbackSupport(ClassWriter cw, String className) {
+    String internal = className.replace('.', '/');
+    cw.visitField(ACC_PRIVATE, "fb", "Lcom/datadoghq/reggie/runtime/ReggieMatcher;", null, null);
+    cw.visitField(ACC_PRIVATE, "fbCount", "J", null, null);
+
+    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "fallbackCount", "()J", null, null);
+    mv.visitCode();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(GETFIELD, internal, "fbCount", "J");
+    mv.visitInsn(LRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+
+    mv =
+        cw.visitMethod(
+            ACC_PRIVATE, "fb", "()Lcom/datadoghq/reggie/runtime/ReggieMatcher;", null, null);
+    mv.visitCode();
+    Label done = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(GETFIELD, internal, "fb", "Lcom/datadoghq/reggie/runtime/ReggieMatcher;");
+    mv.visitJumpInsn(IFNONNULL, done);
+    // fb = new PikeVMMatcher(new ThompsonBuilder().build(new RegexParser().parse(pattern),
+    // groupCount), pattern)
+    mv.visitVarInsn(ALOAD, 0);
+    // NEW+DUP keeps the fallback ref under the construction operands: <init> pops the top
+    // [dup, NFA, pattern] (void — pushes nothing back), then PUTFIELD consumes [this, init].
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/PikeVMMatcher");
+    mv.visitInsn(DUP);
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/codegen/parsing/RegexParser");
+    mv.visitInsn(DUP);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, "com/datadoghq/reggie/codegen/parsing/RegexParser", "<init>", "()V", false);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(GETFIELD, internal, "pattern", "Ljava/lang/String;");
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        "com/datadoghq/reggie/codegen/parsing/RegexParser",
+        "parse",
+        "(Ljava/lang/String;)Lcom/datadoghq/reggie/codegen/ast/RegexNode;",
+        false);
+    mv.visitVarInsn(ASTORE, 1); // scratch local for the AST
+    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/codegen/automaton/ThompsonBuilder");
+    mv.visitInsn(DUP);
+    mv.visitMethodInsn(
+        INVOKESPECIAL,
+        "com/datadoghq/reggie/codegen/automaton/ThompsonBuilder",
+        "<init>",
+        "()V",
+        false);
+    mv.visitVarInsn(ALOAD, 1);
+    pushInt(mv, groupCount);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        "com/datadoghq/reggie/codegen/automaton/ThompsonBuilder",
+        "build",
+        "(Lcom/datadoghq/reggie/codegen/ast/RegexNode;I)Lcom/datadoghq/reggie/codegen/automaton/NFA;",
+        false);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(GETFIELD, internal, "pattern", "Ljava/lang/String;");
+    mv.visitMethodInsn(
+        INVOKESPECIAL,
+        "com/datadoghq/reggie/runtime/PikeVMMatcher",
+        "<init>",
+        "(Lcom/datadoghq/reggie/codegen/automaton/NFA;Ljava/lang/String;)V",
+        false);
+    mv.visitFieldInsn(PUTFIELD, internal, "fb", "Lcom/datadoghq/reggie/runtime/ReggieMatcher;");
+    mv.visitLabel(done);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitFieldInsn(GETFIELD, internal, "fb", "Lcom/datadoghq/reggie/runtime/ReggieMatcher;");
+    mv.visitInsn(ARETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
@@ -593,13 +957,13 @@ public class DeterministicChainBytecodeGenerator {
    * end is not a valid {@code $} position: non-multiline = region end only; multiline = region end
    * or immediately before a line terminator (LF, CR, NEL, LS, PS — the JDK's set).
    */
-  private void emitEndAnchorCheck(EmitCtx ctx, Label failTarget) {
+  private void emitEndAnchorCheck(EmitCtx ctx, Label failTarget, boolean multilineEnd) {
     MethodVisitor mv = ctx.mv;
     Label ok = new Label();
     mv.visitVarInsn(ILOAD, ctx.posVar);
     mv.visitVarInsn(ILOAD, ctx.lenVar);
     mv.visitJumpInsn(IF_ICMPEQ, ok);
-    if (branch.multilineEnd) {
+    if (multilineEnd) {
       // pos < len here: check charAt(pos) against the JDK line-terminator set.
       mv.visitVarInsn(ALOAD, ctx.inputVar);
       mv.visitVarInsn(ILOAD, ctx.posVar);
@@ -976,7 +1340,7 @@ public class DeterministicChainBytecodeGenerator {
         mv.visitJumpInsn(IF_ICMPNE, tailFail);
         break;
       case END_ANCHOR:
-        emitEndAnchorCheck(ctx, tailFail);
+        emitEndAnchorCheck(ctx, tailFail, ctx.lazyMultiline);
         break;
     }
     mv.visitJumpInsn(GOTO, loopDone);
