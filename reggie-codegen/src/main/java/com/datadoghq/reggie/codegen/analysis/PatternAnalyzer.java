@@ -9782,10 +9782,16 @@ public class PatternAnalyzer {
       // boundaries when the union first-set intersects the remainder). Every other quantified
       // group shape stays outside the family.
       GroupNode g = (GroupNode) inner;
+      // Greedy * / + over a transparent alternation group only — a higher-min LOOP_ALT
+      // ((?:...){100,}, the QueryObfuscator ssh-key shape) measured 2.3x SLOWER on find and ~275x
+      // slower on no-match than the BitState fast-reject it would displace (the giant keyword
+      // alternation's union first-set almost never rejects a scan position, so every position
+      // pays a full branch try; workspace-jb 2026-09-02, /tmp/reggie-v2beta-results.json). SQL's
+      // shapes are all * / + and measured 30-37x FASTER than JDK — the bound keeps the wins and
+      // returns the one regressed pattern to its best engine.
       if (q.greedy
           && q.max == -1
-          && q.min >= 0
-          && q.min <= MAX_CHAIN_LOOP_BOUND
+          && (q.min == 0 || q.min == 1)
           && !g.capturing
           && !g.atomic
           && g.child instanceof AlternationNode) {

@@ -135,9 +135,12 @@ class IastPatternRoutingTest {
   @Test
   void queryObfuscatorRoutesToBitstateCapture() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         analyze(QUERY_OBFUSCATOR).strategy,
-        "QUERY_OBFUSCATOR routes to the deterministic chain (v2-beta: LOOP_ALT escapes, bounded"
-            + " {13}/{36}/{100,} loops, mid-seq ALT_CHAIN)");
+        "QUERY_OBFUSCATOR stays on BitState: the chain routed it after v2-beta, but the giant"
+            + " keyword alternation's union first-set almost never rejects a scan position and the"
+            + " chain measured 2.3x slower on find / ~275x on no-match than BitState's"
+            + " fast-reject (workspace-jb 2026-09-02) — the {100,} LOOP_ALT admission was bounded"
+            + " back to * / + and the pattern declines again");
   }
 }

@@ -344,33 +344,34 @@ class DeterministicChainV2BetaBytecodeTest {
   }
 
   @Test
-  void queryObfuscatorFullParity() throws Exception {
+  void queryObfuscatorDeclinesForScanCost() throws Exception {
+    // The full QueryObfuscator pattern chain-routed after v2-beta EXCEPT for the ssh-key branch's
+    // (?:...){100,} LOOP_ALT: the higher-min LOOP_ALT admission measured 2.3x slower on find and
+    // ~275x slower on no-match than the BitState fast-reject it displaced (the giant keyword
+    // alternation's union first-set almost never rejects a scan position, so every position pays
+    // a full branch try; workspace-jb 2026-09-02). The admission is bounded back to * / + — the
+    // pattern declines and BitState keeps it. SQL's shapes are all * / + and measured 30-37x
+    // FASTER than JDK, so the bound keeps every win.
     String p =
-        "(?i)(?:(?:\"|%22)?)(?:(?:old[-_]?|new[-_]?)?p(?:ass)?w(?:or)?d(?:1|2)?"
+        "(?i)(?:(?:\\\"|%22)?)(?:(?:old[-_]?|new[-_]?)?p(?:ass)?w(?:or)?d(?:1|2)?"
             + "|pass(?:[-_]?phrase)?|secret"
             + "|(?:api[-_]?|private[-_]?|public[-_]?|access[-_]?|secret[-_]?|app(?:lication)?[-_]?)"
             + "key(?:[-_]?id)?"
             + "|token|consumer[-_]?(?:id|key|secret)|sign(?:ed|ature)?|auth(?:entication|orization)?)"
             + "(?:(?:\\s|%20)*(?:=|%3D)[^&]+"
-            + "|(?:\"|%22)(?:\\s|%20)*(?::|%3A)(?:\\s|%20)*(?:\"|%22)(?:%2[^2]|%[^2]|[^\"%])+(?:\"|%22))"
+            + "|(?:\\\"|%22)(?:\\s|%20)*(?::|%3A)(?:\\s|%20)*(?:\\\"|%22)(?:%2[^2]|%[^2]|[^\\\"%])+"
+            + "(?:\\\"|%22))"
             + "|(?:bearer(?:\\s|%20)+[a-z0-9._\\-]+"
             + "|token(?::|%3A)[a-z0-9]{13}"
             + "|gh[opsu]_[0-9a-zA-Z]{36}"
             + "|-{5}BEGIN(?:[a-z\\s]|%20)+PRIVATE(?:\\s|%20)KEY-{5}[^\\-]+-{5}END(?:[a-z\\s]|%20)"
-            + "+PRIVATE(?:\\s|%20)KEY(?:-{5})?(?:\\n|%0A)?)";
-    Compiled c = compileChain(p);
-    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(p);
-    assertFullParity(c, jdk, "password=hunter2&user=bob");
-    assertFullParity(c, jdk, "x?old_password%3Dsecret%20stuff&y=1");
-    assertFullParity(c, jdk, "api-key: \"abc%2Fdef\"");
-    assertFullParity(c, jdk, "consumer_secret=xyz");
-    assertFullParity(c, jdk, "authorization=Bearer");
-    assertFullParity(c, jdk, "bearer abc.def-ghi");
-    assertFullParity(c, jdk, "token:0123456789abcd");
-    assertFullParity(c, jdk, "ghp_" + "Ab1".repeat(12));
-    assertFullParity(c, jdk, "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----");
-    assertFullParity(c, jdk, "q=\"pass : %2Fx\"&r=1");
-    assertFullParity(c, jdk, "nothing=here");
-    assertFullParity(c, jdk, "");
+            + "+PRIVATE(?:\\s|%20)KEY(?:-{5})?(?:\\n|%0A)?"
+            + "|(?:ssh-(?:rsa|dss)|ecdsa-[a-z0-9]+-[a-z0-9]+)(?:\\s|%20|%09)+"
+            + "(?:[a-z0-9/.+]|%2F|%5C|%2B){100,}(?:=|%3D)*"
+            + "(?:(?:\\s|%20|%09)+[a-z0-9._-]+)?)";
+    RegexNode ast = new RegexParser().parse(p);
+    assertNull(
+        new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0)).detectDeterministicChain(ast),
+        "the {100,} LOOP_ALT declines; BitState keeps QueryObfuscator");
   }
 }
