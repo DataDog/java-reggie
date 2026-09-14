@@ -4180,6 +4180,14 @@ public class PatternAnalyzer {
       }
     }
 
+    // \b/\B word-boundary anchors in prefix/suffix are silently dropped by the generator
+    // (emitPrefixNode treats all AnchorNode as zero-width no-ops; the suffix is never emitted).
+    // Decline so the pattern falls through to OPTIMIZED_NFA_WITH_BACKREFS, which evaluates \b
+    // correctly. START/STRING_START and END/STRING_END are handled via hasStartAnchor/hasEndAnchor.
+    if (containsWordBoundaryAnchor(prefix) || containsWordBoundaryAnchor(suffix)) {
+      return null;
+    }
+
     // Groups whose content is a LiteralNode (e.g. (a*), (b+)) have their charset extracted as
     // CharSet.ANY by the fallthrough in extractGroupCharSet, so the generator would accept any
     // character instead of restricting to the literal. Nullable such groups (min=0 or nullable
@@ -4276,6 +4284,42 @@ public class PatternAnalyzer {
     if (node instanceof AlternationNode) {
       for (RegexNode alt : ((AlternationNode) node).alternatives) {
         if (containsBackrefToGroup(alt, groupNumber)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the node list contains a {@code WORD_BOUNDARY} or {@code NON_WORD_BOUNDARY}
+   * anchor. The VARIABLE_CAPTURE_BACKREF generator silently drops these (treats all anchors as
+   * zero-width no-ops), so patterns containing them must be declined.
+   */
+  private static boolean containsWordBoundaryAnchor(List<RegexNode> nodes) {
+    for (RegexNode node : nodes) {
+      if (containsWordBoundaryAnchor(node)) return true;
+    }
+    return false;
+  }
+
+  private static boolean containsWordBoundaryAnchor(RegexNode node) {
+    if (node instanceof AnchorNode) {
+      AnchorNode a = (AnchorNode) node;
+      return a.type == AnchorNode.Type.WORD_BOUNDARY || a.type == AnchorNode.Type.NON_WORD_BOUNDARY;
+    }
+    if (node instanceof GroupNode g) {
+      return containsWordBoundaryAnchor(g.child);
+    }
+    if (node instanceof QuantifierNode q) {
+      return containsWordBoundaryAnchor(q.child);
+    }
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (containsWordBoundaryAnchor(child)) return true;
+      }
+    }
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (containsWordBoundaryAnchor(alt)) return true;
       }
     }
     return false;

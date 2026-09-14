@@ -243,11 +243,14 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testSpecializedBackrefRepeatedWord() throws Exception {
-    // The \b anchors sit outside the group/backref span, which PINNED_BACKREFERENCE now rejects
-    // (its generated matcher has no code path to evaluate anything outside that span), so this
-    // falls through to VARIABLE_CAPTURE_BACKREF instead.
+    // The \b anchors sit outside the group/backref span, which PINNED_BACKREFERENCE rejects
+    // (its generated matcher has no code path to evaluate anything outside that span).
+    // VARIABLE_CAPTURE_BACKREF also declines: its generator silently drops \b anchors
+    // (treats all AnchorNode as zero-width no-ops), producing false positives. Falls through
+    // to SPECIALIZED_BACKREFERENCE (detectSimpleBackreference catches it), which evaluates \b
+    // correctly.
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\b(\\w+)\\s+\\1\\b");
-    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.SPECIALIZED_BACKREFERENCE, result.strategy);
   }
 
   // ── VARIABLE_CAPTURE_BACKREF ─────────────────────────────────────────────
@@ -456,10 +459,11 @@ class StrategySelectionExtendedTest {
   @Test
   void testPinnedBackrefRepeatedWordShape() throws Exception {
     // \w+ content disjoint from \s+ separator - proven single forward-scan boundary - but the
-    // \b anchors sit outside the group/backref span, which PINNED_BACKREFERENCE now rejects, so
-    // it falls through to VARIABLE_CAPTURE_BACKREF instead.
+    // \b anchors sit outside the group/backref span, which PINNED_BACKREFERENCE rejects, and
+    // VARIABLE_CAPTURE_BACKREF declines (\b silently dropped → false positives). Falls through
+    // to SPECIALIZED_BACKREFERENCE.
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\b(\\w+)\\s+\\1\\b");
-    assertEquals(PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.SPECIALIZED_BACKREFERENCE, result.strategy);
   }
 
   @Test
