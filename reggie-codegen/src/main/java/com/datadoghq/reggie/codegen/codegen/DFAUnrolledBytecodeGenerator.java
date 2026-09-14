@@ -112,6 +112,7 @@ public class DFAUnrolledBytecodeGenerator {
   private final boolean hasStringEndAbsoluteAnchor;
   private final boolean
       skipEagerAssertionGroupCapture; // True when assertion groups conflict with regular groups
+  private final boolean requiresEndAnchor; // True only if ALL accepting states need an end anchor
 
   public DFAUnrolledBytecodeGenerator(DFA dfa) {
     this(dfa, 0, false, null);
@@ -138,6 +139,7 @@ public class DFAUnrolledBytecodeGenerator {
     this.hasStringStartAnchor = (nfa != null) && nfa.hasStringStartAnchor();
     this.hasStringEndAnchor = (nfa != null) && nfa.hasStringEndAnchor();
     this.hasStringEndAbsoluteAnchor = (nfa != null) && nfa.hasStringEndAbsoluteAnchor();
+    this.requiresEndAnchor = computeRequiresEndAnchor();
     this.skipEagerAssertionGroupCapture = computeSkipEagerAssertionGroupCapture();
   }
 
@@ -903,6 +905,62 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitLabel(validPosition);
     }
 
+    // OPTIMIZATION: End-anchor last-char filter — if ALL accepting states require an end
+    // anchor ($, \Z, \z), the match must end at end-of-input or before a trailing newline.
+    // The last consuming char before the anchor must be in the valid-last-chars set. If the
+    // char at the match-end position doesn't match, no match is possible — return -1.
+    // This is checked ONCE before the scan loop, not per-position.
+    if (requiresEndAnchor && !hasMultilineEnd && !dfa.getStartState().accepting) {
+      CharSet validLastChars = computeValidLastChars();
+      if (validLastChars != null) {
+        // The match can end at two positions:
+        // 1. len (end of input): last consuming char is charAt(len-1)
+        // 2. len-1 (before trailing \n, only for $ and \Z): last consuming char is charAt(len-2)
+        // If neither position has a valid last char, return -1.
+        Label lastCharOk = new Label();
+        // Case 1: charAt(len-1) is a valid last char
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 3); // len
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+        mv.visitVarInsn(ISTORE, 5);
+        generateFirstCharFilterCheck(mv, validLastChars, 5, lastCharOk);
+        // Case 2: charAt(len-1) == '\n' and charAt(len-2) is a valid last char
+        // (only for $ (END) and \Z (STRING_END), not \z (STRING_END_ABSOLUTE))
+        if (hasEndAnchor || hasStringEndAnchor) {
+          Label notNewline = new Label();
+          Label tooShort = new Label();
+          // Check len >= 2
+          mv.visitVarInsn(ILOAD, 3);
+          pushInt(mv, 2);
+          mv.visitJumpInsn(IF_ICMPLT, tooShort);
+          // Check charAt(len-1) == '\n'
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, 3);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          pushInt(mv, '\n');
+          mv.visitJumpInsn(IF_ICMPNE, notNewline);
+          // Check charAt(len-2) is a valid last char
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, 3);
+          pushInt(mv, 2);
+          mv.visitInsn(ISUB);
+          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+          mv.visitVarInsn(ISTORE, 5);
+          generateFirstCharFilterCheck(mv, validLastChars, 5, lastCharOk);
+          mv.visitLabel(notNewline);
+          mv.visitLabel(tooShort);
+        }
+        // Neither position has a valid last char — no match possible
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(lastCharOk);
+      }
+    }
+
     // OPTIMIZATION: First char skip - if char at tryPos cannot start a match, skip
     if (validFirstChars != null && !dfa.getStartState().accepting) {
       Label canStartMatch = new Label();
@@ -1004,6 +1062,72 @@ public class DFAUnrolledBytecodeGenerator {
         result = cs;
       } else {
         result = result.union(cs);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Returns true when every accepting DFA state has an end-class anchor condition (END, STRING_END,
+   * STRING_END_ABSOLUTE, END_MULTILINE). When true, the match must end at a $-valid position
+   * (end-of-input or before a trailing newline), so the findFrom loop can use a last-char filter to
+   * skip positions where the match can't end at a valid position.
+   */
+  private boolean computeRequiresEndAnchor() {
+    boolean anyAccepting = false;
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (state.accepting) {
+        anyAccepting = true;
+        if (state.acceptanceAnchorConditions.isEmpty()) {
+          return false; // accepting without end anchor — match can end anywhere
+        }
+        for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+          if (!isEndClass(a)) {
+            return false; // has a non-end anchor condition
+          }
+        }
+      }
+    }
+    return anyAccepting;
+  }
+
+  private static boolean isEndClass(NFA.AnchorType a) {
+    return a == NFA.AnchorType.END
+        || a == NFA.AnchorType.STRING_END
+        || a == NFA.AnchorType.STRING_END_ABSOLUTE
+        || a == NFA.AnchorType.END_MULTILINE;
+  }
+
+  /**
+   * Computes the set of characters that can be the last consuming character before reaching an
+   * end-anchored accepting state. Used by the findFrom last-char filter: if the char at the
+   * match-end position is not in this set, no match is possible and findFrom returns -1
+   * immediately.
+   */
+  private CharSet computeValidLastChars() {
+    CharSet result = null;
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.accepting) continue;
+      if (state.acceptanceAnchorConditions.isEmpty()) continue;
+      boolean endClassOnly = true;
+      for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+        if (!isEndClass(a)) {
+          endClassOnly = false;
+          break;
+        }
+      }
+      if (!endClassOnly) continue;
+      // Find all transitions INTO this accepting state and union their CharSets.
+      for (DFA.DFAState src : dfa.getAllStates()) {
+        for (Map.Entry<CharSet, DFA.DFATransition> entry : src.transitions.entrySet()) {
+          if (entry.getValue().target == state) {
+            if (result == null) {
+              result = entry.getKey();
+            } else {
+              result = result.union(entry.getKey());
+            }
+          }
+        }
       }
     }
     return result;
