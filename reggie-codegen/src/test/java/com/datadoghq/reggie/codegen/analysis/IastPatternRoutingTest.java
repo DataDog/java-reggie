@@ -133,14 +133,14 @@ class IastPatternRoutingTest {
   }
 
   @Test
-  void queryObfuscatorRoutesToBitstateCapture() throws Exception {
+  void queryObfuscatorRoutesToDfaTable() throws Exception {
+    // QUERY_OBFUSCATOR now routes to DFA_TABLE: the altWithAcceptingTransFlag guard
+    // was refined to only block when dfaHasPriorityConflictTransition is true (actual
+    // priority conflict from different-length alternatives). QO's alternation has no
+    // priority conflict, so the DFA fast path is safe and significantly faster.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         analyze(QUERY_OBFUSCATOR).strategy,
-        "QUERY_OBFUSCATOR stays on BitState: the chain routed it after v2-beta, but the giant"
-            + " keyword alternation's union first-set almost never rejects a scan position and the"
-            + " chain measured 2.3x slower on find / ~275x on no-match than BitState's"
-            + " fast-reject (workspace-jb 2026-09-02) — the {100,} LOOP_ALT admission was bounded"
-            + " back to * / + and the pattern declines again");
+        "QUERY_OBFUSCATOR routes to DFA_TABLE (no priority conflict, DFA is safe)");
   }
 }

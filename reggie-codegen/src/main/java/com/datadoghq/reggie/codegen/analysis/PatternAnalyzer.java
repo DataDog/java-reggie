@@ -1544,14 +1544,12 @@ public class PatternAnalyzer {
       // (the dilution fallback target) shares the old find() anchor bug.
       boolean altWithAcceptingTransFlag =
           containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa);
-      // When ignoreGroupCount=true (hybrid mode), the DFA serves only boolean
-      // matching (matches/find); alternation priority affects match boundaries
-      // only when there's an actual priority conflict (different-length alternatives
-      // where a lower-priority thread can select a longer match). The DFA's
-      // hasPriorityConflictTransition flag detects this precisely. Patterns with
-      // same-length alternatives (e.g. (abc|def|...)+) have no conflict and can
-      // safely use the DFA fast path.
-      if (ignoreGroupCount && altWithAcceptingTransFlag) {
+      // Alternation priority affects match boundaries only when there's an actual
+      // priority conflict (different-length alternatives where a lower-priority thread
+      // can select a longer match). The DFA's hasPriorityConflictTransition flag detects
+      // this precisely. Patterns without conflicts (same-length alternatives, or branches
+      // that can't co-occur at the same position) can safely use the DFA fast path.
+      if (altWithAcceptingTransFlag) {
         altWithAcceptingTransFlag = dfaHasPriorityConflictTransition(dfa);
       }
       addTrace(
@@ -2140,6 +2138,33 @@ public class PatternAnalyzer {
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state.accepting && state.hasPriorityConflictTransition) {
         return true;
+      }
+      // Also check for END-anchor accepts with outgoing transitions: the $ branch
+      // can match (empty) while a consuming branch continues, creating a priority
+      // conflict that hasPriorityConflictTransition misses (it excludes END-class
+      // anchors from acceptRankForPriorityCut).
+      if (state.accepting && !state.transitions.isEmpty()) {
+        for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+          if (a == NFA.AnchorType.END
+              || a == NFA.AnchorType.STRING_END
+              || a == NFA.AnchorType.END_MULTILINE) {
+            return true;
+          }
+        }
+      }
+    }
+    // Also check for START anchors in alternation: when requiresStartAnchor is
+    // false but the NFA has ^/\A, the DFA drops the START anchor condition,
+    // causing the DFA to accept at all positions instead of only position 0.
+    // This creates a priority conflict (^ branch matches at pos 0, other branches
+    // continue consuming) that the DFA mishandles.
+    if (nfa != null
+        && !nfa.requiresStartAnchor()
+        && (nfa.hasStartAnchor() || nfa.hasStringStartAnchor())) {
+      for (DFA.DFAState state : dfa.getAllStates()) {
+        if (state.accepting && !state.transitions.isEmpty()) {
+          return true;
+        }
       }
     }
     return false;
