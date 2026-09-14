@@ -1544,6 +1544,16 @@ public class PatternAnalyzer {
       // (the dilution fallback target) shares the old find() anchor bug.
       boolean altWithAcceptingTransFlag =
           containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa);
+      // When ignoreGroupCount=true (hybrid mode), the DFA serves only boolean
+      // matching (matches/find); alternation priority affects match boundaries
+      // only when there's an actual priority conflict (different-length alternatives
+      // where a lower-priority thread can select a longer match). The DFA's
+      // hasPriorityConflictTransition flag detects this precisely. Patterns with
+      // same-length alternatives (e.g. (abc|def|...)+) have no conflict and can
+      // safely use the DFA fast path.
+      if (ignoreGroupCount && altWithAcceptingTransFlag) {
+        altWithAcceptingTransFlag = dfaHasPriorityConflictTransition(dfa);
+      }
       addTrace(
           "containsAlternation && dfaHasAcceptingStateWithTransitions", altWithAcceptingTransFlag);
       if (altWithAcceptingTransFlag) {
@@ -1563,7 +1573,7 @@ public class PatternAnalyzer {
         return r;
       }
 
-      if (FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
+      if (!ignoreGroupCount && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
         // DFA cannot track per-iteration spans; PIKEVM_CAPTURE handles capturing groups correctly.
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
@@ -2120,7 +2130,22 @@ public class PatternAnalyzer {
   }
 
   /**
-   * Returns true when any accepting DFA state with outgoing transitions has {@link
+   * Returns true if any accepting DFA state has {@link DFA.DFAState#hasPriorityConflictTransition},
+   * meaning a lower-priority consuming thread can fire and select a longer match over the accept.
+   * In hybrid mode (ignoreGroupCount=true), the DFA uses untagged longest-match semantics for
+   * boolean matching, which diverges from JDK leftmost-first when a priority conflict exists.
+   * Patterns without conflicts (same-length alternatives) are safe.
+   */
+  private boolean dfaHasPriorityConflictTransition(DFA dfa) {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (state.accepting && state.hasPriorityConflictTransition) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * DFA.DFAState#acceptIsPriorityCut} set to {@code false}. When this is true, the generator's
    * longest-match semantics cannot be corrected by the priority-cut flag alone — the consuming
    * thread(s) with higher priority than the accept thread may or may not succeed at runtime, and
