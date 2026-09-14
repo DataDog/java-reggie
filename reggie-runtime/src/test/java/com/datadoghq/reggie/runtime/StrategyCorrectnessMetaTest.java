@@ -112,9 +112,11 @@ public class StrategyCorrectnessMetaTest {
             List.of("<b>hi</b>", "x<b>hi</b>y", "<b>hi</i>", "", "<b>héllo</b>")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS,
-        new Spec(
-            "(?=[a-z]+\\d)(?=\\w+!).*end",
-            List.of("abc1!end", "x abc1!end", "abcend", "", "abc1!énd")));
+        // Groups inside the lookaheads keep this off the DFA-with-assertions gate ladder (gate
+        // admission is groupless-patterns-only) and in the fusion tier; the old representative
+        // (?=[a-z]+\d)(?=\w+!).*end now routes to DFA_UNROLLED_WITH_ASSERTIONS via the
+        // sub-DFA gate.
+        new Spec("(?=(a+z))(?=(b+q))x", List.of("aazbbqx", "aazq", "abx", "", "azbq")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS,
         new Spec(
@@ -225,12 +227,17 @@ public class StrategyCorrectnessMetaTest {
         new Spec("(a|b)c\\1", List.of("aca", "x bcb y", "acb", "", "acaé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
-        new Spec("a(?!\\d+x).*b", List.of("ab", "x ayb y", "a1xb", "", "aéb")));
+        // A lookahead inside an alternation branch is NFA-only (the B11 guard: per-thread
+        // assertion isolation), so the gate ladder never takes it. The old representative
+        // a(?!\d+x).*b now routes to DFA_UNROLLED_WITH_ASSERTIONS via the sub-DFA gate.
+        new Spec("((?=\\d+)x|y)", List.of("1x", "y", "ax", "2x", "")));
     m.put(
         PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD,
-        new Spec(
-            "(?=\\w+@).*@example.com",
-            List.of("u@example.com", "x u@example.com", "u@other.com", "", "ü@example.com")));
+        // A group inside the variable-width lookahead keeps the pattern off the sub-DFA gate
+        // ladder (gate admission is groupless-only), landing in the hybrid tier. The old
+        // representative (?=\w+@).*@example.com now routes to DFA_UNROLLED_WITH_ASSERTIONS via
+        // the gate.
+        new Spec("(?=(\\w+@)).*x", List.of("a@x", "a @x", "@x", "", "a@y")));
     // RECURSIVE_DESCENT: subroutine/conditional/branch-reset forms are not expressible in
     // java.util.regex, so they cannot be cross-checked. This backtracking-for-groups form
     // (a([bc]*)(c+d)) also routes to RECURSIVE_DESCENT and IS JDK-expressible, giving a valid

@@ -1214,6 +1214,18 @@ public class SubsetConstructor {
    * @throws UnsupportedOperationException if assertions are not fixed-width
    */
   public DFA buildDFAWithAssertions(NFA nfa) throws StateExplosionException {
+    return buildDFAWithAssertions(nfa, false);
+  }
+
+  /**
+   * @param literalTierCandidate true when the caller (PatternAnalyzer) determined the pattern has
+   *     >=2 literal-extractable lookaheads and SPECIALIZED_LITERAL_LOOKAHEADS would take it if this
+   *     build threw. The sub-DFA gate admission declines for such patterns (the gate's
+   *     per-candidate scan loses to the intrinsified indexOf), reproducing the pre-gate routing.
+   */
+  public DFA buildDFAWithAssertions(NFA nfa, boolean literalTierCandidate)
+      throws StateExplosionException {
+    this.literalTierCandidate = literalTierCandidate;
     this.stateCache = new HashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
@@ -1364,8 +1376,32 @@ public class SubsetConstructor {
           }
           check = new AssertionCheck(type, result.charSets, 0, result.groups);
         } else {
-          throw new UnsupportedOperationException(
-              "Complex assertion patterns not yet supported in DFA mode");
+          // Fixed-width extraction failed. For a LOOKAHEAD whose body carries no groups, anchors
+          // or nested assertions, fall back to a sub-DFA gate: compile the assertion body to its
+          // own DFA and evaluate it as an anchored run from the assertion position (scan until
+          // the gate DFA accepts or dies; {1,64}-style bodies die at their bound, \w+ at the
+          // first non-word char). The check attaches to this assertion state as usual, so it
+          // fires once at every position where the main DFA walk enters it (for a leading
+          // assertion: once per candidate start).
+          // Gate admission is groupless-patterns-only: the gate runs on the DFA-with-assertions
+          // ladder, whose tagged-capture machinery does not track body groups correctly behind a
+          // variable-width assertion (e.g. (?=.*b)(a+)b mis-spans group 1 on the ladder). Grouped
+          // patterns keep their pre-gate routing (hybrid/NFA), which handles captures.
+          if (literalTierCandidate) {
+            throw new UnsupportedOperationException(
+                "Literal-indexOf tier candidate: the sub-DFA gate declines so"
+                    + " SPECIALIZED_LITERAL_LOOKAHEADS keeps the pattern");
+          }
+          if (nfa.getGroupCount() == 0
+              && (state.assertionType == NFA.AssertionType.POSITIVE_LOOKAHEAD
+                  || state.assertionType == NFA.AssertionType.NEGATIVE_LOOKAHEAD)) {
+            check =
+                new AssertionCheck(convertAssertionType(state.assertionType), buildGateDfa(state));
+          } else {
+            throw new UnsupportedOperationException(
+                "Complex lookbehind assertion not supported in DFA mode (lookbehinds peek"
+                    + " backwards and cannot be evaluated by a forward sub-DFA run)");
+          }
         }
 
         // Attach the assertion to the assertion NFA state itself so it fires only
@@ -1379,6 +1415,79 @@ public class SubsetConstructor {
     }
 
     return map;
+  }
+
+  /**
+   * Gate-DFA size cap: a gate is scanned once per candidate start, so pathological assertion bodies
+   * (state explosion) stay out and keep the old routing.
+   */
+  private static final int MAX_GATE_DFA_STATES = 1000;
+
+  /**
+   * Set by buildDFAWithAssertions(nfa, true): decline gates for literal-indexOf-tier candidates.
+   */
+  private boolean literalTierCandidate = false;
+
+  /**
+   * Builds the gate DFA for a variable-width lookahead assertion: the assertion body's NFA
+   * fragment, subset-constructed on its own. Throws {@link UnsupportedOperationException} for
+   * bodies this gate form must not evaluate (capturing groups need boundary tracking the gate does
+   * not do; anchors and nested assertions need the main-construction's anchor machinery, which
+   * plain {@link #buildDFA} does not apply to a bare fragment).
+   */
+  private DFA buildGateDfa(NFA.NFAState assertionState) {
+    if (assertionState.assertionStartState == null
+        || assertionState.assertionAcceptStates == null
+        || assertionState.assertionAcceptStates.isEmpty()) {
+      throw new UnsupportedOperationException("Malformed assertion for gate DFA");
+    }
+    List<NFA.NFAState> fragment = collectReachableStates(assertionState.assertionStartState);
+    for (NFA.NFAState st : fragment) {
+      if (st.enterGroup != null || st.exitGroup != null) {
+        throw new UnsupportedOperationException("Capturing group in variable-width lookahead");
+      }
+      if (st.anchor != null) {
+        throw new UnsupportedOperationException("Anchor in variable-width lookahead");
+      }
+      if (st.assertionType != null) {
+        throw new UnsupportedOperationException("Nested assertion in variable-width lookahead");
+      }
+    }
+    NFA subNfa =
+        new NFA(
+            fragment, assertionState.assertionStartState, assertionState.assertionAcceptStates, 0);
+    DFA gateDfa;
+    try {
+      gateDfa = new SubsetConstructor().buildDFA(subNfa);
+    } catch (StateExplosionException | UnsupportedOperationException e) {
+      throw new UnsupportedOperationException(
+          "Lookahead body not DFA-compilable for gate: " + e.getMessage());
+    }
+    if (gateDfa.getStateCount() > MAX_GATE_DFA_STATES) {
+      throw new UnsupportedOperationException(
+          "Gate DFA too large: " + gateDfa.getStateCount() + " states");
+    }
+    return gateDfa;
+  }
+
+  /** All NFA states reachable from {@code start} (including itself), BFS order. */
+  private static List<NFA.NFAState> collectReachableStates(NFA.NFAState start) {
+    List<NFA.NFAState> order = new ArrayList<>();
+    Set<NFA.NFAState> visited = new HashSet<>();
+    Deque<NFA.NFAState> work = new ArrayDeque<>();
+    work.add(start);
+    visited.add(start);
+    while (!work.isEmpty()) {
+      NFA.NFAState cur = work.poll();
+      order.add(cur);
+      for (NFA.Transition t : cur.getTransitions()) {
+        if (visited.add(t.target)) work.add(t.target);
+      }
+      for (NFA.NFAState t : cur.getEpsilonTransitions()) {
+        if (visited.add(t)) work.add(t);
+      }
+    }
+    return order;
   }
 
   /**

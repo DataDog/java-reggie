@@ -606,7 +606,17 @@ public class PatternAnalyzer {
         // Attempt DFA construction - will throw UnsupportedOperationException
         // if assertions are too complex (not simple literals)
         SubsetConstructor constructor = new SubsetConstructor();
-        DFA dfa = constructor.buildDFAWithAssertions(nfa);
+        // literalTierCandidate: the pattern has >=2 literal-extractable lookaheads and would be
+        // taken by SPECIALIZED_LITERAL_LOOKAHEADS (intrinsified indexOf) if the ladder threw.
+        // Passing it lets the ladder's sub-DFA gates decline (SubsetConstructor throws), so the
+        // gate never preempts the indexOf tier on the (?=.*foo)(?=.*bar).*baz shapes - the
+        // gate's per-candidate char-loop scan loses to String.indexOf there.
+        boolean literalTierCandidate = false;
+        List<LiteralLookaheadInfo> literalTierLookaheads = extractLiteralLookaheads();
+        if (literalTierLookaheads != null && literalTierLookaheads.size() >= 2) {
+          literalTierCandidate = true;
+        }
+        DFA dfa = constructor.buildDFAWithAssertions(nfa, literalTierCandidate);
 
         // Success! Assertions are simple literals, use DFA.
         // However, when a lookahead appears inside a capturing group, the DFA path

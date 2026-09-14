@@ -25,6 +25,7 @@ import com.datadoghq.reggie.codegen.automaton.NFA;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.objectweb.asm.ClassWriter;
@@ -285,7 +286,12 @@ public class DFAUnrolledBytecodeGenerator {
     // still tried when the lookahead fails mid-match.
     boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
     for (AssertionCheck assertion : state.assertionChecks) {
-      if (assertion.isLookbehind() || !state.accepting) {
+      // Gate-form lookaheads are entry guards even on accepting states: the assertion anchors at
+      // the state's entry position (start-anchored for a leading assertion), which is NOT the
+      // match-end position the deferred acceptance block evaluates at. Deferring them would drop
+      // the assertion for every longer match (e.g. (?=.*a)(?=.*b).*: the gates sit on the
+      // accepting start state and never fire once the .* walk consumes input).
+      if (assertion.isGateDfa() || assertion.isLookbehind() || !state.accepting) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
@@ -334,7 +340,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitLabel(endOfInput);
     if (state.accepting) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        if (assertion.isLookahead()) {
+        if (assertion.isLookahead() && !assertion.isGateDfa()) {
           generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
         }
       }
@@ -369,12 +375,95 @@ public class DFAUnrolledBytecodeGenerator {
    *
    * <p>For lookahead: peek at current position For lookbehind: peek backward (not implemented yet)
    */
+  /**
+   * Emits the sub-DFA gate for a variable-width lookahead (AssertionCheck gate form): an inline
+   * anchored walk of the gate DFA starting at the current position. Positive lookahead: the gate
+   * passes when the gate DFA reaches an accepting state (scan-death fails); negative lookahead is
+   * inverted (scan-death passes). The walk never consumes the caller's position variable - it
+   * advances its own copy in {@code gatePosSlot}.
+   *
+   * <p>Context parameterization: {@code boundVar} is the scan limit ({@code -1} = the input's
+   * length, String only); {@code charSeqInput} selects {@code CharSequence.charAt} (bounded
+   * contexts receive a CharSequence) vs {@code String.charAt}; the two scratch slots are supplied
+   * by the caller because the fixed-slot paths (bounded/greedy) have no allocator.
+   */
+  private void generateGateDfaCheckInto(
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int peekStartVar,
+      int boundVar,
+      boolean charSeqInput,
+      int gatePosSlot,
+      int gateChSlot,
+      Label assertionFailed) {
+    DFA gate = assertion.gateDfa;
+    boolean positive = assertion.isPositive();
+    Label gatePassed = new Label();
+    Label gateAccept = positive ? gatePassed : assertionFailed;
+    Label gateDead = positive ? assertionFailed : gatePassed;
+
+    mv.visitVarInsn(ILOAD, peekStartVar);
+    mv.visitVarInsn(ISTORE, gatePosSlot);
+
+    List<DFA.DFAState> states = gate.getAllStates();
+    Map<DFA.DFAState, Label> labels = new HashMap<>();
+    for (DFA.DFAState st : states) {
+      labels.put(st, new Label());
+    }
+    mv.visitJumpInsn(GOTO, labels.get(gate.getStartState()));
+
+    for (DFA.DFAState st : states) {
+      mv.visitLabel(labels.get(st));
+      // Accepting gate state: the lookahead body matched (anchored at the peek start) - the
+      // lookahead's decision point (existence semantics: no need to try longer gate matches).
+      if (st.accepting) {
+        mv.visitJumpInsn(GOTO, gateAccept);
+        continue;
+      }
+      // gatePos >= scan bound: scan exhausted without acceptance.
+      mv.visitVarInsn(ILOAD, gatePosSlot);
+      if (boundVar >= 0) {
+        mv.visitVarInsn(ILOAD, boundVar);
+      } else {
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      }
+      mv.visitJumpInsn(IF_ICMPGE, gateDead);
+      // ch = input.charAt(gatePos); gatePos++
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, gatePosSlot);
+      if (charSeqInput) {
+        mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true);
+      } else {
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      }
+      mv.visitVarInsn(ISTORE, gateChSlot);
+      mv.visitIincInsn(gatePosSlot, 1);
+      for (Map.Entry<CharSet, DFA.DFATransition> entry : st.transitions.entrySet()) {
+        Label nextCheck = new Label();
+        generateCharSetCheck(mv, entry.getKey(), gateChSlot, nextCheck);
+        mv.visitJumpInsn(GOTO, labels.get(entry.getValue().target));
+        mv.visitLabel(nextCheck);
+      }
+      // No transition: gate DFA died.
+      mv.visitJumpInsn(GOTO, gateDead);
+    }
+    mv.visitLabel(gatePassed);
+  }
+
   private void generateAssertionCheck(
       MethodVisitor mv,
       AssertionCheck assertion,
       int posVar,
       Label assertionFailed,
       LocalVarAllocator allocator) {
+    if (assertion.isGateDfa()) {
+      int gatePosSlot = allocator.allocate();
+      int gateChSlot = allocator.allocate();
+      generateGateDfaCheckInto(
+          mv, assertion, posVar, -1, false, gatePosSlot, gateChSlot, assertionFailed);
+      return;
+    }
     if (assertion.isLookahead()) {
       // Lookahead: peek at current position + offset
       if (assertion.isLiteral) {
@@ -2067,7 +2156,8 @@ public class DFAUnrolledBytecodeGenerator {
     boolean hasLookaheadOnAccepting = false;
     boolean needsAssertionFailedLabel = false;
     for (AssertionCheck assertion : state.assertionChecks) {
-      if (assertion.isLookbehind() || !state.accepting) {
+      // Gate form: entry guard even on accepting states (see generateStateCode).
+      if (assertion.isGateDfa() || assertion.isLookbehind() || !state.accepting) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
         needsAssertionFailedLabel = true;
       } else {
@@ -2087,7 +2177,7 @@ public class DFAUnrolledBytecodeGenerator {
       if (hasLookaheadOnAccepting) {
         Label skipRecord = new Label();
         for (AssertionCheck assertion : state.assertionChecks) {
-          if (assertion.isLookahead()) {
+          if (assertion.isLookahead() && !assertion.isGateDfa()) {
             generateAssertionCheck(mv, assertion, posVar, skipRecord, allocator);
           }
         }
@@ -2566,6 +2656,13 @@ public class DFAUnrolledBytecodeGenerator {
       int endVar,
       int startVar,
       Label assertionFailed) {
+    if (assertion.isGateDfa()) {
+      // Fixed-slot context (bounded methods have no allocator): slots 8/9 are scratch here
+      // (0=this, 1=input, 2=start, 3=end, 4=pos, 5=transition ch, 6/7=lookbehind scratch).
+      // Peek bound is the region end, consistent with the fixed-width bounded checks below.
+      generateGateDfaCheckInto(mv, assertion, posVar, endVar, true, 8, 9, assertionFailed);
+      return;
+    }
     if (assertion.isLookahead()) {
       if (assertion.isLiteral) {
         String literal = assertion.literal;
@@ -2631,6 +2728,56 @@ public class DFAUnrolledBytecodeGenerator {
           mv.visitJumpInsn(GOTO, assertionFailed);
           mv.visitLabel(assertionPassed);
         }
+      } else {
+        // charSets-form lookahead (e.g. (?=[A-Z][0-9]), or a quantified body existence-collapsed
+        // to a single charSet by extractFromAssertion, e.g. (?=\d+) -> [\d]). Mirrors the greedy
+        // emitter's charSets-lookahead branch with the region end as the bound and
+        // CharSequence.charAt. (This branch was previously missing - a charSets lookahead was
+        // silently skipped here, dropping the assertion from matchesBounded entirely.)
+        boolean positive = assertion.isPositive();
+        int chVar = 7; // slot 7: ch (slots 5=transition ch, 6=lookbehind checkPos)
+        Label mismatch = new Label();
+        Label assertionPassed = new Label();
+
+        for (int i = 0; i < assertion.charSets.size(); i++) {
+          // Bounds check: if (pos + i >= end) goto assertionFailed/Passed
+          mv.visitVarInsn(ILOAD, posVar);
+          if (i > 0) {
+            pushInt(mv, i);
+            mv.visitInsn(IADD);
+          }
+          mv.visitVarInsn(ILOAD, endVar);
+          if (positive) {
+            mv.visitJumpInsn(IF_ICMPGE, assertionFailed);
+          } else {
+            mv.visitJumpInsn(IF_ICMPGE, assertionPassed);
+          }
+
+          // ch = input.charAt(pos + i)
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          if (i > 0) {
+            pushInt(mv, i);
+            mv.visitInsn(IADD);
+          }
+          mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true);
+          mv.visitVarInsn(ISTORE, chVar);
+
+          generateCharSetCheck(mv, assertion.charSets.get(i), chVar, mismatch);
+        }
+
+        // All sets matched: positive passes, negative fails
+        if (positive) {
+          mv.visitJumpInsn(GOTO, assertionPassed);
+        } else {
+          mv.visitJumpInsn(GOTO, assertionFailed);
+        }
+
+        mv.visitLabel(mismatch);
+        if (positive) {
+          mv.visitJumpInsn(GOTO, assertionFailed);
+        }
+        mv.visitLabel(assertionPassed);
       }
     } else if (assertion.isLookbehind()) {
       int width = assertion.width;
@@ -3012,6 +3159,13 @@ public class DFAUnrolledBytecodeGenerator {
    */
   private void generateGreedyAssertionCheck(
       MethodVisitor mv, AssertionCheck assertion, int posVar, int lenVar, Label assertionFailed) {
+    if (assertion.isGateDfa()) {
+      // Fixed-slot context (findBoundsFrom greedy scan): slots 12/13 are scratch here
+      // (0=this, 1=input, 2=start, 3=bounds, 4=matchStart, 5=pos, 6=lastAccepting, 7=len,
+      // 9/10=lookbehind scratch, 11=lookahead ch). Scan bound is len, matching the literal checks.
+      generateGateDfaCheckInto(mv, assertion, posVar, lenVar, false, 12, 13, assertionFailed);
+      return;
+    }
     if (assertion.isLookahead()) {
       if (assertion.isLiteral) {
         String literal = assertion.literal;

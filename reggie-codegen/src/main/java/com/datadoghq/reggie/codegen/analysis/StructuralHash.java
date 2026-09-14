@@ -182,6 +182,12 @@ public final class StructuralHash {
       hash = mult * hash + state.assertionChecks.size();
       for (var ac : state.assertionChecks) {
         hash = mult * hash + ac.type.ordinal();
+        if (ac.isGateDfa()) {
+          // Sub-DFA gate form: fold the gate DFA's own topology (its states carry no assertions
+          // by construction - SubsetConstructor rejects groups/anchors/nested assertions in
+          // gate bodies - so this recursion terminates).
+          hash = mult * hash + computeDFATopologyHash(ac.gateDfa, mult);
+        }
         hash = mult * hash + (ac.literal != null ? ac.literal.hashCode() : 0);
         hash = mult * hash + ac.offset;
         hash = mult * hash + ac.width;
