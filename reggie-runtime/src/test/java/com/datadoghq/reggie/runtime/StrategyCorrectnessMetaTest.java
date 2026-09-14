@@ -177,9 +177,8 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(a|b|c|d|e|f|g)(h|i|j|k|l|m)(n|o|p|q|r)(s|t|u|v)",
             List.of("ahns", "x bios y", "aaaa", "", "ahnsé")));
-    // (?:[a-z][0-9]){150} is now intercepted by COUNTING_GLUSHKOV before DFA construction.
-    // Use a leading literal to prevent extractSingleQuantifier from matching, so the pattern
-    // falls through to DFA construction (302 states → DFA_TABLE).
+    // (?:[a-z][0-9]){150} now also routes to DFA_TABLE (301 states < 2000 threshold).
+
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         new Spec(
@@ -190,12 +189,16 @@ public class StrategyCorrectnessMetaTest {
                 "x" + "a0".repeat(149),
                 "",
                 "xa0é")));
-    // (?:[a-z][0-9]){150}: top-level bounded repeat with group-free body → COUNTING_GLUSHKOV.
+    // (?:[a-z][0-9]){150}: 301 DFA states < 2000 → DFA_TABLE.
     m.put(
-        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
+        PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         new Spec(
             "(?:[a-z][0-9]){150}",
             List.of("a0".repeat(150), "x" + "a0".repeat(150) + "y", "a0".repeat(149), "", "a0é")));
+    // (?:[a-z][0-9]){1000}: 2001 DFA states >= 2000 threshold → COUNTING_GLUSHKOV.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
+        new Spec("(?:[a-z][0-9]){1000}", List.of("a0".repeat(1000), "a0".repeat(999), "", "a0é")));
     // Large DFA (513 states) but small NFA (<=63 positions) → bit-parallel Glushkov simulation.
     m.put(
         PatternAnalyzer.MatchingStrategy.BITPARALLEL_GLUSHKOV,

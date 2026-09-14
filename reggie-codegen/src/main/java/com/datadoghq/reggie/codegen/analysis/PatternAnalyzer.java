@@ -8740,6 +8740,21 @@ public class PatternAnalyzer {
 
     if (base.positionCount > 1 && (base.accept & base.initial) != 0) return null;
 
+    // When the estimated DFA state count is small enough, DFA_TABLE or DFA_SWITCH
+    // is significantly faster than the counting Glushkov simulation (2 array lookups
+    // per char vs 3+ bit operations). The DFA for (?:body){n} has ~n * positionCount + 1
+    // states. Skip COUNTING_GLUSHKOV when the DFA would fit in DFA_SWITCH_STATE_LIMIT
+    // states, letting the DFA path handle it.
+    if (q.max != -1) {
+      int estimatedDfaStates = q.max * base.positionCount + 1;
+      // DFA_TABLE is faster than counting Glushkov for small DFAs (2 array lookups
+      // vs 3+ bit ops per char). Skip when the DFA fits in L1 cache (~2000 states
+      // * classes * 4 bytes = ~16KB).
+      if (estimatedDfaStates < 2000) {
+        return null;
+      }
+    }
+
     return new CountingGlushkovInfo(base, q.min, q.max);
   }
 

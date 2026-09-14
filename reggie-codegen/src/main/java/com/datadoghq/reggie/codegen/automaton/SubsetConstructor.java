@@ -45,12 +45,12 @@ public class SubsetConstructor {
    * @throws StateExplosionException if DFA has too many states
    */
   public DFA buildDFA(NFA nfa, boolean computeTags) throws StateExplosionException {
-    this.stateCache = new HashMap<>();
+    this.stateCache = new LinkedHashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
     this.anchorConditionDiluted = false;
     this.captureAmbiguous = false;
-    this.dfaStateOrdering = new HashMap<>();
+    this.dfaStateOrdering = new LinkedHashMap<>();
 
     // Pre-compute anchor-aware epsilon closures for all NFA states. Each entry maps a reachable
     // NFA state to the weakest conjunction of anchors that must hold at the current input
@@ -1226,7 +1226,7 @@ public class SubsetConstructor {
   public DFA buildDFAWithAssertions(NFA nfa, boolean literalTierCandidate)
       throws StateExplosionException {
     this.literalTierCandidate = literalTierCandidate;
-    this.stateCache = new HashMap<>();
+    this.stateCache = new LinkedHashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
     this.anchorConditionDiluted = false;

@@ -162,27 +162,27 @@ public final class SWARUtils {
    */
   private static boolean containsHexDigit(long chunk) {
     // Check for digits 0-9 (0x30-0x39)
-    long digitsLow = chunk - 0x3030303030303030L; // Subtract '0'
-    long digitsHigh = chunk - 0x3A3A3A3A3A3A3A3AL; // Subtract '9' + 1
-    long digits = (~digitsLow & digitsHigh) & SWAR_0x80;
+    long digitsLow = chunk + (SWAR_0x80 - 0x3030303030303030L);
+    long digitsHigh = 0x3A3A3A3A3A3A3A3AL + (SWAR_0x80 - chunk);
+    long digits = digitsLow & digitsHigh & SWAR_0x80;
 
     if (digits != 0) {
       return true;
     }
 
     // Check for lowercase a-f (0x61-0x66)
-    long lowerLow = chunk - 0x6161616161616161L; // Subtract 'a'
-    long lowerHigh = chunk - 0x6767676767676767L; // Subtract 'f' + 1
-    long lower = (~lowerLow & lowerHigh) & SWAR_0x80;
+    long lowerLow = chunk + (SWAR_0x80 - 0x6161616161616161L);
+    long lowerHigh = 0x6767676767676767L + (SWAR_0x80 - chunk);
+    long lower = lowerLow & lowerHigh & SWAR_0x80;
 
     if (lower != 0) {
       return true;
     }
 
     // Check for uppercase A-F (0x41-0x46)
-    long upperLow = chunk - 0x4141414141414141L; // Subtract 'A'
-    long upperHigh = chunk - 0x4747474747474747L; // Subtract 'F' + 1
-    long upper = (~upperLow & upperHigh) & SWAR_0x80;
+    long upperLow = chunk + (SWAR_0x80 - 0x4141414141414141L);
+    long upperHigh = 0x4747474747474747L + (SWAR_0x80 - chunk);
+    long upper = upperLow & upperHigh & SWAR_0x80;
 
     return upper != 0;
   }
@@ -212,17 +212,13 @@ public final class SWARUtils {
    * @return true if all 8 bytes are in range
    */
   public static boolean allBytesInRange(long chunk, int low, int high) {
-    // Check: byte >= low  =>  (byte - low) has high bit clear
-    long aboveLow = chunk - (SWAR_0x01 * low);
-
-    // Check: byte <= high  =>  (high - byte) has high bit clear
-    long belowHigh = (SWAR_0x01 * high) - chunk;
-
-    // Byte is in range when BOTH high bits are clear (neither underflow occurred)
-    // aboveLow has high bit SET when byte < low, belowHigh has high bit SET when byte > high
-    // All 8 bytes are in range when all high bits of inverted OR are set
-    long bothValid = ~(aboveLow | belowHigh) & SWAR_0x80;
-
+    // SWAR range check with 0x80 offset to prevent inter-byte borrow propagation.
+    // Per byte: (b + 0x80 - low) has high bit SET when b >= low.
+    // Per byte: (high + 0x80 - b) has high bit SET when b <= high.
+    // Both high bits set means b is in [low, high].
+    long aboveLow = chunk + (SWAR_0x80 - SWAR_0x01 * low);
+    long belowHigh = (SWAR_0x01 * high) + (SWAR_0x80 - chunk);
+    long bothValid = aboveLow & belowHigh & SWAR_0x80;
     return bothValid == SWAR_0x80;
   }
 
@@ -251,15 +247,9 @@ public final class SWARUtils {
       long chunk = getLong(bytes, pos);
 
       // Check: byte >= low  =>  (byte - low) has high bit clear
-      long aboveLow = chunk - lowBroadcast;
-
-      // Check: byte <= high  =>  (high - byte) has high bit clear
-      long belowHigh = highBroadcast - chunk;
-
-      // Byte is in range when BOTH high bits are clear (neither underflow occurred)
-      // aboveLow has high bit SET when byte < low, belowHigh has high bit SET when byte > high
-      // So invert the OR to find bytes where NEITHER condition has a set high bit
-      long inRange = ~(aboveLow | belowHigh) & SWAR_0x80;
+      long aboveLow = chunk + (SWAR_0x80 - lowBroadcast);
+      long belowHigh = highBroadcast + (SWAR_0x80 - chunk);
+      long inRange = aboveLow & belowHigh & SWAR_0x80;
 
       if (inRange != 0) {
         // Found at least one byte in range - locate exact position
@@ -382,14 +372,9 @@ public final class SWARUtils {
       long chunk = getLong(bytes, pos);
 
       // Check: byte >= low  =>  (byte - low) has high bit clear
-      long aboveLow = chunk - lowBroadcast;
-
-      // Check: byte <= high  =>  (high - byte) has high bit clear
-      long belowHigh = highBroadcast - chunk;
-
-      // A byte is NOT in range if aboveLow OR belowHigh has its high bit set
-      // (i.e., b < low or b > high caused a borrow in subtraction)
-      long notInRange = (aboveLow | belowHigh) & SWAR_0x80;
+      long aboveLow = chunk + (SWAR_0x80 - lowBroadcast);
+      long belowHigh = highBroadcast + (SWAR_0x80 - chunk);
+      long notInRange = (~aboveLow | ~belowHigh) & SWAR_0x80;
 
       if (notInRange != 0) {
         // Found at least one byte not in range - locate exact position
@@ -453,10 +438,9 @@ public final class SWARUtils {
 
       // Check each range and OR the results
       for (int i = 0; i < rangeCount; i++) {
-        long aboveLow = chunk - lowBroadcasts[i];
-        long belowHigh = highBroadcasts[i] - chunk;
-        // Byte is in range when BOTH high bits are clear
-        long inThisRange = ~(aboveLow | belowHigh) & SWAR_0x80;
+        long aboveLow = chunk + (SWAR_0x80 - lowBroadcasts[i]);
+        long belowHigh = highBroadcasts[i] + (SWAR_0x80 - chunk);
+        long inThisRange = aboveLow & belowHigh & SWAR_0x80;
         matchAny |= inThisRange;
       }
 
