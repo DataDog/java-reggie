@@ -65,13 +65,50 @@ import org.objectweb.asm.MethodVisitor;
  * </ul>
  */
 public class FixedSequenceBytecodeGenerator {
+  /**
+   * Maximum literal length for the pure-literal specialization. Guards the class-file constant pool
+   * (UTF-8 constant entries are capped at 65535 bytes; a non-Latin-1 char takes up to 3).
+   */
+  private static final int MAX_PURE_LITERAL_LENGTH = 4096;
+
   private final FixedSequenceInfo info;
   private final int groupCount;
+
+  /**
+   * Non-null when every element is a plain literal with no group tags and no word-boundary anchors:
+   * the whole pattern is a fixed string, so findFrom is exactly {@code input.indexOf(literal,
+   * start)} (a substring hit at {@code idx} implies the full fixed-length match) and matches is
+   * exactly {@code input.equals(literal)}. Both delegate to HotSpot SIMD intrinsics, which dominate
+   * per-char unrolled comparison for long literals like {@code (?:abc){100}}.
+   */
+  private final String pureLiteral;
 
   public FixedSequenceBytecodeGenerator(FixedSequenceInfo info, int nfaGroupCount) {
     this.info = info;
     // Use the group count from pattern analysis, which tracks groups in the sequence
     this.groupCount = info.groupCount;
+    this.pureLiteral = computePureLiteral(info);
+  }
+
+  /** The whole sequence as a single literal string, or null when not all-literal/tagless. */
+  private static String computePureLiteral(FixedSequenceInfo info) {
+    if (info.groupCount != 0
+        || info.leadingBoundary != null
+        || info.trailingBoundary != null
+        || info.totalLength == -1
+        || info.elements.size() != info.totalLength
+        || info.totalLength < 2
+        || info.totalLength > MAX_PURE_LITERAL_LENGTH) {
+      return null;
+    }
+    StringBuilder sb = new StringBuilder(info.elements.size());
+    for (SequenceElement elem : info.elements) {
+      if (!(elem instanceof LiteralElement) || elem.getGroupNumber() != -1) {
+        return null;
+      }
+      sb.append(((LiteralElement) elem).ch);
+    }
+    return sb.toString();
   }
 
   /**
@@ -92,6 +129,16 @@ public class FixedSequenceBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
     mv.visitLabel(notNull);
+
+    // Pure literal: the whole pattern is one string - String.equals is an arrayEquals
+    // intrinsic, far cheaper than the unrolled per-char comparison below.
+    if (pureLiteral != null) {
+      mv.visitLdcInsn(pureLiteral);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+      mv.visitInsn(IRETURN);
+    }
 
     // If fixed length, check input.length() == expectedLength
     if (info.totalLength != -1) {
@@ -577,6 +624,19 @@ public class FixedSequenceBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, 2);
     mv.visitLabel(startNotNeg);
+
+    // Pure literal: findFrom is exactly String.indexOf(literal, start). A substring hit at
+    // idx implies the full fixed-length literal is present starting at idx (indexOf never
+    // matches past the end), and there are no other constraints (no groups, no boundaries),
+    // so idx is the match start. indexOf is a HotSpot SIMD intrinsic.
+    if (pureLiteral != null) {
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitLdcInsn(pureLiteral);
+      mv.visitVarInsn(ILOAD, 2); // start (clamped above)
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "indexOf", "(Ljava/lang/String;I)I", false);
+      mv.visitInsn(IRETURN);
+    }
 
     // int len = input.length();
     int lenVar = allocator.allocate();
