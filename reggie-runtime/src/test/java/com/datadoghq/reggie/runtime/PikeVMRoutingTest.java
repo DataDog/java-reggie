@@ -237,23 +237,22 @@ class PikeVMRoutingTest {
 
   @Test
   void dollarInAlternation_routesToPikevm() throws Exception {
-    // $|[^c]{1}: $ anchor in alternation — now routes to DFA_UNROLLED because the DFA
-    // handles end-anchor-leading alternation branches via charset narrowing to line
-    // terminators (SubsetConstructor#narrowEndGuardedCharset) and the fixed END entry
-    // guard in the codegen. Previously routed to BITSTATE_CAPTURE (B3b).
+    // $|[^c]{1}: bare $ in alternation — bare $ (zero-width) vs [^c] (1 char) is a
+    // priority conflict (DFA longest-match prefers [^c], JDK first-alternative prefers $).
+    // Routes to BITSTATE_CAPTURE via B3b (hasBareEndAnchorLeadingInAlternation).
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED,
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("$|[^c]{1}"),
-        "$|[^c]{1} now routes to DFA_UNROLLED (end-anchor alternation handled by DFA)");
+        "$|[^c]{1} must route to BITSTATE_CAPTURE (bare $ in alternation)");
   }
 
   @Test
   void dollarInAlternationAlt_routesToPikevm() throws Exception {
-    // $|[^0]{1}: $ anchor in alternation — now routes to DFA_UNROLLED (see above).
+    // $|[^0]{1}: same shape as above.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.DFA_UNROLLED,
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         StrategyCorrectnessMetaTest.routeOf("$|[^0]{1}"),
-        "$|[^0]{1} now routes to DFA_UNROLLED (end-anchor alternation handled by DFA)");
+        "$|[^0]{1} must route to BITSTATE_CAPTURE (bare $ in alternation)");
   }
 
   // ── B6: FIXED_REPETITION_BACKREF declined when suffix is non-empty ──────────

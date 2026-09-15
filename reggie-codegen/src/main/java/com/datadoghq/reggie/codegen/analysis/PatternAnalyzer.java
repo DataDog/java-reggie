@@ -1052,7 +1052,8 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         boolean b3bCapFlag =
-            (hasStringEndAnchorInAlternation(ast)) && !dfaHasAcceptingStateWithTransitions(dfa);
+            (hasStringEndAnchorInAlternation(ast) || hasBareEndAnchorLeadingInAlternation(ast))
+                && !dfaHasAcceptingStateWithTransitions(dfa);
         addTrace("B3b: hasStringEndAnchorInAlternation", b3bCapFlag);
         if (b3bCapFlag) {
           // \Z in alternation with capturing groups: PIKEVM_CAPTURE handles anchors correctly.
@@ -1523,7 +1524,8 @@ public class PatternAnalyzer {
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
       boolean b3bFlag =
-          (hasStringEndAnchorInAlternation(ast)) && !dfaHasAcceptingStateWithTransitions(dfa);
+          (hasStringEndAnchorInAlternation(ast) || hasBareEndAnchorLeadingInAlternation(ast))
+              && !dfaHasAcceptingStateWithTransitions(dfa);
       addTrace("B3b: hasStringEndAnchorInAlternation", b3bFlag);
       if (b3bFlag) {
         // \Z in alternation with priority conflict: OPTIMIZED_NFA mishandles find() anchor
@@ -1912,6 +1914,52 @@ public class PatternAnalyzer {
     if (branch instanceof ConcatNode c && !c.children.isEmpty()) {
       return branchLeadsWithEndAnchor(c.children.get(0));
     }
+    return false;
+  }
+
+  /**
+   * Returns true if {@code branch} is exactly a bare end-anchor ({@code $}, {@code \Z}, {@code
+   * \z}), possibly wrapped in groups or optional quantifiers, but NOT followed by any consuming
+   * element in the same concatenation. This distinguishes {@code $|[^c]} (bare {@code $} —
+   * zero-width vs 1-char priority conflict) from {@code $[^a-zA-Z0-9]|^[0-9]} ({@code $} followed
+   * by a consumer — no empty-vs-nonempty conflict).
+   */
+  private static boolean branchIsBareEndAnchor(RegexNode branch) {
+    if (branch instanceof AnchorNode a) {
+      return a.type == AnchorNode.Type.END
+          || a.type == AnchorNode.Type.STRING_END
+          || a.type == AnchorNode.Type.STRING_END_ABSOLUTE;
+    }
+    if (branch instanceof GroupNode g) return branchIsBareEndAnchor(g.child);
+    if (branch instanceof QuantifierNode q) return branchIsBareEndAnchor(q.child);
+    if (branch instanceof ConcatNode c) {
+      return c.children.size() == 1 && branchIsBareEndAnchor(c.children.get(0));
+    }
+    return false;
+  }
+
+  /**
+   * Like {@link #hasEndAnchorLeadingInAlternationBranch} but only returns true when the end-anchor
+   * is bare (not followed by a consumer in the same branch). Used by B3b to distinguish {@code
+   * $|[^c]} (bare {@code $} — needs PIKEVM) from {@code $[^a-zA-Z0-9]|^[0-9]} ({@code $} followed
+   * by consumer — safe for DFA via charset narrowing).
+   */
+  private static boolean hasBareEndAnchorLeadingInAlternation(RegexNode node) {
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (branchIsBareEndAnchor(alt)) return true;
+        if (hasBareEndAnchorLeadingInAlternation(alt)) return true;
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (hasBareEndAnchorLeadingInAlternation(child)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode g) return hasBareEndAnchorLeadingInAlternation(g.child);
+    if (node instanceof QuantifierNode q) return hasBareEndAnchorLeadingInAlternation(q.child);
     return false;
   }
 
