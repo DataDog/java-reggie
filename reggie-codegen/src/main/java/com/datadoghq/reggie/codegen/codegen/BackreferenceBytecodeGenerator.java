@@ -1068,7 +1068,17 @@ public class BackreferenceBytecodeGenerator {
 
     // Continue loop
     mv.visitLabel(continueLoop);
+    // Skip to end of scanned word (word1EndVar) to avoid re-checking every char inside
+    // the word for boundary status. Advance at least 1 to handle empty-word case.
+    mv.visitVarInsn(ILOAD, word1EndVar);
+    mv.visitVarInsn(ILOAD, startVar);
+    Label useWordEnd = new Label();
+    mv.visitJumpInsn(IF_ICMPGT, useWordEnd);
     mv.visitIincInsn(startVar, 1);
+    mv.visitJumpInsn(GOTO, loopStart);
+    mv.visitLabel(useWordEnd);
+    mv.visitVarInsn(ILOAD, word1EndVar);
+    mv.visitVarInsn(ISTORE, startVar);
     mv.visitJumpInsn(GOTO, loopStart);
 
     mv.visitLabel(loopEnd);
