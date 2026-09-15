@@ -54,6 +54,7 @@ import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator
 import com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.SuffixSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.util.Map;
@@ -390,6 +391,22 @@ public class ReggieMatcherBytecodeGenerator {
         fixedGen.generateFindMatchMethod(cw, getJavaClassName());
         fixedGen.generateFindMatchFromMethod(cw, getJavaClassName());
         fixedGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+        break;
+
+      case SPECIALIZED_SUFFIX_SEQUENCE:
+        PatternAnalyzer.SuffixSequenceInfo suffixInfo =
+            (PatternAnalyzer.SuffixSequenceInfo) result.patternInfo;
+        SuffixSequenceBytecodeGenerator suffixGen =
+            new SuffixSequenceBytecodeGenerator(suffixInfo, nfa.getGroupCount());
+        suffixGen.generateMatchesMethod(cw, getJavaClassName());
+        suffixGen.generateFindMethod(cw, getJavaClassName());
+        suffixGen.generateFindFromMethod(cw, getJavaClassName());
+        suffixGen.generateMatchMethod(cw, getJavaClassName());
+        suffixGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+        suffixGen.generateMatchBoundedMethod(cw, getJavaClassName());
+        suffixGen.generateFindMatchMethod(cw, getJavaClassName());
+        suffixGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        suffixGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;
 
       case SPECIALIZED_BOUNDED_QUANTIFIERS:

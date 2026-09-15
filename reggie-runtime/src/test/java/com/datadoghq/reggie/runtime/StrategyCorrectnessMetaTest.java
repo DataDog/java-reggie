@@ -95,6 +95,9 @@ public class StrategyCorrectnessMetaTest {
             "\\d{3}-\\d{3}-\\d{4}",
             List.of("123-456-7890", "call 123-456-7890 now", "12-34-5678", "", "１23-456-7890")));
     m.put(
+        PatternAnalyzer.MatchingStrategy.SPECIALIZED_SUFFIX_SEQUENCE,
+        new Spec("\\.?0+$", List.of("ab.000", "000", "000\n", "ab0", "", "a\\.000")));
+    m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_BOUNDED_QUANTIFIERS,
         new Spec(
             "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}",

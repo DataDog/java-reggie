@@ -418,8 +418,10 @@ class StrategySelectionExtendedTest {
 
   @Test
   void testAnchoredTrailing() throws Exception {
+    // \w+$ is an unbounded class run anchored at $: the suffix backward scan takes it
+    // (was DFA_UNROLLED before SPECIALIZED_SUFFIX_SEQUENCE existed).
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\w+$");
-    assertEquals(PatternAnalyzer.MatchingStrategy.DFA_UNROLLED, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.SPECIALIZED_SUFFIX_SEQUENCE, result.strategy);
   }
 
   // ── detectHTMLTagPattern ─────────────────────────────────────────────────

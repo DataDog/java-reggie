@@ -807,6 +807,17 @@ public class PatternAnalyzer {
           MatchingStrategy.SPECIALIZED_FIXED_SEQUENCE, null, fixedInfo, false, requiredLiterals);
     }
 
+    // Check for suffix-anchored run patterns (\.?0+$, \s+$): greedy backward scan from the
+    // anchor end. Checked before the DFA ladder because the forward candidate loop walks the
+    // trailing run once per first-char candidate; the admission (trailing unbounded run
+    // required, optional-literal-only prefix) keeps current DFA winners (xyz#$, $, bounded
+    // reps) on their existing routes.
+    SuffixSequenceInfo suffixInfo = detectSuffixSequence(ast);
+    if (suffixInfo != null) {
+      return new MatchingStrategyResult(
+          MatchingStrategy.SPECIALIZED_SUFFIX_SEQUENCE, null, suffixInfo, false, requiredLiterals);
+    }
+
     // Check for bounded quantifier sequence patterns
     BoundedQuantifierInfo boundedInfo = detectBoundedQuantifierSequence(ast);
     if (boundedInfo != null) {
@@ -3516,6 +3527,8 @@ public class PatternAnalyzer {
     // (\d{3})-(\d+)-(\d{4})
     SPECIALIZED_CONCAT_GREEDY_GROUP, // Prefix + greedy group + suffix: a(b*), x(y*)z, foo(bar+)baz
     SPECIALIZED_FIXED_SEQUENCE, // Fixed-length sequences: \d{3}-\d{3}-\d{4}, \d{4}-\d{2}-\d{2}
+    SPECIALIZED_SUFFIX_SEQUENCE, // Optional literals + unbounded class run + $/\Z/\z: backward
+    // suffix scan
     SPECIALIZED_BOUNDED_QUANTIFIERS, // Bounded quantifier sequences:
     // \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3} (IPv4)
     SPECIALIZED_OPTIONAL_GROUP, // Single-literal optional group + single-literal suffix,
@@ -6967,6 +6980,97 @@ public class PatternAnalyzer {
   /**
    * Information about a fixed-length sequence pattern like \d{3}-\d{3}-\d{4} or \d{4}-\d{2}-\d{2}.
    */
+  /**
+   * Pattern info for SPECIALIZED_SUFFIX_SEQUENCE: a suffix-anchored run pattern like {@code \.?0+$}
+   * or {@code \s+$} - zero or more optional literal characters followed by an unbounded quantified
+   * single char-class run, anchored at end of input ($, \Z or \z).
+   *
+   * <p>Every match ends at an anchor end (input end, or before the final line terminator for $ and
+   * \Z), so {@code findFrom} is emitted as a greedy backward scan from the anchor end instead of
+   * the forward candidate loop: one pass over the trailing run instead of one walk per first-char
+   * candidate (the {@code \.?0+$} TrailingZeros benchmark lost 12-17% to the forward scan).
+   *
+   * <p>Admission keeps preceding elements optional-literal-only: mandatory elements would need run
+   * backtracking for leftmost correctness ({@code 00+$} on "000"), and all-optional prefixes give a
+   * contiguous valid-start range {@code [s, end - runMin]}.
+   */
+  public static class SuffixSequenceInfo implements PatternInfo {
+    /** Optional literals before the run, forward order (may be empty). */
+    public final List<SequenceElement> elements;
+
+    /** The trailing unbounded run's charset. */
+    public final CharSet runCharset;
+
+    /** Whether the run charset is negated ([^x]+$). */
+    public final boolean runNegated;
+
+    /** Minimum run length ({@code +} = 1, {@code *} = 0, {@code {n,}} = n). */
+    public final int runMin;
+
+    /** Trailing anchor: END ($), STRING_END (\Z) or STRING_END_ABSOLUTE (\z). */
+    public final AnchorNode.Type anchorType;
+
+    private final int hash;
+
+    public SuffixSequenceInfo(
+        List<SequenceElement> elements,
+        CharSet runCharset,
+        boolean runNegated,
+        int runMin,
+        AnchorNode.Type anchorType) {
+      this.elements = elements;
+      this.runCharset = runCharset;
+      this.runNegated = runNegated;
+      this.runMin = runMin;
+      this.anchorType = anchorType;
+      int h = runMin * 31 + anchorType.hashCode();
+      for (SequenceElement elem : elements) {
+        h = 31 * h + elem.hashCode();
+      }
+      this.hash = h;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (!(o instanceof SuffixSequenceInfo)) {
+        return false;
+      }
+      SuffixSequenceInfo other = (SuffixSequenceInfo) o;
+      return elements.equals(other.elements)
+          && runCharset.equals(other.runCharset)
+          && runNegated == other.runNegated
+          && runMin == other.runMin
+          && anchorType == other.anchorType;
+    }
+
+    @Override
+    public int hashCode() {
+      return hash;
+    }
+
+    @Override
+    public int structuralHashCode() {
+      // Fold the optional-literal prefix and the run shape; two patterns with the same
+      // suffix shape generate identical matcher classes.
+      int h = getClass().getName().hashCode();
+      h = 31 * h + runMin;
+      h = 31 * h + (runNegated ? 1 : 0);
+      h = 31 * h + anchorType.ordinal();
+      for (SequenceElement elem : elements) {
+        h =
+            31 * h
+                + (elem instanceof OptionalLiteralElement
+                    ? (int) ((OptionalLiteralElement) elem).ch
+                    : 0);
+      }
+      h = 31 * h + runCharset.getRanges().hashCode();
+      return h;
+    }
+  }
+
   public static class FixedSequenceInfo implements PatternInfo {
     public final List<SequenceElement> elements;
     public final int totalLength; // Total expected length (or -1 if has optional parts)
@@ -7882,6 +7986,80 @@ public class PatternAnalyzer {
    * Detect fixed-length sequence pattern: concatenation of fixed elements. Examples:
    * \d{3}-\d{3}-\d{4}, \d{4}-\d{2}-\d{2}, (\d{3})-(\d{3})-(\d{4})
    */
+  /**
+   * Detect suffix-anchored run patterns: {@code [optional literals] run $/\Z/\z} where the run is
+   * an unbounded quantified single char-class or single literal ({@code 0+}, {@code \s+}, {@code
+   * [0-9]{2,}}). The whole match is a suffix of the input, so a greedy backward scan from the
+   * anchor end replaces the forward candidate loop.
+   *
+   * <p>Declines: multiline $, lazy or possessive runs, bounded tail runs, mandatory elements before
+   * the run (their leftmost-correct backward extension needs run backtracking, see {@code 00+$} on
+   * "000"), groups, backreferences and any other node type.
+   */
+  private SuffixSequenceInfo detectSuffixSequence(RegexNode ast) {
+    if (!(ast instanceof ConcatNode)) {
+      return null;
+    }
+    List<RegexNode> children = ((ConcatNode) ast).children;
+    if (children.size() < 2) {
+      return null;
+    }
+    RegexNode last = children.get(children.size() - 1);
+    if (!(last instanceof AnchorNode)) {
+      return null;
+    }
+    AnchorNode anchor = (AnchorNode) last;
+    if (anchor.multiline
+        || (anchor.type != AnchorNode.Type.END
+            && anchor.type != AnchorNode.Type.STRING_END
+            && anchor.type != AnchorNode.Type.STRING_END_ABSOLUTE)) {
+      return null;
+    }
+    RegexNode runNode = children.get(children.size() - 2);
+    if (!(runNode instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode run = (QuantifierNode) runNode;
+    if (run.max != -1 || !run.greedy || run.possessive || run.min < 0) {
+      return null;
+    }
+    CharSet runCharset;
+    boolean runNegated;
+    if (run.child instanceof CharClassNode) {
+      CharClassNode charClass = (CharClassNode) run.child;
+      runCharset = charClass.chars;
+      runNegated = charClass.negated;
+    } else if (run.child instanceof LiteralNode) {
+      runCharset = CharSet.of(((LiteralNode) run.child).ch);
+      runNegated = false;
+    } else {
+      return null;
+    }
+    if (runCharset == null) {
+      return null;
+    }
+    List<SequenceElement> elements = new ArrayList<>();
+    for (int i = 0; i < children.size() - 2; i++) {
+      RegexNode child = children.get(i);
+      // Optional literals only: X? over a plain literal. Everything else declines -
+      // mandatory elements need run backtracking for leftmost correctness, and other
+      // quantified or grouped shapes are out of scope for the suffix scan.
+      if (child instanceof QuantifierNode) {
+        QuantifierNode quant = (QuantifierNode) child;
+        if (quant.min == 0
+            && quant.max == 1
+            && quant.greedy
+            && !quant.possessive
+            && quant.child instanceof LiteralNode) {
+          elements.add(new OptionalLiteralElement(((LiteralNode) quant.child).ch, -1));
+          continue;
+        }
+      }
+      return null;
+    }
+    return new SuffixSequenceInfo(elements, runCharset, runNegated, run.min, anchor.type);
+  }
+
   private FixedSequenceInfo detectFixedSequence(RegexNode ast) {
     List<SequenceElement> elements = new ArrayList<>();
     int[] groupCounter = {0}; // Mutable counter for group numbers

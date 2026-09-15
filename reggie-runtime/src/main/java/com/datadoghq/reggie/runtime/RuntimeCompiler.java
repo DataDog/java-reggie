@@ -72,6 +72,7 @@ import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator
 import com.datadoghq.reggie.codegen.codegen.QuantifiedGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.SuffixSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
@@ -1571,6 +1572,22 @@ public class RuntimeCompiler {
         fixedGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case SPECIALIZED_SUFFIX_SEQUENCE:
+        PatternAnalyzer.SuffixSequenceInfo suffixInfo =
+            (PatternAnalyzer.SuffixSequenceInfo) result.patternInfo;
+        SuffixSequenceBytecodeGenerator suffixGen =
+            new SuffixSequenceBytecodeGenerator(suffixInfo, nfa.getGroupCount());
+        suffixGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case SPECIALIZED_BOUNDED_QUANTIFIERS:
