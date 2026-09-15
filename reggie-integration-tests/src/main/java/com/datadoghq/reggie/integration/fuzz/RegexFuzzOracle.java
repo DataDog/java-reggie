@@ -17,6 +17,7 @@ package com.datadoghq.reggie.integration.fuzz;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.runtime.JavaRegexFallbackMatcher;
 import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import java.util.ArrayList;
@@ -98,6 +99,13 @@ public final class RegexFuzzOracle {
     } catch (Throwable t) {
       return Result.skipped(
           "Reggie rejected pattern: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+    }
+    // When Reggie delegates to java.util.regex, both engines are the JDK: the comparison is
+    // JDK-vs-JDK and agrees by construction, so it cannot surface a native-engine bug. Skip it.
+    // This also avoids exposing the oracle to JDK catastrophic backtracking (ReDoS) on patterns
+    // the native engine does not even attempt to handle.
+    if (reggie instanceof JavaRegexFallbackMatcher) {
+      return Result.skipped("Reggie JDK fallback — agrees by construction");
     }
     return compareAgainstJdk(jdk, pattern, input, reggie);
   }
