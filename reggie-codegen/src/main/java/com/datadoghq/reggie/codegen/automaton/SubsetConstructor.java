@@ -23,6 +23,20 @@ import java.util.*;
  */
 public class SubsetConstructor {
 
+  /**
+   * Characters that can appear immediately before an END/STRING_END anchor's match position and be
+   * consumed by a following consumer: {@code \n}, {@code \r}, NEL (U+0085), LS (U+2028), PS
+   * (U+2029). The {@code \r\n} two-char terminator is handled by the codegen guard (it checks
+   * {@code pos == end-2} with {@code \r\n}). Used to narrow transition charsets that cross an
+   * END/STRING_END guard — see {@link #narrowEndGuardedCharset}.
+   */
+  static final CharSet LINE_TERMINATORS =
+      CharSet.of('\n')
+          .union(CharSet.of('\r'))
+          .union(CharSet.of('\u0085'))
+          .union(CharSet.of('\u2028'))
+          .union(CharSet.of('\u2029'));
+
   private Map<Set<NFA.NFAState>, DFA.DFAState> stateCache;
   private List<DFA.DFAState> allStates;
   private int nextStateId;
@@ -191,19 +205,23 @@ public class SubsetConstructor {
           worklist.add(target);
         }
 
+        // Narrow charset for END/STRING_END-guarded consuming transitions to line terminators.
+        CharSet narrowedChars = narrowEndGuardedCharset(transitionGuard, chars);
+        if (narrowedChars == null) continue;
+
         // Compute tag operations if requested (Tagged DFA)
         if (computeTags && nfa.getGroupCount() > 0) {
           List<DFA.TagOperation> tagOps =
               computeTagOperations(
                   current.nfaStates,
                   targets,
-                  chars,
+                  narrowedChars,
                   flattenClosure(anchoredClosures),
                   nfa.getAcceptStates(),
                   target.acceptanceAnchorConditions);
-          current.addTransition(chars, target, tagOps, transitionGuard);
+          current.addTransition(narrowedChars, target, tagOps, transitionGuard);
         } else {
-          current.addTransition(chars, target, Collections.emptyList(), transitionGuard);
+          current.addTransition(narrowedChars, target, Collections.emptyList(), transitionGuard);
         }
       }
 
@@ -515,11 +533,25 @@ public class SubsetConstructor {
   private static boolean containsConsumeKillingAnchor(
       EnumSet<NFA.AnchorType> conds, CharSet chars) {
     if (conds.contains(NFA.AnchorType.STRING_END_ABSOLUTE)) return true;
-    if (conds.contains(NFA.AnchorType.END) || conds.contains(NFA.AnchorType.STRING_END)) {
-      // Allow only if chars is strictly {'\n'} — i.e., newline is the only character.
-      return !(chars.isSingleChar() && chars.getSingleChar() == '\n');
-    }
+    // END/STRING_END: the transition charset is narrowed to line terminators after the
+    // partition loop (see narrowEndGuardedCharset), so we no longer kill here.
     return false;
+  }
+
+  /**
+   * Narrow a transition charset when the guard contains END/STRING_END. A consuming transition that
+   * crosses an END/STRING_END anchor can only fire for line terminators at the end of input (the "$
+   * before terminal line terminator" path). Narrowing the charset to line terminators prevents the
+   * transition from firing for non-line-terminator chars, which the codegen guard would reject
+   * anyway. Returns {@code null} if the narrowed charset is empty (no valid consuming transition
+   * exists for this anchor).
+   */
+  private static CharSet narrowEndGuardedCharset(EnumSet<NFA.AnchorType> guard, CharSet chars) {
+    if (!guard.contains(NFA.AnchorType.END) && !guard.contains(NFA.AnchorType.STRING_END)) {
+      return chars;
+    }
+    CharSet narrowed = chars.intersection(LINE_TERMINATORS);
+    return narrowed.isEmpty() ? null : narrowed;
   }
 
   /**
@@ -1311,7 +1343,10 @@ public class SubsetConstructor {
           dfaStateConditions.put(targetState, targetsWithCond);
           worklist.add(targetState);
         }
-        current.addTransition(chars, targetState, Collections.emptyList(), transitionGuard);
+        CharSet narrowedChars2 = narrowEndGuardedCharset(transitionGuard, chars);
+        if (narrowedChars2 == null) continue;
+        current.addTransition(
+            narrowedChars2, targetState, Collections.emptyList(), transitionGuard);
       }
     }
 

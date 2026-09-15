@@ -3418,8 +3418,58 @@ public class DFASwitchBytecodeGenerator {
             break;
           }
         case END:
-        case STRING_END_ABSOLUTE:
         case STRING_END:
+          // $ / \Z before a consuming transition: the consumed char must be a line terminator
+          // at the end of input. After consuming, posVar == src_pos + 1.
+          // Case 1: src_pos == len-1 (line terminator at last position) → posVar == len.
+          //   CRLF guard: if the consumed char was '\n', the preceding char must not be '\r'.
+          // Case 2: src_pos == len-2 with \r\n → posVar == len-1, consumed '\r', next is '\n'.
+          {
+            Label ok = new Label();
+            Label checkCrlf = new Label();
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+            mv.visitJumpInsn(IF_ICMPEQ, checkCrlf);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+            pushInt(mv, '\r');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitJumpInsn(GOTO, ok);
+            mv.visitLabel(checkCrlf);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, ok);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitJumpInsn(IF_ICMPLT, ok);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitInsn(ISUB);
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+            pushInt(mv, '\r');
+            mv.visitJumpInsn(IF_ICMPEQ, skipTransition);
+            mv.visitLabel(ok);
+            break;
+          }
+        case STRING_END_ABSOLUTE:
         case END_MULTILINE:
           mv.visitJumpInsn(GOTO, skipTransition);
           break;

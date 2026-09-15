@@ -3935,13 +3935,61 @@ public class DFAUnrolledBytecodeGenerator {
           }
         case END:
         case STRING_END:
-          // $ / \Z allows a \n transition when the newline is the last char in the string.
-          // After consuming the char, posVar == src_pos + 1. The condition is src_pos == len-1,
-          // i.e. posVar == len. The charset already constrains the char to '\n'.
-          mv.visitVarInsn(ILOAD, posVar);
-          access.loadLength.run();
-          mv.visitJumpInsn(IF_ICMPNE, skipTransition);
-          break;
+          // $ / \Z before a consuming transition: the consumed char must be a line terminator
+          // at the end of input. After consuming, posVar == src_pos + 1.
+          // Case 1: src_pos == len-1 (line terminator at last position) → posVar == len.
+          //   CRLF guard: if the consumed char was '\n', the preceding char must not be '\r'
+          //   (otherwise $ matches at src_pos-1 before the \r\n pair, not here).
+          // Case 2: src_pos == len-2 with \r\n → posVar == len-1, consumed '\r', next is '\n'.
+          {
+            Label ok = new Label();
+            Label checkCrlf = new Label();
+            // Case 1: posVar == len → CRLF guard
+            mv.visitVarInsn(ILOAD, posVar);
+            access.loadLength.run();
+            mv.visitJumpInsn(IF_ICMPEQ, checkCrlf);
+            // Case 2: posVar == len-1 AND charAt(posVar-1)=='\r' AND charAt(posVar)=='\n'
+            mv.visitVarInsn(ILOAD, posVar);
+            access.loadLength.run();
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            access.invokeCharAt.run();
+            pushInt(mv, '\r');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            access.invokeCharAt.run();
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitJumpInsn(GOTO, ok);
+            // CRLF guard for Case 1: if consumed char is '\n', preceding char must not be '\r'
+            mv.visitLabel(checkCrlf);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            access.invokeCharAt.run();
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, ok); // not \n → no CRLF guard needed
+            // posVar >= 2 to check charAt(posVar-2)
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitJumpInsn(IF_ICMPLT, ok); // posVar < 2 → no preceding char → OK
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitInsn(ISUB);
+            access.invokeCharAt.run();
+            pushInt(mv, '\r');
+            mv.visitJumpInsn(IF_ICMPEQ, skipTransition); // CRLF → skip
+            mv.visitLabel(ok);
+            break;
+          }
         case STRING_END_ABSOLUTE:
         case END_MULTILINE:
           // \z requires strict end of input; no consuming transition is valid.

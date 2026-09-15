@@ -1052,12 +1052,13 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         boolean b3bCapFlag =
-            (hasStringEndAnchorInAlternation(ast) || hasEndAnchorLeadingInAlternationBranch(ast))
-                && !dfaHasAcceptingStateWithTransitions(dfa);
+            (hasStringEndAnchorInAlternation(ast)) && !dfaHasAcceptingStateWithTransitions(dfa);
         addTrace("B3b: hasStringEndAnchorInAlternation", b3bCapFlag);
         if (b3bCapFlag) {
           // \Z in alternation with capturing groups: PIKEVM_CAPTURE handles anchors correctly.
           // OPTIMIZED_NFA would be rejected by needsFallback for this combination.
+          // End-anchor-leading alternation branches ($/\Z before a consumer) are now handled by
+          // the DFA via charset narrowing (see SubsetConstructor#narrowEndGuardedCharset).
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1522,12 +1523,13 @@ public class PatternAnalyzer {
             MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
       }
       boolean b3bFlag =
-          (hasStringEndAnchorInAlternation(ast) || hasEndAnchorLeadingInAlternationBranch(ast))
-              && !dfaHasAcceptingStateWithTransitions(dfa);
+          (hasStringEndAnchorInAlternation(ast)) && !dfaHasAcceptingStateWithTransitions(dfa);
       addTrace("B3b: hasStringEndAnchorInAlternation", b3bFlag);
       if (b3bFlag) {
-        // \Z or $ in alternation: OPTIMIZED_NFA mishandles find() anchor semantics;
-        // route to PIKEVM_CAPTURE which handles \Z/$ correctly.
+        // \Z in alternation with priority conflict: OPTIMIZED_NFA mishandles find() anchor
+        // semantics; route to PIKEVM_CAPTURE which handles \Z correctly. End-anchor-leading
+        // alternation branches ($/\Z before a consumer) are now handled by the DFA via
+        // charset narrowing to line terminators (see SubsetConstructor#narrowEndGuardedCharset).
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }

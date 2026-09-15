@@ -119,12 +119,18 @@ public final class FallbackPatternDetector {
         return "assertion inside quantifier references captured group value";
       }
 
-      // B4 — KEEP-PERMANENT (conservative): END/STRING_END anchor ($, \Z) immediately before a
-      // non-newline char consumer. Spike showed that \Z[^c] and $[^\n] pass under PikeVM for the
-      // tested inputs (all unconditionally false in JDK). Retaining the guard until a fuzz sweep
-      // confirms no strategy can mis-model this path; removing it is safe but deferred.
-      if (hasEndAnchorBeforeNonNewlineConsumer(ast)) {
-        return "end-anchor before non-newline consumer: DFA does not model this path correctly";
+      // B4 — END/STRING_END anchor ($, \Z) immediately before a non-newline char consumer.
+      // DFA_UNROLLED and DFA_SWITCH (including _WITH_GROUPS variants) now handle this path
+      // correctly via charset narrowing to line terminators
+      // (SubsetConstructor#narrowEndGuardedCharset) and the fixed END entry guard in the codegen.
+      // Other strategies (DFA_TABLE, BITPARALLEL_GLUSHKOV, OPTIMIZED_NFA, RECURSIVE_DESCENT)
+      // lack the entry-guard codegen, so they must still fall back.
+      if (hasEndAnchorBeforeNonNewlineConsumer(ast)
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_SWITCH
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS) {
+        return "end-anchor before non-newline consumer: strategy does not model this path";
       }
     }
 
