@@ -10077,7 +10077,60 @@ public class PatternAnalyzer {
       }
       alts.add(seq);
     }
+    if (!loopAltAltsUnambiguous(alts)) {
+      return null; // retryable body overlap: see loopAltAltsUnambiguous
+    }
     return alts;
+  }
+
+  /**
+   * True when no two body alternatives can both match at the same start position with different
+   * ends. The journal give-back records iteration boundaries only - it cannot re-choose the body of
+   * an already-consumed iteration. When one body can match a proper prefix of another (e.g. {@code
+   * (?:a|ab)+c}: the first-listed {@code a} is committed and {@code ab} is never retried), matches
+   * the JDK finds are silently dropped. Both-match-same-end bodies are interchangeable (flat bodies
+   * carry no captures), so only different-width overlaps matter: for each pair the shorter body
+   * must be position-wise disjoint from the longer one somewhere. This also restores the soundness
+   * of the disjoint (no-journal) LOOP_ALT path: after the rejection every position has a unique
+   * possible iteration end, so the maximal run is input-determined.
+   */
+  private boolean loopAltAltsUnambiguous(List<DeterministicChainInfo.ChainSeq> alts) {
+    int n = alts.size();
+    // Exact per-position accepted sets (CharSet handles negated classes and non-ASCII exactly;
+    // the boolean[128]+non-ASCII-flag form used for the first-set gates is deliberately
+    // conservative and would reject sound bodies like %[^2] vs %2[^2]).
+    CharSet[][] posSets = new CharSet[n][];
+    for (int k = 0; k < n; k++) {
+      DeterministicChainInfo.ChainSeq body = alts.get(k);
+      List<CharSet> positions = new ArrayList<>();
+      for (DeterministicChainInfo.ChainElem e : body.elems) {
+        if (e.kind == DeterministicChainInfo.ElemKind.LITERAL) {
+          for (int c = 0; c < e.literal.length(); c++) {
+            positions.add(CharSet.of(e.literal.charAt(c)));
+          }
+        } else {
+          positions.add(e.charSet);
+        }
+      }
+      posSets[k] = positions.toArray(new CharSet[0]);
+    }
+    for (int a = 0; a < n; a++) {
+      for (int b = 0; b < n; b++) {
+        int wA = posSets[a].length;
+        int wB = posSets[b].length;
+        if (wA >= wB) {
+          continue; // only the strictly shorter body can be a proper prefix
+        }
+        boolean compatible = true;
+        for (int i = 0; i < wA && compatible; i++) {
+          compatible = !posSets[a][i].intersection(posSets[b][i]).isEmpty();
+        }
+        if (compatible) {
+          return false; // some input lets both match at the same start: retryable, reject
+        }
+      }
+    }
+    return true;
   }
 
   private boolean loopAltBodyOk(DeterministicChainInfo.ChainSeq seq) {
@@ -10470,6 +10523,18 @@ public class PatternAnalyzer {
             addChainFirstChar(firstOut, alt.charAt(0), nonAsciiOut);
           }
           emptyPrefix = false;
+          break;
+        case LOOP_ALT:
+          // The union of the body first-sets (a leading LOOP_ALT previously fell through the
+          // default case, leaving the first-set empty when the loop headed the branch - the
+          // find-family gates then rejected every scan position and the pattern matched nothing,
+          // e.g. (?:a|bc)+z on xxbcz). min > 0 means the loop must consume before the rest.
+          for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+            computeChainFirst(alt, firstOut, nonAsciiOut);
+          }
+          if (e.min > 0) {
+            emptyPrefix = false;
+          }
           break;
         case WORDB:
           break; // zero-width: contributes nothing, the prefix stays empty-matchable

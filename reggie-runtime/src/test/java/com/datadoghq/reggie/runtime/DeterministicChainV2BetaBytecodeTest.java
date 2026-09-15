@@ -228,12 +228,53 @@ class DeterministicChainV2BetaBytecodeTest {
   @Test
   void loopAltMinPlusParity() throws Exception {
     // A min-1 LOOP_ALT (+: at least one iteration) with the journal floor at one boundary.
-    Compiled c = compileChain("q(?:ab|a)+z");
-    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("q(?:ab|a)+z");
+    // (Previously q(?:ab|a)+z: the ab/a bodies overlap position-wise, so the committed short
+    // body was never retried - such bodies are now rejected at admission; see
+    // loopAltOverlappingBodiesDeclined.)
+    Compiled c = compileChain("q(?:ab|b)+z");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("q(?:ab|b)+z");
     assertFullParity(c, jdk, "qabz");
     assertFullParity(c, jdk, "qababz");
-    assertFullParity(c, jdk, "qaz");
+    assertFullParity(c, jdk, "qbz");
     assertFullParity(c, jdk, "qba");
+  }
+
+  @Test
+  void loopAltOverlappingBodiesDeclined() throws Exception {
+    // Bodies where one can match a proper prefix of another (a vs ab) are retryable: the
+    // journal records iteration ends only and cannot re-choose a committed body, so admitting
+    // them silently dropped JDK matches (q(?:a|ab)+c on qabc found nothing). They must be
+    // declined out of the family (BitState/PikeVM handle them correctly).
+    RegexNode ast = new RegexParser().parse("q(?:a|ab)+z");
+    PatternAnalyzer analyzer = new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0));
+    assertNull(
+        analyzer.detectDeterministicChain(ast),
+        "prefix-overlapping LOOP_ALT bodies must be declined");
+    // Non-overlapping mixed-width bodies stay admitted (position-0 sets disjoint).
+    ast = new RegexParser().parse("q(?:ab|b)+z");
+    analyzer = new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0));
+    assertNotNull(analyzer.detectDeterministicChain(ast), "disjoint bodies stay admitted");
+  }
+
+  @Test
+  void loopAltFirstSetGatesFindScan() throws Exception {
+    // A branch headed by a LOOP_ALT: the find-family scan gate must be the union of the body
+    // first-sets (previously the element fell through the default case, the first-set came out
+    // as the tail's alone, and every scan position was rejected - the pattern matched nothing).
+    Compiled c = compileChain("(?:a|bc)+z");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("(?:a|bc)+z");
+    assertFullParity(c, jdk, "xxbcz");
+    assertFullParity(c, jdk, "bcz");
+    assertFullParity(c, jdk, "az");
+    assertFullParity(c, jdk, "abcz");
+    assertFullParity(c, jdk, "aaz");
+    assertFullParity(c, jdk, "q");
+    // '*' variant: nullable prefix, the tail first-set must union in too.
+    Compiled star = compileChain("(?:a|bc)*z");
+    java.util.regex.Pattern jdkStar = java.util.regex.Pattern.compile("(?:a|bc)*z");
+    assertFullParity(star, jdkStar, "z");
+    assertFullParity(star, jdkStar, "bcz");
+    assertFullParity(star, jdkStar, "xaz");
   }
 
   @Test
@@ -330,17 +371,37 @@ class DeterministicChainV2BetaBytecodeTest {
 
   @Test
   void sqlMysqlEscapedLiteralParity() throws Exception {
+    // MySQL's escaped-literal bodies (\" | [^"]) overlap position-wise (the [^"] body accepts
+    // the escape body's leading backslash, and the two bodies then end at different widths), so
+    // the committed first-listed body can never be retried by the boundary journal. The family
+    // must decline it (BitState/PikeVM keep exact JDK retry semantics); behavior parity is
+    // asserted through the production compile path instead of compileChain.
     String p =
         "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?"
             + "|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
             + "|\"(?:\\\\\"|[^\"])*\"|'(?:\\\\'|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
-    Compiled c = compileChain(p);
+    RegexNode ast = new RegexParser().parse(p);
+    PatternAnalyzer analyzer = new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0));
+    assertNull(
+        analyzer.detectDeterministicChain(ast),
+        "MySQL escape-body overlap must decline the chain family");
+    com.datadoghq.reggie.ReggieMatcher m = com.datadoghq.reggie.Reggie.compile(p);
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(p);
-    assertFullParity(c, jdk, "SET a = 'It\\'s fine' WHERE b = \"quoted \\\" str\"");
-    assertFullParity(c, jdk, "SELECT \"abc\" FROM t");
-    assertFullParity(c, jdk, "SELECT 'a\\'b' FROM t");
-    assertFullParity(c, jdk, "x = \"open");
-    assertFullParity(c, jdk, "1.5E3");
+    for (String input :
+        new String[] {
+          "SET a = 'It\\'s fine' WHERE b = \"quoted \\\" str\"",
+          "SELECT \"abc\" FROM t",
+          "SELECT 'a\\'b' FROM t",
+          "x = \"open",
+          "1.5E3",
+        }) {
+      java.util.regex.Matcher jm = jdk.matcher(input);
+      String expect = jm.find() ? "[" + jm.start() + "," + jm.end() + ")" : "none";
+      com.datadoghq.reggie.runtime.MatchResult r =
+          ((com.datadoghq.reggie.runtime.ReggieMatcher) m).findMatch(input);
+      String actual = r == null ? "none" : "[" + r.start() + "," + r.end() + ")";
+      assertEquals(expect, actual, "find parity on: " + input);
+    }
   }
 
   @Test

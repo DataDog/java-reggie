@@ -1470,7 +1470,7 @@ public class DFASwitchBytecodeGenerator {
       int minPosVar,
       int idxVar,
       Label noMatchLabel) {
-    mv.visitLdcInsn(Integer.MAX_VALUE);
+    pushInt(mv, Integer.MAX_VALUE);
     mv.visitVarInsn(ISTORE, minPosVar);
     for (char c : firstChars) {
       mv.visitVarInsn(ALOAD, 1);
@@ -1489,7 +1489,7 @@ public class DFASwitchBytecodeGenerator {
       mv.visitLabel(skip);
     }
     mv.visitVarInsn(ILOAD, minPosVar);
-    mv.visitLdcInsn(Integer.MAX_VALUE);
+    pushInt(mv, Integer.MAX_VALUE);
     mv.visitJumpInsn(IF_ICMPEQ, noMatchLabel);
     mv.visitVarInsn(ILOAD, minPosVar);
     mv.visitVarInsn(ISTORE, tryPosVar);

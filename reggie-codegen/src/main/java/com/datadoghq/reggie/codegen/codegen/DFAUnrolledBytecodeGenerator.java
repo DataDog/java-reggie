@@ -1071,7 +1071,7 @@ public class DFAUnrolledBytecodeGenerator {
       int idxVar,
       Label noMatchLabel) {
     // int minPos = Integer.MAX_VALUE;
-    mv.visitLdcInsn(Integer.MAX_VALUE);
+    pushInt(mv, Integer.MAX_VALUE);
     mv.visitVarInsn(ISTORE, minPosVar);
     for (char c : firstChars) {
       // int idx = input.indexOf(c, tryPos);
@@ -1093,7 +1093,7 @@ public class DFAUnrolledBytecodeGenerator {
     }
     // if (minPos == MAX_VALUE) goto noMatch;
     mv.visitVarInsn(ILOAD, minPosVar);
-    mv.visitLdcInsn(Integer.MAX_VALUE);
+    pushInt(mv, Integer.MAX_VALUE);
     mv.visitJumpInsn(IF_ICMPEQ, noMatchLabel);
     // tryPos = minPos;
     mv.visitVarInsn(ILOAD, minPosVar);
@@ -2518,15 +2518,24 @@ public class DFAUnrolledBytecodeGenerator {
       stateLabels.put(state, new Label());
     }
 
+    // Gate-DFA scratch: allocated (not hardcoded) past the bounded method's fixed layout
+    // (0=this, 1=input, 2=start, 3=end, 4=pos, 5=transition ch, 6/7=lookbehind scratch) - the
+    // allocation keeps future layout changes from silently aliasing live locals.
+    LocalVarAllocator boundedScratch = new LocalVarAllocator(8);
+    int boundedGatePosSlot = boundedScratch.allocate();
+    int boundedGateChSlot = boundedScratch.allocate();
+
     // Generate code for start state
     mv.visitLabel(stateLabels.get(dfa.getStartState()));
-    generateBoundedStateCode(mv, dfa.getStartState(), stateLabels, 4, 3, 2);
+    generateBoundedStateCode(
+        mv, dfa.getStartState(), stateLabels, 4, 3, 2, boundedGatePosSlot, boundedGateChSlot);
 
     // Generate code for all other states
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state == dfa.getStartState()) continue;
       mv.visitLabel(stateLabels.get(state));
-      generateBoundedStateCode(mv, state, stateLabels, 4, 3, 2);
+      generateBoundedStateCode(
+          mv, state, stateLabels, 4, 3, 2, boundedGatePosSlot, boundedGateChSlot);
     }
 
     mv.visitMaxs(0, 0);
@@ -2658,14 +2667,17 @@ public class DFAUnrolledBytecodeGenerator {
       Map<DFA.DFAState, Label> stateLabels,
       int posVar,
       int endVar,
-      int startVar) {
+      int startVar,
+      int gatePosSlot,
+      int gateChSlot) {
     Label endOfRegion = new Label();
     Label assertionFailed = new Label();
 
     // Generate assertion checks first (before consuming character)
     if (!state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        generateBoundedAssertionCheck(mv, assertion, posVar, endVar, startVar, assertionFailed);
+        generateBoundedAssertionCheck(
+            mv, assertion, posVar, endVar, startVar, gatePosSlot, gateChSlot, assertionFailed);
       }
     }
 
@@ -2746,12 +2758,14 @@ public class DFAUnrolledBytecodeGenerator {
       int posVar,
       int endVar,
       int startVar,
+      int gatePosSlot,
+      int gateChSlot,
       Label assertionFailed) {
     if (assertion.isGateDfa()) {
-      // Fixed-slot context (bounded methods have no allocator): slots 8/9 are scratch here
-      // (0=this, 1=input, 2=start, 3=end, 4=pos, 5=transition ch, 6/7=lookbehind scratch).
-      // Peek bound is the region end, consistent with the fixed-width bounded checks below.
-      generateGateDfaCheckInto(mv, assertion, posVar, endVar, true, 8, 9, assertionFailed);
+      // Scratch slots threaded from the bounded method's LocalVarAllocator (past its fixed
+      // layout). Peek bound is the region end, consistent with the fixed-width bounded checks.
+      generateGateDfaCheckInto(
+          mv, assertion, posVar, endVar, true, gatePosSlot, gateChSlot, assertionFailed);
       return;
     }
     if (assertion.isLookahead()) {
@@ -3034,6 +3048,18 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, 7); // len
 
+    // Scratch locals past the fixed layout (0=this, 1=input, 2=start, 3=bounds, 4=matchStart,
+    // 5=pos, 6=lastAccepting, 7=len): transition ch, lookbehind checkPos/ch, lookahead ch and
+    // the gate-DFA scratch - all allocated here and threaded through the emitters, so future
+    // layout changes cannot silently alias live locals.
+    LocalVarAllocator greedyScratch = new LocalVarAllocator(8);
+    int greedyChSlot = greedyScratch.allocate(); // 8
+    int greedyLbCheckPosSlot = greedyScratch.allocate(); // 9
+    int greedyLbChSlot = greedyScratch.allocate(); // 10
+    int greedyLaChSlot = greedyScratch.allocate(); // 11
+    int greedyGatePosSlot = greedyScratch.allocate(); // 12
+    int greedyGateChSlot = greedyScratch.allocate(); // 13
+
     // Create labels for all states
     Map<DFA.DFAState, Label> stateLabels = new HashMap<>();
     for (DFA.DFAState state : dfa.getAllStates()) {
@@ -3048,13 +3074,40 @@ public class DFAUnrolledBytecodeGenerator {
     // Generate code for start state
     mv.visitLabel(stateLabels.get(dfa.getStartState()));
     generateGreedyStateCode(
-        mv, dfa.getStartState(), stateLabels, 5, 7, 6, scanComplete, skippableStates);
+        mv,
+        dfa.getStartState(),
+        stateLabels,
+        5,
+        7,
+        6,
+        scanComplete,
+        skippableStates,
+        greedyChSlot,
+        greedyLbCheckPosSlot,
+        greedyLbChSlot,
+        greedyLaChSlot,
+        greedyGatePosSlot,
+        greedyGateChSlot);
 
     // Generate code for all other states
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state == dfa.getStartState()) continue;
       mv.visitLabel(stateLabels.get(state));
-      generateGreedyStateCode(mv, state, stateLabels, 5, 7, 6, scanComplete, skippableStates);
+      generateGreedyStateCode(
+          mv,
+          state,
+          stateLabels,
+          5,
+          7,
+          6,
+          scanComplete,
+          skippableStates,
+          greedyChSlot,
+          greedyLbCheckPosSlot,
+          greedyLbChSlot,
+          greedyLaChSlot,
+          greedyGatePosSlot,
+          greedyGateChSlot);
     }
 
     mv.visitLabel(scanComplete);
@@ -3183,12 +3236,28 @@ public class DFAUnrolledBytecodeGenerator {
       int lenVar,
       int lastAcceptingVar,
       Label scanComplete,
-      Set<DFA.DFAState> skippableStates) {
+      Set<DFA.DFAState> skippableStates,
+      int chSlot,
+      int lbCheckPosSlot,
+      int lbChSlot,
+      int laChSlot,
+      int gatePosSlot,
+      int gateChSlot) {
     // Handle assertions if present (before recording accepting position)
     Label assertionFailed = new Label();
     if (!state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        generateGreedyAssertionCheck(mv, assertion, posVar, lenVar, assertionFailed);
+        generateGreedyAssertionCheck(
+            mv,
+            assertion,
+            posVar,
+            lenVar,
+            lbCheckPosSlot,
+            lbChSlot,
+            laChSlot,
+            gatePosSlot,
+            gateChSlot,
+            assertionFailed);
       }
     }
 
@@ -3214,7 +3283,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-    mv.visitVarInsn(ISTORE, 8); // ch in var 8
+    mv.visitVarInsn(ISTORE, chSlot); // transition ch (allocated, see generateFindBoundsFromMethod)
 
     // pos++;
     mv.visitIincInsn(posVar, 1);
@@ -3225,7 +3294,7 @@ public class DFAUnrolledBytecodeGenerator {
       DFA.DFAState target = entry.getValue().target;
 
       Label nextCheck = new Label();
-      generateCharSetCheck(mv, chars, 8, nextCheck);
+      generateCharSetCheck(mv, chars, chSlot, nextCheck);
 
       // Match found - jump to target state
       mv.visitJumpInsn(GOTO, stateLabels.get(target));
@@ -3249,12 +3318,21 @@ public class DFAUnrolledBytecodeGenerator {
    * jumps to assertionFailed instead of returning false.
    */
   private void generateGreedyAssertionCheck(
-      MethodVisitor mv, AssertionCheck assertion, int posVar, int lenVar, Label assertionFailed) {
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int posVar,
+      int lenVar,
+      int lbCheckPosSlot,
+      int lbChSlot,
+      int laChSlot,
+      int gatePosSlot,
+      int gateChSlot,
+      Label assertionFailed) {
     if (assertion.isGateDfa()) {
-      // Fixed-slot context (findBoundsFrom greedy scan): slots 12/13 are scratch here
-      // (0=this, 1=input, 2=start, 3=bounds, 4=matchStart, 5=pos, 6=lastAccepting, 7=len,
-      // 9/10=lookbehind scratch, 11=lookahead ch). Scan bound is len, matching the literal checks.
-      generateGateDfaCheckInto(mv, assertion, posVar, lenVar, false, 12, 13, assertionFailed);
+      // Gate scratch threaded from generateFindBoundsFromMethod's LocalVarAllocator. Scan bound
+      // is len, matching the literal checks.
+      generateGateDfaCheckInto(
+          mv, assertion, posVar, lenVar, false, gatePosSlot, gateChSlot, assertionFailed);
       return;
     }
     if (assertion.isLookahead()) {
@@ -3305,9 +3383,9 @@ public class DFAUnrolledBytecodeGenerator {
         }
         mv.visitLabel(assertionPassed);
       } else {
-        // charSets lookahead: slot 11 for ch (slots 9/10 reserved for lookbehind)
+        // charSets lookahead: ch on the threaded lookahead scratch slot
         boolean positive = assertion.isPositive();
-        int chVar = 11;
+        int chVar = laChSlot;
         Label mismatch = new Label();
         Label assertionPassed = new Label();
 
@@ -3351,9 +3429,8 @@ public class DFAUnrolledBytecodeGenerator {
       }
     } else if (assertion.isLookbehind()) {
       int width = assertion.width;
-      // checkPos = pos - width
-      // slot 9: checkPosVar, slot 10: chVar (slot 8 is ch for transitions)
-      int checkPosVar = 9;
+      // checkPos = pos - width (scratch slots threaded from generateFindBoundsFromMethod)
+      int checkPosVar = lbCheckPosSlot;
 
       mv.visitVarInsn(ILOAD, posVar);
       pushInt(mv, width);
@@ -3391,7 +3468,7 @@ public class DFAUnrolledBytecodeGenerator {
           mv.visitLabel(assertionPassed);
         }
       } else {
-        int chVar = 10;
+        int chVar = lbChSlot;
         Label mismatch = new Label();
 
         for (int i = 0; i < assertion.charSets.size(); i++) {
