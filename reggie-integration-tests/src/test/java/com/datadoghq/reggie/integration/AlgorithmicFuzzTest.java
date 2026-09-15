@@ -86,7 +86,8 @@ public class AlgorithmicFuzzTest {
     // Shrink each finding and dedupe by (shrunk pattern, shrunk input, kind). Raw findings are
     // often 30-char patterns reproducing the same underlying bug at different sizes; shrinking
     // collapses them to a handful of unique minimal repros that can be triaged directly.
-    RegexFuzzShrinker shrinker = new RegexFuzzShrinker();
+    RegexFuzzShrinker shrinker =
+        new RegexFuzzShrinker(Long.getLong("reggie.fuzz.checkTimeoutMs", 5_000));
     Map<String, Shrunk> uniqueShrunk = new LinkedHashMap<>();
     int shrunk = 0;
     int shrinkLimit = Math.min(report.findings.size(), 80); // bound CPU on enormous reports
@@ -279,7 +280,8 @@ public class AlgorithmicFuzzTest {
    * across runs with the same seed.
    */
   static List<Shrunk> shrinkAndDedupe(FuzzRunner.Report report) {
-    RegexFuzzShrinker shrinker = new RegexFuzzShrinker();
+    RegexFuzzShrinker shrinker =
+        new RegexFuzzShrinker(Long.getLong("reggie.fuzz.checkTimeoutMs", 5_000));
     Map<String, Shrunk> unique = new LinkedHashMap<>();
     for (Finding f : report.findings) {
       Shrunk s = shrinker.shrink(f);

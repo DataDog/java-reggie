@@ -20,23 +20,18 @@ import com.datadoghq.reggie.integration.fuzz.RegexFuzzOracle.Result;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 /**
  * Driver that pairs a {@link RandomRegexGenerator} with {@link RandomInputGenerator} and runs each
  * (pattern, input) through {@link RegexFuzzOracle}. Reports aggregated stats and a deduped list of
  * findings.
  *
- * <p>Each {@code oracle.check()} is run on a daemon thread with a wall-clock budget ({@link
- * Config#checkTimeoutMs}). This prevents a single (pattern, input) pair that triggers JDK
- * catastrophic backtracking (ReDoS) from stalling the entire sweep. JDK backtracking is CPU-bound
- * and ignores {@code Thread.interrupt()}, so a timed-out check is abandoned: the daemon thread
- * keeps running in the background but the sweep moves on to the next input. Abandoned threads are
- * daemons and do not block JVM exit.
+ * <p>Each {@code oracle.check()} is run with a wall-clock budget ({@link Config#checkTimeoutMs})
+ * via {@link RegexFuzzOracle#check(String, String, long)}. This prevents a single (pattern, input)
+ * pair that triggers JDK catastrophic backtracking (ReDoS) from stalling the entire sweep. JDK
+ * backtracking is CPU-bound and ignores {@code Thread.interrupt()}, so a timed-out check is
+ * abandoned: the daemon thread keeps running in the background but the sweep moves on to the next
+ * input. Abandoned threads are daemons and do not block JVM exit.
  */
 public final class FuzzRunner {
 
@@ -100,14 +95,6 @@ public final class FuzzRunner {
   private static final int PROGRESS_INTERVAL =
       Math.max(1, Integer.getInteger("reggie.fuzz.progressInterval", 500));
 
-  private final ExecutorService checkPool =
-      Executors.newCachedThreadPool(
-          r -> {
-            Thread t = new Thread(r, "fuzz-check");
-            t.setDaemon(true);
-            return t;
-          });
-
   public Report run(Config cfg) {
     Random patternRng = new Random(cfg.seed);
     Random inputRng = new Random(cfg.seed ^ 0x9E3779B97F4A7C15L);
@@ -143,6 +130,12 @@ public final class FuzzRunner {
       if (hasNestedQuantifier(pattern)) {
         skipped++;
         redosSkipped++;
+        // Advance the input RNG by inputsPerPattern steps to keep the input sequence stable
+        // relative to a run without the pre-screen. Without this, downstream patterns see
+        // shifted inputs and the finding set changes.
+        for (int i = 0; i < cfg.inputsPerPattern; i++) {
+          inputGen.generate();
+        }
         if (p % PROGRESS_INTERVAL == 0) {
           System.out.printf(
               "[fuzz] p=%d/%d skipped=%d inputs=%d timed-out=%d findings=%d pattern=%s [ReDoS skip]%n",
@@ -173,7 +166,7 @@ public final class FuzzRunner {
 
       for (int i = 0; i < cfg.inputsPerPattern; i++) {
         String input = inputGen.generate();
-        Result result = checkWithTimeout(oracle, pattern, input, cfg.checkTimeoutMs);
+        Result result = oracle.check(pattern, input, cfg.checkTimeoutMs);
 
         if (result.skipped) {
           if (result.skipReason != null && result.skipReason.startsWith("check timeout")) {
@@ -210,33 +203,10 @@ public final class FuzzRunner {
       if (patternSkipped) skipped++;
     }
 
-    checkPool.shutdownNow();
     if (redosSkipped > 0) {
       System.out.printf("[fuzz] ReDoS pre-screen skipped %d patterns%n", redosSkipped);
     }
     return new Report(cfg.patternCount - skipped, skipped, inputs, timedOut, findings);
-  }
-
-  /**
-   * Run {@code oracle.check()} on a daemon thread with a wall-clock budget. On timeout the check is
-   * abandoned (the daemon thread continues in the background) and a skipped {@link Result} is
-   * returned. When {@code timeoutMs <= 0} the check runs inline with no timeout.
-   */
-  private Result checkWithTimeout(
-      RegexFuzzOracle oracle, String pattern, String input, long timeoutMs) {
-    if (timeoutMs <= 0) {
-      return oracle.check(pattern, input);
-    }
-    Future<Result> f = checkPool.submit(() -> oracle.check(pattern, input));
-    try {
-      return f.get(timeoutMs, TimeUnit.MILLISECONDS);
-    } catch (TimeoutException te) {
-      f.cancel(true); // best-effort interrupt; JDK backtracking ignores it
-      return Result.skipped("check timeout >" + timeoutMs + "ms");
-    } catch (Exception e) {
-      f.cancel(true);
-      return Result.skipped("check threw: " + e);
-    }
   }
 
   /**

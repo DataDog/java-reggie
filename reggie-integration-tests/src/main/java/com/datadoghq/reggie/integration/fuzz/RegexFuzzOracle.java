@@ -22,6 +22,11 @@ import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
@@ -35,6 +40,20 @@ import java.util.regex.PatternSyntaxException;
  * comparison.
  */
 public final class RegexFuzzOracle {
+
+  /**
+   * Daemon thread pool for timed checks. JDK catastrophic backtracking is CPU-bound and ignores
+   * {@code Thread.interrupt()}; a timed-out check is abandoned (the daemon thread continues in the
+   * background) and a skipped {@link Result} is returned. Abandoned threads are daemons and do not
+   * block JVM exit.
+   */
+  private final ExecutorService checkPool =
+      Executors.newCachedThreadPool(
+          r -> {
+            Thread t = new Thread(r, "fuzz-oracle-check");
+            t.setDaemon(true);
+            return t;
+          });
 
   /** A divergence between Reggie and the JDK. Self-contained so it can be logged or rerun. */
   public static final class Finding {
@@ -79,7 +98,36 @@ public final class RegexFuzzOracle {
    * Run the comparison. Returns a {@link Result} carrying any divergences. Never throws; if
    * compilation or matching blows up unexpectedly in either engine the pair is skipped.
    */
+  /**
+   * Run the comparison. Returns a {@link Result} carrying any divergences. Never throws; if
+   * compilation or matching blows up unexpectedly in either engine the pair is skipped.
+   */
   public Result check(String pattern, String input) {
+    return check(pattern, input, 0);
+  }
+
+  /**
+   * Run the comparison with a wall-clock budget. When {@code timeoutMs > 0} the check runs on a
+   * daemon thread and is abandoned on timeout, returning a skipped {@link Result}. When {@code
+   * timeoutMs <= 0} the check runs inline with no timeout.
+   */
+  public Result check(String pattern, String input, long timeoutMs) {
+    if (timeoutMs <= 0) {
+      return checkInline(pattern, input);
+    }
+    Future<Result> f = checkPool.submit(() -> checkInline(pattern, input));
+    try {
+      return f.get(timeoutMs, TimeUnit.MILLISECONDS);
+    } catch (TimeoutException te) {
+      f.cancel(true); // best-effort interrupt; JDK backtracking ignores it
+      return Result.skipped("check timeout >" + timeoutMs + "ms");
+    } catch (Exception e) {
+      f.cancel(true);
+      return Result.skipped("check threw: " + e);
+    }
+  }
+
+  private Result checkInline(String pattern, String input) {
     Pattern jdk;
     try {
       jdk = Pattern.compile(pattern);

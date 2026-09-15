@@ -31,6 +31,24 @@ import com.datadoghq.reggie.integration.fuzz.RegexFuzzOracle.Result;
 public final class RegexFuzzShrinker {
 
   private final RegexFuzzOracle oracle = new RegexFuzzOracle();
+  private final long timeoutMs;
+
+  /**
+   * Creates a shrinker with no per-check timeout. Use {@link #RegexFuzzShrinker(long)} when
+   * shrinking patterns that may trigger JDK catastrophic backtracking (ReDoS).
+   */
+  public RegexFuzzShrinker() {
+    this(0);
+  }
+
+  /**
+   * Creates a shrinker with a per-check wall-clock budget. Each oracle invocation during shrinking
+   * is abandoned after {@code timeoutMs} milliseconds, preventing a single ReDoS pattern from
+   * stalling the shrink loop.
+   */
+  public RegexFuzzShrinker(long timeoutMs) {
+    this.timeoutMs = timeoutMs;
+  }
 
   /** Result of shrinking. Always returns a valid divergent pair. */
   public static final class Shrunk {
@@ -101,7 +119,7 @@ public final class RegexFuzzShrinker {
   }
 
   private boolean stillDivergesSameKind(String pattern, String input, String kind) {
-    Result r = oracle.check(pattern, input);
+    Result r = oracle.check(pattern, input, timeoutMs);
     if (r.skipped) return false;
     for (Finding f : r.findings) {
       if (findingKind(f.description).equals(kind)) return true;
