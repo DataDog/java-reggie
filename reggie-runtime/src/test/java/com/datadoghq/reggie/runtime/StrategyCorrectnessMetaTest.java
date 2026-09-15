@@ -95,6 +95,9 @@ public class StrategyCorrectnessMetaTest {
             "\\d{3}-\\d{3}-\\d{4}",
             List.of("123-456-7890", "call 123-456-7890 now", "12-34-5678", "", "１23-456-7890")));
     m.put(
+        PatternAnalyzer.MatchingStrategy.SPECIALIZED_SUFFIX_SEQUENCE,
+        new Spec("\\.?0+$", List.of("ab.000", "000", "000\n", "ab0", "", "a\\.000")));
+    m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_BOUNDED_QUANTIFIERS,
         new Spec(
             "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}",
@@ -112,9 +115,11 @@ public class StrategyCorrectnessMetaTest {
             List.of("<b>hi</b>", "x<b>hi</b>y", "<b>hi</i>", "", "<b>héllo</b>")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTIPLE_LOOKAHEADS,
-        new Spec(
-            "(?=[a-z]+\\d)(?=\\w+!).*end",
-            List.of("abc1!end", "x abc1!end", "abcend", "", "abc1!énd")));
+        // Groups inside the lookaheads keep this off the DFA-with-assertions gate ladder (gate
+        // admission is groupless-patterns-only) and in the fusion tier; the old representative
+        // (?=[a-z]+\d)(?=\w+!).*end now routes to DFA_UNROLLED_WITH_ASSERTIONS via the
+        // sub-DFA gate.
+        new Spec("(?=(a+z))(?=(b+q))x", List.of("aazbbqx", "aazq", "abx", "", "azbq")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS,
         new Spec(
@@ -175,9 +180,8 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(a|b|c|d|e|f|g)(h|i|j|k|l|m)(n|o|p|q|r)(s|t|u|v)",
             List.of("ahns", "x bios y", "aaaa", "", "ahnsé")));
-    // (?:[a-z][0-9]){150} is now intercepted by COUNTING_GLUSHKOV before DFA construction.
-    // Use a leading literal to prevent extractSingleQuantifier from matching, so the pattern
-    // falls through to DFA construction (302 states → DFA_TABLE).
+    // (?:[a-z][0-9]){150} now also routes to DFA_TABLE (301 states < 2000 threshold).
+
     m.put(
         PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         new Spec(
@@ -188,12 +192,16 @@ public class StrategyCorrectnessMetaTest {
                 "x" + "a0".repeat(149),
                 "",
                 "xa0é")));
-    // (?:[a-z][0-9]){150}: top-level bounded repeat with group-free body → COUNTING_GLUSHKOV.
+    // (?:[a-z][0-9]){150}: 301 DFA states < 2000 → DFA_TABLE.
     m.put(
-        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
+        PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         new Spec(
             "(?:[a-z][0-9]){150}",
             List.of("a0".repeat(150), "x" + "a0".repeat(150) + "y", "a0".repeat(149), "", "a0é")));
+    // (?:[a-z][0-9]){1000}: 2001 DFA states >= 2000 threshold → COUNTING_GLUSHKOV.
+    m.put(
+        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
+        new Spec("(?:[a-z][0-9]){1000}", List.of("a0".repeat(1000), "a0".repeat(999), "", "a0é")));
     // Large DFA (513 states) but small NFA (<=63 positions) → bit-parallel Glushkov simulation.
     m.put(
         PatternAnalyzer.MatchingStrategy.BITPARALLEL_GLUSHKOV,
@@ -225,12 +233,17 @@ public class StrategyCorrectnessMetaTest {
         new Spec("(a|b)c\\1", List.of("aca", "x bcb y", "acb", "", "acaé")));
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
-        new Spec("a(?!\\d+x).*b", List.of("ab", "x ayb y", "a1xb", "", "aéb")));
+        // A lookahead inside an alternation branch is NFA-only (the B11 guard: per-thread
+        // assertion isolation), so the gate ladder never takes it. The old representative
+        // a(?!\d+x).*b now routes to DFA_UNROLLED_WITH_ASSERTIONS via the sub-DFA gate.
+        new Spec("((?=\\d+)x|y)", List.of("1x", "y", "ax", "2x", "")));
     m.put(
         PatternAnalyzer.MatchingStrategy.HYBRID_DFA_LOOKAHEAD,
-        new Spec(
-            "(?=\\w+@).*@example.com",
-            List.of("u@example.com", "x u@example.com", "u@other.com", "", "ü@example.com")));
+        // A group inside the variable-width lookahead keeps the pattern off the sub-DFA gate
+        // ladder (gate admission is groupless-only), landing in the hybrid tier. The old
+        // representative (?=\w+@).*@example.com now routes to DFA_UNROLLED_WITH_ASSERTIONS via
+        // the gate.
+        new Spec("(?=(\\w+@)).*x", List.of("a@x", "a @x", "@x", "", "a@y")));
     // RECURSIVE_DESCENT: subroutine/conditional/branch-reset forms are not expressible in
     // java.util.regex, so they cannot be cross-checked. This backtracking-for-groups form
     // (a([bc]*)(c+d)) also routes to RECURSIVE_DESCENT and IS JDK-expressible, giving a valid
@@ -263,6 +276,11 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             "(?s)(?m)^(?:\\s*(?:sudo|doas)\\s+)?\\b\\S+\\b\\s*(.*)",
             List.of("sudo ls -la", "a!", "!!!", "", "héllo")));
+    m.put(
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
+        new Spec(
+            "(<\\w+>).*?(</\\w+>)",
+            List.of("<a></a>", "x <tag> mid </tag> y", "<a>", "", "<é></é>")));
 
     return m;
   }

@@ -206,12 +206,15 @@ class StrategySelectionTest {
 
   @Test
   void lazyQuantifierRoutesToPikeVm() throws Exception {
-    // Positive: plain lazy quantifiers must route to BITSTATE_CAPTURE (the eligible substitution
-    // target for PIKEVM_CAPTURE)
+    // Positive: plain lazy quantifiers route to the deterministic-chain family when the chain
+    // detector admits the shape (a*?b is a lazy scan loop + literal — chain-generated with the
+    // same lazy priority semantics); otherwise BITSTATE_CAPTURE (the eligible substitution
+    // target for PIKEVM_CAPTURE) stays.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze("a*?b").strategy,
-        "a*?b should route to BITSTATE_CAPTURE");
+        "a*?b routes to the deterministic-chain generator (lazy scan semantics are generated, "
+            + "see DeterministicChainV3BytecodeTest)");
     assertEquals(
         PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         analyze("a+?b").strategy,
@@ -225,9 +228,10 @@ class StrategySelectionTest {
         analyze("a{2,4}?b").strategy,
         "a{2,4}?b should route to BITSTATE_CAPTURE");
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze("(a*?)b").strategy,
-        "(a*?)b should route to BITSTATE_CAPTURE");
+        "(a*?)b routes to the deterministic-chain generator (capture over a lazy scan loop "
+            + "with crossing-tail capture ends, see DeterministicChainV3BytecodeTest)");
 
     // Negative: backreference blocks the lazy route
     assertNotEquals(

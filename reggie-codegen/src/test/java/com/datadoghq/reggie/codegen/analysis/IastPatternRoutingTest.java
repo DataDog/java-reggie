@@ -83,58 +83,69 @@ class IastPatternRoutingTest {
   }
 
   @Test
-  void urlRoutesToBitstateCapture() throws Exception {
+  void urlRoutesToDeterministicChainBytecode() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(URL).strategy,
-        "URL pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "URL pattern routing changed — the deterministic-chain generator is the only route to JDK"
+            + " parity on this shape (BitState measured 0.09x reg/jdk even with the greedy-loop"
+            + " fast path); before rerouting verify its first-set gates + budget + PikeVM"
+            + " overflow fallback still cover this pattern");
   }
 
   @Test
   void sqlAnsiRoutesToBitstateCapture() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(SQL_ANSI).strategy,
-        "SQL_ANSI pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "SQL_ANSI routes to the deterministic chain (v2-beta: LOOP_ALT string literals, bounded"
+            + " hex loops, ALT_CHAIN numerics) — the V2-β benchmark verifies the no-match side");
   }
 
   @Test
   void sqlMysqlRoutesToBitstateCapture() throws Exception {
+    // MySQL's escaped-literal bodies (\" | [^"]) overlap position-wise, so the loop's body
+    // choice is retryable; the chain journal records iteration boundaries only and cannot
+    // re-choose a committed body - the family declines it and BitState keeps exact semantics.
+    // (SQL_ANSI/SQL_POSTGRESQL stay on the chain: their ''-escape bodies are position-0
+    // disjoint from [^'] and are not retryable.)
     assertEquals(
         PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         analyze(SQL_MYSQL).strategy,
-        "SQL_MYSQL pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "SQL_MYSQL declines the deterministic chain (retryable escaped-literal bodies)");
   }
 
   @Test
   void sqlPostgresqlRoutesToBitstateCapture() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(SQL_POSTGRESQL).strategy,
-        "SQL_POSTGRESQL pattern routing changed — this pattern regressed 15x->0.15x on no-match"
-            + " once routed off PikeVMMatcher's SIMD fast-reject; verify BitStateMatcher still"
-            + " carries the singleFirstCharAscii fast-reject before updating this pin");
+        "SQL_POSTGRESQL routes to the deterministic chain (v2-beta). History: this pattern"
+            + " regressed 15x->0.15x on no-match when it moved PikeVM→BitState; the chain's"
+            + " per-branch first-set gates must hold the no-match side — the V2-β benchmark"
+            + " verifies");
   }
 
   @Test
-  void ldapRoutesToBitstateCapture() throws Exception {
+  void ldapRoutesToDeterministicChainBytecode() throws Exception {
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(LDAP).strategy,
-        "LDAP pattern routing changed — this pattern regressed 15x->0.15x on no-match once"
-            + " routed off PikeVMMatcher's SIMD fast-reject; verify BitStateMatcher still carries"
-            + " the singleFirstCharAscii fast-reject before updating this pin");
+        "LDAP pattern routing changed — the deterministic-chain generator is the only route to"
+            + " JDK parity on this shape (BitState measured 0.10x reg/jdk even with the"
+            + " greedy-loop fast path); before rerouting verify its lazy-scan tail, bounded"
+            + " LIT_ALT tries and budget + PikeVM overflow fallback still cover this pattern");
   }
 
   @Test
-  void queryObfuscatorRoutesToBitstateCapture() throws Exception {
+  void queryObfuscatorRoutesToDfaTable() throws Exception {
+    // QUERY_OBFUSCATOR now routes to DFA_TABLE: the altWithAcceptingTransFlag guard
+    // was refined to only block when dfaHasPriorityConflictTransition is true (actual
+    // priority conflict from different-length alternatives). QO's alternation has no
+    // priority conflict, so the DFA fast path is safe and significantly faster.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         analyze(QUERY_OBFUSCATOR).strategy,
-        "QUERY_OBFUSCATOR pattern routing changed — verify BitStateMatcher still carries the "
-            + "singleFirstCharAscii fast-reject before updating this pin");
+        "QUERY_OBFUSCATOR routes to DFA_TABLE (no priority conflict, DFA is safe)");
   }
 }

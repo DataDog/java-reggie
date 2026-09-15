@@ -17,6 +17,8 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.codegen.ast.RegexNode;
@@ -122,6 +124,74 @@ class BitStateFastRejectRegressionTest {
         name + ": test fixture bug — noMatchInput actually matches per java.util.regex");
 
     assertFalse(matcher.find(noMatchInput), name + ": BitStateMatcher.find() false positive");
+  }
+
+  @Test
+  void find_rejectsWithoutNonAsciiBlindSpot() throws Exception {
+    // "(a|[\u03b1\u03b2])(x|xy|xyz)": exactly one ASCII char ('a') can begin a match, but the
+    // non-ASCII alternative branch means
+    // the ASCII-only prefilter is unsound: before computeFirstByteFilter declined on ranges past
+    // 127, find() wrongly rejected non-ASCII-leading inputs that DO match ("\u03b1xyz" etc.).
+    BitStateMatcher matcher = build("(a|[\u03b1\u03b2])(x|xy|xyz)");
+
+    assertTrue(matcher.find("\u03b1xyz"), "non-ASCII-leading match wrongly rejected by find()");
+    assertTrue(matcher.find("\u03b1x"), "non-ASCII-leading match wrongly rejected by find()");
+    assertTrue(matcher.find("axyz"));
+    assertFalse(matcher.find("zzz"));
+
+    // The anchored family must not over-reject either — and must not START over-rejecting once
+    // it consults the same prefilter (matches/matchesBounded are region-anchored).
+    assertTrue(
+        matcher.matches("\u03b1xyz"), "non-ASCII-leading match wrongly rejected by matches()");
+    assertTrue(matcher.matches("\u03b1x"));
+    assertTrue(matcher.matches("axyz"));
+    assertFalse(matcher.matches("zzz"));
+    assertTrue(matcher.matchesBounded("zz\u03b1xzz", 2, 4));
+  }
+
+  @Test
+  void matchesFamily_rejectsNoMatchInputOnFirstChar() throws Exception {
+    // The StateExplosionBenchmark.AlternationHeavyNoMatch shape: exactly one ASCII first char
+    // ('a'), so every anchored entry point can reject a first-char mismatch with one compare
+    // instead of the full DFS setup. Correctness parity must be preserved on both sides.
+    String pat = "(a|ab|abc)(1|12|123)";
+    BitStateMatcher matcher = build(pat);
+    BitStateMatcher oracle = build(pat); // same engine, no reject wiring assumptions
+    assertTrue(matcher.hasFastReject());
+
+    // No-match side: wrong first char, and empty input (pattern cannot match empty).
+    assertFalse(matcher.matches("xyz789"));
+    assertFalse(matcher.matches("b"));
+    assertFalse(matcher.matches(""));
+    assertNull(matcher.match("xyz789"));
+    assertNull(matcher.match(""));
+    assertFalse(matcher.matchesBounded("xyz789", 0, 6));
+    assertFalse(matcher.matchesBounded("abc123", 2, 2)); // empty region
+    assertNull(matcher.matchBounded("xyz789", 0, 6));
+
+    // Match side: full parity with a fresh instance through every anchored entry point.
+    assertTrue(matcher.matches("abc123"));
+    assertTrue(matcher.matches("a123"));
+    assertTrue(matcher.matches("ab12"));
+    assertEquals(oracle.match("abc123").start(0), matcher.match("abc123").start(0));
+    assertEquals(oracle.match("abc123").end(0), matcher.match("abc123").end(0));
+    assertTrue(matcher.matchesBounded("xxabc123xx", 2, 8));
+    MatchResult bounded = matcher.matchBounded("xxabc123xx", 2, 8);
+    assertNotNull(bounded);
+    assertEquals(2, bounded.start(0));
+    assertEquals(8, bounded.end(0));
+  }
+
+  @Test
+  void matchesFamily_doesNotRejectEmptyMatchingPattern() throws Exception {
+    // (a)?(b)? can match the empty string, so singleFirstCharAscii is -1 and the anchored
+    // pre-reject must not fire — matches("") has to stay true.
+    BitStateMatcher matcher = build("(a)?(b)?");
+    assertTrue(matcher.matches(""));
+    assertTrue(matcher.match("") != null);
+    assertTrue(matcher.matchesBounded("ab", 1, 1));
+    assertTrue(matcher.matchBounded("ab", 1, 1) != null);
+    assertFalse(matcher.matches("c"));
   }
 
   @Test

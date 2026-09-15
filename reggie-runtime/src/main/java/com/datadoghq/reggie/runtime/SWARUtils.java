@@ -35,6 +35,7 @@ public final class SWARUtils {
   // SWAR magic constants for zero-byte detection
   private static final long SWAR_0x01 = 0x0101010101010101L;
   private static final long SWAR_0x80 = 0x8080808080808080L;
+  private static final long SWAR_0x7F = 0x7F7F7F7F7F7F7F7FL;
 
   // Feature flag: can be disabled via system property
   private static final boolean SWAR_ENABLED =
@@ -157,34 +158,55 @@ public final class SWARUtils {
   }
 
   /**
+   * Carry-safe per-lane range mask: a word whose high bit is set in each lane whose byte value lies
+   * in [low, high] (unsigned, both inclusive). The naive formulation ({@code chunk + (0x80 - low)}
+   * / {@code high + (0x80 - chunk)}) overflows or borrows across lane boundaries for bytes >= 0x80
+   * (Latin-1), silently corrupting neighboring lanes and both missing and hallucinating range
+   * members. This formulation folds every byte to 7 bits first ({@code chunk & SWAR_0x7F}), which
+   * keeps both comparisons inside [0x01, 0xFF] so no carry can ever leave a lane, then restores the
+   * high bit with an explicit ASCII mask: a folded byte matches the low half only when the original
+   * byte is < 0x80 and the high half (range portion above 0x7F, re-based by -0x80) only when it is
+   * >= 0x80.
+   */
+  private static long rangeMask(long chunk, int low, int high) {
+    long x7 = chunk & SWAR_0x7F;
+    long m = 0;
+    if (high < 0x80) {
+      // Entire range below 0x80: match only high-bit-clear lanes.
+      m = halfRangeMask(x7, low, high) & ~chunk;
+    } else if (low >= 0x80) {
+      // Entire range above 0x80: re-base to [low-0x80, high-0x80], match only high-bit-set lanes.
+      m = halfRangeMask(x7, low - 0x80, high - 0x80) & chunk;
+    } else {
+      // Range straddles 0x80: both halves.
+      m = (halfRangeMask(x7, low, 0x7F) & ~chunk) | (halfRangeMask(x7, 0, high - 0x80) & chunk);
+    }
+    return m & SWAR_0x80;
+  }
+
+  /**
+   * Per-lane mask over 7-bit folded bytes: high bit set iff {@code lo <= (byte & 0x7F) <= hi} with
+   * lo, hi in [0, 0x7F]. Both additions stay within [0x01, 0xFF], so they are carry- and
+   * borrow-free by construction.
+   */
+  private static long halfRangeMask(long x7, int lo, int hi) {
+    long aboveLow = x7 + (SWAR_0x80 - SWAR_0x01 * lo);
+    long belowHigh = SWAR_0x01 * hi + (SWAR_0x80 - x7);
+    return aboveLow & belowHigh & SWAR_0x80;
+  }
+
+  /**
    * Check if an 8-byte chunk contains at least one hex digit. Uses SWAR to check all 8 bytes in
    * parallel.
    */
   private static boolean containsHexDigit(long chunk) {
-    // Check for digits 0-9 (0x30-0x39)
-    long digitsLow = chunk - 0x3030303030303030L; // Subtract '0'
-    long digitsHigh = chunk - 0x3A3A3A3A3A3A3A3AL; // Subtract '9' + 1
-    long digits = (~digitsLow & digitsHigh) & SWAR_0x80;
-
-    if (digits != 0) {
-      return true;
-    }
-
-    // Check for lowercase a-f (0x61-0x66)
-    long lowerLow = chunk - 0x6161616161616161L; // Subtract 'a'
-    long lowerHigh = chunk - 0x6767676767676767L; // Subtract 'f' + 1
-    long lower = (~lowerLow & lowerHigh) & SWAR_0x80;
-
-    if (lower != 0) {
-      return true;
-    }
-
-    // Check for uppercase A-F (0x41-0x46)
-    long upperLow = chunk - 0x4141414141414141L; // Subtract 'A'
-    long upperHigh = chunk - 0x4747474747474747L; // Subtract 'F' + 1
-    long upper = (~upperLow & upperHigh) & SWAR_0x80;
-
-    return upper != 0;
+    // Digits 0-9, lowercase a-f, uppercase A-F - all three via the carry-safe range mask.
+    // (The previous broadcast constants used the exclusive upper bounds 0x3A/0x67/0x47 with an
+    // inclusive comparison, so ':', 'g' and 'G' read as hex digits; a false-positive first chunk
+    // made findFirstHexDigit return -1 without ever scanning later chunks.)
+    return rangeMask(chunk, '0', '9') != 0
+        || rangeMask(chunk, 'a', 'f') != 0
+        || rangeMask(chunk, 'A', 'F') != 0;
   }
 
   /** Scalar fallback for finding first hex digit. */
@@ -212,18 +234,9 @@ public final class SWARUtils {
    * @return true if all 8 bytes are in range
    */
   public static boolean allBytesInRange(long chunk, int low, int high) {
-    // Check: byte >= low  =>  (byte - low) has high bit clear
-    long aboveLow = chunk - (SWAR_0x01 * low);
-
-    // Check: byte <= high  =>  (high - byte) has high bit clear
-    long belowHigh = (SWAR_0x01 * high) - chunk;
-
-    // Byte is in range when BOTH high bits are clear (neither underflow occurred)
-    // aboveLow has high bit SET when byte < low, belowHigh has high bit SET when byte > high
-    // All 8 bytes are in range when all high bits of inverted OR are set
-    long bothValid = ~(aboveLow | belowHigh) & SWAR_0x80;
-
-    return bothValid == SWAR_0x80;
+    // Carry-safe formulation (see rangeMask): the previous 0x80-offset additions crossed lane
+    // boundaries for bytes >= 0x80, so a Latin-1 byte could corrupt its neighbor's lane.
+    return rangeMask(chunk, low, high) == SWAR_0x80;
   }
 
   /**
@@ -243,23 +256,12 @@ public final class SWARUtils {
     }
 
     int pos = start;
-    long lowBroadcast = SWAR_0x01 * (low & 0xFF);
-    long highBroadcast = SWAR_0x01 * (high & 0xFF);
 
-    // Process 8 bytes at a time
+    // Process 8 bytes at a time (carry-safe range mask, see rangeMask)
     while (pos + 8 <= end) {
       long chunk = getLong(bytes, pos);
 
-      // Check: byte >= low  =>  (byte - low) has high bit clear
-      long aboveLow = chunk - lowBroadcast;
-
-      // Check: byte <= high  =>  (high - byte) has high bit clear
-      long belowHigh = highBroadcast - chunk;
-
-      // Byte is in range when BOTH high bits are clear (neither underflow occurred)
-      // aboveLow has high bit SET when byte < low, belowHigh has high bit SET when byte > high
-      // So invert the OR to find bytes where NEITHER condition has a set high bit
-      long inRange = ~(aboveLow | belowHigh) & SWAR_0x80;
+      long inRange = rangeMask(chunk, low & 0xFF, high & 0xFF);
 
       if (inRange != 0) {
         // Found at least one byte in range - locate exact position
@@ -374,22 +376,12 @@ public final class SWARUtils {
     }
 
     int pos = start;
-    long lowBroadcast = SWAR_0x01 * (low & 0xFF);
-    long highBroadcast = SWAR_0x01 * (high & 0xFF);
 
-    // Process 8 bytes at a time
+    // Process 8 bytes at a time (carry-safe range mask, see rangeMask)
     while (pos + 8 <= end) {
       long chunk = getLong(bytes, pos);
 
-      // Check: byte >= low  =>  (byte - low) has high bit clear
-      long aboveLow = chunk - lowBroadcast;
-
-      // Check: byte <= high  =>  (high - byte) has high bit clear
-      long belowHigh = highBroadcast - chunk;
-
-      // A byte is NOT in range if aboveLow OR belowHigh has its high bit set
-      // (i.e., b < low or b > high caused a borrow in subtraction)
-      long notInRange = (aboveLow | belowHigh) & SWAR_0x80;
+      long notInRange = ~rangeMask(chunk, low & 0xFF, high & 0xFF) & SWAR_0x80;
 
       if (notInRange != 0) {
         // Found at least one byte not in range - locate exact position
@@ -437,15 +429,7 @@ public final class SWARUtils {
     int pos = start;
     int rangeCount = ranges.length / 2;
 
-    // Broadcast all range bounds
-    long[] lowBroadcasts = new long[rangeCount];
-    long[] highBroadcasts = new long[rangeCount];
-    for (int i = 0; i < rangeCount; i++) {
-      lowBroadcasts[i] = SWAR_0x01 * (ranges[i * 2] & 0xFF);
-      highBroadcasts[i] = SWAR_0x01 * (ranges[i * 2 + 1] & 0xFF);
-    }
-
-    // Process 8 bytes at a time
+    // Process 8 bytes at a time (carry-safe range masks, see rangeMask)
     while (pos + 8 <= end) {
       long chunk = getLong(bytes, pos);
 
@@ -453,11 +437,7 @@ public final class SWARUtils {
 
       // Check each range and OR the results
       for (int i = 0; i < rangeCount; i++) {
-        long aboveLow = chunk - lowBroadcasts[i];
-        long belowHigh = highBroadcasts[i] - chunk;
-        // Byte is in range when BOTH high bits are clear
-        long inThisRange = ~(aboveLow | belowHigh) & SWAR_0x80;
-        matchAny |= inThisRange;
+        matchAny |= rangeMask(chunk, ranges[i * 2] & 0xFF, ranges[i * 2 + 1] & 0xFF);
       }
 
       if (matchAny != 0) {

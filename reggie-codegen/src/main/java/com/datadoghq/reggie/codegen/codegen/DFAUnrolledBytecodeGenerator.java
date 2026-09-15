@@ -25,6 +25,7 @@ import com.datadoghq.reggie.codegen.automaton.NFA;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.objectweb.asm.ClassWriter;
@@ -285,7 +286,12 @@ public class DFAUnrolledBytecodeGenerator {
     // still tried when the lookahead fails mid-match.
     boolean hasAnyAssertions = !state.assertionChecks.isEmpty();
     for (AssertionCheck assertion : state.assertionChecks) {
-      if (assertion.isLookbehind() || !state.accepting) {
+      // Gate-form lookaheads are entry guards even on accepting states: the assertion anchors at
+      // the state's entry position (start-anchored for a leading assertion), which is NOT the
+      // match-end position the deferred acceptance block evaluates at. Deferring them would drop
+      // the assertion for every longer match (e.g. (?=.*a)(?=.*b).*: the gates sit on the
+      // accepting start state and never fire once the .* walk consumes input).
+      if (assertion.isGateDfa() || assertion.isLookbehind() || !state.accepting) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
       }
     }
@@ -334,7 +340,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitLabel(endOfInput);
     if (state.accepting) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        if (assertion.isLookahead()) {
+        if (assertion.isLookahead() && !assertion.isGateDfa()) {
           generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
         }
       }
@@ -369,12 +375,95 @@ public class DFAUnrolledBytecodeGenerator {
    *
    * <p>For lookahead: peek at current position For lookbehind: peek backward (not implemented yet)
    */
+  /**
+   * Emits the sub-DFA gate for a variable-width lookahead (AssertionCheck gate form): an inline
+   * anchored walk of the gate DFA starting at the current position. Positive lookahead: the gate
+   * passes when the gate DFA reaches an accepting state (scan-death fails); negative lookahead is
+   * inverted (scan-death passes). The walk never consumes the caller's position variable - it
+   * advances its own copy in {@code gatePosSlot}.
+   *
+   * <p>Context parameterization: {@code boundVar} is the scan limit ({@code -1} = the input's
+   * length, String only); {@code charSeqInput} selects {@code CharSequence.charAt} (bounded
+   * contexts receive a CharSequence) vs {@code String.charAt}; the two scratch slots are supplied
+   * by the caller because the fixed-slot paths (bounded/greedy) have no allocator.
+   */
+  private void generateGateDfaCheckInto(
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int peekStartVar,
+      int boundVar,
+      boolean charSeqInput,
+      int gatePosSlot,
+      int gateChSlot,
+      Label assertionFailed) {
+    DFA gate = assertion.gateDfa;
+    boolean positive = assertion.isPositive();
+    Label gatePassed = new Label();
+    Label gateAccept = positive ? gatePassed : assertionFailed;
+    Label gateDead = positive ? assertionFailed : gatePassed;
+
+    mv.visitVarInsn(ILOAD, peekStartVar);
+    mv.visitVarInsn(ISTORE, gatePosSlot);
+
+    List<DFA.DFAState> states = gate.getAllStates();
+    Map<DFA.DFAState, Label> labels = new HashMap<>();
+    for (DFA.DFAState st : states) {
+      labels.put(st, new Label());
+    }
+    mv.visitJumpInsn(GOTO, labels.get(gate.getStartState()));
+
+    for (DFA.DFAState st : states) {
+      mv.visitLabel(labels.get(st));
+      // Accepting gate state: the lookahead body matched (anchored at the peek start) - the
+      // lookahead's decision point (existence semantics: no need to try longer gate matches).
+      if (st.accepting) {
+        mv.visitJumpInsn(GOTO, gateAccept);
+        continue;
+      }
+      // gatePos >= scan bound: scan exhausted without acceptance.
+      mv.visitVarInsn(ILOAD, gatePosSlot);
+      if (boundVar >= 0) {
+        mv.visitVarInsn(ILOAD, boundVar);
+      } else {
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      }
+      mv.visitJumpInsn(IF_ICMPGE, gateDead);
+      // ch = input.charAt(gatePos); gatePos++
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, gatePosSlot);
+      if (charSeqInput) {
+        mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true);
+      } else {
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      }
+      mv.visitVarInsn(ISTORE, gateChSlot);
+      mv.visitIincInsn(gatePosSlot, 1);
+      for (Map.Entry<CharSet, DFA.DFATransition> entry : st.transitions.entrySet()) {
+        Label nextCheck = new Label();
+        generateCharSetCheck(mv, entry.getKey(), gateChSlot, nextCheck);
+        mv.visitJumpInsn(GOTO, labels.get(entry.getValue().target));
+        mv.visitLabel(nextCheck);
+      }
+      // No transition: gate DFA died.
+      mv.visitJumpInsn(GOTO, gateDead);
+    }
+    mv.visitLabel(gatePassed);
+  }
+
   private void generateAssertionCheck(
       MethodVisitor mv,
       AssertionCheck assertion,
       int posVar,
       Label assertionFailed,
       LocalVarAllocator allocator) {
+    if (assertion.isGateDfa()) {
+      int gatePosSlot = allocator.allocate();
+      int gateChSlot = allocator.allocate();
+      generateGateDfaCheckInto(
+          mv, assertion, posVar, -1, false, gatePosSlot, gateChSlot, assertionFailed);
+      return;
+    }
     if (assertion.isLookahead()) {
       // Lookahead: peek at current position + offset
       if (assertion.isLiteral) {
@@ -738,8 +827,14 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitJumpInsn(IFNULL, returnMinusOne);
 
+    // if (start < 0) start = 0;  (clamp - a negative start behaves like 0, matching the
+    // cross-generator findFrom contract; FIXED_SEQUENCE and the suffix scan already do this)
+    Label startNotNeg = new Label();
     mv.visitVarInsn(ILOAD, 2);
-    mv.visitJumpInsn(IFLT, returnMinusOne);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
 
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ALOAD, 1);
@@ -763,6 +858,14 @@ public class DFAUnrolledBytecodeGenerator {
 
     // OPTIMIZATION: Compute valid first characters from DFA start state
     CharSet validFirstChars = computeValidFirstChars();
+    java.util.List<Character> indexOfFirstChars = computeIndexOfFirstChars(validFirstChars);
+
+    // Scratch vars for indexOf skip (only used when indexOfFirstChars != null)
+    int minPosVar = -1, idxVar = -1;
+    if (indexOfFirstChars != null) {
+      minPosVar = 6; // after len(3), tryPos(4), ch(5)
+      idxVar = 7;
+    }
 
     Label outerLoopStart = new Label();
     Label outerLoopEnd = new Label();
@@ -815,7 +918,20 @@ public class DFAUnrolledBytecodeGenerator {
     }
 
     // OPTIMIZATION: First char skip - if char at tryPos cannot start a match, skip
-    if (validFirstChars != null && !dfa.getStartState().accepting) {
+    if (indexOfFirstChars != null) {
+      // indexOf-based skip: jump tryPos to the next occurrence of any valid first char.
+      // indexOf is JIT-intrinsified (SIMD on modern CPUs) and much faster than per-position
+      // charAt + range checks for sparse first-char sets.
+      Label canStartMatch = new Label();
+      generateIndexOfSkip(mv, indexOfFirstChars, 4, minPosVar, idxVar, outerLoopEnd);
+      // After indexOf skip, tryPos is at a valid first char — fall through to matchesAtStart.
+      // Re-check loop bound: if (tryPos >= len) goto outerLoopEnd (already checked by indexOf
+      // returning -1 → outerLoopEnd, but guard for the case where indexOf returns exactly len-1).
+      mv.visitVarInsn(ILOAD, 4);
+      mv.visitVarInsn(ILOAD, 3);
+      mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
+      mv.visitLabel(canStartMatch); // not used as a jump target, just a label for clarity
+    } else if (validFirstChars != null && !dfa.getStartState().accepting) {
       Label canStartMatch = new Label();
 
       // char ch = input.charAt(tryPos);
@@ -918,6 +1034,70 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
     return result;
+  }
+
+  /**
+   * If all ranges in {@code validFirstChars} are single characters and there are at most {@code
+   * MAX_INDEXOF_CHARS} of them, return them as a list for indexOf-based skipping. Returns {@code
+   * null} if the set contains multi-char ranges (where indexOf can't help).
+   */
+  private static java.util.List<Character> computeIndexOfFirstChars(CharSet validFirstChars) {
+    if (validFirstChars == null) return null;
+    java.util.List<CharSet.Range> ranges = validFirstChars.getRanges();
+    if (ranges.size() > MAX_INDEXOF_CHARS) return null;
+    java.util.List<Character> chars = new java.util.ArrayList<>();
+    for (CharSet.Range r : ranges) {
+      if (r.start != r.end) return null; // multi-char range — can't use indexOf
+      chars.add(r.start);
+    }
+    return chars;
+  }
+
+  private static final int MAX_INDEXOF_CHARS = 8;
+
+  /**
+   * Emit indexOf-based position skip: for each char in {@code firstChars}, call {@code
+   * input.indexOf(c, tryPos)} and set {@code tryPosVar} to the minimum result. Jumps to {@code
+   * noMatchLabel} if no valid char is found (all indexOf return -1).
+   *
+   * @param minPosVar scratch local for the running minimum
+   * @param idxVar scratch local for the current indexOf result
+   */
+  private void generateIndexOfSkip(
+      MethodVisitor mv,
+      java.util.List<Character> firstChars,
+      int tryPosVar,
+      int minPosVar,
+      int idxVar,
+      Label noMatchLabel) {
+    // int minPos = Integer.MAX_VALUE;
+    pushInt(mv, Integer.MAX_VALUE);
+    mv.visitVarInsn(ISTORE, minPosVar);
+    for (char c : firstChars) {
+      // int idx = input.indexOf(c, tryPos);
+      mv.visitVarInsn(ALOAD, 1);
+      pushInt(mv, (int) c);
+      mv.visitVarInsn(ILOAD, tryPosVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
+      mv.visitVarInsn(ISTORE, idxVar);
+      // if (idx >= 0 && idx < minPos) minPos = idx;
+      Label skip = new Label();
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitJumpInsn(IFLT, skip);
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitVarInsn(ILOAD, minPosVar);
+      mv.visitJumpInsn(IF_ICMPGE, skip);
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitVarInsn(ISTORE, minPosVar);
+      mv.visitLabel(skip);
+    }
+    // if (minPos == MAX_VALUE) goto noMatch;
+    mv.visitVarInsn(ILOAD, minPosVar);
+    pushInt(mv, Integer.MAX_VALUE);
+    mv.visitJumpInsn(IF_ICMPEQ, noMatchLabel);
+    // tryPos = minPos;
+    mv.visitVarInsn(ILOAD, minPosVar);
+    mv.visitVarInsn(ISTORE, tryPosVar);
   }
 
   /**
@@ -2067,7 +2247,8 @@ public class DFAUnrolledBytecodeGenerator {
     boolean hasLookaheadOnAccepting = false;
     boolean needsAssertionFailedLabel = false;
     for (AssertionCheck assertion : state.assertionChecks) {
-      if (assertion.isLookbehind() || !state.accepting) {
+      // Gate form: entry guard even on accepting states (see generateStateCode).
+      if (assertion.isGateDfa() || assertion.isLookbehind() || !state.accepting) {
         generateAssertionCheck(mv, assertion, posVar, assertionFailed, allocator);
         needsAssertionFailedLabel = true;
       } else {
@@ -2087,7 +2268,7 @@ public class DFAUnrolledBytecodeGenerator {
       if (hasLookaheadOnAccepting) {
         Label skipRecord = new Label();
         for (AssertionCheck assertion : state.assertionChecks) {
-          if (assertion.isLookahead()) {
+          if (assertion.isLookahead() && !assertion.isGateDfa()) {
             generateAssertionCheck(mv, assertion, posVar, skipRecord, allocator);
           }
         }
@@ -2337,15 +2518,24 @@ public class DFAUnrolledBytecodeGenerator {
       stateLabels.put(state, new Label());
     }
 
+    // Gate-DFA scratch: allocated (not hardcoded) past the bounded method's fixed layout
+    // (0=this, 1=input, 2=start, 3=end, 4=pos, 5=transition ch, 6/7=lookbehind scratch) - the
+    // allocation keeps future layout changes from silently aliasing live locals.
+    LocalVarAllocator boundedScratch = new LocalVarAllocator(8);
+    int boundedGatePosSlot = boundedScratch.allocate();
+    int boundedGateChSlot = boundedScratch.allocate();
+
     // Generate code for start state
     mv.visitLabel(stateLabels.get(dfa.getStartState()));
-    generateBoundedStateCode(mv, dfa.getStartState(), stateLabels, 4, 3, 2);
+    generateBoundedStateCode(
+        mv, dfa.getStartState(), stateLabels, 4, 3, 2, boundedGatePosSlot, boundedGateChSlot);
 
     // Generate code for all other states
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state == dfa.getStartState()) continue;
       mv.visitLabel(stateLabels.get(state));
-      generateBoundedStateCode(mv, state, stateLabels, 4, 3, 2);
+      generateBoundedStateCode(
+          mv, state, stateLabels, 4, 3, 2, boundedGatePosSlot, boundedGateChSlot);
     }
 
     mv.visitMaxs(0, 0);
@@ -2477,14 +2667,17 @@ public class DFAUnrolledBytecodeGenerator {
       Map<DFA.DFAState, Label> stateLabels,
       int posVar,
       int endVar,
-      int startVar) {
+      int startVar,
+      int gatePosSlot,
+      int gateChSlot) {
     Label endOfRegion = new Label();
     Label assertionFailed = new Label();
 
     // Generate assertion checks first (before consuming character)
     if (!state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        generateBoundedAssertionCheck(mv, assertion, posVar, endVar, startVar, assertionFailed);
+        generateBoundedAssertionCheck(
+            mv, assertion, posVar, endVar, startVar, gatePosSlot, gateChSlot, assertionFailed);
       }
     }
 
@@ -2565,7 +2758,16 @@ public class DFAUnrolledBytecodeGenerator {
       int posVar,
       int endVar,
       int startVar,
+      int gatePosSlot,
+      int gateChSlot,
       Label assertionFailed) {
+    if (assertion.isGateDfa()) {
+      // Scratch slots threaded from the bounded method's LocalVarAllocator (past its fixed
+      // layout). Peek bound is the region end, consistent with the fixed-width bounded checks.
+      generateGateDfaCheckInto(
+          mv, assertion, posVar, endVar, true, gatePosSlot, gateChSlot, assertionFailed);
+      return;
+    }
     if (assertion.isLookahead()) {
       if (assertion.isLiteral) {
         String literal = assertion.literal;
@@ -2631,6 +2833,56 @@ public class DFAUnrolledBytecodeGenerator {
           mv.visitJumpInsn(GOTO, assertionFailed);
           mv.visitLabel(assertionPassed);
         }
+      } else {
+        // charSets-form lookahead (e.g. (?=[A-Z][0-9]), or a quantified body existence-collapsed
+        // to a single charSet by extractFromAssertion, e.g. (?=\d+) -> [\d]). Mirrors the greedy
+        // emitter's charSets-lookahead branch with the region end as the bound and
+        // CharSequence.charAt. (This branch was previously missing - a charSets lookahead was
+        // silently skipped here, dropping the assertion from matchesBounded entirely.)
+        boolean positive = assertion.isPositive();
+        int chVar = 7; // slot 7: ch (slots 5=transition ch, 6=lookbehind checkPos)
+        Label mismatch = new Label();
+        Label assertionPassed = new Label();
+
+        for (int i = 0; i < assertion.charSets.size(); i++) {
+          // Bounds check: if (pos + i >= end) goto assertionFailed/Passed
+          mv.visitVarInsn(ILOAD, posVar);
+          if (i > 0) {
+            pushInt(mv, i);
+            mv.visitInsn(IADD);
+          }
+          mv.visitVarInsn(ILOAD, endVar);
+          if (positive) {
+            mv.visitJumpInsn(IF_ICMPGE, assertionFailed);
+          } else {
+            mv.visitJumpInsn(IF_ICMPGE, assertionPassed);
+          }
+
+          // ch = input.charAt(pos + i)
+          mv.visitVarInsn(ALOAD, 1);
+          mv.visitVarInsn(ILOAD, posVar);
+          if (i > 0) {
+            pushInt(mv, i);
+            mv.visitInsn(IADD);
+          }
+          mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true);
+          mv.visitVarInsn(ISTORE, chVar);
+
+          generateCharSetCheck(mv, assertion.charSets.get(i), chVar, mismatch);
+        }
+
+        // All sets matched: positive passes, negative fails
+        if (positive) {
+          mv.visitJumpInsn(GOTO, assertionPassed);
+        } else {
+          mv.visitJumpInsn(GOTO, assertionFailed);
+        }
+
+        mv.visitLabel(mismatch);
+        if (positive) {
+          mv.visitJumpInsn(GOTO, assertionFailed);
+        }
+        mv.visitLabel(assertionPassed);
       }
     } else if (assertion.isLookbehind()) {
       int width = assertion.width;
@@ -2796,6 +3048,18 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, 7); // len
 
+    // Scratch locals past the fixed layout (0=this, 1=input, 2=start, 3=bounds, 4=matchStart,
+    // 5=pos, 6=lastAccepting, 7=len): transition ch, lookbehind checkPos/ch, lookahead ch and
+    // the gate-DFA scratch - all allocated here and threaded through the emitters, so future
+    // layout changes cannot silently alias live locals.
+    LocalVarAllocator greedyScratch = new LocalVarAllocator(8);
+    int greedyChSlot = greedyScratch.allocate(); // 8
+    int greedyLbCheckPosSlot = greedyScratch.allocate(); // 9
+    int greedyLbChSlot = greedyScratch.allocate(); // 10
+    int greedyLaChSlot = greedyScratch.allocate(); // 11
+    int greedyGatePosSlot = greedyScratch.allocate(); // 12
+    int greedyGateChSlot = greedyScratch.allocate(); // 13
+
     // Create labels for all states
     Map<DFA.DFAState, Label> stateLabels = new HashMap<>();
     for (DFA.DFAState state : dfa.getAllStates()) {
@@ -2810,13 +3074,40 @@ public class DFAUnrolledBytecodeGenerator {
     // Generate code for start state
     mv.visitLabel(stateLabels.get(dfa.getStartState()));
     generateGreedyStateCode(
-        mv, dfa.getStartState(), stateLabels, 5, 7, 6, scanComplete, skippableStates);
+        mv,
+        dfa.getStartState(),
+        stateLabels,
+        5,
+        7,
+        6,
+        scanComplete,
+        skippableStates,
+        greedyChSlot,
+        greedyLbCheckPosSlot,
+        greedyLbChSlot,
+        greedyLaChSlot,
+        greedyGatePosSlot,
+        greedyGateChSlot);
 
     // Generate code for all other states
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state == dfa.getStartState()) continue;
       mv.visitLabel(stateLabels.get(state));
-      generateGreedyStateCode(mv, state, stateLabels, 5, 7, 6, scanComplete, skippableStates);
+      generateGreedyStateCode(
+          mv,
+          state,
+          stateLabels,
+          5,
+          7,
+          6,
+          scanComplete,
+          skippableStates,
+          greedyChSlot,
+          greedyLbCheckPosSlot,
+          greedyLbChSlot,
+          greedyLaChSlot,
+          greedyGatePosSlot,
+          greedyGateChSlot);
     }
 
     mv.visitLabel(scanComplete);
@@ -2945,12 +3236,28 @@ public class DFAUnrolledBytecodeGenerator {
       int lenVar,
       int lastAcceptingVar,
       Label scanComplete,
-      Set<DFA.DFAState> skippableStates) {
+      Set<DFA.DFAState> skippableStates,
+      int chSlot,
+      int lbCheckPosSlot,
+      int lbChSlot,
+      int laChSlot,
+      int gatePosSlot,
+      int gateChSlot) {
     // Handle assertions if present (before recording accepting position)
     Label assertionFailed = new Label();
     if (!state.assertionChecks.isEmpty()) {
       for (AssertionCheck assertion : state.assertionChecks) {
-        generateGreedyAssertionCheck(mv, assertion, posVar, lenVar, assertionFailed);
+        generateGreedyAssertionCheck(
+            mv,
+            assertion,
+            posVar,
+            lenVar,
+            lbCheckPosSlot,
+            lbChSlot,
+            laChSlot,
+            gatePosSlot,
+            gateChSlot,
+            assertionFailed);
       }
     }
 
@@ -2976,7 +3283,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-    mv.visitVarInsn(ISTORE, 8); // ch in var 8
+    mv.visitVarInsn(ISTORE, chSlot); // transition ch (allocated, see generateFindBoundsFromMethod)
 
     // pos++;
     mv.visitIincInsn(posVar, 1);
@@ -2987,7 +3294,7 @@ public class DFAUnrolledBytecodeGenerator {
       DFA.DFAState target = entry.getValue().target;
 
       Label nextCheck = new Label();
-      generateCharSetCheck(mv, chars, 8, nextCheck);
+      generateCharSetCheck(mv, chars, chSlot, nextCheck);
 
       // Match found - jump to target state
       mv.visitJumpInsn(GOTO, stateLabels.get(target));
@@ -3011,7 +3318,23 @@ public class DFAUnrolledBytecodeGenerator {
    * jumps to assertionFailed instead of returning false.
    */
   private void generateGreedyAssertionCheck(
-      MethodVisitor mv, AssertionCheck assertion, int posVar, int lenVar, Label assertionFailed) {
+      MethodVisitor mv,
+      AssertionCheck assertion,
+      int posVar,
+      int lenVar,
+      int lbCheckPosSlot,
+      int lbChSlot,
+      int laChSlot,
+      int gatePosSlot,
+      int gateChSlot,
+      Label assertionFailed) {
+    if (assertion.isGateDfa()) {
+      // Gate scratch threaded from generateFindBoundsFromMethod's LocalVarAllocator. Scan bound
+      // is len, matching the literal checks.
+      generateGateDfaCheckInto(
+          mv, assertion, posVar, lenVar, false, gatePosSlot, gateChSlot, assertionFailed);
+      return;
+    }
     if (assertion.isLookahead()) {
       if (assertion.isLiteral) {
         String literal = assertion.literal;
@@ -3060,9 +3383,9 @@ public class DFAUnrolledBytecodeGenerator {
         }
         mv.visitLabel(assertionPassed);
       } else {
-        // charSets lookahead: slot 11 for ch (slots 9/10 reserved for lookbehind)
+        // charSets lookahead: ch on the threaded lookahead scratch slot
         boolean positive = assertion.isPositive();
-        int chVar = 11;
+        int chVar = laChSlot;
         Label mismatch = new Label();
         Label assertionPassed = new Label();
 
@@ -3106,9 +3429,8 @@ public class DFAUnrolledBytecodeGenerator {
       }
     } else if (assertion.isLookbehind()) {
       int width = assertion.width;
-      // checkPos = pos - width
-      // slot 9: checkPosVar, slot 10: chVar (slot 8 is ch for transitions)
-      int checkPosVar = 9;
+      // checkPos = pos - width (scratch slots threaded from generateFindBoundsFromMethod)
+      int checkPosVar = lbCheckPosSlot;
 
       mv.visitVarInsn(ILOAD, posVar);
       pushInt(mv, width);
@@ -3146,7 +3468,7 @@ public class DFAUnrolledBytecodeGenerator {
           mv.visitLabel(assertionPassed);
         }
       } else {
-        int chVar = 10;
+        int chVar = lbChSlot;
         Label mismatch = new Label();
 
         for (int i = 0; i < assertion.charSets.size(); i++) {
@@ -3781,13 +4103,61 @@ public class DFAUnrolledBytecodeGenerator {
           }
         case END:
         case STRING_END:
-          // $ / \Z allows a \n transition when the newline is the last char in the string.
-          // After consuming the char, posVar == src_pos + 1. The condition is src_pos == len-1,
-          // i.e. posVar == len. The charset already constrains the char to '\n'.
-          mv.visitVarInsn(ILOAD, posVar);
-          access.loadLength.run();
-          mv.visitJumpInsn(IF_ICMPNE, skipTransition);
-          break;
+          // $ / \Z before a consuming transition: the consumed char must be a line terminator
+          // at the end of input. After consuming, posVar == src_pos + 1.
+          // Case 1: src_pos == len-1 (line terminator at last position) → posVar == len.
+          //   CRLF guard: if the consumed char was '\n', the preceding char must not be '\r'
+          //   (otherwise $ matches at src_pos-1 before the \r\n pair, not here).
+          // Case 2: src_pos == len-2 with \r\n → posVar == len-1, consumed '\r', next is '\n'.
+          {
+            Label ok = new Label();
+            Label checkCrlf = new Label();
+            // Case 1: posVar == len → CRLF guard
+            mv.visitVarInsn(ILOAD, posVar);
+            access.loadLength.run();
+            mv.visitJumpInsn(IF_ICMPEQ, checkCrlf);
+            // Case 2: posVar == len-1 AND charAt(posVar-1)=='\r' AND charAt(posVar)=='\n'
+            mv.visitVarInsn(ILOAD, posVar);
+            access.loadLength.run();
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            access.invokeCharAt.run();
+            pushInt(mv, '\r');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            access.invokeCharAt.run();
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
+            mv.visitJumpInsn(GOTO, ok);
+            // CRLF guard for Case 1: if consumed char is '\n', preceding char must not be '\r'
+            mv.visitLabel(checkCrlf);
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_1);
+            mv.visitInsn(ISUB);
+            access.invokeCharAt.run();
+            pushInt(mv, '\n');
+            mv.visitJumpInsn(IF_ICMPNE, ok); // not \n → no CRLF guard needed
+            // posVar >= 2 to check charAt(posVar-2)
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitJumpInsn(IF_ICMPLT, ok); // posVar < 2 → no preceding char → OK
+            mv.visitVarInsn(ALOAD, 1);
+            mv.visitVarInsn(ILOAD, posVar);
+            mv.visitInsn(ICONST_2);
+            mv.visitInsn(ISUB);
+            access.invokeCharAt.run();
+            pushInt(mv, '\r');
+            mv.visitJumpInsn(IF_ICMPEQ, skipTransition); // CRLF → skip
+            mv.visitLabel(ok);
+            break;
+          }
         case STRING_END_ABSOLUTE:
         case END_MULTILINE:
           // \z requires strict end of input; no consuming transition is valid.

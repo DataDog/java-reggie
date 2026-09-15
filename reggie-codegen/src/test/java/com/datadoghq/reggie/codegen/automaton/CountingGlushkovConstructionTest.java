@@ -16,7 +16,6 @@
 package com.datadoghq.reggie.codegen.automaton;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
@@ -37,38 +36,25 @@ public class CountingGlushkovConstructionTest {
 
   @Test
   void twoCharBodyExactRepetition() throws Exception {
+    // (?:ab){20}: 2 positions * 20 = 41 DFA states < 300, so COUNTING_GLUSHKOV is skipped.
+    // Falls through to SPECIALIZED_FIXED_SEQUENCE (literal repeat).
     PatternAnalyzer.MatchingStrategyResult result = analyze("(?:ab){20}");
-
-    assertEquals(PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV, result.strategy);
-    PatternAnalyzer.CountingGlushkovInfo info =
-        assertInstanceOf(PatternAnalyzer.CountingGlushkovInfo.class, result.patternInfo);
-    assertEquals(2, info.base.positionCount);
-    assertEquals(20, info.counterMin);
-    assertEquals(20, info.counterMax);
+    assertEquals(PatternAnalyzer.MatchingStrategy.SPECIALIZED_FIXED_SEQUENCE, result.strategy);
   }
 
   @Test
   void twoCharBodyRangeRepetition() throws Exception {
+    // (?:ab){5,20}: 2 positions * 20 = 41 DFA states < 300 → DFA_SWITCH.
     PatternAnalyzer.MatchingStrategyResult result = analyze("(?:ab){5,20}");
-
-    assertEquals(PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV, result.strategy);
-    PatternAnalyzer.CountingGlushkovInfo info =
-        assertInstanceOf(PatternAnalyzer.CountingGlushkovInfo.class, result.patternInfo);
-    assertEquals(5, info.counterMin);
-    assertEquals(20, info.counterMax);
+    assertEquals(PatternAnalyzer.MatchingStrategy.DFA_SWITCH, result.strategy);
   }
 
   @Test
   void singleCharClassBodyIsTriviallyEligible() throws Exception {
-    // \d{11}: single-position body, positionCount==1, synchronizing check skipped
+    // \d{11}: 1 position * 11 = 12 DFA states < 300, so COUNTING_GLUSHKOV is skipped.
+    // Falls through to STATELESS_LOOP (single char class).
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\d{11}");
-
-    assertEquals(PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV, result.strategy);
-    PatternAnalyzer.CountingGlushkovInfo info =
-        assertInstanceOf(PatternAnalyzer.CountingGlushkovInfo.class, result.patternInfo);
-    assertEquals(1, info.base.positionCount);
-    assertEquals(11, info.counterMin);
-    assertEquals(11, info.counterMax);
+    assertEquals(PatternAnalyzer.MatchingStrategy.STATELESS_LOOP, result.strategy);
   }
 
   @Test

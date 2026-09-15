@@ -44,26 +44,30 @@ public class CountingGlushkovRoutingTest {
 
   @Test
   void alphanumPairRepeat20_routesToCountingGlushkov() throws Exception {
+    // (?:[a-z][0-9]){20}: 2 positions * 20 = 41 DFA states < 300 → DFA_SWITCH.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
+        PatternAnalyzer.MatchingStrategy.DFA_SWITCH,
         StrategyCorrectnessMetaTest.routeOf("(?:[a-z][0-9]){20}"),
-        "(?:[a-z][0-9]){20} must route to COUNTING_GLUSHKOV");
+        "(?:[a-z][0-9]){20} routes to DFA_SWITCH (small DFA)");
   }
 
   @Test
   void hexPairColon11_routesToCountingGlushkov() throws Exception {
+    // (?:[a-f0-9]{2}:){11}: 3 positions * 11 = 34 DFA states < 300 → DFA_SWITCH.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
+        PatternAnalyzer.MatchingStrategy.DFA_SWITCH,
         StrategyCorrectnessMetaTest.routeOf("(?:[a-f0-9]{2}:){11}"),
-        "(?:[a-f0-9]{2}:){11} must route to COUNTING_GLUSHKOV");
+        "(?:[a-f0-9]{2}:){11} routes to DFA_SWITCH (small DFA)");
   }
 
   @Test
   void alphanumBodyRepeat150_routesToCountingGlushkov() throws Exception {
+    // (?:[a-z][0-9]){150}: 2 positions * 150 = 301 DFA states. < 2000 threshold
+    // → DFA_TABLE (faster than COUNTING_GLUSHKOV for small DFAs).
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV,
+        PatternAnalyzer.MatchingStrategy.DFA_TABLE,
         StrategyCorrectnessMetaTest.routeOf("(?:[a-z][0-9]){150}"),
-        "(?:[a-z][0-9]){150} must route to COUNTING_GLUSHKOV");
+        "(?:[a-z][0-9]){150} routes to DFA_TABLE (DFA fits in L1 cache)");
   }
 
   // -------------------------------------------------------------------------
@@ -93,6 +97,12 @@ public class CountingGlushkovRoutingTest {
     ReggieMatcher m = RuntimeCompiler.compile("(?:[a-z][0-9]){20}");
     String input = "X" + "a0".repeat(20) + "Y";
     int start = m.findFrom(input, 0);
+    System.err.println("DEBUG: class=" + m.getClass().getName() + " start=" + start);
+    System.err.println(
+        "DEBUG CL: "
+            + m.getClass().getClassLoader()
+            + " RT="
+            + RuntimeCompiler.class.getClassLoader());
     assertEquals(1, start, "(?:[a-z][0-9]){20} find should start at index 1 in \"X<pattern>Y\"");
   }
 
