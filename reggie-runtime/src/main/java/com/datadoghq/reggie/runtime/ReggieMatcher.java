@@ -673,6 +673,7 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
     List<String> parts = new ArrayList<>();
     int lastEnd = 0;
     int pos = 0;
+    int[] bounds = new int[2];
 
     while (pos <= input.length()) {
       // Early termination: we have limit - 1 parts, remainder becomes the last part.
@@ -680,22 +681,21 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
         break;
       }
 
-      MatchResult match = findMatchFrom(input, pos);
-      if (match == null) {
+      if (!findBoundsFrom(input, pos, bounds)) {
         break;
       }
 
       // JDK 8+ behaviour: skip a zero-width match at the very start of the string.
-      if (lastEnd == 0 && match.start() == 0 && match.start() == match.end()) {
+      if (lastEnd == 0 && bounds[0] == 0 && bounds[0] == bounds[1]) {
         pos = 1;
         continue;
       }
 
-      parts.add(input.substring(lastEnd, match.start()));
-      lastEnd = match.end();
+      parts.add(input.substring(lastEnd, bounds[0]));
+      lastEnd = bounds[1];
 
       // Advance past zero-width match to prevent an infinite loop.
-      pos = advancePos(match.start(), match.end());
+      pos = advancePos(bounds[0], bounds[1]);
     }
 
     // No splits: return the whole input as a single-element array (matches JDK behaviour).
