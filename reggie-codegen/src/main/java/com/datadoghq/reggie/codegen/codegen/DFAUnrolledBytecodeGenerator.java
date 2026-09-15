@@ -827,8 +827,14 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 1);
     mv.visitJumpInsn(IFNULL, returnMinusOne);
 
+    // if (start < 0) start = 0;  (clamp - a negative start behaves like 0, matching the
+    // cross-generator findFrom contract; FIXED_SEQUENCE and the suffix scan already do this)
+    Label startNotNeg = new Label();
     mv.visitVarInsn(ILOAD, 2);
-    mv.visitJumpInsn(IFLT, returnMinusOne);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
 
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ALOAD, 1);

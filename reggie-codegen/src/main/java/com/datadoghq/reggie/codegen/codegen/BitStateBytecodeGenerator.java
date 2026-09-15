@@ -688,8 +688,15 @@ public class BitStateBytecodeGenerator {
     Label returnMinusOne = new Label();
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitJumpInsn(IFNULL, returnMinusOne);
+    // if (start < 0) start = 0;  (clamp - a negative start behaves like 0, matching the
+    // cross-generator findFrom contract; FIXED_SEQUENCE and the suffix scan already do this)
+    Label startNotNeg = new Label();
     mv.visitVarInsn(ILOAD, startVar);
-    mv.visitJumpInsn(IFLT, returnMinusOne);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, startVar);
+    mv.visitLabel(startNotNeg);
+
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitVarInsn(ALOAD, inputVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);

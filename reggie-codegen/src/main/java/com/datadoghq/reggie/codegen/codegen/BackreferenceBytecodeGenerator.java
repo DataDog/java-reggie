@@ -2378,6 +2378,14 @@ public class BackreferenceBytecodeGenerator {
     mv.visitLabel(notNull);
     // S: []
 
+    // if (startPos < 0) startPos = 0;  (clamp - cross-generator findFrom contract)
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
+
     // int len = input.length();
     // S: [] -> [A:String]
     mv.visitVarInsn(ALOAD, 1);

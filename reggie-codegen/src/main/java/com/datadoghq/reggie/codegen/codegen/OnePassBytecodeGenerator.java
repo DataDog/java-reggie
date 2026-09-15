@@ -962,8 +962,13 @@ public class OnePassBytecodeGenerator {
 
     mv.visitVarInsn(ALOAD, 1);
     mv.visitJumpInsn(IFNULL, returnMinusOne);
+    // if (start < 0) start = 0;  (clamp - negative start behaves like 0)
+    Label startNotNeg = new Label();
     mv.visitVarInsn(ILOAD, 2);
-    mv.visitJumpInsn(IFLT, returnMinusOne);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);

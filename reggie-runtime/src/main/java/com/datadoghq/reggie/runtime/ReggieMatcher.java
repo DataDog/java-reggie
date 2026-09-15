@@ -234,7 +234,13 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   /** JDK-backed {@link #findMatchFrom(String, int)}: first match at or after {@code start}. */
   protected final MatchResult jdkFindMatchFrom(String input, int start) {
     java.util.regex.Matcher m = jdkRichDelegate().matcher(input);
-    return m.find(start) ? toMatchResult(input, m) : null;
+    // Clamp to the cross-generator findFrom contract: negative start behaves like 0 (JDK
+    // find(from) would throw), start past the end finds nothing.
+    int from = Math.max(0, start);
+    if (from > input.length()) {
+      return null;
+    }
+    return m.find(from) ? toMatchResult(input, m) : null;
   }
 
   private MatchResult toMatchResult(String input, java.util.regex.Matcher m) {
