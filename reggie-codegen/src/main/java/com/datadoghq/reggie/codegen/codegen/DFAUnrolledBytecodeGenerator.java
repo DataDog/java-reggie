@@ -852,6 +852,14 @@ public class DFAUnrolledBytecodeGenerator {
 
     // OPTIMIZATION: Compute valid first characters from DFA start state
     CharSet validFirstChars = computeValidFirstChars();
+    java.util.List<Character> indexOfFirstChars = computeIndexOfFirstChars(validFirstChars);
+
+    // Scratch vars for indexOf skip (only used when indexOfFirstChars != null)
+    int minPosVar = -1, idxVar = -1;
+    if (indexOfFirstChars != null) {
+      minPosVar = 6; // after len(3), tryPos(4), ch(5)
+      idxVar = 7;
+    }
 
     Label outerLoopStart = new Label();
     Label outerLoopEnd = new Label();
@@ -904,7 +912,20 @@ public class DFAUnrolledBytecodeGenerator {
     }
 
     // OPTIMIZATION: First char skip - if char at tryPos cannot start a match, skip
-    if (validFirstChars != null && !dfa.getStartState().accepting) {
+    if (indexOfFirstChars != null) {
+      // indexOf-based skip: jump tryPos to the next occurrence of any valid first char.
+      // indexOf is JIT-intrinsified (SIMD on modern CPUs) and much faster than per-position
+      // charAt + range checks for sparse first-char sets.
+      Label canStartMatch = new Label();
+      generateIndexOfSkip(mv, indexOfFirstChars, 4, minPosVar, idxVar, outerLoopEnd);
+      // After indexOf skip, tryPos is at a valid first char — fall through to matchesAtStart.
+      // Re-check loop bound: if (tryPos >= len) goto outerLoopEnd (already checked by indexOf
+      // returning -1 → outerLoopEnd, but guard for the case where indexOf returns exactly len-1).
+      mv.visitVarInsn(ILOAD, 4);
+      mv.visitVarInsn(ILOAD, 3);
+      mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
+      mv.visitLabel(canStartMatch); // not used as a jump target, just a label for clarity
+    } else if (validFirstChars != null && !dfa.getStartState().accepting) {
       Label canStartMatch = new Label();
 
       // char ch = input.charAt(tryPos);
@@ -1007,6 +1028,70 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
     return result;
+  }
+
+  /**
+   * If all ranges in {@code validFirstChars} are single characters and there are at most {@code
+   * MAX_INDEXOF_CHARS} of them, return them as a list for indexOf-based skipping. Returns {@code
+   * null} if the set contains multi-char ranges (where indexOf can't help).
+   */
+  private static java.util.List<Character> computeIndexOfFirstChars(CharSet validFirstChars) {
+    if (validFirstChars == null) return null;
+    java.util.List<CharSet.Range> ranges = validFirstChars.getRanges();
+    if (ranges.size() > MAX_INDEXOF_CHARS) return null;
+    java.util.List<Character> chars = new java.util.ArrayList<>();
+    for (CharSet.Range r : ranges) {
+      if (r.start != r.end) return null; // multi-char range — can't use indexOf
+      chars.add(r.start);
+    }
+    return chars;
+  }
+
+  private static final int MAX_INDEXOF_CHARS = 8;
+
+  /**
+   * Emit indexOf-based position skip: for each char in {@code firstChars}, call {@code
+   * input.indexOf(c, tryPos)} and set {@code tryPosVar} to the minimum result. Jumps to {@code
+   * noMatchLabel} if no valid char is found (all indexOf return -1).
+   *
+   * @param minPosVar scratch local for the running minimum
+   * @param idxVar scratch local for the current indexOf result
+   */
+  private void generateIndexOfSkip(
+      MethodVisitor mv,
+      java.util.List<Character> firstChars,
+      int tryPosVar,
+      int minPosVar,
+      int idxVar,
+      Label noMatchLabel) {
+    // int minPos = Integer.MAX_VALUE;
+    mv.visitLdcInsn(Integer.MAX_VALUE);
+    mv.visitVarInsn(ISTORE, minPosVar);
+    for (char c : firstChars) {
+      // int idx = input.indexOf(c, tryPos);
+      mv.visitVarInsn(ALOAD, 1);
+      pushInt(mv, (int) c);
+      mv.visitVarInsn(ILOAD, tryPosVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
+      mv.visitVarInsn(ISTORE, idxVar);
+      // if (idx >= 0 && idx < minPos) minPos = idx;
+      Label skip = new Label();
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitJumpInsn(IFLT, skip);
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitVarInsn(ILOAD, minPosVar);
+      mv.visitJumpInsn(IF_ICMPGE, skip);
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitVarInsn(ISTORE, minPosVar);
+      mv.visitLabel(skip);
+    }
+    // if (minPos == MAX_VALUE) goto noMatch;
+    mv.visitVarInsn(ILOAD, minPosVar);
+    mv.visitLdcInsn(Integer.MAX_VALUE);
+    mv.visitJumpInsn(IF_ICMPEQ, noMatchLabel);
+    // tryPos = minPos;
+    mv.visitVarInsn(ILOAD, minPosVar);
+    mv.visitVarInsn(ISTORE, tryPosVar);
   }
 
   /**

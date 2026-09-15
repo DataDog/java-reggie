@@ -1272,6 +1272,12 @@ public class DFASwitchBytecodeGenerator {
     // OPTIMIZATION: Analyze first-character filtering at compile time
     com.datadoghq.reggie.codegen.codegen.swar.SWAROptimization swarOpt = analyzeFirstCharFilter();
     CharSet validFirstChars = computeValidFirstChars();
+    java.util.List<Character> indexOfFirstChars = computeIndexOfFirstChars(validFirstChars);
+    int minPosVar = -1, idxVar = -1;
+    if (indexOfFirstChars != null) {
+      minPosVar = allocator.allocate();
+      idxVar = allocator.allocate();
+    }
 
     Label outerLoopStart = new Label();
     Label outerLoopEnd = new Label();
@@ -1339,6 +1345,15 @@ public class DFASwitchBytecodeGenerator {
       mv.visitJumpInsn(IFLT, outerLoopEnd);
 
       // Check: if (tryPos >= len) goto outerLoopEnd
+      mv.visitVarInsn(ILOAD, tryPosVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
+    } else if (!requiresStartAnchor
+        && !hasMultilineStart
+        && indexOfFirstChars != null
+        && !dfa.getStartState().accepting) {
+      // indexOf-based skip: jump tryPos to the next occurrence of any valid first char.
+      generateIndexOfSkip(mv, indexOfFirstChars, tryPosVar, minPosVar, idxVar, outerLoopEnd);
       mv.visitVarInsn(ILOAD, tryPosVar);
       mv.visitVarInsn(ILOAD, lenVar);
       mv.visitJumpInsn(IF_ICMPGE, outerLoopEnd);
@@ -1432,6 +1447,52 @@ public class DFASwitchBytecodeGenerator {
       }
     }
     return result;
+  }
+
+  private static final int MAX_INDEXOF_CHARS = 8;
+
+  private static java.util.List<Character> computeIndexOfFirstChars(CharSet validFirstChars) {
+    if (validFirstChars == null) return null;
+    java.util.List<CharSet.Range> ranges = validFirstChars.getRanges();
+    if (ranges.size() > MAX_INDEXOF_CHARS) return null;
+    java.util.List<Character> chars = new java.util.ArrayList<>();
+    for (CharSet.Range r : ranges) {
+      if (r.start != r.end) return null;
+      chars.add(r.start);
+    }
+    return chars;
+  }
+
+  private void generateIndexOfSkip(
+      MethodVisitor mv,
+      java.util.List<Character> firstChars,
+      int tryPosVar,
+      int minPosVar,
+      int idxVar,
+      Label noMatchLabel) {
+    mv.visitLdcInsn(Integer.MAX_VALUE);
+    mv.visitVarInsn(ISTORE, minPosVar);
+    for (char c : firstChars) {
+      mv.visitVarInsn(ALOAD, 1);
+      pushInt(mv, (int) c);
+      mv.visitVarInsn(ILOAD, tryPosVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
+      mv.visitVarInsn(ISTORE, idxVar);
+      Label skip = new Label();
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitJumpInsn(IFLT, skip);
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitVarInsn(ILOAD, minPosVar);
+      mv.visitJumpInsn(IF_ICMPGE, skip);
+      mv.visitVarInsn(ILOAD, idxVar);
+      mv.visitVarInsn(ISTORE, minPosVar);
+      mv.visitLabel(skip);
+    }
+    mv.visitVarInsn(ILOAD, minPosVar);
+    mv.visitLdcInsn(Integer.MAX_VALUE);
+    mv.visitJumpInsn(IF_ICMPEQ, noMatchLabel);
+    mv.visitVarInsn(ILOAD, minPosVar);
+    mv.visitVarInsn(ISTORE, tryPosVar);
   }
 
   /**
