@@ -104,15 +104,13 @@ class IastPatternRoutingTest {
 
   @Test
   void sqlMysqlRoutesToBitstateCapture() throws Exception {
-    // MySQL's escaped-literal bodies (\" | [^"]) overlap position-wise, so the loop's body
-    // choice is retryable; the chain journal records iteration boundaries only and cannot
-    // re-choose a committed body - the family declines it and BitState keeps exact semantics.
-    // (SQL_ANSI/SQL_POSTGRESQL stay on the chain: their ''-escape bodies are position-0
-    // disjoint from [^'] and are not retryable.)
+    // v2-gamma: MySQL's escaped-literal bodies are retryable, and the chain family now
+    // re-admits them - the alt-choice journal ((end << 4) | bodyIndex) and the floor-retry
+    // give-back reproduce the JDK backtracking order.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze(SQL_MYSQL).strategy,
-        "SQL_MYSQL declines the deterministic chain (retryable escaped-literal bodies)");
+        "SQL_MYSQL routes to the deterministic chain (v2-gamma alt-retry LOOP_ALT)");
   }
 
   @Test
