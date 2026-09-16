@@ -227,10 +227,8 @@ class DeterministicChainV2BetaBytecodeTest {
 
   @Test
   void loopAltMinPlusParity() throws Exception {
-    // A min-1 LOOP_ALT (+: at least one iteration) with the journal floor at one boundary.
-    // (Previously q(?:ab|a)+z: the ab/a bodies overlap position-wise, so the committed short
-    // body was never retried - such bodies are now rejected at admission; see
-    // loopAltOverlappingBodiesDeclined.)
+    // A min-1 LOOP_ALT (+: at least one iteration) with the journal floor at one boundary -
+    // non-overlapping bodies (boundary-only give-back).
     Compiled c = compileChain("q(?:ab|b)+z");
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("q(?:ab|b)+z");
     assertFullParity(c, jdk, "qabz");
@@ -240,20 +238,135 @@ class DeterministicChainV2BetaBytecodeTest {
   }
 
   @Test
-  void loopAltOverlappingBodiesDeclined() throws Exception {
-    // Bodies where one can match a proper prefix of another (a vs ab) are retryable: the
-    // journal records iteration ends only and cannot re-choose a committed body, so admitting
-    // them silently dropped JDK matches (q(?:a|ab)+c on qabc found nothing). They must be
-    // declined out of the family (BitState/PikeVM handle them correctly).
-    RegexNode ast = new RegexParser().parse("q(?:a|ab)+z");
-    PatternAnalyzer analyzer = new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0));
-    assertNull(
-        analyzer.detectDeterministicChain(ast),
-        "prefix-overlapping LOOP_ALT bodies must be declined");
-    // Non-overlapping mixed-width bodies stay admitted (position-0 sets disjoint).
-    ast = new RegexParser().parse("q(?:ab|b)+z");
-    analyzer = new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0));
-    assertNotNull(analyzer.detectDeterministicChain(ast), "disjoint bodies stay admitted");
+  void loopAltAltRetryParity() throws Exception {
+    // v2-gamma: overlapping bodies ((?:a|ab) - the short body can match a proper prefix of the
+    // long one, so the committed choice is retryable). The journal encodes the chosen body per
+    // iteration and the give-back handler re-enters the consume loop at the popped iteration
+    // with a floor past the committed body - JDK backtracking order. "qabc" is the minimal
+    // retry repro: greedy 'a' + boundary give-backs fail, and only retrying iteration 1 with
+    // 'ab' reaches the tail.
+    Compiled c = compileChain("q(?:a|ab)+c\\b");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("q(?:a|ab)+c\\b");
+    assertFullParity(c, jdk, "qabc");
+    assertFullParity(c, jdk, "qac");
+    assertFullParity(c, jdk, "qababc");
+    assertFullParity(c, jdk, "qabac");
+    assertFullParity(c, jdk, "qqabc");
+    assertFullParity(c, jdk, "qabaac");
+    assertFullParity(c, jdk, "qba");
+    // Exhaustive sweep over {q,a,b,c,x}^<=5 (3906 inputs): full find-parity against the JDK.
+    for (int len = 0; len <= 5; len++) {
+      int n = (int) Math.pow(5, len);
+      for (int v = 0; v < n; v++) {
+        StringBuilder sb = new StringBuilder();
+        int x = v;
+        for (int k = 0; k < len; k++) {
+          sb.append("qabcx".charAt(x % 5));
+          x /= 5;
+        }
+        assertFullParity(c, jdk, sb.toString());
+      }
+    }
+  }
+
+  @Test
+  void loopAltDisjointMixedWidthForcedGiveBackParity() throws Exception {
+    // Disjoint-but-mixed-width overlapping bodies: the first-set disjointness test alone would
+    // leave the loop journal-free, but the maximal end is not input-determined without body
+    // retry ((?:ab|a)+[bc] on "aab" needs the 'a' retry at iteration 1). The analyzer forces
+    // giveBack for overlapping bodies, and the alt-retry machinery handles it.
+    Compiled c = compileChain("(?:ab|a)+[bc]");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("(?:ab|a)+[bc]");
+    assertFullParity(c, jdk, "aab");
+    assertFullParity(c, jdk, "ab");
+    assertFullParity(c, jdk, "a");
+    assertFullParity(c, jdk, "abab");
+    assertFullParity(c, jdk, "abac");
+    assertFullParity(c, jdk, "x");
+  }
+
+  @Test
+  void loopAltSequentialGiveBackJournalSlicesParity() throws Exception {
+    // Two overlapping give-back LOOP_ALTs in one chain: each journals into its own (len+1)
+    // slice of the per-thread scratch buffer - a shared from-0 journal let the second loop
+    // clobber the first's entries (the MySQL two-quote-loop shape). The middle 'x' forces
+    // both loops' give-back to matter.
+    Compiled c = compileChain("a(?:b|bc)*x(?:d|de)*z");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("a(?:b|bc)*x(?:d|de)*z");
+    assertFullParity(c, jdk, "axz");
+    assertFullParity(c, jdk, "abxdez");
+    assertFullParity(c, jdk, "abcxbcdz");
+    assertFullParity(c, jdk, "abcxbdez");
+    assertFullParity(c, jdk, "abcxbcedez");
+    assertFullParity(c, jdk, "abcbcxddedez");
+    assertFullParity(c, jdk, "abcx");
+    assertFullParity(c, jdk, "abc");
+  }
+
+  @Test
+  void loopAltOverlappingBodiesAdmittedWithAltRetry() throws Exception {
+    // v2-gamma: overlapping bodies are re-admitted - the analyzer forces giveBack so the
+    // generator emits the alt-choice journal ((end << 4) | bodyIndex) and the floor-retry
+    // give-back. Non-overlapping mixed-width bodies keep the boundary-only journal.
+    RegexNode overlapAst = new RegexParser().parse("q(?:a|ab)+z");
+    PatternAnalyzer overlapAnalyzer =
+        new PatternAnalyzer(overlapAst, new ThompsonBuilder().build(overlapAst, 0));
+    PatternAnalyzer.DeterministicChainInfo info =
+        overlapAnalyzer.detectDeterministicChain(overlapAst);
+    assertNotNull(info, "overlapping bodies are admitted (v2-gamma alt-retry)");
+    assertTrue(
+        findLoopAltGiveBack(info),
+        "overlapping LOOP_ALT bodies must carry giveBack (alt-retry journal)");
+
+    RegexNode disjointAst = new RegexParser().parse("q(?:ab|b)+z");
+    PatternAnalyzer disjointAnalyzer =
+        new PatternAnalyzer(disjointAst, new ThompsonBuilder().build(disjointAst, 0));
+    PatternAnalyzer.DeterministicChainInfo disjointInfo =
+        disjointAnalyzer.detectDeterministicChain(disjointAst);
+    assertNotNull(disjointInfo, "disjoint bodies stay admitted");
+    assertFalse(
+        findLoopAltGiveBack(disjointInfo),
+        "non-overlapping disjoint bodies keep the plain single scan");
+  }
+
+  private static boolean findLoopAltGiveBack(PatternAnalyzer.DeterministicChainInfo info) {
+    for (PatternAnalyzer.DeterministicChainInfo.ChainBranch b : info.branches) {
+      if (seqHasLoopAltGiveBack(b.seq)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean seqHasLoopAltGiveBack(
+      PatternAnalyzer.DeterministicChainInfo.ChainSeq seq) {
+    for (PatternAnalyzer.DeterministicChainInfo.ChainElem e : seq.elems) {
+      if (e.kind == PatternAnalyzer.DeterministicChainInfo.ElemKind.LOOP_ALT && e.giveBack) {
+        return true;
+      }
+      if (e.nested != null && seqHasLoopAltGiveBack(e.nested)) {
+        return true;
+      }
+      if (e.alts != null) {
+        for (PatternAnalyzer.DeterministicChainInfo.ChainSeq alt : e.alts) {
+          if (seqHasLoopAltGiveBack(alt)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  @Test
+  void loopAltAltRetryOverflowDelegatesToPikeVM() throws Exception {
+    // The retryable-body retry space is exponential ((?:a|aa)+ on an a-run): the per-retry
+    // budget charge must trip and delegate to PikeVM - same answer, counted.
+    Compiled c = compileChain("q(?:a|aa)+z");
+    String s = "q" + "a".repeat(60) + "b";
+    assertEquals(0, c.fallbackCount(), "nothing delegated yet");
+    assertEquals(-1, c.m.findFrom(s, 0), "no match, via the linear fallback");
+    assertTrue(c.fallbackCount() > 0, "budget must have tripped");
   }
 
   @Test
@@ -371,37 +484,28 @@ class DeterministicChainV2BetaBytecodeTest {
 
   @Test
   void sqlMysqlEscapedLiteralParity() throws Exception {
-    // MySQL's escaped-literal bodies (\" | [^"]) overlap position-wise (the [^"] body accepts
-    // the escape body's leading backslash, and the two bodies then end at different widths), so
-    // the committed first-listed body can never be retried by the boundary journal. The family
-    // must decline it (BitState/PikeVM keep exact JDK retry semantics); behavior parity is
-    // asserted through the production compile path instead of compileChain.
+    // MySQL's escaped-literal bodies (\\" | [^"]) overlap position-wise: the [^"] body accepts
+    // the escape body's leading backslash and the two end at different widths, so the body
+    // choice is retryable. v2-gamma re-admits it - the alt-choice journal and floor-retry
+    // reproduce the JDK's backtracking, and the two quote-loop branches journal into disjoint
+    // scratch slices.
     String p =
         "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?"
             + "|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
             + "|\"(?:\\\\\"|[^\"])*\"|'(?:\\\\'|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
-    RegexNode ast = new RegexParser().parse(p);
-    PatternAnalyzer analyzer = new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0));
-    assertNull(
-        analyzer.detectDeterministicChain(ast),
-        "MySQL escape-body overlap must decline the chain family");
-    com.datadoghq.reggie.ReggieMatcher m = com.datadoghq.reggie.Reggie.compile(p);
+    Compiled c = compileChain(p);
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(p);
-    for (String input :
-        new String[] {
-          "SET a = 'It\\'s fine' WHERE b = \"quoted \\\" str\"",
-          "SELECT \"abc\" FROM t",
-          "SELECT 'a\\'b' FROM t",
-          "x = \"open",
-          "1.5E3",
-        }) {
-      java.util.regex.Matcher jm = jdk.matcher(input);
-      String expect = jm.find() ? "[" + jm.start() + "," + jm.end() + ")" : "none";
-      com.datadoghq.reggie.runtime.MatchResult r =
-          ((com.datadoghq.reggie.runtime.ReggieMatcher) m).findMatch(input);
-      String actual = r == null ? "none" : "[" + r.start() + "," + r.end() + ")";
-      assertEquals(expect, actual, "find parity on: " + input);
-    }
+    assertFullParity(c, jdk, "SET a = 'It\\'s fine' WHERE b = \"quoted \\\" str\"");
+    assertFullParity(c, jdk, "SELECT \"abc\" FROM t");
+    assertFullParity(c, jdk, "SELECT 'a\\'b' FROM t");
+    assertFullParity(c, jdk, "x = \"open");
+    assertFullParity(c, jdk, "1.5E3");
+    // Retry-triggering shapes: the escape body vs the single-char body diverge on unterminated
+    // and re-quoted literals, and both loops appear in one input (journal slice isolation).
+    assertFullParity(c, jdk, "'\\'' + \"\\\"\"");
+    assertFullParity(c, jdk, "a\"b\\\"c\\\"d\"e");
+    assertFullParity(c, jdk, "''''\"\"\"\"");
+    assertFullParity(c, jdk, "'\\''");
   }
 
   @Test

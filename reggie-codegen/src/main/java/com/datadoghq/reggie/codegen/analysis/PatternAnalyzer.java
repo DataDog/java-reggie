@@ -10077,10 +10077,8 @@ public class PatternAnalyzer {
       }
       alts.add(seq);
     }
-    if (!loopAltAltsUnambiguous(alts)) {
-      return null; // retryable body overlap: see loopAltAltsUnambiguous
-    }
-    return alts;
+    return alts; // retryable body overlap is re-admitted (v2-gamma): checkChainDisjoint then
+    // forces giveBack so the generator emits the alt-choice journal and floor-retry machinery.
   }
 
   /**
@@ -10094,7 +10092,7 @@ public class PatternAnalyzer {
    * of the disjoint (no-journal) LOOP_ALT path: after the rejection every position has a unique
    * possible iteration end, so the maximal run is input-determined.
    */
-  private boolean loopAltAltsUnambiguous(List<DeterministicChainInfo.ChainSeq> alts) {
+  public static boolean loopAltAltsUnambiguous(List<DeterministicChainInfo.ChainSeq> alts) {
     int n = alts.size();
     // Exact per-position accepted sets (CharSet handles negated classes and non-ASCII exactly;
     // the boolean[128]+non-ASCII-flag form used for the first-set gates is deliberately
@@ -10436,6 +10434,14 @@ public class PatternAnalyzer {
               computeChainFirst(alt, elemFirst, elemNonAscii);
             }
             if (chainSetIntersects(elemFirst, after, afterNonAscii)) {
+              e.giveBack = true;
+            }
+            // v2-gamma: overlapping bodies (one can match a proper prefix of another) make the
+            // body choice retryable, which needs the alt-choice journal even when the loop's
+            // first-set is disjoint from the remainder - a disjoint mixed-width loop can still
+            // end at different boundaries depending on which body matched, so the maximal run
+            // is not input-determined without retry (e.g. (?:ab|a)+[bc] on "aab").
+            if (!loopAltAltsUnambiguous(e.alts)) {
               e.giveBack = true;
             }
             if (e.min == 0) {
