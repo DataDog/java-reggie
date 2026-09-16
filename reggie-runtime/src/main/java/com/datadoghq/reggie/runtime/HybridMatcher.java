@@ -42,7 +42,7 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public int findFrom(String input, int start) {
-    return dfaMatcher.findFrom(input, start);
+    return dfaMatcher.findFrom(input, Math.max(0, start));
   }
 
   @Override

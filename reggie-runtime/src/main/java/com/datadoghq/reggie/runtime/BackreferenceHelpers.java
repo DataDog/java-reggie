@@ -49,6 +49,9 @@ public final class BackreferenceHelpers {
       String closePrefixStr,
       int closeSuffixChar) {
     if (input == null) return null;
+
+    // Clamp negative start to 0 (cross-generator findFrom contract)
+    startPos = Math.max(0, startPos);
     int len = input.length();
     for (int pos = startPos; pos < len; pos++) {
       if (input.charAt(pos) != openPrefixChar) continue;
@@ -102,6 +105,9 @@ public final class BackreferenceHelpers {
   public static MatchResult findRepeatedWordMatchFrom(
       String input, int startPos, boolean requireWordBoundary) {
     if (input == null) return null;
+
+    // Clamp negative start to 0 (cross-generator findFrom contract)
+    startPos = Math.max(0, startPos);
     int len = input.length();
     for (int pos = startPos; pos < len; pos++) {
       if (requireWordBoundary && pos > 0 && isWordChar(input.charAt(pos - 1))) continue;
@@ -135,6 +141,9 @@ public final class BackreferenceHelpers {
   public static MatchResult findAttributeMatchFrom(
       String input, int startPos, int quoteChar, String assignmentOp) {
     if (input == null) return null;
+
+    // Clamp negative start to 0 (cross-generator findFrom contract)
+    startPos = Math.max(0, startPos);
     int len = input.length();
     for (int pos = startPos; pos < len; pos++) {
       if (input.charAt(pos) != (char) quoteChar) continue;

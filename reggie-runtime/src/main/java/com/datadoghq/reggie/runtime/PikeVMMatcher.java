@@ -564,7 +564,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * consume). Returns {@code true} iff the prefilter is usable: the pattern cannot match the empty
    * string (no accept state is reachable epsilon-only from start) AND at least one ASCII char
    * cannot begin a match (otherwise skipping never fires and the per-position check is pure
-   * overhead).
+   * overhead) AND no char above ASCII (127) can begin a match — {@code firstByteAscii} only covers
+   * chars 0..127, so with e.g. {@code (a|α)x} every consumer of the filter would wrongly reject
+   * inputs that begin with a qualifying non-ASCII char (see {@code
+   * BitStateFastRejectRegressionTest.find_rejectsWithoutNonAsciiBlindSpot}).
    */
   static boolean computeFirstByteFilter(NFA nfa, boolean[] firstByteAscii) {
     java.util.Set<Integer> seen = new java.util.HashSet<>();
@@ -579,6 +582,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
         canMatchEmpty = true; // accept reachable without consuming any char
       }
       for (NFA.Transition t : s.getTransitions()) {
+        for (CharSet.Range r : t.chars.getRanges()) {
+          if (r.end > 127) {
+            // Some char above 127 can begin a match; the filter can only see chars 0..127, so it
+            // would be unsound — decline the whole prefilter rather than let any consumer
+            // wrongly reject a non-ASCII-leading input.
+            return false;
+          }
+        }
         for (int c = 0; c < 128; c++) {
           if (t.chars.contains((char) c)) firstByteAscii[c] = true;
         }

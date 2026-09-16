@@ -151,7 +151,9 @@ public class PikeVmCaptureRegressionTest {
   @Test
   void lazyShortestMatch_star() throws Exception {
     // a.*?b must stop at the first 'b', not consume the whole string
-    assertRoute("a.*?b", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    // Chain-admitted: lazy scan + literal routes to the deterministic-chain generator; the
+    // behavior asserts below then guard the chain's lazy priority semantics.
+    assertRoute("a.*?b", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     String pattern = "a.*?b";
     String input = "axxbxxb";
     Pattern jdk = Pattern.compile(pattern);
@@ -208,7 +210,7 @@ public class PikeVmCaptureRegressionTest {
 
   @Test
   void lazyGreedyOverlapGiveBack() throws Exception {
-    assertRoute("(a*?)(\\d+)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    assertRoute("(a*?)(\\d+)", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     assertGroupsAgree("(a*?)(\\d+)", "aaa123");
     assertGroupsAgree("(a+?)(a+)", "aaa");
   }
@@ -218,7 +220,7 @@ public class PikeVmCaptureRegressionTest {
     // a*?a on "baaa": lazy star must prefer the shortest match (at position 1, matching one 'a'),
     // not consume all 'a's greedily.  This would fail if ThompsonBuilder emits greedy epsilon
     // order.
-    assertRoute("a*?a", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    assertRoute("a*?a", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     String pattern = "a*?a";
     String input = "baaa";
     Pattern jdk = Pattern.compile(pattern);
@@ -237,7 +239,7 @@ public class PikeVmCaptureRegressionTest {
   void lazyGroupSpan_minimalFirstGroup() throws Exception {
     // (\\w*?)(\\w+) on "abc": lazy first group must be minimal (empty), second captures all.
     // This would fail if ThompsonBuilder emits greedy epsilon order for the lazy quantifier.
-    assertRoute("(\\w*?)(\\w+)", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    assertRoute("(\\w*?)(\\w+)", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     assertGroupsAgree("(\\w*?)(\\w+)", "abc");
   }
 
@@ -281,7 +283,7 @@ public class PikeVmCaptureRegressionTest {
 
     // a*?b on "aaab": non-zero-width lazy star must advance through input and match [0,4].
     // This exercises a different code path from pure zero-width matching above.
-    assertRoute("a*?b", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    assertRoute("a*?b", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     String pattern2 = "a*?b";
     String input2 = "aaab";
     Pattern jdk2 = Pattern.compile(pattern2);
@@ -328,10 +330,12 @@ public class PikeVmCaptureRegressionTest {
 
   @Test
   void ldapPattern() throws Exception {
-    // Lazy quantifier LDAP-style pattern with named group
+    // Lazy quantifier LDAP-style pattern with named group — chain-admitted (lazy scan loop +
+    // bounded LIT_ALT + capture), so the generated matcher exercises the chain's lazy semantics;
+    // the behavior asserts below remain the oracle.
     assertRoute(
         "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)",
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     String pattern = "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)";
     String input = "(uid=jsmith)";
     Pattern jdk = Pattern.compile(pattern);

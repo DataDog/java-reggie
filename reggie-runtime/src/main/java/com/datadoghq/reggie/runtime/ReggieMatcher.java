@@ -45,6 +45,33 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   // bug is never completely silent yet never floods the log.
   private static final AtomicBoolean NATIVE_DELEGATE_WARNED = new AtomicBoolean(false);
 
+  /**
+   * Per-thread scratch buffer for the deterministic-chain generator's give-back journals (a
+   * LOOP_ALT whose iteration boundaries must be retried). Generated matchers are method-locals
+   * only, so instances are shared and used concurrently across threads — the journal cannot be an
+   * instance field, and per-call allocation would churn the malloc arenas. The buffer is grown to
+   * the requested length and cached per thread; steady-state matching allocates nothing. Matching
+   * makes no calls into user code, so no re-entrancy hazard exists.
+   */
+  private static final ThreadLocal<int[]> CHAIN_SCRATCH = new ThreadLocal<>();
+
+  /**
+   * Returns the calling thread's chain scratch buffer, at least {@code minLen} ints, grown and
+   * cached on first use (never shrinks — bounded by the longest input seen on the thread).
+   */
+  public static int[] chainScratch(int minLen) {
+    int[] buf = CHAIN_SCRATCH.get();
+    if (buf == null || buf.length < minLen) {
+      int len = Math.max(minLen, 64);
+      while (len < minLen) {
+        len <<= 1;
+      }
+      buf = new int[len];
+      CHAIN_SCRATCH.set(buf);
+    }
+    return buf;
+  }
+
   // Set true by the compiler (runtime or annotation-processor path) when this matcher's strategy
   // was classified NATIVE — i.e. it is expected to fully generate the rich MatchResult API and
   // never build the JDK delegate. If such a matcher ever reaches jdkRichDelegate(), that is a
@@ -207,7 +234,13 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
   /** JDK-backed {@link #findMatchFrom(String, int)}: first match at or after {@code start}. */
   protected final MatchResult jdkFindMatchFrom(String input, int start) {
     java.util.regex.Matcher m = jdkRichDelegate().matcher(input);
-    return m.find(start) ? toMatchResult(input, m) : null;
+    // Clamp to the cross-generator findFrom contract: negative start behaves like 0 (JDK
+    // find(from) would throw), start past the end finds nothing.
+    int from = Math.max(0, start);
+    if (from > input.length()) {
+      return null;
+    }
+    return m.find(from) ? toMatchResult(input, m) : null;
   }
 
   private MatchResult toMatchResult(String input, java.util.regex.Matcher m) {
@@ -646,6 +679,7 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
     List<String> parts = new ArrayList<>();
     int lastEnd = 0;
     int pos = 0;
+    int[] bounds = new int[2];
 
     while (pos <= input.length()) {
       // Early termination: we have limit - 1 parts, remainder becomes the last part.
@@ -653,22 +687,21 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
         break;
       }
 
-      MatchResult match = findMatchFrom(input, pos);
-      if (match == null) {
+      if (!findBoundsFrom(input, pos, bounds)) {
         break;
       }
 
       // JDK 8+ behaviour: skip a zero-width match at the very start of the string.
-      if (lastEnd == 0 && match.start() == 0 && match.start() == match.end()) {
+      if (lastEnd == 0 && bounds[0] == 0 && bounds[0] == bounds[1]) {
         pos = 1;
         continue;
       }
 
-      parts.add(input.substring(lastEnd, match.start()));
-      lastEnd = match.end();
+      parts.add(input.substring(lastEnd, bounds[0]));
+      lastEnd = bounds[1];
 
       // Advance past zero-width match to prevent an infinite loop.
-      pos = advancePos(match.start(), match.end());
+      pos = advancePos(bounds[0], bounds[1]);
     }
 
     // No splits: return the whole input as a single-element array (matches JDK behaviour).

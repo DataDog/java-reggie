@@ -119,12 +119,26 @@ public final class FallbackPatternDetector {
         return "assertion inside quantifier references captured group value";
       }
 
-      // B4 — KEEP-PERMANENT (conservative): END/STRING_END anchor ($, \Z) immediately before a
-      // non-newline char consumer. Spike showed that \Z[^c] and $[^\n] pass under PikeVM for the
-      // tested inputs (all unconditionally false in JDK). Retaining the guard until a fuzz sweep
-      // confirms no strategy can mis-model this path; removing it is safe but deferred.
-      if (hasEndAnchorBeforeNonNewlineConsumer(ast)) {
-        return "end-anchor before non-newline consumer: DFA does not model this path correctly";
+      // B4 — END/STRING_END anchor ($, \Z) immediately before a non-newline char consumer.
+      // DFA_UNROLLED and DFA_SWITCH (including _WITH_GROUPS variants) now handle this path
+      // correctly via charset narrowing to line terminators
+      // (SubsetConstructor#narrowEndGuardedCharset) and the fixed END entry guard in the codegen.
+      // However, this only works for REQUIRED consumers (min >= 1). Optional consumers (\Z[^1]?)
+      // produce
+      // wrong spans on empty input because the DFA mishandles the zero-width accept path.
+      // Other strategies (DFA_TABLE, BITPARALLEL_GLUSHKOV, OPTIMIZED_NFA, RECURSIVE_DESCENT)
+      // lack the entry-guard codegen, so they must still fall back.
+      if (hasEndAnchorBeforeNonNewlineConsumer(ast)
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_SWITCH
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS) {
+        return "end-anchor before non-newline consumer: strategy does not model this path";
+      }
+      if (hasEndAnchorBeforeOptionalConsumer(ast)
+          && strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+          && strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+        return "end-anchor before optional consumer: DFA mishandles zero-width accept path";
       }
     }
 
@@ -978,6 +992,49 @@ public final class FallbackPatternDetector {
     if (node instanceof CharClassNode) {
       CharClassNode cc = (CharClassNode) node;
       return cc.chars.isSingleChar() && cc.chars.getSingleChar() == '\n';
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the AST contains an END/STRING_END anchor immediately before an OPTIONAL
+   * consumer (quantifier with min=0) that can match non-newline chars. Patterns like {@code
+   * \Z[^1]?} produce wrong spans on empty input under DFA because the zero-width accept path
+   * (anchor matches, optional consumer matches nothing) is mishandled.
+   */
+  private static boolean hasEndAnchorBeforeOptionalConsumer(RegexNode ast) {
+    if (ast instanceof ConcatNode) {
+      ConcatNode concat = (ConcatNode) ast;
+      for (int i = 0; i < concat.children.size() - 1; i++) {
+        RegexNode child = concat.children.get(i);
+        if (child instanceof AnchorNode) {
+          AnchorNode anchor = (AnchorNode) child;
+          if (anchor.type == AnchorNode.Type.END || anchor.type == AnchorNode.Type.STRING_END) {
+            RegexNode next = concat.children.get(i + 1);
+            if (isOptionalConsumer(next)) return true;
+          }
+        }
+      }
+      for (RegexNode c : concat.children) if (hasEndAnchorBeforeOptionalConsumer(c)) return true;
+    }
+    if (ast instanceof GroupNode)
+      return hasEndAnchorBeforeOptionalConsumer(((GroupNode) ast).child);
+    if (ast instanceof QuantifierNode)
+      return hasEndAnchorBeforeOptionalConsumer(((QuantifierNode) ast).child);
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives)
+        if (hasEndAnchorBeforeOptionalConsumer(a)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if {@code node} is an optional consumer (quantifier with min=0 wrapping a
+   * char-consuming element that can match non-newline chars).
+   */
+  private static boolean isOptionalConsumer(RegexNode node) {
+    if (node instanceof QuantifierNode q && q.min == 0) {
+      return !isNewlineOnlyConsumer(q.child);
     }
     return false;
   }

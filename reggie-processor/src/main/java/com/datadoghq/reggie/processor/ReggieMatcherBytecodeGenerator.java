@@ -38,6 +38,7 @@ import com.datadoghq.reggie.codegen.codegen.BoundedQuantifierBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DeterministicChainBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyCharClassBytecodeGenerator;
@@ -53,6 +54,7 @@ import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator
 import com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.SuffixSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.util.Map;
@@ -357,6 +359,21 @@ public class ReggieMatcherBytecodeGenerator {
         bitStateGen.generateAll(cw, getJavaClassName());
         break;
 
+      case DETERMINISTIC_CHAIN_BYTECODE:
+        PatternAnalyzer.DeterministicChainInfo chainInfo =
+            (PatternAnalyzer.DeterministicChainInfo) result.patternInfo;
+        DeterministicChainBytecodeGenerator chainGen =
+            new DeterministicChainBytecodeGenerator(chainInfo, nfa.getGroupCount());
+        chainGen.generateMatchesMethod(cw, getJavaClassName());
+        chainGen.generateMatchMethod(cw, getJavaClassName());
+        chainGen.generateFindMethod(cw, getJavaClassName());
+        chainGen.generateFindFromMethod(cw, getJavaClassName());
+        chainGen.generateFindMatchMethod(cw, getJavaClassName());
+        chainGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        chainGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+        chainGen.generateFallbackSupport(cw, getJavaClassName());
+        break;
+
       case SPECIALIZED_FIXED_SEQUENCE:
         PatternAnalyzer.FixedSequenceInfo fixedInfo =
             (PatternAnalyzer.FixedSequenceInfo) result.patternInfo;
@@ -374,6 +391,22 @@ public class ReggieMatcherBytecodeGenerator {
         fixedGen.generateFindMatchMethod(cw, getJavaClassName());
         fixedGen.generateFindMatchFromMethod(cw, getJavaClassName());
         fixedGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+        break;
+
+      case SPECIALIZED_SUFFIX_SEQUENCE:
+        PatternAnalyzer.SuffixSequenceInfo suffixInfo =
+            (PatternAnalyzer.SuffixSequenceInfo) result.patternInfo;
+        SuffixSequenceBytecodeGenerator suffixGen =
+            new SuffixSequenceBytecodeGenerator(suffixInfo, nfa.getGroupCount());
+        suffixGen.generateMatchesMethod(cw, getJavaClassName());
+        suffixGen.generateFindMethod(cw, getJavaClassName());
+        suffixGen.generateFindFromMethod(cw, getJavaClassName());
+        suffixGen.generateMatchMethod(cw, getJavaClassName());
+        suffixGen.generateMatchesBoundedMethod(cw, getJavaClassName());
+        suffixGen.generateMatchBoundedMethod(cw, getJavaClassName());
+        suffixGen.generateFindMatchMethod(cw, getJavaClassName());
+        suffixGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        suffixGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;
 
       case SPECIALIZED_BOUNDED_QUANTIFIERS:

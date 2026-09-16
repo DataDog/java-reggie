@@ -23,6 +23,20 @@ import java.util.*;
  */
 public class SubsetConstructor {
 
+  /**
+   * Characters that can appear immediately before an END/STRING_END anchor's match position and be
+   * consumed by a following consumer: {@code \n}, {@code \r}, NEL (U+0085), LS (U+2028), PS
+   * (U+2029). The {@code \r\n} two-char terminator is handled by the codegen guard (it checks
+   * {@code pos == end-2} with {@code \r\n}). Used to narrow transition charsets that cross an
+   * END/STRING_END guard — see {@link #narrowEndGuardedCharset}.
+   */
+  static final CharSet LINE_TERMINATORS =
+      CharSet.of('\n')
+          .union(CharSet.of('\r'))
+          .union(CharSet.of('\u0085'))
+          .union(CharSet.of('\u2028'))
+          .union(CharSet.of('\u2029'));
+
   private Map<Set<NFA.NFAState>, DFA.DFAState> stateCache;
   private List<DFA.DFAState> allStates;
   private int nextStateId;
@@ -45,12 +59,12 @@ public class SubsetConstructor {
    * @throws StateExplosionException if DFA has too many states
    */
   public DFA buildDFA(NFA nfa, boolean computeTags) throws StateExplosionException {
-    this.stateCache = new HashMap<>();
+    this.stateCache = new LinkedHashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
     this.anchorConditionDiluted = false;
     this.captureAmbiguous = false;
-    this.dfaStateOrdering = new HashMap<>();
+    this.dfaStateOrdering = new LinkedHashMap<>();
 
     // Pre-compute anchor-aware epsilon closures for all NFA states. Each entry maps a reachable
     // NFA state to the weakest conjunction of anchors that must hold at the current input
@@ -191,19 +205,23 @@ public class SubsetConstructor {
           worklist.add(target);
         }
 
+        // Narrow charset for END/STRING_END-guarded consuming transitions to line terminators.
+        CharSet narrowedChars = narrowEndGuardedCharset(transitionGuard, chars);
+        if (narrowedChars == null) continue;
+
         // Compute tag operations if requested (Tagged DFA)
         if (computeTags && nfa.getGroupCount() > 0) {
           List<DFA.TagOperation> tagOps =
               computeTagOperations(
                   current.nfaStates,
                   targets,
-                  chars,
+                  narrowedChars,
                   flattenClosure(anchoredClosures),
                   nfa.getAcceptStates(),
                   target.acceptanceAnchorConditions);
-          current.addTransition(chars, target, tagOps, transitionGuard);
+          current.addTransition(narrowedChars, target, tagOps, transitionGuard);
         } else {
-          current.addTransition(chars, target, Collections.emptyList(), transitionGuard);
+          current.addTransition(narrowedChars, target, Collections.emptyList(), transitionGuard);
         }
       }
 
@@ -515,11 +533,25 @@ public class SubsetConstructor {
   private static boolean containsConsumeKillingAnchor(
       EnumSet<NFA.AnchorType> conds, CharSet chars) {
     if (conds.contains(NFA.AnchorType.STRING_END_ABSOLUTE)) return true;
-    if (conds.contains(NFA.AnchorType.END) || conds.contains(NFA.AnchorType.STRING_END)) {
-      // Allow only if chars is strictly {'\n'} — i.e., newline is the only character.
-      return !(chars.isSingleChar() && chars.getSingleChar() == '\n');
-    }
+    // END/STRING_END: the transition charset is narrowed to line terminators after the
+    // partition loop (see narrowEndGuardedCharset), so we no longer kill here.
     return false;
+  }
+
+  /**
+   * Narrow a transition charset when the guard contains END/STRING_END. A consuming transition that
+   * crosses an END/STRING_END anchor can only fire for line terminators at the end of input (the "$
+   * before terminal line terminator" path). Narrowing the charset to line terminators prevents the
+   * transition from firing for non-line-terminator chars, which the codegen guard would reject
+   * anyway. Returns {@code null} if the narrowed charset is empty (no valid consuming transition
+   * exists for this anchor).
+   */
+  private static CharSet narrowEndGuardedCharset(EnumSet<NFA.AnchorType> guard, CharSet chars) {
+    if (!guard.contains(NFA.AnchorType.END) && !guard.contains(NFA.AnchorType.STRING_END)) {
+      return chars;
+    }
+    CharSet narrowed = chars.intersection(LINE_TERMINATORS);
+    return narrowed.isEmpty() ? null : narrowed;
   }
 
   /**
@@ -1214,7 +1246,19 @@ public class SubsetConstructor {
    * @throws UnsupportedOperationException if assertions are not fixed-width
    */
   public DFA buildDFAWithAssertions(NFA nfa) throws StateExplosionException {
-    this.stateCache = new HashMap<>();
+    return buildDFAWithAssertions(nfa, false);
+  }
+
+  /**
+   * @param literalTierCandidate true when the caller (PatternAnalyzer) determined the pattern has
+   *     >=2 literal-extractable lookaheads and SPECIALIZED_LITERAL_LOOKAHEADS would take it if this
+   *     build threw. The sub-DFA gate admission declines for such patterns (the gate's
+   *     per-candidate scan loses to the intrinsified indexOf), reproducing the pre-gate routing.
+   */
+  public DFA buildDFAWithAssertions(NFA nfa, boolean literalTierCandidate)
+      throws StateExplosionException {
+    this.literalTierCandidate = literalTierCandidate;
+    this.stateCache = new LinkedHashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
     this.anchorConditionDiluted = false;
@@ -1299,7 +1343,10 @@ public class SubsetConstructor {
           dfaStateConditions.put(targetState, targetsWithCond);
           worklist.add(targetState);
         }
-        current.addTransition(chars, targetState, Collections.emptyList(), transitionGuard);
+        CharSet narrowedChars2 = narrowEndGuardedCharset(transitionGuard, chars);
+        if (narrowedChars2 == null) continue;
+        current.addTransition(
+            narrowedChars2, targetState, Collections.emptyList(), transitionGuard);
       }
     }
 
@@ -1364,8 +1411,32 @@ public class SubsetConstructor {
           }
           check = new AssertionCheck(type, result.charSets, 0, result.groups);
         } else {
-          throw new UnsupportedOperationException(
-              "Complex assertion patterns not yet supported in DFA mode");
+          // Fixed-width extraction failed. For a LOOKAHEAD whose body carries no groups, anchors
+          // or nested assertions, fall back to a sub-DFA gate: compile the assertion body to its
+          // own DFA and evaluate it as an anchored run from the assertion position (scan until
+          // the gate DFA accepts or dies; {1,64}-style bodies die at their bound, \w+ at the
+          // first non-word char). The check attaches to this assertion state as usual, so it
+          // fires once at every position where the main DFA walk enters it (for a leading
+          // assertion: once per candidate start).
+          // Gate admission is groupless-patterns-only: the gate runs on the DFA-with-assertions
+          // ladder, whose tagged-capture machinery does not track body groups correctly behind a
+          // variable-width assertion (e.g. (?=.*b)(a+)b mis-spans group 1 on the ladder). Grouped
+          // patterns keep their pre-gate routing (hybrid/NFA), which handles captures.
+          if (literalTierCandidate) {
+            throw new UnsupportedOperationException(
+                "Literal-indexOf tier candidate: the sub-DFA gate declines so"
+                    + " SPECIALIZED_LITERAL_LOOKAHEADS keeps the pattern");
+          }
+          if (nfa.getGroupCount() == 0
+              && (state.assertionType == NFA.AssertionType.POSITIVE_LOOKAHEAD
+                  || state.assertionType == NFA.AssertionType.NEGATIVE_LOOKAHEAD)) {
+            check =
+                new AssertionCheck(convertAssertionType(state.assertionType), buildGateDfa(state));
+          } else {
+            throw new UnsupportedOperationException(
+                "Complex lookbehind assertion not supported in DFA mode (lookbehinds peek"
+                    + " backwards and cannot be evaluated by a forward sub-DFA run)");
+          }
         }
 
         // Attach the assertion to the assertion NFA state itself so it fires only
@@ -1379,6 +1450,79 @@ public class SubsetConstructor {
     }
 
     return map;
+  }
+
+  /**
+   * Gate-DFA size cap: a gate is scanned once per candidate start, so pathological assertion bodies
+   * (state explosion) stay out and keep the old routing.
+   */
+  private static final int MAX_GATE_DFA_STATES = 1000;
+
+  /**
+   * Set by buildDFAWithAssertions(nfa, true): decline gates for literal-indexOf-tier candidates.
+   */
+  private boolean literalTierCandidate = false;
+
+  /**
+   * Builds the gate DFA for a variable-width lookahead assertion: the assertion body's NFA
+   * fragment, subset-constructed on its own. Throws {@link UnsupportedOperationException} for
+   * bodies this gate form must not evaluate (capturing groups need boundary tracking the gate does
+   * not do; anchors and nested assertions need the main-construction's anchor machinery, which
+   * plain {@link #buildDFA} does not apply to a bare fragment).
+   */
+  private DFA buildGateDfa(NFA.NFAState assertionState) {
+    if (assertionState.assertionStartState == null
+        || assertionState.assertionAcceptStates == null
+        || assertionState.assertionAcceptStates.isEmpty()) {
+      throw new UnsupportedOperationException("Malformed assertion for gate DFA");
+    }
+    List<NFA.NFAState> fragment = collectReachableStates(assertionState.assertionStartState);
+    for (NFA.NFAState st : fragment) {
+      if (st.enterGroup != null || st.exitGroup != null) {
+        throw new UnsupportedOperationException("Capturing group in variable-width lookahead");
+      }
+      if (st.anchor != null) {
+        throw new UnsupportedOperationException("Anchor in variable-width lookahead");
+      }
+      if (st.assertionType != null) {
+        throw new UnsupportedOperationException("Nested assertion in variable-width lookahead");
+      }
+    }
+    NFA subNfa =
+        new NFA(
+            fragment, assertionState.assertionStartState, assertionState.assertionAcceptStates, 0);
+    DFA gateDfa;
+    try {
+      gateDfa = new SubsetConstructor().buildDFA(subNfa);
+    } catch (StateExplosionException | UnsupportedOperationException e) {
+      throw new UnsupportedOperationException(
+          "Lookahead body not DFA-compilable for gate: " + e.getMessage());
+    }
+    if (gateDfa.getStateCount() > MAX_GATE_DFA_STATES) {
+      throw new UnsupportedOperationException(
+          "Gate DFA too large: " + gateDfa.getStateCount() + " states");
+    }
+    return gateDfa;
+  }
+
+  /** All NFA states reachable from {@code start} (including itself), BFS order. */
+  private static List<NFA.NFAState> collectReachableStates(NFA.NFAState start) {
+    List<NFA.NFAState> order = new ArrayList<>();
+    Set<NFA.NFAState> visited = new HashSet<>();
+    Deque<NFA.NFAState> work = new ArrayDeque<>();
+    work.add(start);
+    visited.add(start);
+    while (!work.isEmpty()) {
+      NFA.NFAState cur = work.poll();
+      order.add(cur);
+      for (NFA.Transition t : cur.getTransitions()) {
+        if (visited.add(t.target)) work.add(t.target);
+      }
+      for (NFA.NFAState t : cur.getEpsilonTransitions()) {
+        if (visited.add(t)) work.add(t);
+      }
+    }
+    return order;
   }
 
   /**

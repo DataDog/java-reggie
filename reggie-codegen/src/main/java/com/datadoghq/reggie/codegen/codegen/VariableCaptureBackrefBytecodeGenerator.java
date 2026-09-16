@@ -537,6 +537,15 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(notNull);
 
+    // if (startPos < 0) startPos = 0;  (clamp - cross-generator findFrom contract; the raw
+    // value previously crashed with StringIndexOutOfBounds in the outer loop)
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
+
     // int len = input.length();
     mv.visitVarInsn(ALOAD, 1);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
@@ -1354,6 +1363,15 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(ICONST_M1);
     mv.visitInsn(IRETURN);
     mv.visitLabel(notNull);
+
+    // if (start < 0) start = 0;  (clamp - negative start behaves like 0; previously crashed
+    // with a StringIndexOutOfBounds because the walk read input.charAt(start ...))
+    Label startNotNeg = new Label();
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitJumpInsn(IFGE, startNotNeg);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, 2);
+    mv.visitLabel(startNotNeg);
 
     // int len = input.length();
     mv.visitVarInsn(ALOAD, 1);

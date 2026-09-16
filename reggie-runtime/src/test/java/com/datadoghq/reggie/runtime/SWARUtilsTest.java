@@ -24,6 +24,118 @@ import org.junit.jupiter.api.Test;
 /** Direct unit tests for SWARUtils, covering uncovered branches. */
 class SWARUtilsTest {
 
+  // ── Regression: carry-safe range masks (Latin-1 / bounds bugs) ────────────────
+
+  @Test
+  void hexDigitBoundsRejectColon() {
+    // The old broadcast constants used the exclusive upper bounds 0x3A/0x67/0x47 with an
+    // inclusive comparison, so ':', 'g', 'G' read as hex digits - and a false-positive first
+    // chunk made findFirstHexDigit return -1 without scanning later chunks.
+    byte[] bytes = "::::::::1".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    assertEquals(8, SWARUtils.findFirstHexDigit(bytes, 0, bytes.length));
+    byte[] gs = "gggggggA".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    assertEquals(7, SWARUtils.findFirstHexDigit(gs, 0, gs.length));
+  }
+
+  @Test
+  void rangeCarrySafeWithHighBitBytes() {
+    // The naive x + (0x80 - low) formulation overflowed its lane for bytes >= 0x80 and the
+    // borrow variant underflowed, corrupting neighboring lanes: [0xff, '9', 0xff, ...] read as
+    // an empty [0-9] chunk and the digit was missed.
+    byte[] bytes = {
+      (byte) 0xFF,
+      (byte) '9',
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF
+    };
+    assertEquals(1, SWARUtils.findFirstInRange(bytes, 0, bytes.length, '0', '9'));
+    // Symmetric borrow direction: a trailing high-bit byte must not hide a leading digit.
+    byte[] bytes2 = {
+      (byte) '0',
+      (byte) '0',
+      (byte) '0',
+      (byte) '0',
+      (byte) '0',
+      (byte) '0',
+      (byte) '0',
+      (byte) 0xC0
+    };
+    assertEquals(0, SWARUtils.findFirstInRange(bytes2, 0, bytes2.length, '0', '9'));
+  }
+
+  @Test
+  void notInRangeHighBitByteIsAViolator() {
+    // A byte >= 0x80 is never in an ASCII range; findFirstNotInRange must report it, and a
+    // high-bit byte must not mask a real violator (or produce one) in a neighbor lane.
+    byte[] bytes = {
+      (byte) 0xC0,
+      (byte) '9',
+      (byte) '9',
+      (byte) '9',
+      (byte) '9',
+      (byte) '9',
+      (byte) '9',
+      (byte) '9',
+      (byte) 'a'
+    };
+    assertEquals(0, SWARUtils.findFirstNotInRange(bytes, 0, bytes.length, '0', '9'));
+    byte[] clean = "99999999".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    assertEquals(-1, SWARUtils.findFirstNotInRange(clean, 0, clean.length, '0', '9'));
+  }
+
+  @Test
+  void inRangesCarrySafeWithHighBitBytes() {
+    byte[] bytes = {
+      (byte) 0xFF,
+      (byte) 'b',
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF,
+      (byte) 0xFF
+    };
+    char[] az09 = {'0', '9', 'a', 'f'};
+    assertEquals(1, SWARUtils.findFirstInRanges(bytes, 0, bytes.length, az09));
+  }
+
+  @Test
+  void latin1RangeStraddle() {
+    // A range straddling 0x80 must match bytes on both sides via the two-half formulation.
+    byte[] bytes = {
+      (byte) 0x7F,
+      (byte) 0x80,
+      (byte) 0xA0,
+      (byte) 0xFF,
+      (byte) 0x00,
+      (byte) 0x00,
+      (byte) 0x00,
+      (byte) 0x00
+    };
+    assertEquals(1, SWARUtils.findFirstInRange(bytes, 0, bytes.length, (char) 0x80, (char) 0xFF));
+    assertEquals(0, SWARUtils.findFirstInRange(bytes, 0, bytes.length, (char) 0x7F, (char) 0x80));
+    // All-hits chunk for allBytesInRange:
+    java.nio.ByteBuffer buf =
+        java.nio.ByteBuffer.wrap(
+            new byte[] {
+              (byte) 0x90,
+              (byte) 0xA0,
+              (byte) 0xFF,
+              (byte) 0x90,
+              (byte) 0xA0,
+              (byte) 0xFF,
+              (byte) 0x90,
+              (byte) 0xA0
+            });
+    assertTrue(SWARUtils.allBytesInRange(buf.getLong(), (char) 0x80, (char) 0xFF));
+    java.nio.ByteBuffer buf2 = java.nio.ByteBuffer.wrap("99999999".getBytes());
+    assertTrue(SWARUtils.allBytesInRange(buf2.getLong(), '0', '9'));
+  }
+
   // ── isEnabled ────────────────────────────────────────────────────────────────
 
   @Test

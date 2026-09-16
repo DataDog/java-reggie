@@ -55,6 +55,7 @@ import com.datadoghq.reggie.codegen.codegen.CountingGlushkovBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFASwitchBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFATableBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.DeterministicChainBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyBacktrackBytecodeGenerator;
@@ -71,11 +72,13 @@ import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator
 import com.datadoghq.reggie.codegen.codegen.QuantifiedGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.SuffixSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Constructor;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -404,6 +407,36 @@ public class RuntimeCompiler {
    * strategy re-analysis. The NFA is still built by the canonical runtime builder; only the routing
    * decision and name map are carried from compile time. Used by generated delegating stubs.
    */
+  /**
+   * Constructs the PikeVM fallback matcher used by DETERMINISTIC_CHAIN_BYTECODE generated classes
+   * on find-budget overflow (doc/2026-09-01-deterministic-chain-bytecode-design.md §4). Public and
+   * static because the generated classes live in any package (the annotation-processor path emits
+   * them into the user's package) while {@link PikeVMMatcher} is package-private. The construction
+   * happens lazily at first overflow — parse-at-overflow keeps the generated class constructor
+   * signature pattern-only, so the runtime and annotation-processor generators emit byte-identical
+   * classes.
+   *
+   * <p>The lazy-aware NFA builder is required: chain-family patterns with lazy quantifiers keep
+   * their priority semantics only through {@code ThompsonBuilder(true)}.
+   *
+   * @param pattern the pattern this matcher was generated for
+   * @param nameToIndex the named-group map of the generated instance (for group(name) on fallback
+   *     results); may be empty
+   */
+  public static ReggieMatcher createChainFallback(
+      String pattern, Map<String, Integer> nameToIndex) {
+    try {
+      RegexParser parser = new RegexParser();
+      RegexNode ast = parser.parse(pattern);
+      NFA nfa = new ThompsonBuilder(true).build(ast, countGroups(pattern));
+      PikeVMMatcher m = new PikeVMMatcher(nfa, pattern);
+      m.setNameToIndex(nameToIndex == null ? Collections.emptyMap() : nameToIndex);
+      return m;
+    } catch (RegexParser.ParseException e) {
+      throw new java.util.regex.PatternSyntaxException(e.getMessage(), pattern, -1);
+    }
+  }
+
   public static ReggieMatcher compilePikeVm(String pattern, String encodedNames) {
     PikeVMEntry entry = PIKEVM_NFA_CACHE.get(pattern);
     if (entry != null) {
@@ -770,6 +803,50 @@ public class RuntimeCompiler {
             options);
       }
 
+      // 4. needsFallback guard for ALL strategies. Patterns that need JDK fallback
+      // (e.g. nullable group content with nullable outer quantifier, anchors in quantified
+      // capturing groups) must not be wrapped in a hybrid matcher — the DFA boolean path can
+      // produce incorrect results for these shapes. This runs BEFORE the hybrid check and
+      // BEFORE the PIKEVM/BITSTATE early returns, so it also catches DFA_*_WITH_GROUPS
+      // patterns that usePosixLastMatch routes into hybrid.
+      String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+      if (fallbackReason != null) {
+        return fallbackOrThrow(pattern, fallbackReason, nameMap, options);
+      }
+
+      // 5. Check if we should use hybrid mode (DFA + NFA for groups).
+      // This must run BEFORE the PIKEVM_CAPTURE / BITSTATE_CAPTURE early returns below: those
+      // strategies were chosen because the tagged DFA couldn't track group spans, but the DFA
+      // itself is still correct for boolean matching (matches/find). Hybrid mode lets the DFA
+      // serve the boolean methods and the NFA serve match/findMatch. When no DFA is available
+      // (dfaResult.dfa == null && result.dfa == null) or the DFA is anchor-diluted, hybrid is
+      // skipped and the PIKEVM/BITSTATE early returns handle the pattern as before.
+      if (groupCount > 0 && shouldUseHybrid(result)) {
+        // For PIKEVM/BITSTATE patterns whose NFA contains anchors (^, $, \A, \Z, \z):
+        // the DFA from ignoreGroupCount=true may mishandle anchors in find() context (e.g. \A
+        // inside a quantified group is treated as match-start instead of input-start). Skip
+        // hybrid and let the PIKEVM/BITSTATE early returns below handle them. Patterns without
+        // anchors (e.g. (a*b*c*d*e*)) still benefit from the DFA fast path.
+        boolean skipHybrid = false;
+        if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+            || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+          if (nfa != null && nfaHasAnchor(nfa)) {
+            skipHybrid = true;
+          }
+        }
+        if (!skipHybrid) {
+          PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+          if (!dfaResult.anchorConditionDiluted && (dfaResult.dfa != null || result.dfa != null)) {
+            ReggieMatcher hybrid =
+                compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);
+            hybrid.setNameToIndex(nameMap);
+            return hybrid;
+          }
+          // Hybrid DFA anchor-diluted or no DFA: fall through to NFA-only routing below.
+        }
+        // skipHybrid: fall through to PIKEVM/BITSTATE early returns below.
+      }
+
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
       // correctly-enriched PikeVMMatcher without re-parsing the pattern.
       // B16 guard: nullable group content under a nullable outer quantifier diverges even in PikeVM
@@ -800,28 +877,7 @@ public class RuntimeCompiler {
         return BITSTATE_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
-      String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
-      if (fallbackReason != null) {
-        return fallbackOrThrow(pattern, fallbackReason, nameMap, options);
-      }
-
-      // 4. Check if we should use hybrid mode (DFA + NFA for groups)
-      if (groupCount > 0 && shouldUseHybrid(result)) {
-        PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
-        // Skip hybrid when the anchor-free DFA is anchor-diluted: the DFA incorrectly models
-        // anchor conditions so it cannot serve as the fast-matching pass. compileHybrid handles
-        // dfaResult.dfa==null by generating a pure NFA matcher, so non-diluted PIKEVM results
-        // (e.g. from hasCapturingGroupInQuantifiedSection) still reach the NFA fallback inside.
-        if (!dfaResult.anchorConditionDiluted) {
-          ReggieMatcher hybrid =
-              compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);
-          hybrid.setNameToIndex(nameMap);
-          return hybrid;
-        }
-        // Hybrid DFA anchor-diluted: skip hybrid, fall through to NFA-only routing below.
-      }
-
-      // 5. Compute structural hash (64-bit cache key) + an independent verification hash.
+      // 6. Compute structural hash (64-bit cache key) + an independent verification hash.
       long structHash;
       long verifyHash;
       if (nfa != null) {
@@ -1160,6 +1216,17 @@ public class RuntimeCompiler {
     if (result.usePosixLastMatch) {
       return true;
     }
+    // PIKEVM_CAPTURE / BITSTATE_CAPTURE patterns landed on an NFA strategy because the tagged
+    // DFA couldn't track group spans (capture-ambiguous, quantified-alt-with-group, etc.). The
+    // DFA itself is still correct for boolean matching (matches/find) — only group extraction
+    // needs the NFA. Hybrid mode lets the DFA serve the boolean methods and the NFA serve
+    // match/findMatch. The compileHybrid path falls back to pure NFA when no DFA is available,
+    // and the caller-side guard (dfaResult.dfa != null || result.dfa != null) skips hybrid when
+    // neither path produced a DFA, preserving the current PIKEVM/BITSTATE routing.
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+      return true;
+    }
     return false;
   }
 
@@ -1175,25 +1242,38 @@ public class RuntimeCompiler {
       throws Exception {
     // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
     // When dfaResult.dfa==null but originalResult.dfa!=null, use original DFA for booleans + NFA.
+    boolean usePikeVm =
+        originalResult.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+            || originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE;
     if (dfaResult.dfa == null) {
       if (originalResult.dfa != null) {
         // Use the original DFA for boolean matching, NFA for group extraction.
         byte[] dfaBytecode = generateBytecode(pattern, originalResult, nfa, ast, caseInsensitive);
         ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
-        PatternAnalyzer.MatchingStrategyResult nfaResult =
-            new PatternAnalyzer.MatchingStrategyResult(
-                PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-                null,
-                null,
-                false,
-                originalResult.requiredLiterals,
-                originalResult.lookaheadGreedyInfo,
-                originalResult.usePosixLastMatch);
-        byte[] nfaBytecode = generateBytecode(pattern, nfaResult, nfa, ast, caseInsensitive);
-        ReggieMatcher nfaMatcher = instantiateMatcher(nfaBytecode, pattern);
+        ReggieMatcher nfaMatcher =
+            usePikeVm
+                ? new PikeVMMatcher(nfa, pattern)
+                : instantiateMatcher(
+                    generateBytecode(
+                        pattern,
+                        new PatternAnalyzer.MatchingStrategyResult(
+                            PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
+                            null,
+                            null,
+                            false,
+                            originalResult.requiredLiterals,
+                            originalResult.lookaheadGreedyInfo,
+                            originalResult.usePosixLastMatch),
+                        nfa,
+                        ast,
+                        caseInsensitive),
+                    pattern);
         return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
       }
       // No DFA available: fall back to pure NFA
+      if (usePikeVm) {
+        return new PikeVMMatcher(nfa, pattern);
+      }
       PatternAnalyzer.MatchingStrategyResult nfaResult =
           new PatternAnalyzer.MatchingStrategyResult(
               PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
@@ -1211,18 +1291,26 @@ public class RuntimeCompiler {
     byte[] dfaBytecode = generateBytecode(pattern, dfaResult, nfa, ast, caseInsensitive);
     ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
 
-    // 3. Generate NFA matcher (for group extraction) - preserve POSIX flag!
-    PatternAnalyzer.MatchingStrategyResult nfaResult =
-        new PatternAnalyzer.MatchingStrategyResult(
-            PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-            null,
-            null,
-            false,
-            originalResult.requiredLiterals,
-            originalResult.lookaheadGreedyInfo,
-            originalResult.usePosixLastMatch);
-    byte[] nfaBytecode = generateBytecode(pattern, nfaResult, nfa, ast, caseInsensitive);
-    ReggieMatcher nfaMatcher = instantiateMatcher(nfaBytecode, pattern);
+    // 3. Generate NFA matcher (for group extraction). For PIKEVM/BITSTATE patterns, use
+    // PikeVMMatcher directly — OPTIMIZED_NFA has known bugs with anchors in quantified groups,
+    // optional prefixes, and POSIX last-match that PikeVM handles correctly. The DFA fast path
+    // serves matches()/find(); PikeVM serves match()/findMatch() at the same speed as before.
+    ReggieMatcher nfaMatcher;
+    if (usePikeVm) {
+      nfaMatcher = new PikeVMMatcher(nfa, pattern);
+    } else {
+      PatternAnalyzer.MatchingStrategyResult nfaResult =
+          new PatternAnalyzer.MatchingStrategyResult(
+              PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
+              null,
+              null,
+              false,
+              originalResult.requiredLiterals,
+              originalResult.lookaheadGreedyInfo,
+              originalResult.usePosixLastMatch);
+      byte[] nfaBytecode = generateBytecode(pattern, nfaResult, nfa, ast, caseInsensitive);
+      nfaMatcher = instantiateMatcher(nfaBytecode, pattern);
+    }
 
     // 4. Return hybrid matcher
     return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
@@ -1283,6 +1371,14 @@ public class RuntimeCompiler {
    * fields (currentStates, nextStates, epsilonProcessed, configGroupStarts) during matching.
    * Instances of these matchers must not be shared across threads or sequential compile() calls.
    */
+  /** True if the NFA contains any anchor states (^, $, \A, \Z, \z, \b, \B). */
+  private static boolean nfaHasAnchor(NFA nfa) {
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.anchor != null) return true;
+    }
+    return false;
+  }
+
   private static boolean isNfaBacked(PatternAnalyzer.MatchingStrategy strategy) {
     switch (strategy) {
       case OPTIMIZED_NFA:
@@ -1399,6 +1495,21 @@ public class RuntimeCompiler {
         bitStateGen.generateAll(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
+      case DETERMINISTIC_CHAIN_BYTECODE:
+        PatternAnalyzer.DeterministicChainInfo chainInfo =
+            (PatternAnalyzer.DeterministicChainInfo) result.patternInfo;
+        DeterministicChainBytecodeGenerator chainGen =
+            new DeterministicChainBytecodeGenerator(chainInfo, nfa.getGroupCount());
+        chainGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        chainGen.generateFallbackSupport(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
       case SPECIALIZED_MULTI_GROUP_GREEDY:
         PatternAnalyzer.MultiGroupGreedyInfo multiGroupInfo =
             (PatternAnalyzer.MultiGroupGreedyInfo) result.patternInfo;
@@ -1461,6 +1572,22 @@ public class RuntimeCompiler {
         fixedGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
+      case SPECIALIZED_SUFFIX_SEQUENCE:
+        PatternAnalyzer.SuffixSequenceInfo suffixInfo =
+            (PatternAnalyzer.SuffixSequenceInfo) result.patternInfo;
+        SuffixSequenceBytecodeGenerator suffixGen =
+            new SuffixSequenceBytecodeGenerator(suffixInfo, nfa.getGroupCount());
+        suffixGen.generateMatchesMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        suffixGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
       case SPECIALIZED_BOUNDED_QUANTIFIERS:

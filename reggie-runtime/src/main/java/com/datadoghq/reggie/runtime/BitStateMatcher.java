@@ -126,7 +126,11 @@ final class BitStateMatcher extends ReggieMatcher {
   // Single-char SIMD fast-reject (mirrors PikeVMMatcher.singleFirstCharAscii): when exactly one
   // ASCII char can begin a match, String.indexOf() gives a SIMD-accelerated scan that rejects
   // no-match inputs without running the DFS at every position. -1 when zero or multiple chars
-  // qualify, or when the pattern can match the empty string.
+  // qualify, when the pattern can match the empty string, or when a non-ASCII char can begin a
+  // match (computeFirstByteFilter then declines, since this filter only sees chars 0..127). Used
+  // by the unanchored find family AND — since a match under matches()/match()/matchesBounded()/
+  // matchBounded() must begin at the region start — by the anchored entry points, which need only
+  // compare input.charAt(regionStart) instead of scanning for the char.
   private final int singleFirstCharAscii;
 
   // General multi-prefix fast-reject (mirrors PikeVMMatcher.rejectDfa/rejectStep, built by the
@@ -141,6 +145,19 @@ final class BitStateMatcher extends ReggieMatcher {
   // find()/findFrom()/findMatchFrom() call — safe because a single matcher instance is never
   // shared across threads or concurrent calls (see class-level thread-safety contract).
   private final int[] localizeScratch = new int[2];
+
+  // Greedy char-class loop fast path (see the fast-consume block in search()): for a consuming
+  // leaf state whose single transition targets a pure-epsilon state whose fan-out is exactly
+  // [loop-back-to-leaf, exit] in that Perl-priority order (the Thompson shape of every GREEDY
+  // plus/star of a single char class — lazy quantifiers swap the order and so never match, see
+  // ThompsonBuilder(lazyAware)), the whole greedy run can be consumed by a tight scan loop
+  // instead of paying two EXPAND-job stack round-trips per consumed char (the dominant constant
+  // in the JDK losses of the IAST URL/LDAP/SQL find-family benchmarks: ~10-15 ns/char vs JDK's
+  // ~1 ns/char compiled greedy loop). greedyLoopMid[sid] = the post-consume state id (whose
+  // (mid,pos) cells the DFS marks visited per consumed char), greedyLoopExit[sid] = the exit
+  // state id (one job pushed per consumed position, popping longest-first); -1 = no such shape.
+  private final int[] greedyLoopMid;
+  private final int[] greedyLoopExit;
 
   BitStateMatcher(NFA nfa, String pattern) {
     this(nfa, pattern, null);
@@ -205,6 +222,18 @@ final class BitStateMatcher extends ReggieMatcher {
     stackB = new int[initialStackCap];
     stackC = new int[initialStackCap];
 
+    greedyLoopMid = new int[stateCount];
+    greedyLoopExit = new int[stateCount];
+    java.util.Arrays.fill(greedyLoopMid, -1);
+    java.util.Arrays.fill(greedyLoopExit, -1);
+    for (int sid = 0; sid < stateCount; sid++) {
+      int mid = greedyLoopShapeAt(sid);
+      if (mid >= 0) {
+        greedyLoopMid[sid] = mid;
+        greedyLoopExit[sid] = epsilonTargets[mid][1];
+      }
+    }
+
     boolean[] firstByteAscii = new boolean[128];
     boolean prefilterUsable = PikeVMMatcher.computeFirstByteFilter(nfa, firstByteAscii);
     int singleChar = -1;
@@ -230,9 +259,52 @@ final class BitStateMatcher extends ReggieMatcher {
   }
 
   /**
-   * Test-only: whether {@link #find}/{@link #findFrom}/{@link #findMatchFrom} carry either
-   * fast-reject filter (single-char {@code indexOf} prefilter or the general reject-DFA). Used to
-   * pin the presence of these optimizations against silent regression (see {@code
+   * Returns the post-consume state id when {@code sid} is a consuming leaf forming a greedy
+   * single-char-class loop — i.e. every precondition the fast-consume block in {@link #search}
+   * relies on for equivalence — or -1 otherwise:
+   *
+   * <ul>
+   *   <li>{@code sid}: no anchor, no group enter/exit, not accepting, no epsilon children, exactly
+   *       one consuming transition (the char class), targeting {@code mid != sid};
+   *   <li>{@code mid}: no anchor, no group enter/exit, not accepting, no consuming transitions
+   *       (pure epsilon fan-out), and its epsilon children are exactly {@code [sid, exit]} in that
+   *       order — loop-back first, so greedy continue-before-exit priority, and {@code exit}
+   *       distinct from both. Lazy loops ({@code ThompsonBuilder(lazyAware=true)}) reverse the
+   *       order, so they (and every multi-branch loop like {@code (a|b)+}) fall out here and stay
+   *       on the generic per-char path.
+   * </ul>
+   */
+  private int greedyLoopShapeAt(int sid) {
+    if (anchorBySid[sid] != null
+        || enterGroupBySid[sid] >= 0
+        || exitGroupBySid[sid] >= 0
+        || isAccept[sid]
+        || epsilonTargets[sid].length != 0
+        || transitionCharSets[sid].length != 1) {
+      return -1;
+    }
+    int mid = transitionTargets[sid][0];
+    if (mid == sid
+        || anchorBySid[mid] != null
+        || enterGroupBySid[mid] >= 0
+        || exitGroupBySid[mid] >= 0
+        || isAccept[mid]
+        || transitionCharSets[mid].length != 0) {
+      return -1;
+    }
+    int[] eps = epsilonTargets[mid];
+    if (eps.length != 2 || eps[0] != sid || eps[1] == sid || eps[1] == mid) {
+      return -1;
+    }
+    return mid;
+  }
+
+  /**
+   * Test-only: whether the unanchored find family ({@link #find}/{@link #findFrom}/{@link
+   * #findMatchFrom}) carries either fast-reject filter (single-char {@code indexOf} prefilter or
+   * the general reject-DFA), or the anchored matches family ({@link #matches}/{@link #match}/
+   * {@link #matchesBounded}/{@link #matchBounded}) carries the single-char prefilter. Used to pin
+   * the presence of these optimizations against silent regression (see {@code
    * IastPatternRoutingTest}'s sibling fast-reject test) — routing alone doesn't guarantee the
    * filter is still wired once a pattern reaches {@code BitStateMatcher}.
    */
@@ -246,6 +318,13 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public boolean matches(String input) {
+    // Anchored single-char fast-reject: singleFirstCharAscii >= 0 means exactly that char can
+    // begin a match and the empty string cannot match, so a whole-input match must begin at pos 0
+    // with input.charAt(0) == singleFirstCharAscii. One compare instead of the full DFS setup
+    // (visited-generation bump, caps fill, seed push, epsilon-closure walk) on no-match inputs.
+    if (singleFirstCharAscii >= 0 && (input.isEmpty() || input.charAt(0) != singleFirstCharAscii)) {
+      return false;
+    }
     if (exceedsBudget(input.length())) {
       if (laurikari != null) {
         laurikariCount++;
@@ -307,6 +386,10 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult match(String input) {
+    // Anchored single-char fast-reject, same soundness argument as matches() above.
+    if (singleFirstCharAscii >= 0 && (input.isEmpty() || input.charAt(0) != singleFirstCharAscii)) {
+      return null;
+    }
     if (exceedsBudget(input.length())) {
       if (laurikari != null) {
         laurikariCount++;
@@ -351,6 +434,12 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public boolean matchesBounded(CharSequence input, int start, int end) {
+    // Anchored single-char fast-reject on the region's first char, same soundness argument as
+    // matches() above: a region match must begin at the region start.
+    if (singleFirstCharAscii >= 0
+        && (start == end || input.charAt(start) != singleFirstCharAscii)) {
+      return false;
+    }
     if (exceedsBudget(end - start)) {
       fallbackCount++;
       return fallback().matchesBounded(input, start, end);
@@ -361,6 +450,12 @@ final class BitStateMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
+    // Anchored single-char fast-reject on the region's first char, same soundness argument as
+    // matches() above: a region match must begin at the region start.
+    if (singleFirstCharAscii >= 0
+        && (start == end || input.charAt(start) != singleFirstCharAscii)) {
+      return null;
+    }
     if (exceedsBudget(end - start)) {
       fallbackCount++;
       return fallback().matchBounded(input, start, end);
@@ -603,6 +698,48 @@ final class BitStateMatcher extends ReggieMatcher {
 
       // Consuming leaf.
       if (pos < spanEnd) {
+        int mid = greedyLoopMid[sid];
+        if (mid >= 0) {
+          // Greedy single-char-class loop (shape pinned by greedyLoopShapeAt): consume the whole
+          // run in a tight scan instead of two EXPAND-job stack round-trips per char. This block
+          // replicates EXACTLY the (stateId, pos) side effects the generic path would produce
+          // one char at a time, so every other path (alternation re-entry, lazy exits, captures)
+          // still sees the identical visited/stack state:
+          //   - per consumed position p in [pos+1, k] (k = first non-matching position): the
+          //     (mid, p) and (leaf, p) cells the descent would mark visited, in the same order,
+          //     stopping where a pre-visited cell would have short-circuited the chain;
+          //   - one (exit, p) job per consumed position, pushed ascending so they pop DESCENDING
+          //     — greedy give-back tries the longest run first, matching the generic path's
+          //     exit-children accumulation under the continue chain.
+          // The leaf cell (sid, pos) itself was already marked by the pop above; an empty run
+          // (k == pos, first char doesn't match) marks and pushes nothing beyond that.
+          int exit = greedyLoopExit[sid];
+          CharSet loopChars = transitionCharSets[sid][0];
+          int k = pos;
+          while (k < spanEnd && loopChars.contains(input.charAt(k))) {
+            k++;
+          }
+          int stride = spanLen + 1;
+          int leafRow = sid * stride;
+          int midRow = mid * stride;
+          ensureStackCapacity(k - pos);
+          for (int p = pos + 1; p <= k; p++) {
+            rel = p - scanStart;
+            if (visited[midRow + rel] == visitedGeneration) {
+              break; // (mid, p) already expanded: the chain dies here, no exit push for p
+            }
+            visited[midRow + rel] = visitedGeneration;
+            stackA[stackTop] = exit;
+            stackB[stackTop] = p;
+            stackC[stackTop] = 0;
+            stackTop++;
+            if (visited[leafRow + rel] == visitedGeneration) {
+              break; // (leaf, p) already expanded: exit push for p happened, descent stops
+            }
+            visited[leafRow + rel] = visitedGeneration;
+          }
+          continue;
+        }
         char ch = input.charAt(pos);
         CharSet[] charSets = transitionCharSets[sid];
         int[] targets = transitionTargets[sid];
