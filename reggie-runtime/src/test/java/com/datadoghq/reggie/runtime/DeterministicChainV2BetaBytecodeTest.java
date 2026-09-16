@@ -23,6 +23,7 @@ import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.codegen.DeterministicChainBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.lang.invoke.MethodHandles;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.regex.Matcher;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,11 @@ class DeterministicChainV2BetaBytecodeTest {
 
   private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
   private static int classCounter;
+
+  private static final String SQL_MYSQL_PATTERN =
+      "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?"
+          + "|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
+          + "|\"(?:\\\\\"|[^\"])*\"|'(?:\\\\'|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
 
   private static final class Compiled {
     final ReggieMatcher m;
@@ -487,12 +493,9 @@ class DeterministicChainV2BetaBytecodeTest {
     // MySQL's escaped-literal bodies (\\" | [^"]) overlap position-wise: the [^"] body accepts
     // the escape body's leading backslash and the two end at different widths, so the body
     // choice is retryable. v2-gamma re-admits it - the alt-choice journal and floor-retry
-    // reproduce the JDK's backtracking, and the two quote-loop branches journal into disjoint
-    // scratch slices.
-    String p =
-        "(?i)(?m)[-+]?(?:x'[0-9a-f]+'|0x[0-9a-f]+|\\d*\\.\\d+(?:E[-+]?\\d+[fd]?)?"
-            + "|\\b\\d+(?:E[-+]?\\d+[fd]?)?)"
-            + "|\"(?:\\\\\"|[^\"])*\"|'(?:\\\\'|[^'])*'|--.*$|/\\*[\\s\\S]*\\*/";
+    // reproduce the JDK's backtracking; the two quote-loop branches live in mutually
+    // exclusive alternations, so they share one journal slice (deepest-live-path sizing).
+    String p = SQL_MYSQL_PATTERN;
     Compiled c = compileChain(p);
     java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(p);
     assertFullParity(c, jdk, "SET a = 'It\\'s fine' WHERE b = \"quoted \\\" str\"");
@@ -538,5 +541,73 @@ class DeterministicChainV2BetaBytecodeTest {
     assertNull(
         new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0)).detectDeterministicChain(ast),
         "the {100,} LOOP_ALT declines; BitState keeps QueryObfuscator");
+  }
+
+  @Test
+  void loopAltJournalSizedByDeepestLivePath() throws Exception {
+    // Mutually exclusive branches reuse one journal slice: only one branch can have a live
+    // retry chain at a time, and a failed branch's journal is dead once its retry chain
+    // unwinds into the next branch. The syntactic tree sum would instead over-allocate per
+    // branch count - 32 branches with one give-back loop each would request 32x(len+1) ints
+    // (~1 GiB at 8M chars), retained per thread by chainScratch.
+    assertEquals(1, journalLoops("q(?:a|ab)+c\\b"), "single loop, single branch");
+    assertEquals(1, journalLoops("x(?:a|ab)+y|q(?:b|ba)+z"), "2 exclusive branches share a slice");
+    StringBuilder b = new StringBuilder();
+    for (int i = 0; i < 8; i++) {
+      if (i > 0) {
+        b.append('|');
+      }
+      char c = (char) ('a' + i);
+      b.append('x').append(c).append("(?:").append(c).append('|').append(c).append(c).append(")+y");
+    }
+    assertEquals(1, journalLoops(b.toString()), "8 exclusive branches share a slice");
+    // Loops along ONE execution path stack: an earlier loop's give-back handler wraps the
+    // later loop (both stay live), so they need disjoint slices.
+    assertEquals(2, journalLoops("q(?:a|ab)*x(?:b|ba)*z"), "sequential loops in one path stack");
+    assertEquals(
+        2,
+        journalLoops("q(?:x(?:a|ab)+y|(?:c|cd)+e)(?:b|ba)+z"),
+        "alt body + sequential successor stack");
+    assertEquals(1, journalLoops("q(?:x(?:a|ab)+y|(?:c|cd)+e)z"), "alt bodies share a slice");
+    // MySQL's two quote loops live in exclusive alternation branches: one slice, not two.
+    assertEquals(1, journalLoops(SQL_MYSQL_PATTERN), "SQL_MYSQL quote loops in exclusive branches");
+  }
+
+  private static int journalLoops(String pattern) throws Exception {
+    RegexNode ast = new RegexParser().parse(pattern);
+    PatternAnalyzer analyzer = new PatternAnalyzer(ast, new ThompsonBuilder().build(ast, 0));
+    PatternAnalyzer.DeterministicChainInfo info = analyzer.detectDeterministicChain(ast);
+    assertNotNull(info, "pattern must be detected as a deterministic chain: " + pattern);
+    DeterministicChainBytecodeGenerator gen = new DeterministicChainBytecodeGenerator(info, 0);
+    Field f = DeterministicChainBytecodeGenerator.class.getDeclaredField("loopAltJournalLoops");
+    f.setAccessible(true);
+    return f.getInt(gen);
+  }
+
+  @Test
+  void loopAltExclusiveBranchJournalReuseParity() throws Exception {
+    // Give-back LOOP_ALTs in mutually exclusive branches share journal slice 0; the reuse must
+    // be invisible (a failed branch's journal is dead once its retries unwind into the next
+    // branch). The sweep forces branch-1 loop retries and their exhaustion before branch 2
+    // wins, and vice versa.
+    String p = "x(?:a|ab)+y|q(?:b|ba)+z";
+    Compiled c = compileChain(p);
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(p);
+    assertFullParity(c, jdk, "xaby");
+    assertFullParity(c, jdk, "qbbz");
+    assertFullParity(c, jdk, "qbabaz");
+    assertFullParity(c, jdk, "xaz");
+    for (int len = 0; len <= 4; len++) {
+      int n = (int) Math.pow(6, len);
+      for (int v = 0; v < n; v++) {
+        StringBuilder sb = new StringBuilder();
+        int x = v;
+        for (int k = 0; k < len; k++) {
+          sb.append("xqabyz".charAt(x % 6));
+          x /= 6;
+        }
+        assertFullParity(c, jdk, sb.toString());
+      }
+    }
   }
 }

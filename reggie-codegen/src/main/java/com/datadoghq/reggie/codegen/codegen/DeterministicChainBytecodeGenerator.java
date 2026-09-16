@@ -110,6 +110,14 @@ public class DeterministicChainBytecodeGenerator {
   /** Slices of (len+1) ints the journal must hold (see the constructor). */
   private final int loopAltJournalLoops;
 
+  /**
+   * True when any give-back LOOP_ALT packs its journal entries as (end &lt;&lt; 4) | bodyIndex - an
+   * encoding that only represents ends below {@code 1 << 27}. Entry points guard on it and delegate
+   * such inputs to the PikeVM fallback (full-width positions) instead of corrupting the retry
+   * chain.
+   */
+  private final boolean hasAltRetryJournal;
+
   public DeterministicChainBytecodeGenerator(DeterministicChainInfo info, int groupCount) {
     this.branches = info.branches;
     this.groupCount = groupCount;
@@ -144,33 +152,70 @@ public class DeterministicChainBytecodeGenerator {
     }
     this.hasGiveBack = giveBack;
     int journalLoops = 0;
+    boolean altRetry = false;
     for (DeterministicChainInfo.ChainBranch b : branches) {
-      journalLoops += countLoopAltGiveBack(b.seq);
+      // Top-level branches are mutually exclusive: at most one has a live retry chain, so the
+      // journal is sized by the deepest single path, not by the syntactic sum over the tree (a
+      // 32-branch pattern with one give-back loop per branch would otherwise request
+      // 32x(len+1) ints - ~1 GiB at 8M chars - and chainScratch retains it per thread).
+      journalLoops = Math.max(journalLoops, maxPathLoopAltGiveBack(b.seq));
+      altRetry |= anyLoopAltAltRetry(b.seq);
     }
     this.hasLoopAltGiveBack = journalLoops > 0;
     // Each give-back LOOP_ALT journals into its own (len+1) slice of the per-thread scratch
-    // buffer: sequential give-back loops in one method (MySQL's two quote-loop branches) must
-    // not clobber each other's boundaries. A single loop keeps the original len+1 size, so
-    // existing single-loop patterns see no allocation change.
+    // buffer: sequential give-back loops along one execution path must not clobber each other's
+    // entries (an earlier loop's give-back handler stays live while a later loop runs). Slices
+    // are reused across mutually exclusive paths (branches/alternatives - a failed path's
+    // journal is dead once its retry chain unwinds), so a single-loop pattern keeps the original
+    // len+1 size and exclusive branches share one slice.
     this.loopAltJournalLoops = Math.max(1, journalLoops);
+    this.hasAltRetryJournal = altRetry;
   }
 
-  private static int countLoopAltGiveBack(DeterministicChainInfo.ChainSeq seq) {
+  private static int maxPathLoopAltGiveBack(DeterministicChainInfo.ChainSeq seq) {
+    // The deepest single execution path: sequential elements stack (an earlier give-back
+    // loop's retry handler wraps everything after it, so it stays live while later loops
+    // run), OPT/CAPTURE nested regions stack on their matched path, and alternation bodies
+    // (ALT_CHAIN branches, LOOP_ALT bodies) are mutually exclusive - take the max, never the
+    // sum.
     int count = 0;
     for (DeterministicChainInfo.ChainElem e : seq.elems) {
       if (e.kind == DeterministicChainInfo.ElemKind.LOOP_ALT && e.giveBack) {
         count++;
       }
       if (e.nested != null) {
-        count += countLoopAltGiveBack(e.nested);
+        count += maxPathLoopAltGiveBack(e.nested);
       }
       if (e.alts != null) {
+        int deepest = 0;
         for (DeterministicChainInfo.ChainSeq alt : e.alts) {
-          count += countLoopAltGiveBack(alt);
+          deepest = Math.max(deepest, maxPathLoopAltGiveBack(alt));
         }
+        count += deepest;
       }
     }
     return count;
+  }
+
+  private static boolean anyLoopAltAltRetry(DeterministicChainInfo.ChainSeq seq) {
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      if (e.kind == DeterministicChainInfo.ElemKind.LOOP_ALT
+          && e.giveBack
+          && !PatternAnalyzer.loopAltAltsUnambiguous(e.alts)) {
+        return true;
+      }
+      if (e.nested != null && anyLoopAltAltRetry(e.nested)) {
+        return true;
+      }
+      if (e.alts != null) {
+        for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+          if (anyLoopAltAltRetry(alt)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
   }
 
   private static boolean anyLoopAltGiveBack(DeterministicChainInfo.ChainSeq seq) {
@@ -378,6 +423,16 @@ public class DeterministicChainBytecodeGenerator {
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, workVar);
     }
+    if (hasAltRetryJournal) {
+      // The alt-retry journal packs each iteration as (end << 4) | bodyIndex, which only
+      // represents ends below 1 << 27; at or above that the int shift discards the high bits
+      // and the decode restores wrapped (wrong) positions. The ~512 MiB journal itself fits
+      // large heaps, so the case is reachable - delegate the whole call to the PikeVM
+      // fallback (full-width positions, linear) instead of corrupting the retry chain.
+      mv.visitVarInsn(ILOAD, lenVar);
+      pushInt(mv, 1 << 27);
+      mv.visitJumpInsn(IF_ICMPGE, overflowLabel);
+    }
     if (hasLoopAltGiveBack) {
       emitJournalAcquire(mv, inputVar, lenVar, journalVar, loopAltJournalLoops);
     }
@@ -403,6 +458,10 @@ public class DeterministicChainBytecodeGenerator {
     for (DeterministicChainInfo.ChainBranch b : branches) {
       Label branchFail = new Label();
       Label savedRetry = ctx.retryFail;
+      // Journal-slice ordinals are reused across branches: only one branch can have a live
+      // retry chain at a time, and a failed branch's journal is dead once its retries unwind
+      // into the next branch (the constructor sizes the journal by the deepest single path).
+      int savedJournalNext = ctx.loopAltJournalNext;
       ctx.retryFail = null;
       // A failed earlier branch leaves a partially consumed pos and stale capture slots: reset
       // both (groups outside this branch must end unmatched).
@@ -417,6 +476,7 @@ public class DeterministicChainBytecodeGenerator {
       mv.visitInsn(IRETURN);
       mv.visitLabel(branchFail);
       ctx.retryFail = savedRetry;
+      ctx.loopAltJournalNext = savedJournalNext;
     }
     mv.visitLabel(fail);
     mv.visitInsn(ICONST_0);
@@ -469,6 +529,16 @@ public class DeterministicChainBytecodeGenerator {
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, workVar);
     }
+    if (hasAltRetryJournal) {
+      // The alt-retry journal packs each iteration as (end << 4) | bodyIndex, which only
+      // represents ends below 1 << 27; at or above that the int shift discards the high bits
+      // and the decode restores wrapped (wrong) positions. The ~512 MiB journal itself fits
+      // large heaps, so the case is reachable - delegate the whole call to the PikeVM
+      // fallback (full-width positions, linear) instead of corrupting the retry chain.
+      mv.visitVarInsn(ILOAD, lenVar);
+      pushInt(mv, 1 << 27);
+      mv.visitJumpInsn(IF_ICMPGE, overflowLabel);
+    }
     if (hasLoopAltGiveBack) {
       emitJournalAcquire(mv, inputVar, lenVar, journalVar, loopAltJournalLoops);
     }
@@ -493,6 +563,10 @@ public class DeterministicChainBytecodeGenerator {
     for (DeterministicChainInfo.ChainBranch b : branches) {
       Label branchFail = new Label();
       Label savedRetry = ctx.retryFail;
+      // Journal-slice ordinals are reused across branches: only one branch can have a live
+      // retry chain at a time, and a failed branch's journal is dead once its retries unwind
+      // into the next branch (the constructor sizes the journal by the deepest single path).
+      int savedJournalNext = ctx.loopAltJournalNext;
       ctx.retryFail = null;
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, posVar);
@@ -504,6 +578,7 @@ public class DeterministicChainBytecodeGenerator {
       emitBuildResult(ctx, true, -1);
       mv.visitLabel(branchFail);
       ctx.retryFail = savedRetry;
+      ctx.loopAltJournalNext = savedJournalNext;
     }
     mv.visitLabel(fail);
     mv.visitInsn(ACONST_NULL);
@@ -737,6 +812,13 @@ public class DeterministicChainBytecodeGenerator {
             workVar,
             overflowLabel,
             journalScanVar);
+    if (hasAltRetryJournal) {
+      // See the matches/match guard: the (end << 4) | bodyIndex journal encoding only
+      // represents ends below 1 << 27; delegate such inputs to the PikeVM fallback.
+      mv.visitVarInsn(ILOAD, lenVar);
+      pushInt(mv, 1 << 27);
+      mv.visitJumpInsn(IF_ICMPGE, overflowLabel);
+    }
     if (hasLoopAltGiveBack) {
       emitJournalAcquire(mv, inputVar, lenVar, journalScanVar, loopAltJournalLoops);
     }
@@ -894,6 +976,10 @@ public class DeterministicChainBytecodeGenerator {
     for (DeterministicChainInfo.ChainBranch b : branches) {
       Label branchFail = new Label();
       Label savedRetry = ctx.retryFail;
+      // Journal-slice ordinals are reused across branches: only one branch can have a live
+      // retry chain at a time, and a failed branch's journal is dead once its retries unwind
+      // into the next branch (the constructor sizes the journal by the deepest single path).
+      int savedJournalNext = ctx.loopAltJournalNext;
       ctx.retryFail = null;
 
       if (b.startAnchored) {
@@ -940,6 +1026,7 @@ public class DeterministicChainBytecodeGenerator {
       emitSuccessShape(mv, ctx, pVar, posVar, boundsVar, successShape);
       mv.visitLabel(branchFail);
       ctx.retryFail = savedRetry;
+      ctx.loopAltJournalNext = savedJournalNext;
     }
   }
 
@@ -1532,14 +1619,24 @@ public class DeterministicChainBytecodeGenerator {
     // retry — JDK backtracking retries the innermost unresolved decision (the body's
     // give-back/lazy/OPT) before the next alternative.
     Label[] bodyRetry = new Label[n];
+    // Journal-slice ordinals restart at the region's entry for every alternative: bodies are
+    // mutually exclusive, and a failed body's journal is dead once its retry chain unwinds
+    // into the next alternative. The counter ends at the deepest body's span so that a
+    // sequential give-back loop in the shared rest stacks on the winning body's loops - they
+    // are simultaneously live there (the body's give-back handler wraps the rest).
+    int journalEntry = ctx.loopAltJournalNext;
+    int journalMaxEnd = journalEntry;
     for (int k = 0; k < n; k++) {
       mv.visitLabel(altLabels[k]);
       ctx.retryFail = null;
+      ctx.loopAltJournalNext = journalEntry;
       emitChainTry(
           ctx, e.alts.get(k), 0, closingAtEnd, downstreamFail, List.of(TailLevel.jump(restStart)));
       bodyRetry[k] = ctx.retryFail;
+      journalMaxEnd = Math.max(journalMaxEnd, ctx.loopAltJournalNext);
       mv.visitJumpInsn(GOTO, restStart);
     }
+    ctx.loopAltJournalNext = journalMaxEnd;
 
     // Downstream failure: restore the position, next alternative, redispatch.
     mv.visitLabel(downstreamFail);
@@ -1773,9 +1870,9 @@ public class DeterministicChainBytecodeGenerator {
     int baseVar = -1;
     int floorVar = -1;
     if (giveBack) {
-      // Journal slice base: ordinal * (len + 1) - sequential give-back loops in one method
-      // must not clobber each other's entries (the analyzer can force giveBack on loops that
-      // the first-set disjointness test alone would leave journal-free).
+      // Journal slice base: ordinal * (len + 1) - sequential give-back loops along one path
+      // must not clobber each other's entries (the ordinal is reused across mutually
+      // exclusive branches/alternatives; see the constructor's max-path sizing).
       baseVar = ctx.alloc.allocate();
       int ordinal = ctx.loopAltJournalNext++;
       mv.visitVarInsn(ILOAD, ctx.lenVar);
