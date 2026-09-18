@@ -1126,15 +1126,31 @@ public class RuntimeCompiler {
       // (dfaResult.dfa == null && result.dfa == null) or the DFA is anchor-diluted, hybrid is
       // skipped and the PIKEVM/BITSTATE early returns handle the pattern as before.
       if (groupCount > 0 && shouldUseHybrid(result)) {
-        // For PIKEVM/BITSTATE patterns whose NFA contains anchors (^, $, \A, \Z, \z):
-        // the DFA from ignoreGroupCount=true may mishandle anchors in find() context (e.g. \A
-        // inside a quantified group is treated as match-start instead of input-start). Skip
-        // hybrid and let the PIKEVM/BITSTATE early returns below handle them. Patterns without
-        // anchors (e.g. (a*b*c*d*e*)) still benefit from the DFA fast path.
+        // Anchored PIKEVM/BITSTATE patterns stay out (blanket nfaHasAnchor skip restored).
+        // MEASURED (RealCorpusScanBenchmark, workspace-jb): admitting them (10b1a43) regressed
+        // the matched sweep 340us -> 687us — the flip admitted whole-line anchored patterns
+        // (^...((a)|(b))*$) whose DFA-half bounds find returns the FULL line, so hybrid pays
+        // the DFA scan (~68us on a 162-char line; the LazyDFA/RD lane runs ~420ns/char on
+        // alternation shapes) and then re-runs PikeVM over the same span (~45us) — strictly
+        // worse than PikeVM alone. Re-admitting requires an acceptance rule (DFA find cheap
+        // AND the match span narrows meaningfully vs the region) — see the cairn question
+        // node for the entry points. This is a PERFORMANCE gate, not a correctness one: the
+        // flipped routing passed 266k real find-pairs and 270k full-match pairs with zero
+        // divergences (needsFallback B2/B3/B4 + anchorConditionDiluted cover the anchor
+        // correctness upstream).
+        // \b/\B is doubly excluded: nfaHasAnchor counts word-boundary anchor states, and
+        // the subset construction independently drops per-position boundary context
+        // (SubsetConstructor.isPositionAnchor excludes WORD_BOUNDARY/NON_WORD_BOUNDARY)
+        // without setting anchorConditionDiluted — a \b pattern's DFA-half over-accepts
+        // across boundaries (measured on the no-guard build: \bname:(\S+) on
+        // "@peer.hostname:127.0.0.1" matched [10,24) where JDK finds no match).
         boolean skipHybrid = false;
         if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
             || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
           if (nfa != null && nfaHasAnchor(nfa)) {
+            skipHybrid = true;
+          }
+          if (nfa != null && nfa.hasWordBoundaryAnchor()) {
             skipHybrid = true;
           }
         }
@@ -1151,7 +1167,6 @@ public class RuntimeCompiler {
         }
         // skipHybrid: fall through to PIKEVM/BITSTATE early returns below.
       }
-
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
       // correctly-enriched PikeVMMatcher without re-parsing the pattern.
       // B16 guard: nullable group content under a nullable outer quantifier diverges even in PikeVM
@@ -1300,8 +1315,12 @@ public class RuntimeCompiler {
           null,
           options);
     } catch (RegexParser.UnsupportedPatternException | UnsupportedOperationException e) {
-      throw new UnsupportedPatternException(
-          "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), e);
+      // Parse-time construct refusals (e.g. variable-width lookbehind) must honor
+      // ALLOW_JDK_FALLBACK like every engine-level refusal — the drop-in contract is zero
+      // functional refusals when the option is set. nameMap is unavailable here (the parse
+      // failed); the JDK fallback matcher serves groups from java.util.regex directly.
+      return fallbackOrThrow(
+          pattern, "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), null, options);
     } catch (UnsupportedPatternException e) {
       throw e;
     } catch (RegexParser.ParseException e) {

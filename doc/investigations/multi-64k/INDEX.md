@@ -32,6 +32,9 @@
 - dead-real-generator-differential-test | Real-generator overflow differential test in current corpus | [testing, differential, probe, ci-flake] | REFUTED
 
 ## Evidence
+- ev-word-boundary-find-fix | 10b1a43: find-span parity battery (committed RealFindParityTest, ~2s) caught 2 pre-existing  find() divergences (MULTI_GROUP_GREEDY cross-boundary accept, RECURSIVE_DESCENT  no-match); fixed via targeted declines; 266k find pairs 0 divergences | [word-boundary, find, 10b1a43]
+
+## Evidence
 - ev-asm-semantics-probes | WhereProbe + SourceProbe outputs pinning ASM behavior | [asm, empirical, probe-output]
 - ev-merge-hang-threaddump | Thread dump: Analyzer.merge hotspot on 78k-insn method | [performance, thread-dump, analyzer-merge]
 - ev-split-class-javap | javap of split class: chain correct, test formula inverted | [javap, bytecode-decode, chunk-chain, test-bug]
@@ -59,8 +62,17 @@
 
 - ev-r2b-landed | 97ec426: R2b = ci-facts + R1b 1-char required facts; same-day box series no-match 15,571 -> 2,475 -> 2,070 -> 983us (15.8x; reggie 1.79x ahead of rust no-match), matched flat 338us; hybrid no-match collapsed 582->58us; methodology: 10k+ invocations needed for C2, box drift ~1.85x between days — same-run controls mandatory | [r2b, r1b, ci-facts, 97ec426]
 
+- ev-correctness-cleanup-a | 222c8e6: greedy \\Z-span truncation (DFA_UNROLLED early-return deleted; 28-case matrix test-first) + LazyDFA findFrom leftmost skip (plain restart matchStart+1, self-anchoring -> findFromUnion; consistent with its own NFA fallback); box flat; new pre-existing q-caret-midpattern-anchor (seed 131071) + ev-lazydfa-nfa-delegate-limit recorded | [correctness, greedy, leftmost, 222c8e6]
+
+- ev-real-input-parity | 32a9e26: real-input parity battery (logs-backend-grok-test-harvested lines x 513 corpus, drop-in contract) — 3 divergences found+fixed (nullable-tail spans, backref suffix/end-anchor, parse-refusal fallback bypass), 270,351 pairs / ZERO divergences after; battery committed; shadow supplier drafted | [real-inputs, parity, 32a9e26]
+
 ## Questions
-- q-lazydfa-findfrom-leftmost | OPEN, LATENT (no corpus pattern routes LAZY_DFA): LazyDFACache.findFrom restarts at death+1 without re-walking — a later viable start can begin inside a dead attempt's span (ab|b on xaab) — fix before routing anything through it | [lazydfa, leftmost, soundness]
+- q-hybrid-anchored-admission | OPEN: hybrid admission for anchored PIKEVM/BITSTATE measured NEGATIVE (matched 340->687us, 10b1a43 reverted 2db164b); re-entry points in node (LazyDFA/RD dfa-half 420ns/char on alternation shapes; whole-line anchored .*$ shapes gain nothing from narrowing; `.+)` vs `.*)` decides alternation-priority flag) | [hybrid, anchors, matched, lazydfa]
+
+## Questions
+- q-lazydfa-findfrom-leftmost | FIXED 222c8e6: plain-closure findFrom restarts matchStart+1; self-anchoring closures (PikeVM, BitState) use findFromUnion | [lazydfa, leftmost, fixed]
+- q-caret-midpattern-anchor | OPEN, PRE-EXISTING: (?:[^a-caa]|c)^|.\\z\\z diverges (jdk [9,10) vs reggie [0,1)); mid-pattern ^ in alternation; seed 131071 | [anchor, caret, fuzz]
+- q-lazydfa-findfrom-leftmost | FIXED 222c8e6 | was OPEN, LATENT (no corpus pattern routes LAZY_DFA): LazyDFACache.findFrom restarts at death+1 without re-walking — a later viable start can begin inside a dead attempt's span (ab|b on xaab) — fix before routing anything through it | [lazydfa, leftmost, soundness]
 - q-2pct-fallback-policy | ANSWERED: no silent JDK fallback needed — current services refuse/drop at every site (400/skip/disable/drop); reggie default maps 1:1; statics = per-pattern explicit decisions; dynamics never fall back | [fallback-policy, jdk-fallback, redos, refuse-by-default, degradation, migration-policy, dynamic-patterns]
 - q-prod-readiness | REVISED after user corrections: refuse-by-default code-verified + full 3-engine bench harness in-repo (9 classes) + attested reggie>both; remaining = fleet JVM census + service-corpus refuse-rate + optional current recorded bench run | [readiness, production, adoption, jdk-regex, re2j, backend-services, verdict]
 - q-l2-disposition | ANSWERED: DROPPED (2026-09-16); work preserved in reports/ | [disposition, decision, scope]

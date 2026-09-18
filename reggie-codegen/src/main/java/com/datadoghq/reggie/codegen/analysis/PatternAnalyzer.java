@@ -87,6 +87,96 @@ public class PatternAnalyzer {
    * 2. At most one non-marker epsilon transition per state 3. No backreferences (they require
    * backtracking)
    */
+  /**
+   * True when any capturing group's content can end at an earlier position than its longest
+   * possible consumption — i.e. the content's CONCAT spine ends with a skippable (nullable)
+   * element, such as {@code (\w+:(?://)?)} or {@code (a(b)?)}. The group's exit is then
+   * position-ambiguous and the tagged DFA records the END at the early exit; java.util.regex keeps
+   * the span through the consumed tail. Unambiguous tails ((a+), (ab|a)) re-fire the exit marker
+   * along the consuming path and are NOT flagged.
+   */
+  private static boolean hasTailNullableCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode group = (GroupNode) node;
+      if (group.capturing && isTailNullable(group.child)) {
+        return true;
+      }
+    }
+    for (RegexNode child : childrenOf(node)) {
+      if (hasTailNullableCapturingGroup(child)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Concat content whose last element is skippable; alternations recurse into branches. */
+  private static boolean isTailNullable(RegexNode node) {
+    if (node instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) node).children;
+      return !children.isEmpty() && isNullableAst(children.get(children.size() - 1));
+    }
+    if (node instanceof GroupNode) {
+      return isTailNullable(((GroupNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      // Different-length alternation branches are position-ambiguous too ((ab|a)), but the
+      // exit marker re-fires along each branch's consuming path, so spans stay correct —
+      // only recurse to find nested tail-nullable groups, do not flag the alternation itself.
+      for (RegexNode branch : ((AlternationNode) node).alternatives) {
+        if (isTailNullable(branch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /** True when the node can match the empty string (quantifier min=0, nullable group, etc.). */
+  private static boolean isNullableAst(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      return ((QuantifierNode) node).min == 0;
+    }
+    if (node instanceof GroupNode) {
+      return isNullableAst(((GroupNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode branch : ((AlternationNode) node).alternatives) {
+        if (isNullableAst(branch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) node).children;
+      for (RegexNode child : children) {
+        if (!isNullableAst(child)) {
+          return false;
+        }
+      }
+      return !children.isEmpty();
+    }
+    return false;
+  }
+
+  private static List<RegexNode> childrenOf(RegexNode node) {
+    if (node instanceof ConcatNode) {
+      return ((ConcatNode) node).children;
+    }
+    if (node instanceof AlternationNode) {
+      return ((AlternationNode) node).alternatives;
+    }
+    if (node instanceof QuantifierNode) {
+      return java.util.List.of(((QuantifierNode) node).child);
+    }
+    if (node instanceof GroupNode) {
+      return java.util.List.of(((GroupNode) node).child);
+    }
+    return java.util.Collections.emptyList();
+  }
+
   private boolean isOnePassEligible() {
     // Backreferences require backtracking
     if (hasBackreferences(ast)) {
@@ -557,8 +647,16 @@ public class PatternAnalyzer {
     // "ab00"). Declining lets such patterns fall through to the backtracking-capable routing
     // (the :753 requiresBacktrackingForGroups guard → RECURSIVE_DESCENT), which produces correct
     // spans. (GREEDY_BACKTRACK above already handles the (.*)literal shape.)
+    // /\B decline: the MULTI_GROUP_GREEDY generator has no word-boundary modeling (the
+    // assertion is a silent no-op), so find() accepts across boundaries. Measured divergence
+    // (real-input find battery): name:(\S+) on "@peer.hostname:127.0.0.1" matched [10,24)
+    // where JDK finds nothing (t|n is no boundary). Declined shapes fall through to the
+    // anchor-aware routes (the word-boundary PIKEVM re-route in the DFA section).
+    boolean wordBoundaryAnchor = nfa != null && nfa.hasWordBoundaryAnchor();
     MultiGroupGreedyInfo multiGroupInfo =
-        requiresBacktrackingForGroups(ast) ? null : detectMultiGroupGreedyPattern(ast);
+        requiresBacktrackingForGroups(ast) || wordBoundaryAnchor
+            ? null
+            : detectMultiGroupGreedyPattern(ast);
     if (multiGroupInfo != null) {
       return new MatchingStrategyResult(
           MatchingStrategy.SPECIALIZED_MULTI_GROUP_GREEDY,
@@ -1033,7 +1131,11 @@ public class PatternAnalyzer {
       // Check if pattern requires backtracking for correct group capture
       // Pattern a([bc]*)(c+d) needs backtracking: ([bc]*) must give back chars to allow (c+d) to
       // match
-      if (requiresBacktrackingForGroups(ast)) {
+      // /\B decline: the recursive-descent generator mishandles word boundaries ((.*)end
+      // on "appendend" returned no-match where JDK matches [0,9) — measured, real-input find
+      // battery). Declined shapes fall through to the word-boundary-aware routes below
+      // (PIKEVM/OPTIMIZED_NFA evaluate  via checkAnchor at every position).
+      if (requiresBacktrackingForGroups(ast) && !(nfa != null && nfa.hasWordBoundaryAnchor())) {
         return new MatchingStrategyResult(
             MatchingStrategy.RECURSIVE_DESCENT,
             null,
@@ -1346,6 +1448,24 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // A capturing group with a NULLABLE TAIL (e.g. (\\w+:(?://)?) — the group can
+            // exit before consuming the optional tail, and the tagged DFA writes the group's
+            // END at the early exit with no later re-fire after the tail matched; jdk keeps
+            // the span through the tail (group 1 "http://" vs our "http:"). The C2 priority
+            // TDFA cannot express this position ambiguity — route to PIKEVM_CAPTURE, whose
+            // thread simulation tracks the span exactly. Guarded against the B16 nullable-
+            // content shape, which PikeVM also diverges on (needsFallback then rejects it).
+            if (hasTailNullableCapturingGroup(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
             addTrace(
@@ -1504,6 +1624,20 @@ public class PatternAnalyzer {
                 && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
         addTrace("B17: multipleBypassGroups (non-captureAmbiguous)", b17NonAmbiguousFlag);
         if (b17NonAmbiguousFlag) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // Nullable-tail capturing groups diverge on the tagged DFA (see the Class A route
+        // above): route to PIKEVM_CAPTURE for exact spans, unless the B16 nullable-content
+        // shape is present (PikeVM diverges there too; needsFallback handles it).
+        if (hasTailNullableCapturingGroup(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -2414,6 +2548,32 @@ public class PatternAnalyzer {
     }
     if (node instanceof GroupNode) {
       return scanForMisplacedStartAnchor(((GroupNode) node).child, consumedBefore);
+    }
+    if (node instanceof AlternationNode) {
+      // An alternation in the spine before a START-class anchor: if ANY branch consumes,
+      // the path through may have consumed when the anchor is reached (definite consumption
+      // would require every branch to consume — over-approximating here declines the DFA
+      // for the maybe-consumed shapes too, which is the safe direction). Without this case
+      // the alternation fell through to "non-consuming" below, so (?:c|a)^ scanned as
+      // anchor-at-start and the misplaced-anchor guard never fired — measured: the DFA for
+      // (?:c|a)^|.\z\z erased the [START] acceptance condition on the (?:c|a)-branch accept
+      // states (subset merge with the parallel branch's [STRING_END_ABSOLUTE] conditions
+      // collapsed to unconditional without the dilution flag), so find() fired ^ at
+      // position 1: "ax" matched [0,1) where JDK finds nothing until [1,2) via .\z\z.
+      boolean anyConsumed = false;
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        int r = scanForMisplacedStartAnchor(alt, consumedBefore);
+        if (r == SCAN_MISPLACED) {
+          return SCAN_MISPLACED;
+        }
+        if (r == SCAN_CONSUMED) {
+          anyConsumed = true;
+        }
+      }
+      if (anyConsumed) {
+        return SCAN_CONSUMED;
+      }
+      return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
     }
     if (node instanceof QuantifierNode) {
       QuantifierNode q = (QuantifierNode) node;
@@ -4571,6 +4731,14 @@ public class PatternAnalyzer {
     // Decline so the pattern falls through to OPTIMIZED_NFA_WITH_BACKREFS, which evaluates \b
     // correctly. START/STRING_START and END/STRING_END are handled via hasStartAnchor/hasEndAnchor.
     if (containsWordBoundaryAnchor(prefix) || containsWordBoundaryAnchor(suffix)) {
+      return null;
+    }
+
+    // The generator only matches prefix, group, separator and backref — it never emits trailing
+    // suffix nodes (a suffix like the 'z' in x(\d+)y\1z would be silently dropped, and the
+    // generator would then require the match to end at the backref). Decline non-empty suffixes
+    // so the pattern falls through to OPTIMIZED_NFA_WITH_BACKREFS, which matches the tail.
+    if (!suffix.isEmpty()) {
       return null;
     }
 

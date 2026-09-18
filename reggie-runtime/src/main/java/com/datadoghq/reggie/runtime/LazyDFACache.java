@@ -133,12 +133,19 @@ public final class LazyDFACache {
   }
 
   /**
-   * O(n) DFA-based search for the leftmost match start position in {@code input[start, len)}.
+   * O(n) DFA-based search for the leftmost match start in {@code input[start, len)} using a PLAIN
+   * (non-self-anchoring) step function, as emitted for generated LAZY_DFA matchers.
    *
-   * <p>Scans left-to-right maintaining a single DFA state. When the DFA reaches a DEAD transition,
-   * the current match attempt has failed and the scan restarts from DFA state 0 at the next input
-   * position. The first position at which {@link #accepting}{@code [dfaState]} is true is returned
-   * as the match start.
+   * <p>Scans left-to-right maintaining a single DFA state per candidate start. When the DFA reaches
+   * a DEAD transition, the attempt from {@code matchStart} has failed — but a viable start can
+   * begin anywhere inside the consumed span {@code [matchStart, pos)} (e.g. {@code (ab|b)} on
+   * {@code "xaab"}: the attempt from 0 dies at 2 while start 1 matches), so the scan restarts at
+   * {@code matchStart + 1}, exactly like the NFA fallback below. Worst case is O(n²) on adversarial
+   * input; ordinary patterns die within a few characters of their start, keeping restarts O(n).
+   * Callers whose step function re-injects the start state at every position (the
+   * union/self-anchoring closures in {@code PikeVMMatcher}/{@code BitStateMatcher}) must use {@link
+   * #findFromUnion} instead, where the union already covers every start in the dead span and the
+   * O(n) restart at {@code pos + 1} is sound.
    *
    * <p>If the cache freezes mid-scan (FALLBACK transition), the remainder of the input is handed
    * off to an O(n²) NFA fallback that tries each remaining start position in turn.
@@ -146,6 +153,25 @@ public final class LazyDFACache {
    * @return the leftmost match start position (0-based), or {@code -1} if no match exists
    */
   public int findFrom(String input, int start, NfaStep nfaStep) {
+    return findFromInternal(input, start, nfaStep, false);
+  }
+
+  /**
+   * Leftmost-match search for SELF-ANCHORING step functions whose closure re-injects a fresh start
+   * at every position (see {@code PikeVMMatcher.findStepClosure} and {@code
+   * BitStateMatcher.rejectStepClosure}). The DFA state is the union of all attempts starting at any
+   * position ≥ {@code matchStart}, so a DEAD step means every such attempt is dead and the scan may
+   * restart at {@code pos + 1} without skipping viable starts. When the union accepts, the returned
+   * position is the last restart point — a valid lower bound on the true match start (the accepting
+   * attempt may have started later), which is what the gate-style callers use it for.
+   *
+   * @return a position such that some match begins at or after it (0-based), or {@code -1}
+   */
+  public int findFromUnion(String input, int start, NfaStep nfaStep) {
+    return findFromInternal(input, start, nfaStep, true);
+  }
+
+  private int findFromInternal(String input, int start, NfaStep nfaStep, boolean selfAnchoring) {
     if (input == null) return -1;
     int len = input.length();
     int matchStart = start;
@@ -168,9 +194,12 @@ public final class LazyDFACache {
         return nfaFallbackFindFrom(input, matchStart, pos, nfaStateSets[dfaState], nfaStep);
       }
       if (next == DEAD) {
-        // Current match attempt failed at 'pos'; restart from next position.
-        matchStart = pos + 1;
+        // Attempt from matchStart died at 'pos'. Self-anchoring closures already cover every
+        // start in [matchStart, pos] in their union, so pos+1 skips nothing; plain steps must
+        // retry matchStart+1 — a viable start can sit inside the consumed span.
+        matchStart = selfAnchoring ? pos + 1 : matchStart + 1;
         dfaState = 0;
+        pos = matchStart - 1; // the loop's pos++ lands on matchStart
         continue;
       }
       dfaState = next;

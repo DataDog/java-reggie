@@ -32,10 +32,11 @@ import org.junit.jupiter.api.Test;
  * qualifies it), but {@code usePosixLastMatch} stays {@code true} (a capturing group, {@code (a)},
  * sits inside a repeating quantifier). {@code RuntimeCompiler#compileInternal} returns from its
  * {@code BITSTATE_CAPTURE} early-return branch before ever reaching the {@code shouldUseHybrid}
- * check, so this pattern is actually compiled via {@code BitStateEntry}, not {@code HybridMatcher}
- * -- disjointness holds by control flow, not by this pattern being routed elsewhere. {@code
- * LaurikariEligibility.isEligible} independently rejects {@code usePosixLastMatch} patterns, so no
- * Laurikari matcher gets attached to it either.
+ * check (the hybrid pre-check's blanket anchor skip — restored as a measured performance gate, see
+ * RuntimeCompiler's hybrid block), so this pattern is actually compiled via {@code BitStateEntry},
+ * not {@code HybridMatcher} -- disjointness holds by control flow, not by this pattern being routed
+ * elsewhere. {@code LaurikariEligibility.isEligible} independently rejects {@code
+ * usePosixLastMatch} patterns, so no Laurikari matcher gets attached to it either.
  */
 public class LaurikariHybridDisjointnessTest {
 

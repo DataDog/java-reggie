@@ -506,7 +506,7 @@ final class BitStateMatcher extends ReggieMatcher {
   private boolean localizeForFind(String input, int from, int regionEnd) {
     int scanStart = from;
     if (rejectDfa != null) {
-      scanStart = rejectDfa.findFrom(input, from, rejectStep);
+      scanStart = rejectDfa.findFromUnion(input, from, rejectStep);
       if (scanStart < 0) {
         return false;
       }

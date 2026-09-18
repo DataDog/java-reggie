@@ -209,12 +209,15 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(IADD);
     mv.visitVarInsn(ISTORE, backrefEndVar);
 
-    // Without end anchor: backrefEnd must equal len for match()
-    if (!info.hasEndAnchor) {
-      mv.visitVarInsn(ILOAD, backrefEndVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitJumpInsn(IF_ICMPNE, continueLoop);
-    }
+    // match()/matches() are full-region semantics: the match must end at len. A trailing
+    // $/\Z does NOT relax this — java.util.regex matches() also rejects a match ending
+    // before an unconsumed final line terminator (Pattern.matches("a+$", "aa\\n") is
+    // false), so the backrefEnd == len requirement is unconditional (the anchor's
+    // before-terminator position only applies to find()-style matching, which this
+    // generator does not emit).
+    mv.visitVarInsn(ILOAD, backrefEndVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPNE, continueLoop);
 
     // Match backref: input.regionMatches(sepEnd, input, groupStart, groupLen)
     mv.visitVarInsn(ALOAD, 1);
@@ -992,13 +995,12 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(IADD);
     mv.visitVarInsn(ISTORE, backrefEndVar);
 
-    // For matches(), we need backrefEnd == len (consume entire input)
-    if (!info.hasEndAnchor) {
-      // Without end anchor, backrefEnd must equal len for matches()
-      mv.visitVarInsn(ILOAD, backrefEndVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitJumpInsn(IF_ICMPNE, continueLoop);
-    }
+    // For matches(), the match must end at len unconditionally — a trailing $/\Z does NOT
+    // relax this (java.util.regex matches() rejects a match ending before an unconsumed
+    // final line terminator: Pattern.matches("a+$", "aa\\n") is false).
+    mv.visitVarInsn(ILOAD, backrefEndVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPNE, continueLoop);
 
     // Match backref: input.regionMatches(sepEnd, input, groupStart, groupLen)
     mv.visitVarInsn(ALOAD, 1); // input
