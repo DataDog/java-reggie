@@ -1,0 +1,15 @@
+name: backend-ready
+description: "Make the backend regex engine replacement ready"
+status: done
+generator: cairn
+repo: datadog--java-reggie
+branch: feat-dd-backend-check
+worktree: /Users/jaroslav.bachorik/go/src/github.com/DataDog/.worktrees/java-reggie-dd-backend-check
+created: 2026-09-17
+updated: 2026-09-18
+completed: 2026-09-18
+last_commit: 293d0e6b8e45e9cba3ceccba59ca5ab4e5771a60
+last_session: fa653c80-628f-4c9b-9e71-e45c19523352
+retired_reason: null
+retired_by: null
+last_checkpoint: 2026-09-18T12:19:18
