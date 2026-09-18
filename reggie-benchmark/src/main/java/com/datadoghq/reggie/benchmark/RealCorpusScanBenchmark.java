@@ -32,7 +32,10 @@ import org.openjdk.jmh.annotations.*;
  * Real-corpus scan benchmark: the 528 pattern literals actually used by logs-backend (513 from the
  * readiness survey, plus 15 synthetic give-back/anchor-in-branch/lookaround shapes guarding the
  * generated-NFA findFrom fix; committed as {@code corpus/logs-backend-patterns.tsv}) swept against
- * representative log lines by three engines: JDK, reggie, and the Rust regex engine.
+ * representative log lines. The jdk/reggie/rust lanes sweep their common served set; a fourth
+ * engine lane (re2j) sweeps its own served subset of the corpus — RE2's syntax subset refuses
+ * backrefs/lookarounds, so its served pattern/input counts are printed at setup and its per-pair
+ * cost must be read against those counts, not the common-set totals.
  *
  * <p>This is the benchmark that reproduces the 2026-09-17 real-mix smoke test as a permanent lane:
  * per-pair timing is split into MATCH and NOMATCH sweeps, because the two workload shapes
@@ -41,8 +44,8 @@ import org.openjdk.jmh.annotations.*;
  *
  * <p>Each benchmark method performs one full sweep of its pair list (a pair = pattern × input); the
  * reported time is per sweep, so engine comparisons are apples-to-apples over identical pairs.
- * Patterns are compiled in ALL three engines before entering the sweep (per-engine refusal counts
- * are printed at setup), so coverage differences are visible, not silently excluded.
+ * Patterns are compiled in ALL engines before entering the sweeps (per-engine refusal counts are
+ * printed at setup), so coverage differences are visible, not silently excluded.
  *
  * <p>The rust lane requires {@code ./gradlew :reggie-benchmark:buildRustEngine}; its methods fail
  * fast with a descriptive error when the native library is absent.
@@ -81,6 +84,17 @@ public class RealCorpusScanBenchmark {
   private String[][] inputsForPattern; // [patternIdx][inputIdx] -> input
   private int[][] matchSweep; // (patternIdx, inputIdx) pairs, matched
   private int[][] noMatchSweep; // (patternIdx, inputIdx) pairs, unmatched
+
+  // re2j sweeps over its own served subset of the corpus (RE2 syntax is a subset: backrefs,
+  // lookarounds etc. are refused). The jdk/reggie/rust lanes above keep their common set, so
+  // historical baselines stay comparable; the re2j lanes are read per-pair using the served
+  // pattern/input counts printed at setup.
+  private com.google.re2j.Pattern[] re2j;
+  private String[][] re2jInputsForPattern;
+  private int[][] re2jMatchSweep;
+  private int[][] re2jNoMatchSweep;
+  private int re2jServedMatchPairs;
+  private int re2jServedNoMatchPairs;
 
   @Setup
   public void setup() throws Exception {
@@ -168,6 +182,52 @@ public class RealCorpusScanBenchmark {
         "corpus: %d patterns loaded, %d common across all engines "
             + "(refusals: jdk=%d reggie=%d rust=%d)%n",
         patterns.size(), jdk.length, jdkRefused, reggieRefused, rustRefused);
+
+    // re2j lane: own served subset of the full corpus (independent of the common set),
+    // classified by the JDK oracle so its sweeps measure the same matched/no-match shapes.
+    List<com.google.re2j.Pattern> re2jList = new ArrayList<>();
+    List<String[]> re2jInputList = new ArrayList<>();
+    List<int[]> re2jMatchList = new ArrayList<>();
+    List<int[]> re2jNoMatchList = new ArrayList<>();
+    int re2jRefused = 0;
+    for (String pattern : patterns) {
+      Pattern jp;
+      try {
+        jp = Pattern.compile(pattern);
+      } catch (Exception e) {
+        continue; // not classifiable by the oracle
+      }
+      com.google.re2j.Pattern rp;
+      try {
+        rp = com.google.re2j.Pattern.compile(pattern);
+      } catch (Exception e) {
+        re2jRefused++;
+        continue;
+      }
+      int[] matchPairs = new int[INPUTS.length];
+      int[] noMatchPairs = new int[INPUTS.length];
+      int nMatch = 0, nNoMatch = 0;
+      for (int i = 0; i < INPUTS.length; i++) {
+        if (jp.matcher(INPUTS[i]).find()) {
+          matchPairs[nMatch++] = i;
+        } else {
+          noMatchPairs[nNoMatch++] = i;
+        }
+      }
+      re2jServedMatchPairs += nMatch;
+      re2jServedNoMatchPairs += nNoMatch;
+      re2jList.add(rp);
+      re2jInputList.add(INPUTS);
+      re2jMatchList.add(java.util.Arrays.copyOf(matchPairs, nMatch));
+      re2jNoMatchList.add(java.util.Arrays.copyOf(noMatchPairs, nNoMatch));
+    }
+    re2j = re2jList.toArray(new com.google.re2j.Pattern[0]);
+    re2jInputsForPattern = re2jInputList.toArray(new String[0][]);
+    re2jMatchSweep = re2jMatchList.toArray(new int[0][]);
+    re2jNoMatchSweep = re2jNoMatchList.toArray(new int[0][]);
+    System.out.printf(
+        "re2j lane: %d/%d patterns served (refused %d) — %d matched pairs, %d no-match pairs%n",
+        re2j.length, patterns.size(), re2jRefused, re2jServedMatchPairs, re2jServedNoMatchPairs);
   }
 
   @TearDown
@@ -252,6 +312,32 @@ public class RealCorpusScanBenchmark {
       int[] inputsIdx = noMatchSweep[p];
       for (int i : inputsIdx) {
         acc ^= rust[p].isMatch(inputsForPattern[p][i]);
+      }
+    }
+    return acc;
+  }
+
+  // ===== re2j sweeps (own served subset; per-pair cost = us/op over the printed pair counts) =====
+
+  @Benchmark
+  public boolean re2jSweepMatched() {
+    boolean acc = false;
+    for (int p = 0; p < re2j.length; p++) {
+      int[] inputsIdx = re2jMatchSweep[p];
+      for (int i : inputsIdx) {
+        acc ^= re2j[p].matcher(re2jInputsForPattern[p][i]).find();
+      }
+    }
+    return acc;
+  }
+
+  @Benchmark
+  public boolean re2jSweepNoMatch() {
+    boolean acc = false;
+    for (int p = 0; p < re2j.length; p++) {
+      int[] inputsIdx = re2jNoMatchSweep[p];
+      for (int i : inputsIdx) {
+        acc ^= re2j[p].matcher(re2jInputsForPattern[p][i]).find();
       }
     }
     return acc;

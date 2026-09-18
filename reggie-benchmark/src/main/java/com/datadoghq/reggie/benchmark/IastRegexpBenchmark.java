@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.benchmark.engines.RustRegexEngine;
 import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
@@ -25,6 +26,11 @@ import org.openjdk.jmh.annotations.*;
 /**
  * JMH benchmark for patterns from dd-trace-java PR #11649, which migrated IAST evidence-redaction
  * and the query obfuscator from JDK Pattern to RE2J for linear-time matching.
+ *
+ * <p>Engine lanes: reggie, JDK, re2j, and rust-regex (scan semantics only — boolean isMatch via the
+ * JNI shim; the capture benchmarks have no rust lane). Rust-refused patterns compile to null and
+ * their lanes report a guard constant; refusals are printed at setup. The rust lane requires {@code
+ * ./gradlew :reggie-benchmark:buildRustEngine}.
  *
  * <p>All patterns use find() semantics, matching how the tokenizers and obfuscator scan inputs.
  *
@@ -140,6 +146,8 @@ public class IastRegexpBenchmark {
   // LdapRegexpTokenizer: matches LDAP filter attribute-value pairs with a lazy quantifier.
   // Previously excluded because lazy quantifiers were unsupported; now routed to PIKEVM_CAPTURE.
   private static final String LDAP_JDK = "\\(.*?(?:~=|=|<=|>=)(?<LITERAL>[^)]+)\\)";
+  // Rust regex only supports (?P<name>) named groups (re2j accepts both syntaxes).
+  private static final String LDAP_RUST = "\\(.*?(?:~=|=|<=|>=)(?P<LITERAL>[^)]+)\\)";
 
   // QueryObfuscator: redacts credentials, tokens, and API keys in HTTP query strings.
   // Already has (?i) inline.
@@ -186,6 +194,29 @@ public class IastRegexpBenchmark {
   private com.google.re2j.Pattern re2jSqlPostgresql;
   private com.google.re2j.Pattern re2jQueryObfuscator;
   private com.google.re2j.Pattern re2jLdap;
+
+  // --- Rust regex patterns (scan semantics: boolean isMatch only; the capture benchmarks have
+  // no rust lane — the JNI shim exposes no group extraction). Patterns unsupported by the rust
+  // engine compile to null and their lanes report a guard constant (~0 cost); refused patterns
+  // are printed at setup. ---
+  private RustRegexEngine rustCommand;
+  private RustRegexEngine rustBareWordBoundary;
+  private RustRegexEngine rustUrl;
+  private RustRegexEngine rustSqlAnsi;
+  private RustRegexEngine rustSqlMysql;
+  private RustRegexEngine rustSqlPostgresql;
+  private RustRegexEngine rustQueryObfuscator;
+  private RustRegexEngine rustLdap;
+
+  /** Compile a rust pattern or record it as refused (returns null; setup prints the name). */
+  private RustRegexEngine rustOrNull(String pattern, String name) {
+    try {
+      return RustRegexEngine.compile(pattern);
+    } catch (RustRegexEngine.PatternUnsupportedException e) {
+      System.out.println("rust lane: pattern refused [" + name + "] " + e.getMessage());
+      return null;
+    }
+  }
 
   // --- Test inputs (built per-scale in setup(); see class doc for the growth strategy chosen
   // per pattern) ---
@@ -235,6 +266,7 @@ public class IastRegexpBenchmark {
     reggieCommand = RuntimeCompiler.compile(COMMAND);
     jdkCommand = Pattern.compile(COMMAND);
     re2jCommand = com.google.re2j.Pattern.compile(COMMAND);
+    rustCommand = rustOrNull(COMMAND, "command");
 
     bareWordBoundaryInput =
         pick(
@@ -245,6 +277,7 @@ public class IastRegexpBenchmark {
     reggieBareWordBoundary = RuntimeCompiler.compile(BARE_WORD_BOUNDARY);
     jdkBareWordBoundary = Pattern.compile(BARE_WORD_BOUNDARY);
     re2jBareWordBoundary = com.google.re2j.Pattern.compile(BARE_WORD_BOUNDARY);
+    rustBareWordBoundary = rustOrNull(BARE_WORD_BOUNDARY, "bareWordBoundary");
 
     urlAuthMatch =
         pick(
@@ -275,6 +308,7 @@ public class IastRegexpBenchmark {
     reggieUrl = RuntimeCompiler.compile(URL_JDK);
     jdkUrl = Pattern.compile(URL_JDK);
     re2jUrl = com.google.re2j.Pattern.compile(URL_RE2J);
+    rustUrl = rustOrNull(URL_RE2J, "url");
 
     sqlMatch =
         pick(
@@ -299,6 +333,7 @@ public class IastRegexpBenchmark {
     reggieSqlAnsi = RuntimeCompiler.compile(SQL_ANSI);
     jdkSqlAnsi = Pattern.compile(SQL_ANSI);
     re2jSqlAnsi = com.google.re2j.Pattern.compile(SQL_ANSI);
+    rustSqlAnsi = rustOrNull(SQL_ANSI, "sqlAnsi");
 
     mysqlMatch =
         pick(
@@ -323,6 +358,7 @@ public class IastRegexpBenchmark {
     reggieSqlMysql = RuntimeCompiler.compile(SQL_MYSQL);
     jdkSqlMysql = Pattern.compile(SQL_MYSQL);
     re2jSqlMysql = com.google.re2j.Pattern.compile(SQL_MYSQL);
+    rustSqlMysql = rustOrNull(SQL_MYSQL, "sqlMysql");
 
     postgresqlMatch =
         pick(
@@ -343,6 +379,7 @@ public class IastRegexpBenchmark {
     reggieSqlPostgresql = RuntimeCompiler.compile(SQL_POSTGRESQL);
     jdkSqlPostgresql = Pattern.compile(SQL_POSTGRESQL);
     re2jSqlPostgresql = com.google.re2j.Pattern.compile(SQL_POSTGRESQL);
+    rustSqlPostgresql = rustOrNull(SQL_POSTGRESQL, "sqlPostgresql");
 
     qobfMatch =
         pick(
@@ -359,6 +396,7 @@ public class IastRegexpBenchmark {
     reggieQueryObfuscator = RuntimeCompiler.compile(QUERY_OBFUSCATOR);
     jdkQueryObfuscator = Pattern.compile(QUERY_OBFUSCATOR);
     re2jQueryObfuscator = com.google.re2j.Pattern.compile(QUERY_OBFUSCATOR);
+    rustQueryObfuscator = rustOrNull(QUERY_OBFUSCATOR, "queryObfuscator");
 
     ldapMatch =
         pick(
@@ -370,6 +408,26 @@ public class IastRegexpBenchmark {
     reggieLdap = RuntimeCompiler.compile(LDAP_JDK);
     jdkLdap = Pattern.compile(LDAP_JDK);
     re2jLdap = com.google.re2j.Pattern.compile(LDAP_JDK);
+    rustLdap = rustOrNull(LDAP_RUST, "ldap");
+  }
+
+  @TearDown
+  public void tearDown() {
+    for (RustRegexEngine e :
+        new RustRegexEngine[] {
+          rustCommand,
+          rustBareWordBoundary,
+          rustUrl,
+          rustSqlAnsi,
+          rustSqlMysql,
+          rustSqlPostgresql,
+          rustQueryObfuscator,
+          rustLdap
+        }) {
+      if (e != null) {
+        e.close();
+      }
+    }
   }
 
   // ===== Command =====
@@ -387,6 +445,11 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jCommandFind() {
     return re2jCommand.matcher(commandInput).find();
+  }
+
+  @Benchmark
+  public boolean rustCommandFind() {
+    return rustCommand != null && rustCommand.isMatch(commandInput);
   }
 
   // ----- Command capture (span extraction) -----
@@ -435,6 +498,11 @@ public class IastRegexpBenchmark {
     return re2jBareWordBoundary.matcher(bareWordBoundaryInput).find();
   }
 
+  @Benchmark
+  public boolean rustBareWordBoundaryFind() {
+    return rustBareWordBoundary != null && rustBareWordBoundary.isMatch(bareWordBoundaryInput);
+  }
+
   // ===== URL =====
 
   @Benchmark
@@ -453,6 +521,11 @@ public class IastRegexpBenchmark {
   }
 
   @Benchmark
+  public boolean rustUrlAuthFind() {
+    return rustUrl != null && rustUrl.isMatch(urlAuthMatch);
+  }
+
+  @Benchmark
   public boolean reggieUrlQueryFind() {
     return reggieUrl.find(urlQueryMatch);
   }
@@ -465,6 +538,11 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jUrlQueryFind() {
     return re2jUrl.matcher(urlQueryMatch).find();
+  }
+
+  @Benchmark
+  public boolean rustUrlQueryFind() {
+    return rustUrl != null && rustUrl.isMatch(urlQueryMatch);
   }
 
   // ----- URL capture (span extraction) -----
@@ -573,6 +651,11 @@ public class IastRegexpBenchmark {
     return re2jUrl.matcher(urlNoMatch).find();
   }
 
+  @Benchmark
+  public boolean rustUrlNoMatch() {
+    return rustUrl != null && rustUrl.isMatch(urlNoMatch);
+  }
+
   // ===== SQL ANSI =====
 
   @Benchmark
@@ -591,6 +674,11 @@ public class IastRegexpBenchmark {
   }
 
   @Benchmark
+  public boolean rustSqlAnsiFind() {
+    return rustSqlAnsi != null && rustSqlAnsi.isMatch(sqlMatch);
+  }
+
+  @Benchmark
   public boolean reggieSqlAnsiNoMatch() {
     return reggieSqlAnsi.find(sqlNoMatch);
   }
@@ -603,6 +691,11 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jSqlAnsiNoMatch() {
     return re2jSqlAnsi.matcher(sqlNoMatch).find();
+  }
+
+  @Benchmark
+  public boolean rustSqlAnsiNoMatch() {
+    return rustSqlAnsi != null && rustSqlAnsi.isMatch(sqlNoMatch);
   }
 
   // ===== SQL MySQL =====
@@ -623,6 +716,11 @@ public class IastRegexpBenchmark {
   }
 
   @Benchmark
+  public boolean rustSqlMysqlFind() {
+    return rustSqlMysql != null && rustSqlMysql.isMatch(mysqlMatch);
+  }
+
+  @Benchmark
   public boolean reggieSqlMysqlNoMatch() {
     return reggieSqlMysql.find(mysqlNoMatch);
   }
@@ -635,6 +733,11 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jSqlMysqlNoMatch() {
     return re2jSqlMysql.matcher(mysqlNoMatch).find();
+  }
+
+  @Benchmark
+  public boolean rustSqlMysqlNoMatch() {
+    return rustSqlMysql != null && rustSqlMysql.isMatch(mysqlNoMatch);
   }
 
   // ===== SQL PostgreSQL =====
@@ -655,6 +758,11 @@ public class IastRegexpBenchmark {
   }
 
   @Benchmark
+  public boolean rustSqlPostgresqlFind() {
+    return rustSqlPostgresql != null && rustSqlPostgresql.isMatch(postgresqlMatch);
+  }
+
+  @Benchmark
   public boolean reggieSqlPostgresqlNoMatch() {
     return reggieSqlPostgresql.find(postgresqlNoMatch);
   }
@@ -667,6 +775,11 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jSqlPostgresqlNoMatch() {
     return re2jSqlPostgresql.matcher(postgresqlNoMatch).find();
+  }
+
+  @Benchmark
+  public boolean rustSqlPostgresqlNoMatch() {
+    return rustSqlPostgresql != null && rustSqlPostgresql.isMatch(postgresqlNoMatch);
   }
 
   // ===== Query Obfuscator =====
@@ -687,6 +800,11 @@ public class IastRegexpBenchmark {
   }
 
   @Benchmark
+  public boolean rustQueryObfuscatorFind() {
+    return rustQueryObfuscator != null && rustQueryObfuscator.isMatch(qobfMatch);
+  }
+
+  @Benchmark
   public boolean reggieQueryObfuscatorNoMatch() {
     return reggieQueryObfuscator.find(qobfNoMatch);
   }
@@ -699,6 +817,11 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jQueryObfuscatorNoMatch() {
     return re2jQueryObfuscator.matcher(qobfNoMatch).find();
+  }
+
+  @Benchmark
+  public boolean rustQueryObfuscatorNoMatch() {
+    return rustQueryObfuscator != null && rustQueryObfuscator.isMatch(qobfNoMatch);
   }
 
   // ===== LDAP tokenizer =====
@@ -719,6 +842,11 @@ public class IastRegexpBenchmark {
   }
 
   @Benchmark
+  public boolean rustLdapFind() {
+    return rustLdap != null && rustLdap.isMatch(ldapMatch);
+  }
+
+  @Benchmark
   public boolean reggieLdapNoMatch() {
     return reggieLdap.find(ldapNoMatch);
   }
@@ -731,5 +859,10 @@ public class IastRegexpBenchmark {
   @Benchmark
   public boolean re2jLdapNoMatch() {
     return re2jLdap.matcher(ldapNoMatch).find();
+  }
+
+  @Benchmark
+  public boolean rustLdapNoMatch() {
+    return rustLdap != null && rustLdap.isMatch(ldapNoMatch);
   }
 }

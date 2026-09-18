@@ -18,8 +18,8 @@ package com.datadoghq.reggie.runtime;
 import java.util.Map;
 
 /**
- * R1 prefilter wrapper (hyp-unanchored-find-prefilter): rejects inputs that lack a pattern's
- * required literal before delegating to the engine matcher.
+ * Required-literal rejection wrapper: rejects inputs that lack the pattern's required literal
+ * before delegating to the engine matcher.
  *
  * <p>Used by {@code RuntimeCompiler} for engine-class matchers (PikeVM, BitState, hybrid,
  * counted-loop) whose scanning loops live in Java code rather than generated {@code findFrom}
@@ -49,8 +49,7 @@ final class PrefilteringMatcher extends ReggieMatcher {
 
   /**
    * Wraps {@code matcher} with the literal rejection check, or returns it unchanged when no usable
-   * required literal exists. Accepts 1-char facts (R1b last resort): absence of a required char
-   * still falsifies every match, and the presence scan is a single {@code indexOf}.
+   * required literal exists. 1-char facts are usable: absence still falsifies every match.
    */
   static ReggieMatcher wrap(
       ReggieMatcher matcher, String requiredLiteral, boolean asciiCaseInsensitive) {
@@ -63,9 +62,37 @@ final class PrefilteringMatcher extends ReggieMatcher {
   /** Delegates to {@code input.indexOf(fact, from)}, ASCII case-insensitively when required. */
   private int factIndexOf(String input, int from) {
     if (!asciiCaseInsensitive) {
+      // 1-char facts use the char overload: its intrinsic scans with full-width SIMD, while the
+      // String overload's first-char scan is ~5.7x slower on x86 (22KB no-match input,
+      // workspace-jb).
+      if (requiredLiteral.length() == 1) {
+        return input.indexOf(requiredLiteral.charAt(0), from);
+      }
       return input.indexOf(requiredLiteral, from);
     }
+    if (requiredLiteral.length() == 1) {
+      return indexOfAsciiIgnoreCase1(input, requiredLiteral.charAt(0), from);
+    }
     return indexOfAsciiIgnoreCase(input, requiredLiteral, from);
+  }
+
+  /**
+   * ASCII-only case-insensitive presence scan for a 1-char fact: two exact {@code indexOf(int)}
+   * scans (the cased char and its ASCII case pair — extraction validated the fact char is ASCII),
+   * taking the earlier hit. Still ~3x faster than the per-char loop. Non-letter fact chars have no
+   * case pair, so the scan is exact.
+   */
+  private static int indexOfAsciiIgnoreCase1(String input, char fact, int from) {
+    int first = input.indexOf(fact, from);
+    char pair = toUpperAscii(fact) == fact ? toLowerAscii(fact) : toUpperAscii(fact);
+    if (pair == fact) {
+      return first; // no case fold (non-letter)
+    }
+    int second = input.indexOf(pair, from);
+    if (first < 0) {
+      return second;
+    }
+    return second < 0 ? first : Math.min(first, second);
   }
 
   /**
@@ -110,6 +137,10 @@ final class PrefilteringMatcher extends ReggieMatcher {
     return (c >= 'a' && c <= 'z') ? (char) (c - 32) : c;
   }
 
+  private static char toLowerAscii(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char) (c + 32) : c;
+  }
+
   @Override
   public boolean isJdkFallback() {
     return delegate.isJdkFallback();
@@ -130,7 +161,7 @@ final class PrefilteringMatcher extends ReggieMatcher {
   public boolean matches(String input) {
     // null handling stays with the delegate
     if (input != null && factIndexOf(input, 0) < 0) {
-      return false; // a full match must contain the required literal
+      return false;
     }
     return delegate.matches(input);
   }
@@ -145,8 +176,7 @@ final class PrefilteringMatcher extends ReggieMatcher {
 
   @Override
   public int findFrom(String input, int start) {
-    // indexOf treats negative fromIndex as 0 (same clamp as the delegate); fromIndex > length
-    // returns -1, matching the delegate's "start past the end finds nothing" contract.
+    // indexOf clamps negative start and returns -1 past the end — same contract as findFrom.
     if (input != null && factIndexOf(input, start) < 0) {
       return -1;
     }
@@ -171,7 +201,7 @@ final class PrefilteringMatcher extends ReggieMatcher {
   @Override
   public MatchResult findMatch(String input) {
     if (input != null && factIndexOf(input, 0) < 0) {
-      return null; // no match anywhere implies no match spans
+      return null;
     }
     return delegate.findMatch(input);
   }
