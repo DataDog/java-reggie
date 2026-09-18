@@ -178,6 +178,37 @@ public class RuntimeCompiler {
       new ConcurrentHashMap<>();
 
   /**
+   * Cached entry for counted-loop-lowered patterns (hyp-counted-loop-lowering): immutable NFA +
+   * name map. BackrefBacktrackMatcher is stateless per call (all instance state is final; the DFS
+   * allocates its own stack/memo), but we keep the PikeVM cache shape — fresh matcher per compile,
+   * shared NFA — for consistency and to leave room for per-call buffers later.
+   */
+  private static final class CountedLoopEntry {
+    final NFA nfa;
+    final Map<String, Integer> nameMap;
+
+    CountedLoopEntry(NFA nfa, Map<String, Integer> nameMap) {
+      this.nfa = nfa;
+      this.nameMap = nameMap;
+    }
+
+    ReggieMatcher newMatcher(String pattern) {
+      ReggieMatcher m = new BackrefBacktrackMatcher(nfa, pattern);
+      if (!nameMap.isEmpty()) {
+        m.setNameToIndex(nameMap);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
+      }
+      return m;
+    }
+  }
+
+  // Level 1d: Pattern string → CountedLoopEntry for counted-loop-lowered patterns.
+  private static final ConcurrentHashMap<Object, CountedLoopEntry> COUNTED_LOOP_NFA_CACHE =
+      new ConcurrentHashMap<>();
+
+  /**
    * Cached entry for BITSTATE_CAPTURE patterns: holds the immutable NFA and the compile-time name
    * map so that every compile() call can produce a correctly-enriched fresh {@code BitStateMatcher}
    * without re-parsing the pattern. Parallel to {@link PikeVMEntry} rather than a generalization of
@@ -835,6 +866,20 @@ public class RuntimeCompiler {
         // Build NFA for regular patterns
         ThompsonBuilder nfaBuilder = new ThompsonBuilder();
         nfa = nfaBuilder.build(ast, groupCount);
+      }
+
+      // 2.5. Counted-loop lowering (hyp-counted-loop-lowering): bounded quantifiers whose
+      // unrolled tail exceeded the builder's budget were lowered to counted-loop markers (one
+      // body copy + counter instead of monster unrolling). Only the counter-aware backtracking
+      // matcher can execute them — every other engine, and the analysis passes below, would
+      // misread the loops as unbounded (x* instead of x{min,max}) — so skip analysis entirely.
+      // Rebuild the NFA lazy-aware so lazy quantifiers get correct marker priority (the main
+      // build above is not lazy-aware; the rebuild costs ~ms, which is the whole point of the
+      // lowering: the semver {0,256} family drops from 2.3s/567k states to ~100ms/~2.6k states).
+      if (nfa != null && nfa.hasCountedLoops()) {
+        NFA countedNfa = new ThompsonBuilder(true).build(ast, groupCount);
+        COUNTED_LOOP_NFA_CACHE.putIfAbsent(cacheKey, new CountedLoopEntry(countedNfa, nameMap));
+        return COUNTED_LOOP_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
       // 3. Analyze and select strategy

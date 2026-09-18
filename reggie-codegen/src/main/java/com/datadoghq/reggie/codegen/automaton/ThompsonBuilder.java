@@ -38,6 +38,19 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
    */
   private static final int MAX_NFA_STATES = Integer.getInteger("reggie.nfa.maxStates", 1_000_000);
 
+  /**
+   * Budget, in NFA states, that a single bounded quantifier's unrolled tail may occupy before it is
+   * lowered to a counted loop (see {@link #buildCountedLoopFragment}). Calibrated so ordinary
+   * quantifiers keep the exact unrolled representation — and thus every existing strategy
+   * (DFA/BitState/PikeVM/codegen) stays eligible — while monsters like the nested {0,256} semver
+   * family (which unrolls to ~568k states, costs 2.3s to compile and ~100x-JDK matching) lower to
+   * one body copy plus a counter marker. 5000 states is far above any single legitimate tail (e.g.
+   * \d{0,256} unrolls to ~750) and far below the nested blowup threshold.
+   */
+  private static final int COUNTED_LOOP_UNROLL_BUDGET = 5_000;
+
+  private int nextCountedLoopId = 0;
+
   private int nextAtomicId = 0;
   private final boolean lazyAware;
 
@@ -269,10 +282,35 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private NFAFragment buildCountedQuantifier(RegexNode child, int min, int max, boolean greedy) {
     boolean lazy = lazyAware && !greedy;
 
-    // Build min required copies
     List<NFAFragment> fragments = new ArrayList<>();
-    for (int i = 0; i < min; i++) {
-      fragments.add(child.accept(this));
+    if (max > min) {
+      // {n,m}: build one child copy first to measure its real state cost, then decide:
+      // small tails unroll exactly as before (every existing strategy stays eligible), large
+      // tails lower to a counted loop (one body copy + counter marker) so nested quantifiers
+      // cannot multiply into monster NFAs (the semver {0,256} family: 567k states, 2.3s
+      // compile, ~100x-JDK match — see find-bounded-quantifier-regression).
+      int sizeBefore = allStates.size();
+      NFAFragment first = child.accept(this);
+      int childCost = Math.max(1, allStates.size() - sizeBefore);
+      int tailCopies = max - min;
+      if ((long) tailCopies * childCost > COUNTED_LOOP_UNROLL_BUDGET) {
+        return buildCountedLoopFragment(child, first, min, tailCopies, lazy);
+      }
+      // Unroll, preserving the original state-id sequence: `first` is copy #1 of the
+      // required run (min >= 1) or of the optional run (min == 0).
+      fragments.add(first);
+      for (int i = 1; i < min; i++) {
+        fragments.add(child.accept(this));
+      }
+      int optionalToBuild = tailCopies - (min == 0 ? 1 : 0);
+      for (int i = 0; i < optionalToBuild; i++) {
+        fragments.add(child.accept(this));
+      }
+    } else {
+      // {n} exact or {n,} unbounded: original construction, byte-identical.
+      for (int i = 0; i < min; i++) {
+        fragments.add(child.accept(this));
+      }
     }
 
     if (max == -1) {
@@ -296,11 +334,8 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
         fragments.add(last);
       }
     } else if (max > min) {
-      // {n,m} : between n and m
-      // Add (max - min) optional copies
-      for (int i = min; i < max; i++) {
-        fragments.add(child.accept(this));
-      }
+      // {n,m} : between n and m — optional copies were already built above (same count,
+      // same order as the original inline loop), so nothing more to do here.
     }
 
     // Chain all fragments
@@ -376,6 +411,44 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     }
 
     return new NFAFragment(result.entry, allExits);
+  }
+
+  /**
+   * Lowered form of x{min,max} whose unrolled tail would exceed {@link #COUNTED_LOOP_UNROLL_BUDGET}
+   * states: min required copies (the first is {@code body}, already built), then a single body copy
+   * re-entered through a counted-loop marker state. The marker carries no outgoing epsilon
+   * transitions; the counter-aware backtracking matcher interprets its iterate/stop targets (see
+   * NFA.NFAState countedLoop* fields). Semantics are exactly x{min,max}: the marker permits at most
+   * {@code tailCopies} = max-min further passes, and stopping is always allowed because min copies
+   * precede the marker.
+   */
+  private NFAFragment buildCountedLoopFragment(
+      RegexNode child, NFAFragment body, int min, int tailCopies, boolean lazy) {
+    NFA.NFAState stop = createState();
+    NFA.NFAState marker = createState();
+    int id = nextCountedLoopId++;
+    marker.countedLoopId = id;
+    marker.countedLoopTailMax = tailCopies;
+    marker.countedLoopLazy = lazy;
+    marker.countedLoopBodyEntryId = body.entry.id;
+    marker.countedLoopStopId = stop.id;
+
+    // Required prefix: `body` is copy #1 when min >= 1; build the remaining min-1 copies and
+    // chain them (linear in min — min copies never carry the multiplicative blowup).
+    NFAFragment last = body;
+    for (int i = 1; i < min; i++) {
+      NFAFragment copy = child.accept(this);
+      for (NFA.NFAState exit : last.exits) {
+        exit.addEpsilonTransition(copy.entry);
+      }
+      last = copy;
+    }
+    for (NFA.NFAState exit : last.exits) {
+      exit.addEpsilonTransition(marker);
+    }
+
+    NFA.NFAState entry = (min == 0) ? marker : body.entry;
+    return new NFAFragment(entry, Set.of(stop));
   }
 
   @Override
