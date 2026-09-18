@@ -183,6 +183,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
     super(pattern);
+    if (nfa.hasCountedLoops()) {
+      // Counted-loop markers carry no outgoing epsilons; this engine would misread the loops
+      // as unbounded. RuntimeCompiler routes such NFAs to BackrefBacktrackMatcher exclusively.
+      throw new IllegalStateException(
+          "PikeVMMatcher cannot execute counted-loop NFAs (see NFA#hasCountedLoops)");
+    }
+
     this.nfa = nfa;
     this.groupCount = nfa.getGroupCount();
     this.stateCount = nfa.getStates().size();
