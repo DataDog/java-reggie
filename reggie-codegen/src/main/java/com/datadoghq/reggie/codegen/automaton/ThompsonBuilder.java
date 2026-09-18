@@ -26,6 +26,17 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   private int nextStateId = 0;
   private final List<NFA.NFAState> allStates = new ArrayList<>();
+
+  /**
+   * Hard cap on NFA state count for a single pattern. Nested bounded quantifiers multiply their
+   * unrolled copies exponentially in {@link #buildCountedQuantifier} (e.g. 20 nested {0,8}
+   * groups would request 8^20 states); this cap converts that into a graceful {@code
+   * UnsupportedPatternException} instead of an OutOfMemoryError that could take down the host
+   * JVM. Calibrated above the largest legitimate pattern observed in consumer repositories (the
+   * ~300-char semver pattern with {0,256} bounded quantifiers builds ~0.3-0.6M states).
+   * Override via -Dreggie.nfa.maxStates.
+   */
+  private static final int MAX_NFA_STATES = Integer.getInteger("reggie.nfa.maxStates", 1_000_000);
   private int nextAtomicId = 0;
   private final boolean lazyAware;
 
@@ -71,6 +82,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   }
 
   private NFA.NFAState createState() {
+    if (allStates.size() >= MAX_NFA_STATES) {
+      // UnsupportedOperationException (unchecked, required by the RegexVisitor interface) is
+      // mapped to the public UnsupportedPatternException by RuntimeCompiler's catch block —
+      // same path other codegen guards use.
+      throw new UnsupportedOperationException(
+          "Pattern expands to more than "
+              + MAX_NFA_STATES
+              + " NFA states (nested bounded quantifiers such as {n,m} multiply their copy"
+              + " counts); refusing to build - pattern is too expensive to compile natively");
+    }
     NFA.NFAState state = new NFA.NFAState(nextStateId++);
     allStates.add(state);
     return state;
@@ -82,7 +103,7 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     NFA.NFAState exit = createState();
 
     // Check for epsilon (empty match) - represented as (char)0
-    if (node.ch == 0) {
+    if (node instanceof EpsilonNode) {
       // Epsilon transition: entry --ε--> exit (no character consumption)
       entry.addEpsilonTransition(exit);
     } else {

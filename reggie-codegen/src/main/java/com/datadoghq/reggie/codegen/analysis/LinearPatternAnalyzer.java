@@ -66,7 +66,7 @@ public class LinearPatternAnalyzer implements RegexVisitor<Void> {
 
   @Override
   public Void visitLiteral(LiteralNode node) {
-    if (node.ch == 0) {
+    if (node instanceof EpsilonNode) {
       return null; // Epsilon — empty-group placeholder (char 0), consume nothing
     }
     operations.add(

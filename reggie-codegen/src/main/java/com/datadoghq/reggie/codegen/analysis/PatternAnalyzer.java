@@ -1220,6 +1220,29 @@ public class PatternAnalyzer {
                   null,
                   needsPosixSemantics);
             }
+            // B17: a bypass-able group whose body charset overlaps the bypass path's charset
+            // — e.g. sequential optional captures ((?:(a))?(?:(b))?c) or an optional body
+            // whose first char the tail can also consume (x(?:(a)x)?a), both even with
+            // disjoint body charsets. The TDFA merges a with-path thread's start/end tag onto
+            // a char transition a bypass thread also rides; the winning thread's tags cannot
+            // be chosen at determinization time (observed: a losing thread's group-start
+            // leaking into the reported spans). PikeVM resolves thread priority at match time.
+            // Disjoint-overlap shapes ((?:(a):)?(b)) stay on the TDFA path.
+            boolean b17Flag =
+                nfa != null
+                    && hasNfaBypassCharsetOverlap(nfa, ast)
+                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            addTrace("B17: multipleBypassGroups", b17Flag);
+            if (b17Flag) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             // B15: capturing group inside quantified alternation — TDFA thread ordering wrong.
             if (FallbackPatternDetector.containsAlternation(ast)
                 && FallbackPatternDetector.hasCapturingGroupInQuantifiedSection(ast)) {
@@ -1460,6 +1483,27 @@ public class PatternAnalyzer {
         // PIKEVM_CAPTURE evaluates checkAnchor correctly at each position instead. OPTIMIZED_NFA
         // (the state-count fallback below) has the same latent bug, so it must be excluded too.
         if (nfa.hasWordBoundaryAnchor()) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // B17 (non-captureAmbiguous path): dfa.isCaptureAmbiguous() only samples the start
+        // closure and accepting targets, so a bypass-able group whose enter marker first
+        // appears in a mid-pattern DFA state (a consuming head before the optional, e.g.
+        // x(?:(a):)?b) is reported unambiguous — yet the TDFA's state-entry group actions
+        // still record that group's start at a stale position (start-only span leak). The
+        // NFA-level B17 shape analysis (see hasNfaBypassCharsetOverlap) catches it.
+        boolean b17NonAmbiguousFlag =
+            nfa != null
+                && hasNfaBypassCharsetOverlap(nfa, ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+        addTrace("B17: multipleBypassGroups (non-captureAmbiguous)", b17NonAmbiguousFlag);
+        if (b17NonAmbiguousFlag) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1713,6 +1757,236 @@ public class PatternAnalyzer {
   }
 
   /**
+   * True when a {@code min == 0} quantifier wraps a subtree containing a capturing group — e.g.
+   * {@code (?:(a):)?}, {@code ((a)b)*} — the optional-quantifier bypass family the TDFA tag
+   * tracking cannot handle (see {@link #hasNfaBypassCharsetOverlap} part 1). Plain alternation
+   * bypasses ({@code b|(b)}) do not match.
+   */
+  private boolean hasMinZeroQuantifierOverCapturingGroup(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.min == 0 && subtreeContainsCapturingGroup(q.child)) {
+        return true;
+      }
+      return hasMinZeroQuantifierOverCapturingGroup(q.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (hasMinZeroQuantifierOverCapturingGroup(c)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasMinZeroQuantifierOverCapturingGroup(a)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return hasMinZeroQuantifierOverCapturingGroup(((GroupNode) node).child);
+    }
+    if (node instanceof AssertionNode) {
+      return false; // zero-width, no quantifier inside
+    }
+    return false;
+  }
+
+  private static boolean subtreeContainsCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing) return true;
+      return subtreeContainsCapturingGroup(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (subtreeContainsCapturingGroup(c)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (subtreeContainsCapturingGroup(a)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return subtreeContainsCapturingGroup(((QuantifierNode) node).child);
+    }
+    return false;
+  }
+
+  /**
+   * True when any of the group's enter marker states is reachable from the NFA start via a path
+   * that consumes at least one character (BFS with a consumed-any flag; epsilon steps keep the
+   * flag, character transitions set it). A pure-epsilon path (the group branches at the
+   * anchored start closure) does not count — that shape is handled correctly by the start
+   * position's special case.
+   */
+  private boolean enterMarkerReachableAfterConsume(
+      NFA nfa, List<NFA.NFAState> entries, Map<Integer, NFA.NFAState> byId) {
+    Set<NFA.NFAState> entrySet = new java.util.HashSet<>(entries);
+    // Queue and visited set encode (stateId, consumedAny) pairs as (id << 1) | flag.
+    java.util.ArrayDeque<Long> queue = new java.util.ArrayDeque<>();
+    Set<Long> visited = new java.util.HashSet<>();
+    queue.add(((long) nfa.getStartState().id << 1));
+    while (!queue.isEmpty()) {
+      long frame = queue.poll();
+      if (!visited.add(frame)) continue;
+      NFA.NFAState state = byId.get((int) (frame >>> 1));
+      if (state == null) {
+        throw new IllegalStateException("B17: unknown NFA state id " + (frame >>> 1));
+      }
+      boolean consumed = (frame & 1L) != 0L;
+      if (consumed && entrySet.contains(state)) {
+        return true;
+      }
+      for (NFA.NFAState eps : state.getEpsilonTransitions()) {
+        long epsKey = ((long) eps.id << 1) | (consumed ? 1L : 0L);
+        if (!visited.contains(epsKey)) queue.add(epsKey);
+      }
+      for (NFA.Transition t : state.getTransitions()) {
+        long tKey = ((long) t.target.id << 1) | 1L;
+        if (!visited.contains(tKey)) queue.add(tKey);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Counts capturing groups with a bypass path to acceptance (see {@link
+   * #canReachAcceptWithoutEnteringGroupNfa}). Two or more bypass-able groups — e.g. sequential
+   * optional groups containing captures, {@code (?:(a))?(?:(b))?c} — make the priority-ordered
+   * TDFA attach two competing threads' start tags to the same character transition (both threads
+   * consume the same char on different paths); the winning thread's tags cannot be selected at
+   * DFA-construction time, producing spans the JDK never reports (observed: g2 start bound from a
+   * losing thread). PikeVM resolves the thread priority at match time.
+   */
+  private int countNfaBypassGroups(NFA nfa) {
+    Set<NFA.NFAState> acceptStates = nfa.getAcceptStates();
+    int count = 0;
+    for (int g = 1; g <= nfa.getGroupCount(); g++) {
+      if (canReachAcceptWithoutEnteringGroupNfa(nfa.getStartState(), g, acceptStates)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * B17 core: true when a bypass-able group's TDFA tag tracking cannot be trusted. Two proven
+   * conditions, either suffices:
+   *
+   * <ol>
+   *   <li><b>Charset overlap</b> — the group's body and the bypass path can consume the same
+   *       character ({@code (?:(a):)?(a)}, {@code (?:(a))?(?:(b))?b}, both even with disjoint
+   *       body charsets): the TDFA merges a with-path thread's start/end tag onto a char
+   *       transition a bypass thread also rides, and the winning thread cannot be selected at
+   *       determinization time.
+   *   <li><b>Post-consume branch point</b> — the group's enter marker is reachable from the NFA
+   *       start via a path that consumes at least one character ({@code x(?:(a):)?b},
+   *       {@code y(?:(a+)x)?b}): the branch decision then happens in a non-start DFA state,
+   *       where the state-entry group actions record the group start at a stale position (a
+   *       start-only leak, {@code g=[x,-1)}). When the branch point is only the anchored start
+   *       closure ({@code (?:(a):)?b}), the start-position special case handles it correctly.
+   * </ol>
+   *
+   * <p>Deliberately over-approximating: the charset test collects every character consumable
+   * anywhere on the bypass path and inside the group body (not just branch-point first-sets), so
+   * safe shapes like {@code (?:(ab)c)?(b)} can also route to PikeVM — a performance cost only,
+   * never a correctness cost. Disjoint-overlap, start-anchored-branch shapes like {@code
+   * (?:(a):)?(b)} stay on the TDFA.
+   */
+  private boolean hasNfaBypassCharsetOverlap(NFA nfa, RegexNode ast) {
+    Set<NFA.NFAState> acceptStates = nfa.getAcceptStates();
+    int groupCount = nfa.getGroupCount();
+    if (groupCount == 0) {
+      return false;
+    }
+    // Part 1 applies to optional-QUANTIFIER bypasses ((?:(a):)?(a)); plain alternation
+    // bypasses (b|(b), (b)|b) are handled correctly on the TDFA by C2.4/C2.4B thread
+    // suppression and stay on the DFA (pinned by DfaUnrolledGroupAndFindRegressionTest).
+    boolean hasOptionalQuantifiedCapture = hasMinZeroQuantifierOverCapturingGroup(ast);
+    // Collect enterGroup marker states per group (single BFS over the whole NFA).
+    Map<Integer, List<NFA.NFAState>> entryStates = new java.util.HashMap<>();
+    Map<Integer, NFA.NFAState> byId = new java.util.HashMap<>();
+    Set<NFA.NFAState> visited = new java.util.HashSet<>();
+    java.util.Queue<NFA.NFAState> queue = new java.util.ArrayDeque<>();
+    queue.add(nfa.getStartState());
+    while (!queue.isEmpty()) {
+      NFA.NFAState cur = queue.poll();
+      if (!visited.add(cur)) continue;
+      byId.put(cur.id, cur);
+      if (cur.enterGroup != null) {
+        entryStates.computeIfAbsent(cur.enterGroup, k -> new ArrayList<>()).add(cur);
+      }
+      for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+        if (!visited.contains(eps)) queue.add(eps);
+      }
+      for (NFA.Transition t : cur.getTransitions()) {
+        if (!visited.contains(t.target)) queue.add(t.target);
+      }
+    }
+    for (int g = 1; g <= groupCount; g++) {
+      List<NFA.NFAState> entries = entryStates.get(g);
+      if (entries == null || entries.isEmpty()) continue;
+      if (!canReachAcceptWithoutEnteringGroupNfa(nfa.getStartState(), g, acceptStates)) continue;
+      // Condition 2: the enter marker is reachable via a consuming path — the branch decision
+      // can happen in a non-start DFA state, where the state-entry group actions record the
+      // group start at a stale position (observed: g=[x,-1) start-only leak on x(?:(a):)?b).
+      if (enterMarkerReachableAfterConsume(nfa, entries, byId)) {
+        return true;
+      }
+      // Body charset: everything consumable inside the group (BFS from the enter markers,
+      // blocked at the group's exit markers so post-group chars don't count).
+      List<CharSet> bodyChars = new ArrayList<>();
+      Set<NFA.NFAState> bodySeen = new java.util.HashSet<>();
+      java.util.Queue<NFA.NFAState> bodyQueue = new java.util.ArrayDeque<>(entries);
+      for (NFA.NFAState e : entries) bodySeen.add(e);
+      while (!bodyQueue.isEmpty()) {
+        NFA.NFAState cur = bodyQueue.poll();
+        if (cur.exitGroup != null && cur.exitGroup == g) continue; // group ended
+        for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+          if (bodySeen.add(eps)) bodyQueue.add(eps);
+        }
+        for (NFA.Transition t : cur.getTransitions()) {
+          bodyChars.add(t.chars);
+          if (bodySeen.add(t.target)) bodyQueue.add(t.target);
+        }
+      }
+      if (bodyChars.isEmpty()) continue; // zero-width body: no shared consume to merge on
+      if (!hasOptionalQuantifiedCapture) {
+        continue; // charset-overlap condition is OPT-specific (see above)
+      }
+      // Bypass charset: everything consumable from states reachable without entering g
+      // (blocked at g's enter markers).
+      List<CharSet> bypassChars = new ArrayList<>();
+      Set<NFA.NFAState> bypassSeen = new java.util.HashSet<>();
+      java.util.Queue<NFA.NFAState> bypassQueue = new java.util.ArrayDeque<>();
+      bypassQueue.add(nfa.getStartState());
+      while (!bypassQueue.isEmpty()) {
+        NFA.NFAState cur = bypassQueue.poll();
+        if (!bypassSeen.add(cur)) continue;
+        if (cur.enterGroup != null && cur.enterGroup == g) continue; // entering g: with-path
+        for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+          if (!bypassSeen.contains(eps)) bypassQueue.add(eps);
+        }
+        for (NFA.Transition t : cur.getTransitions()) {
+          bypassChars.add(t.chars);
+          if (!bypassSeen.contains(t.target)) bypassQueue.add(t.target);
+        }
+      }
+      for (CharSet body : bodyChars) {
+        for (CharSet bypass : bypassChars) {
+          if (body.intersects(bypass)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
    * Step-by-step BFS (epsilon + character transitions). Stops expanding any branch at a state with
    * {@code enterGroup == g}. Returns true if an accept state is reachable without ever crossing
    * group g's enter marker — i.e., the NFA can accept with group g never entered.
@@ -1867,7 +2141,7 @@ public class PatternAnalyzer {
       for (RegexNode alt : a.alternatives) {
         // LiteralNode(ch=0) is the parser's epsilon sentinel for syntactically empty branches
         // (e.g. the trailing arm of "a|" or the body of "()"). isNullable does not handle it.
-        if ((alt instanceof LiteralNode l && l.ch == 0)
+        if ((alt instanceof EpsilonNode)
             || isNullable(alt)
             || hasNullableAlternationBranch(alt)) return true;
       }
@@ -2152,7 +2426,7 @@ public class PatternAnalyzer {
     }
     if (node instanceof LiteralNode) {
       // Epsilon literal (char 0) consumes nothing.
-      if (((LiteralNode) node).ch == 0) {
+      if (node instanceof EpsilonNode) {
         return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
       }
       return SCAN_CONSUMED;
@@ -4103,7 +4377,7 @@ public class PatternAnalyzer {
    */
   private boolean isEpsilon(RegexNode node) {
     if (node instanceof LiteralNode) {
-      return ((LiteralNode) node).ch == 0;
+      return node instanceof EpsilonNode;
     }
     return false;
   }
@@ -8436,7 +8710,7 @@ public class PatternAnalyzer {
     if (node instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) node;
       // Skip epsilon nodes (empty match marker)
-      if (lit.ch == 0) {
+      if (lit instanceof EpsilonNode) {
         return null;
       }
       return new BoundedLiteralElement(lit.ch);
@@ -9366,7 +9640,7 @@ public class PatternAnalyzer {
       LiteralNode lit = (LiteralNode) groupChild;
       // Check for epsilon (empty group) - represented as (char)0
       // Empty groups like (){3,5} can't be handled by QuantifiedGroupBytecodeGenerator
-      if (lit.ch == 0) {
+      if (lit instanceof EpsilonNode) {
         return null;
       }
       // (a)+

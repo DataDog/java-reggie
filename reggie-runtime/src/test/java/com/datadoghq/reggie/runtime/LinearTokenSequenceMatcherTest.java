@@ -581,11 +581,17 @@ class LinearTokenSequenceMatcherTest {
 
   @Test
   void unsupportedInlineModifierFamiliesRemainSyntaxErrors() {
-    for (String modifier : new String[] {"u", "U", "d"}) {
-      assertThrows(
-          com.datadoghq.reggie.UnsupportedPatternException.class,
-          () -> Reggie.compile("(?%s)(?<value>\\S+)".formatted(modifier), NAMED_ONLY_OPTIONS));
-    }
+    // (?d) UNIX_LINES is still unsupported. (?U) UNICODE_CHARACTER_CLASS and (?u) UNICODE_CASE
+    // are now supported ((?U) switches \w/\d/\s and POSIX classes to their Unicode sets; (?u)
+    // is a no-op because Reggie's case folding is unconditionally Unicode) — differentially
+    // verified in UnicodeCharacterClassTest.
+    assertThrows(
+        com.datadoghq.reggie.UnsupportedPatternException.class,
+        () -> Reggie.compile("(?d)(?<value>\\S+)", NAMED_ONLY_OPTIONS));
+    org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+        () -> Reggie.compile("(?U)(?<value>\\S+)", NAMED_ONLY_OPTIONS));
+    org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+        () -> Reggie.compile("(?u)(?<value>\\S+)", NAMED_ONLY_OPTIONS));
   }
 
   private static final ReggieOptions NAMED_ONLY_OPTIONS =
