@@ -18,6 +18,7 @@ package com.datadoghq.reggie.benchmark;
 import static com.datadoghq.reggie.benchmark.BenchmarkPatterns.*;
 
 import com.datadoghq.reggie.Reggie;
+import com.datadoghq.reggie.benchmark.engines.RustRegexEngine;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.openjdk.jmh.annotations.*;
@@ -45,6 +46,14 @@ public class MatchOperationBenchmark {
   private com.google.re2j.Pattern re2jEmail;
   private com.google.re2j.Pattern re2jDigits;
   private com.google.re2j.Pattern re2jLiteral;
+
+  // Rust regex engine (regex-automata meta engine, the dd_sds family) — 4th lane.
+  // Null (and the benchmarks report UnavailableException) when the native library
+  // is not built; see ./gradlew :reggie-benchmark:buildRustEngine.
+  private RustRegexEngine rustPhone;
+  private RustRegexEngine rustEmail;
+  private RustRegexEngine rustDigits;
+  private RustRegexEngine rustLiteral;
 
   // Phone test strings
   private static final String PHONE_VALID = "555-123-4567";
@@ -75,9 +84,44 @@ public class MatchOperationBenchmark {
     re2jEmail = com.google.re2j.Pattern.compile(EMAIL);
     re2jDigits = com.google.re2j.Pattern.compile(DIGITS);
     re2jLiteral = com.google.re2j.Pattern.compile(LITERAL_HELLO);
+
+    // Rust engine (optional 4th lane; full-match semantics to match the other lanes)
+    rustPhone = rustOrUnavailable(PHONE);
+    rustEmail = rustOrUnavailable(EMAIL);
+    rustDigits = rustOrUnavailable(DIGITS);
+    rustLiteral = rustOrUnavailable(LITERAL_HELLO);
+  }
+
+  private RustRegexEngine rustOrUnavailable(String pattern) {
+    if (!RustRegexEngine.isAvailable()) {
+      return null; // benchmark methods throw a descriptive error for this lane
+    }
+    try {
+      return RustRegexEngine.compileFullMatch(pattern);
+    } catch (RustRegexEngine.PatternUnsupportedException e) {
+      return null;
+    }
+  }
+
+  private RustRegexEngine require(RustRegexEngine engine, String lane) {
+    if (engine == null) {
+      throw new RustRegexEngine.UnavailableException(
+          "rust lane '" + lane + "' unavailable; run ./gradlew :reggie-benchmark:buildRustEngine");
+    }
+    return engine;
   }
 
   // ===== Phone Pattern Benchmarks =====
+
+  @Benchmark
+  public boolean rustPhoneMatch() {
+    return require(rustPhone, "phone").isMatch(PHONE_VALID);
+  }
+
+  @Benchmark
+  public boolean rustPhoneNoMatch() {
+    return require(rustPhone, "phone").isMatch(PHONE_INVALID);
+  }
 
   @Benchmark
   public boolean reggiePhoneMatch() {
@@ -112,6 +156,16 @@ public class MatchOperationBenchmark {
   // ===== Email Pattern Benchmarks =====
 
   @Benchmark
+  public boolean rustEmailMatch() {
+    return require(rustEmail, "email").isMatch(EMAIL_VALID);
+  }
+
+  @Benchmark
+  public boolean rustEmailNoMatch() {
+    return require(rustEmail, "email").isMatch(EMAIL_INVALID);
+  }
+
+  @Benchmark
   public boolean reggieEmailMatch() {
     return patterns.email().matches(EMAIL_VALID);
   }
@@ -144,6 +198,16 @@ public class MatchOperationBenchmark {
   // ===== Digits Pattern Benchmarks =====
 
   @Benchmark
+  public boolean rustDigitsMatch() {
+    return require(rustDigits, "digits").isMatch(DIGITS_VALID);
+  }
+
+  @Benchmark
+  public boolean rustDigitsNoMatch() {
+    return require(rustDigits, "digits").isMatch(DIGITS_INVALID);
+  }
+
+  @Benchmark
   public boolean reggieDigitsMatch() {
     return patterns.digits().matches(DIGITS_VALID);
   }
@@ -174,6 +238,16 @@ public class MatchOperationBenchmark {
   }
 
   // ===== Literal Pattern Benchmarks =====
+
+  @Benchmark
+  public boolean rustLiteralMatch() {
+    return require(rustLiteral, "literal").isMatch(LITERAL_MATCH);
+  }
+
+  @Benchmark
+  public boolean rustLiteralNoMatch() {
+    return require(rustLiteral, "literal").isMatch(LITERAL_NO_MATCH);
+  }
 
   @Benchmark
   public boolean reggieLiteralMatch() {
