@@ -169,6 +169,24 @@ public class SubsetConstructor {
 
   private DFA buildDFAInternal(NFA nfa, boolean computeTags) throws StateExplosionException {
 
+    // Pruning soundness gate: anchor-free NFAs only. Post-consume closures discharge anchor
+    // conditions (the guard moves to the consuming transition's entryGuard, enforced by
+    // generated code), so the pruner's conds view can mistake a guard-conditional accept for an
+    // unconditional one and kill live higher-priority consumers — proven by fuzz seed 777 on
+    // [^1-a1-c-]\za|([b01-a]{2,})a{0}a{0,}?: branch 1's \z-guarded accept surfaced as
+    // unconditional and pruned branch 2's greedy loop at its minimum. With no anchors in the
+    // NFA, every accept in a state set is genuinely fireable at its position and thread ranks
+    // alone decide — exactly the RE2 leftmost-first rule.
+    boolean pruningActive = leftmostFirst;
+    if (pruningActive) {
+      for (NFA.NFAState s : nfa.getStates()) {
+        if (s.anchor != null) {
+          pruningActive = false;
+          break;
+        }
+      }
+    }
+
     // Pre-compute anchor-aware epsilon closures for all NFA states. Each entry maps a reachable
     // NFA state to the weakest conjunction of anchors that must hold at the current input
     // position for that state to be live.
@@ -196,6 +214,16 @@ public class SubsetConstructor {
     Map<NFA.NFAState, EnumSet<NFA.AnchorType>> startClosure =
         anchoredClosures.get(nfa.getStartState());
     Set<NFA.NFAState> startClosureSet = startClosure.keySet();
+    List<NFA.NFAState> startOrdering = computeInitialOrdering(nfa.getStartState(), startClosureSet);
+    if (pruningActive) {
+      List<NFA.NFAState> prunedOrdering =
+          pruneLeftmostFirstOrdering(startClosure, startOrdering, nfa.getAcceptStates());
+      if (prunedOrdering != startOrdering) {
+        startClosure = filterConditions(startClosure, prunedOrdering);
+        startClosureSet = startClosure.keySet();
+        startOrdering = prunedOrdering;
+      }
+    }
     List<DFA.GroupAction> startGroupActions =
         computeGroupActions(startClosureSet, nfa.getAcceptStates());
     EnumSet<NFA.AnchorType> startAcceptConditions =
@@ -216,10 +244,8 @@ public class SubsetConstructor {
     }
     stateCache.put(startClosureSet, start);
     allStates.add(start);
-    dfaStateOrdering.put(
-        startClosureSet, computeInitialOrdering(nfa.getStartState(), startClosureSet));
+    dfaStateOrdering.put(startClosureSet, startOrdering);
     if (startAccepting) {
-      List<NFA.NFAState> startOrdering = dfaStateOrdering.get(startClosureSet);
       start.acceptIsPriorityCut =
           computeAcceptIsPriorityCut(
               startClosureSet, startClosure, startOrdering, nfa.getAcceptStates());
@@ -281,6 +307,23 @@ public class SubsetConstructor {
 
         Set<NFA.NFAState> targets = targetsWithCond.keySet();
 
+        // Leftmost-first thread pruning: kill every state ranked below the first accept that
+        // can fire at this position. Applied BEFORE the state-cache lookup so the pruned set is
+        // the DFA state identity — successors are computed from pruned members only, keeping
+        // the subset-construction invariant.
+        List<NFA.NFAState> precomputedTargetOrdering = null;
+        if (pruningActive) {
+          List<NFA.NFAState> fullOrdering =
+              computeTransitionOrdering(currentOrdering, targets, chars);
+          List<NFA.NFAState> prunedOrdering =
+              pruneLeftmostFirstOrdering(targetsWithCond, fullOrdering, nfa.getAcceptStates());
+          if (prunedOrdering != fullOrdering) {
+            targetsWithCond = filterConditions(targetsWithCond, prunedOrdering);
+            targets = targetsWithCond.keySet();
+            precomputedTargetOrdering = prunedOrdering;
+          }
+        }
+
         // Get or create DFA state
         DFA.DFAState target = stateCache.get(targets);
         if (target == null) {
@@ -304,7 +347,11 @@ public class SubsetConstructor {
           stateCache.put(targets, target);
           allStates.add(target);
           dfaStateConditions.put(target, targetsWithCond);
-          dfaStateOrdering.put(targets, computeTransitionOrdering(currentOrdering, targets, chars));
+          dfaStateOrdering.put(
+              targets,
+              precomputedTargetOrdering != null
+                  ? precomputedTargetOrdering
+                  : computeTransitionOrdering(currentOrdering, targets, chars));
           if (accepting) {
             List<NFA.NFAState> targetOrdering = dfaStateOrdering.get(targets);
             target.acceptIsPriorityCut =
@@ -346,7 +393,60 @@ public class SubsetConstructor {
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
 
-    return new DFA(start, acceptStates, allStates, anchorConditionDiluted, captureAmbiguous);
+    return new DFA(
+        start, acceptStates, allStates, anchorConditionDiluted, captureAmbiguous, pruningActive);
+  }
+
+  /**
+   * When true, the construction applies RE2-style leftmost-first thread pruning: in every DFA state
+   * set, all NFA states ranked strictly below the first accept that can fire at the current
+   * position (unconditional or START-class-conditioned) are killed. A lower-priority thread can
+   * never win once a higher-priority thread has accepted (Perl thread semantics), so pruning is
+   * sound by construction and converts the DFA's acceptance from longest-match to leftmost-first —
+   * the semantics lazy-quantifier patterns need. Survivors ranked above the accept keep their
+   * preferred longer matches, and the surviving accept's acceptIsPriorityCut (recomputed on the
+   * pruned set) tells the executor when to commit immediately. Set by PatternAnalyzer only for the
+   * lazy-aware captureless retry; the standard analysis keeps longest-match semantics and declines
+   * unresolved-conflict patterns instead.
+   */
+  private boolean leftmostFirst;
+
+  /** See {@link #leftmostFirst}. */
+  public void setLeftmostFirst(boolean leftmostFirst) {
+    this.leftmostFirst = leftmostFirst;
+  }
+
+  /**
+   * Returns the ordering truncated just after the first accept that can fire at the current
+   * position (unconditional or START-class-conditioned — END-class-only accepts fire only at
+   * end-of-input positions and must not prune mid-scan threads), or {@code ordering} unchanged when
+   * no such accept exists or nothing ranks below it. The returned list is the pruned state's
+   * ordering; ranks are indices of {@code ordering} itself.
+   */
+  private List<NFA.NFAState> pruneLeftmostFirstOrdering(
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> conds,
+      List<NFA.NFAState> ordering,
+      Set<NFA.NFAState> acceptStates) {
+    if (ordering == null || ordering.isEmpty() || conds == null || conds.isEmpty()) {
+      return ordering;
+    }
+    int acceptRank =
+        acceptRankForPriorityCut(conds.keySet(), conds, buildRankMap(ordering), acceptStates);
+    if (acceptRank == Integer.MAX_VALUE || acceptRank >= ordering.size() - 1) {
+      return ordering;
+    }
+    return new ArrayList<>(ordering.subList(0, acceptRank + 1));
+  }
+
+  /** Filters a conditions map down to the given (pruned) ordering's members. */
+  private static Map<NFA.NFAState, EnumSet<NFA.AnchorType>> filterConditions(
+      Map<NFA.NFAState, EnumSet<NFA.AnchorType>> conds, List<NFA.NFAState> keep) {
+    Map<NFA.NFAState, EnumSet<NFA.AnchorType>> out = new LinkedHashMap<>();
+    for (NFA.NFAState s : keep) {
+      EnumSet<NFA.AnchorType> c = conds.get(s);
+      if (c != null) out.put(s, c);
+    }
+    return out;
   }
 
   /**

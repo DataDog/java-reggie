@@ -24,15 +24,32 @@ public class HybridMatcher extends ReggieMatcher {
   private final ReggieMatcher dfaMatcher;
   private final ReggieMatcher nfaMatcher;
 
+  /**
+   * True when the DFA half was built with leftmost-first thread pruning (lazy-quantifier originals;
+   * see SubsetConstructor#setLeftmostFirst). The pruned DFA encodes Perl's first-preference END for
+   * search — correct for find()/findFrom()/findMatch — but boolean matches()/matchesBounded() are
+   * path-existence questions and pruning only removes paths, so those delegate to the NFA half,
+   * which answers them exactly as the standalone engine did.
+   */
+  private final boolean lazyFind;
+
   public HybridMatcher(String pattern, ReggieMatcher dfaMatcher, ReggieMatcher nfaMatcher) {
+    this(pattern, dfaMatcher, nfaMatcher, false);
+  }
+
+  public HybridMatcher(
+      String pattern, ReggieMatcher dfaMatcher, ReggieMatcher nfaMatcher, boolean lazyFind) {
     super(pattern);
     this.dfaMatcher = dfaMatcher;
     this.nfaMatcher = nfaMatcher;
+    this.lazyFind = lazyFind;
   }
 
   @Override
   public boolean matches(String input) {
-    return dfaMatcher.matches(input);
+    // Pruned-DFA false-negative guard: see lazyFind. The unpruned NFA half answers
+    // path-existence exactly like the engine the hybrid replaced.
+    return lazyFind ? nfaMatcher.matches(input) : dfaMatcher.matches(input);
   }
 
   @Override
@@ -47,6 +64,11 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult match(String input) {
+    if (lazyFind) {
+      // The pruned DFA false-negatives on path-existence questions (see lazyFind); the NFA
+      // half both decides and extracts, exactly as the standalone engine did.
+      return enrich(nfaMatcher.match(input));
+    }
     if (!dfaMatcher.matches(input)) {
       return null;
     }
@@ -55,6 +77,9 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public boolean matchInto(String input, int[] groupStarts, int[] groupEnds) {
+    if (lazyFind) {
+      return nfaMatcher.matchInto(input, groupStarts, groupEnds);
+    }
     if (!dfaMatcher.matches(input)) {
       return false;
     }
@@ -63,11 +88,16 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public boolean matchesBounded(CharSequence input, int start, int end) {
-    return dfaMatcher.matchesBounded(input, start, end);
+    return lazyFind
+        ? nfaMatcher.matchesBounded(input, start, end)
+        : dfaMatcher.matchesBounded(input, start, end);
   }
 
   @Override
   public MatchResult matchBounded(CharSequence input, int start, int end) {
+    if (lazyFind) {
+      return enrich(nfaMatcher.matchBounded(input, start, end));
+    }
     if (!dfaMatcher.matchesBounded(input, start, end)) {
       return null;
     }

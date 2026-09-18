@@ -179,10 +179,10 @@ public class RuntimeCompiler {
       new ConcurrentHashMap<>();
 
   /**
-   * Cached entry for counted-loop-lowered patterns (hyp-counted-loop-lowering): immutable NFA +
-   * name map. BackrefBacktrackMatcher is stateless per call (all instance state is final; the DFS
-   * allocates its own stack/memo), but we keep the PikeVM cache shape — fresh matcher per compile,
-   * shared NFA — for consistency and to leave room for per-call buffers later.
+   * Cached entry for counted-loop-lowered patterns: immutable NFA + name map.
+   * BackrefBacktrackMatcher is stateless per call (all instance state is final; the DFS allocates
+   * its own stack/memo), but we keep the PikeVM cache shape — fresh matcher per compile, shared NFA
+   * — for consistency and to leave room for per-call buffers later.
    */
   private static final class CountedLoopEntry {
     final NFA nfa;
@@ -414,9 +414,8 @@ public class RuntimeCompiler {
   }
 
   /**
-   * R1 (hyp-unanchored-find-prefilter): required-literal per pattern string, computed once. Null
-   * when no usable (>=2 char) literal exists. Guards the rejection prefilter wrap so the fast paths
-   * pay only one map hit.
+   * Required-literal fact per pattern string, computed once. Null when no usable (>=2 char) literal
+   * exists. Guards the rejection prefilter wrap so the fast paths pay only one map hit.
    */
   private record PrefilterFact(String literal, boolean asciiCaseInsensitive) {}
 
@@ -445,7 +444,7 @@ public class RuntimeCompiler {
             if (fact != null && fact.length() >= 2 && allCasedCharsAscii(fact)) {
               return new PrefilterFact(fact, true);
             }
-            // R1b: no multi-char ci fact — fall back to a 1-char fact scanned case-insensitively
+            // No multi-char ci fact — a 1-char fact still rejects when scanned case-insensitively
             String ciChar =
                 RequiredLiteralAnalyzer.requiredChar(
                     new RegexParser().parse(strippedPattern), false);
@@ -463,7 +462,7 @@ public class RuntimeCompiler {
       if (fact != null) {
         return new PrefilterFact(fact, false);
       }
-      // R1b: 1-char required fact as last resort (absence falsifies every match).
+      // 1-char required fact as last resort: absence falsifies every match.
       String ch = RequiredLiteralAnalyzer.requiredChar(ast, ci);
       return ch == null ? null : new PrefilterFact(ch, false);
     } catch (Exception e) {
@@ -928,6 +927,122 @@ public class RuntimeCompiler {
   // ---- routing introspection (debug tooling; see BytecodeDebugger) ----
 
   /**
+   * HotSpot's HugeMethodLimit: methods whose bytecode exceeds this are not JIT-compiled and run
+   * interpreted (measured 20.8x/17.8x penalty via -XX:-DontCompileHugeMethods on identical code —
+   * see doc find-jit-hugemethodlimit). Generated classes whose largest method exceeds it are
+   * declined to the JDK fallback when allowed (see the generation gate in compileInternal), keeping
+   * the strict-compile contract unchanged: without ALLOW_JDK_FALLBACK the generated (interpreted
+   * but correct) matcher is still returned.
+   */
+  static final int JIT_HUGE_METHOD_LIMIT = 8000;
+
+  /**
+   * Largest single-method bytecode length in a generated class, by direct classfile walk (magic,
+   * constant pool, fields, then each method's Code attribute's u4 code_length). Returns -1 on any
+   * parse anomaly, which callers treat as "no gate" (the matcher is returned as before).
+   */
+  static int largestMethodBytecodes(byte[] classBytes) {
+    try {
+      java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(classBytes);
+      b.getInt(); // magic
+      b.getShort();
+      b.getShort(); // minor, major
+      int cpCount = Short.toUnsignedInt(b.getShort());
+      String[] utf8 = new String[cpCount];
+      for (int idx = 1; idx < cpCount; ) {
+        int tag = b.get() & 0xFF;
+        switch (tag) {
+          case 1: // CONSTANT_Utf8
+            {
+              int len = Short.toUnsignedInt(b.getShort());
+              byte[] s = new byte[len];
+              b.get(s);
+              utf8[idx] = new String(s, java.nio.charset.StandardCharsets.UTF_8);
+              break;
+            }
+          case 3:
+          case 4: // Integer, Float: u4 payload
+            b.getInt();
+            break;
+          case 5:
+          case 6: // Long, Double: 8 bytes, two constant-pool slots
+            b.getInt();
+            idx++;
+            break;
+          case 7: // Class
+          case 8: // String
+          case 16: // MethodType
+          case 19: // Module
+          case 20: // Package
+            b.getShort();
+            break;
+          case 9:
+          case 10:
+          case 11: // Fieldref, Methodref, InterfaceMethodref
+          case 12: // NameAndType
+          case 17: // Dynamic
+          case 18: // InvokeDynamic
+            b.getShort();
+            b.getShort();
+            break;
+          case 15: // MethodHandle
+            b.get();
+            b.getShort();
+            break;
+          default:
+            return -1; // unknown tag: no gate
+        }
+        idx++;
+      }
+      b.getShort(); // access_flags
+      b.getShort(); // this_class
+      b.getShort(); // super_class
+      int interfaces = Short.toUnsignedInt(b.getShort());
+      for (int k = 0; k < interfaces; k++) b.getShort();
+      skipClassfileMembers(b); // fields
+      int methods = Short.toUnsignedInt(b.getShort());
+      int max = 0;
+      for (int m = 0; m < methods; m++) {
+        b.getShort(); // access_flags
+        b.getShort(); // name_index
+        b.getShort(); // descriptor_index
+        int attrs = Short.toUnsignedInt(b.getShort());
+        for (int at = 0; at < attrs; at++) {
+          int nameIdx = Short.toUnsignedInt(b.getShort());
+          int len = b.getInt();
+          int attrStart = b.position();
+          if ("Code".equals(nameIdx < cpCount ? utf8[nameIdx] : null)) {
+            b.getShort(); // max_stack
+            b.getShort(); // max_locals
+            int codeLen = b.getInt();
+            if (codeLen > max) max = codeLen;
+          }
+          b.position(attrStart + len);
+        }
+      }
+      return max;
+    } catch (Exception e) {
+      return -1;
+    }
+  }
+
+  /** Skips a fields/methods member table (u2 count + entries with attribute tables). */
+  private static void skipClassfileMembers(java.nio.ByteBuffer b) {
+    int count = Short.toUnsignedInt(b.getShort());
+    for (int f = 0; f < count; f++) {
+      b.getShort(); // access_flags
+      b.getShort(); // name_index
+      b.getShort(); // descriptor_index
+      int attrs = Short.toUnsignedInt(b.getShort());
+      for (int at = 0; at < attrs; at++) {
+        b.getShort(); // attribute_name_index
+        int len = b.getInt();
+        b.position(b.position() + len);
+      }
+    }
+  }
+
+  /**
    * Last routing decision made by this thread's compile pipeline: set at every decision point
    * (fallback, hybrid, PikeVM, BitState, counted-loop, linear-token-sequence, generated bytecode)
    * so tooling can report the ACTUAL routing rather than an isolated re-analysis, which diverges
@@ -1031,7 +1146,7 @@ public class RuntimeCompiler {
         nfa = nfaBuilder.build(ast, groupCount);
       }
 
-      // 2.5. Counted-loop lowering (hyp-counted-loop-lowering): bounded quantifiers whose
+      // 2.5. Counted-loop lowering: bounded quantifiers whose
       // unrolled tail exceeded the builder's budget were lowered to counted-loop markers (one
       // body copy + counter instead of monster unrolling). Only the counter-aware backtracking
       // matcher can execute them — every other engine, and the analysis passes below, would
@@ -1126,39 +1241,66 @@ public class RuntimeCompiler {
       // (dfaResult.dfa == null && result.dfa == null) or the DFA is anchor-diluted, hybrid is
       // skipped and the PIKEVM/BITSTATE early returns handle the pattern as before.
       if (groupCount > 0 && shouldUseHybrid(result)) {
-        // Anchored PIKEVM/BITSTATE patterns stay out (blanket nfaHasAnchor skip restored).
-        // MEASURED (RealCorpusScanBenchmark, workspace-jb): admitting them (10b1a43) regressed
-        // the matched sweep 340us -> 687us — the flip admitted whole-line anchored patterns
-        // (^...((a)|(b))*$) whose DFA-half bounds find returns the FULL line, so hybrid pays
-        // the DFA scan (~68us on a 162-char line; the LazyDFA/RD lane runs ~420ns/char on
-        // alternation shapes) and then re-runs PikeVM over the same span (~45us) — strictly
-        // worse than PikeVM alone. Re-admitting requires an acceptance rule (DFA find cheap
-        // AND the match span narrows meaningfully vs the region) — see the cairn question
-        // node for the entry points. This is a PERFORMANCE gate, not a correctness one: the
-        // flipped routing passed 266k real find-pairs and 270k full-match pairs with zero
-        // divergences (needsFallback B2/B3/B4 + anchorConditionDiluted cover the anchor
-        // correctness upstream).
-        // \b/\B is doubly excluded: nfaHasAnchor counts word-boundary anchor states, and
-        // the subset construction independently drops per-position boundary context
-        // (SubsetConstructor.isPositionAnchor excludes WORD_BOUNDARY/NON_WORD_BOUNDARY)
-        // without setting anchorConditionDiluted — a \b pattern's DFA-half over-accepts
-        // across boundaries (measured on the no-guard build: \bname:(\S+) on
-        // "@peer.hostname:127.0.0.1" matched [10,24) where JDK finds no match).
+        // Admission rule for PIKEVM/BITSTATE patterns (measured, RealCorpusScanBenchmark +
+        // per-pattern sweeps, workspace-jb): \b/\B patterns stay out: the subset construction
+        // drops per-position boundary context (SubsetConstructor.isPositionAnchor excludes
+        // WORD_BOUNDARY/NON_WORD_BOUNDARY) without setting anchorConditionDiluted — the DFA-half
+        // would over-accept across word boundaries (measured on the no-guard build:
+        // \bname:(\S+) on "@peer.hostname:127.0.0.1" matched [10,24) where JDK finds no match).
+        // Lazy-quantifier and alternation-priority patterns also stay out: their captureless
+        // subset-DFA gives a longest end, not Perl's first-preference end, and the analyzer
+        // leaves dfa == null for them, failing the availability check below.
+        //
+        // START-ANCHORED patterns are ADMITTED (re-admitted after the 10b1a43 experiment): their
+        // earlier exclusion was a performance gate on the DFA-half — the generated DFA_SWITCH
+        // matchesAtStart/findMatchEnd methods exceeded HotSpot's HugeMethodLimit (8000 bytecodes)
+        // and ran INTERPRETED at ~120-200ns/char. DFASwitchBytecodeGenerator now buckets state
+        // cases and factors accept-anchor blocks into per-accept helpers, so every generated
+        // method compiles (measured headroom via -XX:-DontCompileHugeMethods: 20.8x). The NFA
+        // half mirrors the standalone engine choice (newHybridNfaHalf: BitState for
+        // BITSTATE_CAPTURE originals), keeping the capture path at BitState speed instead of
+        // PikeVM (which measured 3.4x slower on the whole-line capture rescan).
         boolean skipHybrid = false;
         if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
-            || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
-          if (nfa != null && nfaHasAnchor(nfa)) {
+            || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
+            || result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT) {
+          if (nfa != null && nfa.hasWordBoundaryAnchor()) {
             skipHybrid = true;
           }
-          if (nfa != null && nfa.hasWordBoundaryAnchor()) {
+          // Mirror the standalone PIKEVM/BITSTATE fallback guards (sections 3.6/3.7 below): a
+          // pattern FallbackPatternDetector refuses for the NFA engines must not enter the
+          // hybrid either — its nfa-half IS that engine (PikeVM for every hybrid-eligible
+          // original: PIKEVM/BITSTATE originals per newHybridNfaHalf, and RECURSIVE_DESCENT
+          // originals whose capture half is PikeVM). Without this, the priority-aware retry
+          // could produce a DFA for a capture-divergent shape (nullable-nullable captures,
+          // anchors in quantifiers, lazy quantifiers) whose standalone routing is
+          // fallbackOrThrow — including lazy-RD shapes that today fall back to JDK.
+          if (FallbackPatternDetector.needsFallback(
+                  ast, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+              != null) {
             skipHybrid = true;
           }
         }
         if (!skipHybrid) {
           PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+          NFA lazyNfa = null;
+          if (dfaResult.dfa == null) {
+            // Priority-aware captureless retry: the standard analysis declines lazy-quantifier
+            // patterns (the standard NFA build normalizes lazy to greedy, so its subset DFA
+            // returns the longest end) and alternation/optional priority patterns (its DFA is
+            // longest-match, not Java's first-preference). The retry rebuilds the NFA lazy-aware
+            // for lazy originals and runs the ladder with leftmost-first thread pruning
+            // (SubsetConstructor.setLeftmostFirst, anchor-free NFAs only): thread ranks then
+            // express exactly the preference the NFA engine would, and the certification gate
+            // (lazyCapturelessDfaIsUnsound) declines any DFA it cannot make sound — the caller
+            // falls back to the pure NFA engine, the same result no retry would produce.
+            lazyNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : null;
+            dfaResult = analyzer.analyzeAndRecommendPriorityAware(lazyNfa);
+          }
           if (!dfaResult.anchorConditionDiluted && (dfaResult.dfa != null || result.dfa != null)) {
             ReggieMatcher hybrid =
-                compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);
+                compileHybrid(
+                    pattern, ast, nfa, lazyNfa, dfaResult, result, caseInsensitive, options);
             hybrid.setNameToIndex(nameMap);
             noteRouting("HYBRID_DFA (DFA boolean + NFA spans)");
             return hybrid;
@@ -1239,6 +1381,22 @@ public class RuntimeCompiler {
           return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
         }
         byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
+        if (options.has(ReggieOption.ALLOW_JDK_FALLBACK)
+            && largestMethodBytecodes(bytecode) > JIT_HUGE_METHOD_LIMIT) {
+          // Generated method exceeds HotSpot's HugeMethodLimit (8000 bytecodes): the matcher
+          // would run INTERPRETED (find-jit-hugemethodlimit: measured 20.8x/17.8x penalty via
+          // -XX:-DontCompileHugeMethods on the same code). With JDK fallback allowed, the JDK
+          // matcher is faster than an interpreted generated one; without the option we keep
+          // the generated (correct, interpreted) matcher — the strict-compile contract
+          // (native-or-throw) is unchanged and the refusal set does not grow.
+          return fallbackOrThrow(
+              pattern,
+              "generated method exceeds HotSpot's JIT method-size limit ("
+                  + JIT_HUGE_METHOD_LIMIT
+                  + " bytecodes) — interpreted execution would be slower than the JDK",
+              nameMap,
+              options);
+        }
 
         MethodHandles.Lookup hiddenLookup =
             LOOKUP.defineHiddenClass(
@@ -1567,6 +1725,15 @@ public class RuntimeCompiler {
         || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
       return true;
     }
+    // RECURSIVE_DESCENT originals that landed there only because the DFA cannot track give-back
+    // capture spans (requiresBacktrackingForGroups: a([bc]*)(c+d) must give back chars): the
+    // captureless DFA serves boolean find, PikeVM serves captures with thread-priority give-back.
+    // Hard RD features (subroutines, conditionals, quantified backrefs, lookaround) never produce
+    // a captureless DFA — the availability check at the call site filters them — and the
+    // needsFallback guard keeps lazy-RD shapes on their JDK-fallback routing.
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT) {
+      return true;
+    }
     return false;
   }
 
@@ -1575,6 +1742,7 @@ public class RuntimeCompiler {
       String pattern,
       RegexNode ast,
       NFA nfa,
+      NFA lazyNfa,
       PatternAnalyzer.MatchingStrategyResult dfaResult,
       PatternAnalyzer.MatchingStrategyResult originalResult,
       boolean caseInsensitive,
@@ -1582,9 +1750,27 @@ public class RuntimeCompiler {
       throws Exception {
     // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
     // When dfaResult.dfa==null but originalResult.dfa!=null, use original DFA for booleans + NFA.
+    // nfaHalf(): mirrors the non-hybrid engine choice — BITSTATE_CAPTURE originals get
+    // BitStateMatcher (with the Laurikari TDFA trial, like the standalone factory), PIKEVM_CAPTURE
+    // originals keep PikeVMMatcher. Measured on the suppressed-kind shape: PikeVM costs 45.5us
+    // vs BitState 13.5us on the 162-char capture path — picking PikeVM for both was 3.4x slower
+    // than the engine the hybrid replaced (10b1a43 flip, reverted 2db164b). RECURSIVE_DESCENT
+    // originals also take PikeVM: they landed on RD only for capture give-back (thread priority
+    // is the universal capture engine; OPTIMIZED_NFA shares the give-back bugs).
     boolean usePikeVm =
         originalResult.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
-            || originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE;
+            || originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
+            || originalResult.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
+    //
+    // lazyNfa != null iff originalResult.lazyNfa: the lazy-aware rebuild the standalone
+    // PikeVM/BitState paths use. Every NFA-consuming use below MUST run on the same NFA its
+    // analysis/DFA was built from: lazy captures and a lazy-certified DFA half take lazyNfa,
+    // originalResult.dfa (only produced by the standard-NFA analysis) takes the standard nfa.
+    // For a lazy originalResult, originalResult.dfa == null always (the analyzer's lazy gate),
+    // so the original-DFA branch below only ever runs on the standard NFA. (RECURSIVE_DESCENT
+    // originals never carry lazyNfa — lazy-RD shapes are skipHybrid via the needsFallback guard.)
+    NFA captureNfa = (originalResult.lazyNfa && lazyNfa != null) ? lazyNfa : nfa;
+    NFA dfaHalfNfa = lazyNfa != null && originalResult.dfa == null ? lazyNfa : nfa;
     if (dfaResult.dfa == null) {
       if (originalResult.dfa != null) {
         // Use the original DFA for boolean matching, NFA for group extraction.
@@ -1592,7 +1778,7 @@ public class RuntimeCompiler {
         ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
         ReggieMatcher nfaMatcher =
             usePikeVm
-                ? new PikeVMMatcher(nfa, pattern)
+                ? newHybridNfaHalf(captureNfa, originalResult, pattern)
                 : instantiateMatcher(
                     generateBytecode(
                         pattern,
@@ -1610,9 +1796,9 @@ public class RuntimeCompiler {
                     pattern);
         return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
       }
-      // No DFA available: fall back to pure NFA
+      // No DFA available: fall back to pure NFA (same engine the standalone path builds).
       if (usePikeVm) {
-        return new PikeVMMatcher(nfa, pattern);
+        return newHybridNfaHalf(captureNfa, originalResult, pattern);
       }
       PatternAnalyzer.MatchingStrategyResult nfaResult =
           new PatternAnalyzer.MatchingStrategyResult(
@@ -1627,17 +1813,28 @@ public class RuntimeCompiler {
       return instantiateMatcher(bytecode, pattern);
     }
 
-    // 2. Generate DFA matcher (for fast matching)
-    byte[] dfaBytecode = generateBytecode(pattern, dfaResult, nfa, ast, caseInsensitive);
-    ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
+    // 2. Generate DFA matcher (for fast matching). dfaHalfNfa: the lazy-aware NFA when the
+    // captureless DFA came from the lazy retry, the standard NFA otherwise (analysis and
+    // bytecode must share one NFA's state identities).
+    byte[] dfaBytecode = generateBytecode(pattern, dfaResult, dfaHalfNfa, ast, caseInsensitive);
+    if (largestMethodBytecodes(dfaBytecode) > JIT_HUGE_METHOD_LIMIT) {
+      // An oversized dfa-half would run interpreted (see JIT_HUGE_METHOD_LIMIT) — slower than
+      // the engine it replaced. Serve the NFA half alone (the same engine the standalone
+      // routing builds). The nfa-half generation below runs unchanged.
+      dfaBytecode = null;
+    }
+    ReggieMatcher dfaMatcher =
+        dfaBytecode == null ? null : instantiateMatcher(dfaBytecode, pattern);
 
-    // 3. Generate NFA matcher (for group extraction). For PIKEVM/BITSTATE patterns, use
-    // PikeVMMatcher directly — OPTIMIZED_NFA has known bugs with anchors in quantified groups,
-    // optional prefixes, and POSIX last-match that PikeVM handles correctly. The DFA fast path
-    // serves matches()/find(); PikeVM serves match()/findMatch() at the same speed as before.
+    // 3. Generate NFA matcher (for group extraction). For PIKEVM/BITSTATE originals, the
+    // hybrid nfa-half mirrors the non-hybrid engine choice (newHybridNfaHalf: BitState for
+    // BITSTATE_CAPTURE with the Laurikari TDFA trial, PikeVM for PIKEVM_CAPTURE) —
+    // OPTIMIZED_NFA has known bugs with anchors in quantified groups, optional prefixes, and
+    // POSIX last-match that PikeVM handles correctly. The DFA fast path serves
+    // matches()/find(); the NFA half serves match()/findMatch().
     ReggieMatcher nfaMatcher;
     if (usePikeVm) {
-      nfaMatcher = new PikeVMMatcher(nfa, pattern);
+      nfaMatcher = newHybridNfaHalf(captureNfa, originalResult, pattern);
     } else {
       PatternAnalyzer.MatchingStrategyResult nfaResult =
           new PatternAnalyzer.MatchingStrategyResult(
@@ -1652,8 +1849,37 @@ public class RuntimeCompiler {
       nfaMatcher = instantiateMatcher(nfaBytecode, pattern);
     }
 
-    // 4. Return hybrid matcher
-    return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
+    // 4. Return hybrid matcher. lazyFind: a pruned (leftmost-first) dfa-half encodes search
+    // semantics — boolean matches() and anchored spans are path-existence questions the pruned
+    // DFA can false-negative on, so they route to the NFA half (see HybridMatcher.lazyFind).
+    // The DFA carries the pruning marker (alternation-priority and lazy retries alike).
+    if (dfaMatcher == null) {
+      // Oversized dfa-half (JIT_HUGE_METHOD_LIMIT): serve the NFA half alone.
+      return nfaMatcher;
+    }
+    return new HybridMatcher(
+        pattern,
+        dfaMatcher,
+        nfaMatcher,
+        dfaResult.dfa != null && dfaResult.dfa.isLeftmostFirstPruned());
+  }
+
+  /**
+   * Hybrid NFA half for capture extraction (see compileHybrid). BITSTATE_CAPTURE originals get
+   * BitStateMatcher with the Laurikari TDFA trial, exactly like the standalone factory;
+   * PIKEVM_CAPTURE originals keep PikeVMMatcher (the analyzer routed them away from BitState for a
+   * reason). Built bare: HybridMatcher.enrich applies the name map to the OUTER result, so the
+   * halves don't need name enrichment.
+   */
+  private static ReggieMatcher newHybridNfaHalf(
+      NFA nfa, PatternAnalyzer.MatchingStrategyResult originalResult, String pattern) {
+    if (originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+      ReggieMatcher laurikari =
+          LaurikariDfaSupport.tryCreate(
+              nfa, pattern, nfa.getGroupCount(), originalResult.usePosixLastMatch);
+      return new BitStateMatcher(nfa, pattern, laurikari);
+    }
+    return new PikeVMMatcher(nfa, pattern);
   }
 
   /** Instantiate a matcher from bytecode. The pattern string is passed to the constructor. */
@@ -1711,6 +1937,16 @@ public class RuntimeCompiler {
    * fields (currentStates, nextStates, epsilonProcessed, configGroupStarts) during matching.
    * Instances of these matchers must not be shared across threads or sequential compile() calls.
    */
+  /**
+   * True when every match must span the whole region: all paths start-anchored AND the pattern
+   * carries an end-class anchor. The hybrid substring-narrowing trick cannot pay for such patterns
+   * (the DFA span always covers the full region), so findMatchFrom delegates to the NFA matcher
+   * instead — see HybridMatcher.wholeLineAnchored.
+   */
+  private static boolean wholeLineAnchored(NFA nfa) {
+    return nfa != null && nfa.requiresStartAnchor() && nfa.hasEndAnchor();
+  }
+
   /** True if the NFA contains any anchor states (^, $, \A, \Z, \z, \b, \B). */
   private static boolean nfaHasAnchor(NFA nfa) {
     for (NFA.NFAState s : nfa.getStates()) {
