@@ -232,9 +232,8 @@ public class NFABytecodeGenerator {
    * 1000-lookahead cascades whose matches()/matchInto() emission reaches hundreds of thousands of
    * instructions) abort DURING emission, long before ASM's per-method maxs/frames computation —
    * previously that pass exhausted multi-GB heaps and killed the host JVM inside the total compile
-   * deadline (see find-deadline-coverage-gaps). RuntimeCompiler converts the thrown
-   * MethodTooLargeException into the standard graceful fallback, so the compile outcome is
-   * unchanged, only the cost of reaching it.
+   * deadline. RuntimeCompiler converts the thrown MethodTooLargeException into the standard
+   * graceful fallback, so the compile outcome is unchanged, only the cost of reaching it.
    */
   private static final int MAX_EMITTED_INSNS_PER_METHOD = 65_535;
 
@@ -4541,6 +4540,21 @@ public class NFABytecodeGenerator {
     String longestLiteral =
         (skipLiteralOptimization || hybridInfo != null) ? null : extractLongestRequiredLiteral(nfa);
 
+    // The indexOf jumps below start the candidate scan at occurrences of the literal. That is
+    // only sound when every match STARTS with the literal: requiredLiterals merely guarantee it
+    // appears somewhere inside the match ((.c)+ requires 'c' at offset 1 — jumping to the first
+    // 'c' would skip the leftmost match start at 0), and extractLongestRequiredLiteral can return
+    // branch-local or mid-pattern runs that are not at offset 0 either. Non-prefix literals keep
+    // the sound rejection below (indexOf == -1 => the required char is in no match) but scan
+    // from `start`.
+    boolean literalIsPrefix = longestLiteral != null && everyMatchStartsWith(longestLiteral);
+    if (!literalIsPrefix) {
+      longestLiteral = null;
+    }
+    boolean requiredCharIsPrefix =
+        requiredLiterals.size() == 1
+            && everyMatchStartsWith(String.valueOf(requiredLiterals.iterator().next()));
+
     // Skip indexOf optimization for:
     // 1. Patterns that require start anchor (^ or \A) - indexOf would skip position 0
     // 2. Patterns with backrefs to lookahead captures - lookahead needs to match from
@@ -4571,19 +4585,35 @@ public class NFABytecodeGenerator {
       mv.visitVarInsn(ILOAD, tryPosVar);
       mv.visitJumpInsn(IFLT, returnMinusOne);
     } else if (!skipIndexOfOptimization && requiredLiterals.size() == 1) {
-      // Fall back to single-character indexOf
+      // Single required char: the indexOf == -1 rejection is sound (the char appears in every
+      // match); the jump to the first occurrence only when every match starts with it.
       char requiredChar = requiredLiterals.iterator().next();
 
-      // tryPos = input.indexOf(requiredChar, start)
-      mv.visitVarInsn(ALOAD, 1); // input
-      pushInt(mv, (int) requiredChar);
-      mv.visitVarInsn(ILOAD, 2); // start
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-      mv.visitVarInsn(ISTORE, tryPosVar);
+      if (requiredCharIsPrefix) {
+        // tryPos = input.indexOf(requiredChar, start)
+        mv.visitVarInsn(ALOAD, 1); // input
+        pushInt(mv, (int) requiredChar);
+        mv.visitVarInsn(ILOAD, 2); // start
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
+        mv.visitVarInsn(ISTORE, tryPosVar);
 
-      // if (tryPos == -1) return -1; (character not found in string)
-      mv.visitVarInsn(ILOAD, tryPosVar);
-      mv.visitJumpInsn(IFLT, returnMinusOne);
+        // if (tryPos == -1) return -1; (character not found in string)
+        mv.visitVarInsn(ILOAD, tryPosVar);
+        mv.visitJumpInsn(IFLT, returnMinusOne);
+      } else {
+        // Sound rejection only: required char absent => no match; scan starts at `start`.
+        mv.visitVarInsn(ALOAD, 1); // input
+        pushInt(mv, (int) requiredChar);
+        mv.visitVarInsn(ILOAD, 2); // start
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
+        mv.visitVarInsn(ISTORE, tryPosVar);
+
+        mv.visitVarInsn(ILOAD, tryPosVar);
+        mv.visitJumpInsn(IFLT, returnMinusOne);
+
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitVarInsn(ISTORE, tryPosVar); // tryPos = start
+      }
     } else {
       // No optimization: start from the given position
       mv.visitVarInsn(ILOAD, 2);
@@ -4830,6 +4860,8 @@ public class NFABytecodeGenerator {
     if (longestLiteral != null && longestLiteral.length() >= 3) {
       // Use multi-character indexOf for next iteration (Tier 1 optimization)
       // tryPos = input.indexOf("literal", tryPos + 1)
+      // longestLiteral is a verified match prefix (see init above), so every candidate start
+      // is an occurrence of it.
       mv.visitVarInsn(ALOAD, 1); // input
       mv.visitLdcInsn(longestLiteral);
       mv.visitVarInsn(ILOAD, tryPosVar);
@@ -4845,8 +4877,9 @@ public class NFABytecodeGenerator {
 
       // Continue to outerLoopStart (will check tryPos <= len there)
       mv.visitJumpInsn(GOTO, outerLoopStart);
-    } else if (!skipIndexOfOptimization && requiredLiterals.size() == 1) {
-      // Fall back to single-character indexOf (only when indexOf optimisation is not suppressed)
+    } else if (!skipIndexOfOptimization && requiredLiterals.size() == 1 && requiredCharIsPrefix) {
+      // Single-char retry jump: only when every match starts with the required char
+      // (verified at init). Otherwise starts between occurrences are viable candidates.
       char requiredChar = requiredLiterals.iterator().next();
 
       // tryPos = input.indexOf(requiredChar, tryPos + 1)
@@ -5667,6 +5700,85 @@ public class NFABytecodeGenerator {
   }
 
   /**
+   * True iff every match of the pattern starts by consuming exactly {@code literal} (the literal
+   * sits at offset 0 of every match). Soundness contract for the findFrom indexOf jumps: the
+   * candidate scan may start at (or jump to) an occurrence of the literal only under this condition
+   * — requiredLiterals only guarantee the literal appears SOMEWHERE inside the match, so for e.g.
+   * (.c)+ (required char 'c' at offset 1) jumping to the first 'c' would skip the leftmost match
+   * start.
+   *
+   * <p>Walks the NFA prefix deterministically: S(0) is the epsilon closure of the start state;
+   * every consuming transition out of S(i) must match exactly {literal[i]} and no accept state may
+   * appear in S(i) before the literal is fully consumed (a shorter match would end before the
+   * literal completes, so the literal is not at offset 0 of every match). Zero-width
+   * context-dependent states (assertions, backrefs, conditionals, counted-loop markers, anchors
+   * other than at an already-verified position) make the answer unknowable without input context —
+   * the walk returns false (no jump) whenever it meets one.
+   *
+   * <p>Anchor states are followed unconditionally: including their successors only enlarges the set
+   * of possible first characters, so a verified literal remains sound (the jump is suppressed
+   * whenever any anchor-conditional path diverges).
+   */
+  private boolean everyMatchStartsWith(String literal) {
+    if (literal == null || literal.isEmpty()) {
+      return false;
+    }
+    Set<NFA.NFAState> current = new HashSet<>();
+    if (!collectContextAwareEpsilonClosure(nfa.getStartState(), current)) {
+      return false;
+    }
+    java.util.Set<NFA.NFAState> accepts = nfa.getAcceptStates();
+
+    for (int i = 0; i < literal.length(); i++) {
+      Set<NFA.NFAState> next = new HashSet<>();
+      boolean anyConsumer = false;
+      boolean closureOk = true;
+      for (NFA.NFAState state : current) {
+        if (accepts.contains(state)) {
+          return false; // a match can end before the literal completes
+        }
+        for (NFA.Transition t : state.getTransitions()) {
+          if (!t.chars.isSingleChar() || t.chars.getSingleChar() != literal.charAt(i)) {
+            return false; // some match starts with a different char at offset i
+          }
+          closureOk &= collectContextAwareEpsilonClosure(t.target, next);
+          anyConsumer = true;
+        }
+      }
+      if (!anyConsumer || !closureOk) {
+        return false;
+      }
+      current = next;
+    }
+    return true;
+  }
+
+  /**
+   * Add {@code state} and everything reachable via plain epsilon transitions to {@code closure}.
+   * Bails by marking the walk context-dependent: assertions, backreference checks, conditionals and
+   * counted-loop markers are zero-width but their passability depends on input context, so the
+   * caller must not trust a literal verified through them.
+   *
+   * <p>Returns false when such a state is met; the closure may then be incomplete.
+   */
+  private boolean collectContextAwareEpsilonClosure(NFA.NFAState state, Set<NFA.NFAState> closure) {
+    if (!closure.add(state)) {
+      return true;
+    }
+    if (state.assertionType != null
+        || state.backrefCheck != null
+        || state.conditionalGroup != null
+        || state.countedLoopId != null) {
+      return false;
+    }
+    boolean ok = true;
+    for (NFA.NFAState next : state.getEpsilonTransitions()) {
+      ok &= collectContextAwareEpsilonClosure(next, closure);
+    }
+    return ok;
+  }
+
+  /**
    * Extract longest required literal from NFA main pattern (excluding lookaheads). For patterns
    * like (?=\w+@)(?=.*example).*@\w+\.com, extracts literals from the main matching path, not from
    * assertion sub-patterns.
@@ -5675,14 +5787,6 @@ public class NFABytecodeGenerator {
    * @return Longest literal string found, or null if no suitable literal exists
    */
   private String extractLongestRequiredLiteral(NFA nfa) {
-    // A multi-char literal is only valid for indexOf skipping when it must appear in EVERY
-    // possible match. For alternation patterns (start state has 2+ epsilon transitions),
-    // literals found inside one branch are not required for all matches, so skip the
-    // optimization entirely to avoid false negatives.
-    NFA.NFAState startState = nfa.getStartState();
-    if (startState != null && startState.getEpsilonTransitions().size() > 1) {
-      return null;
-    }
 
     String longestLiteral = null;
     int maxLength = 0;
