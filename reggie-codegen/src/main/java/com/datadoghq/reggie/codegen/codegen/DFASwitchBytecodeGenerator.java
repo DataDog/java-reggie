@@ -22,6 +22,7 @@ import com.datadoghq.reggie.codegen.automaton.AssertionCheck;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.DFA;
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -101,6 +102,30 @@ public class DFASwitchBytecodeGenerator {
    */
   private static final int STATE_SPLIT_THRESHOLD = 100;
 
+  /**
+   * Estimated-bytecode budget for a single generated method. HotSpot's HugeMethodLimit (default
+   * 8000 bytecodes) keeps any method above it out of C1/C2 compilation entirely — such methods run
+   * INTERPRETED (measured on the suppressed-kind hybrid dfa-half, 2026-09-17: dfa.find 120.6 -> 5.8
+   * ns/char once the limit is lifted with -XX:-DontCompileHugeMethods, 20.8x). Every generated
+   * method therefore targets well below 8000. The bucket planner multiplies per-state estimates by
+   * {@link #SIZE_ESTIMATE_SAFETY} for margin; the 64 KB JVM hard limit stays protected by the
+   * per-bucket state cap.
+   */
+  private static final int JIT_METHOD_TARGET = 5000;
+
+  /** Conservative multiplier over the size estimate (the estimator under-counts real emission). */
+  private static final float SIZE_ESTIMATE_SAFETY = 1.3f;
+
+  /**
+   * findMatchEnd bucket-helper encoding: target is an accepting state (caller updates
+   * lastAccepting). State ids stay below {@code DFA_SWITCH_STATE_LIMIT} (300), so bits 16/17 are
+   * free.
+   */
+  private static final int FE_ACCEPTING = 0x10000;
+
+  /** findMatchEnd bucket-helper encoding: accepting target is a priority-cut (caller commits). */
+  private static final int FE_PRIORITY_CUT = 0x20000;
+
   private final DFA dfa;
   private final int groupCount;
   private final NFA nfa; // Needed for anchor information
@@ -150,6 +175,85 @@ public class DFASwitchBytecodeGenerator {
     this.hasStringStartAnchor = (nfa != null) && nfa.hasStringStartAnchor();
     this.hasStringEndAnchor = (nfa != null) && nfa.hasStringEndAnchor();
     this.hasStringEndAbsoluteAnchor = (nfa != null) && nfa.hasStringEndAbsoluteAnchor();
+  }
+
+  /** Accepting state ids, precomputed for the findMatchEnd bucket-helper encoding. */
+  private Set<Integer> acceptingIds() {
+    Set<Integer> ids = new HashSet<>();
+    for (DFA.DFAState s : dfa.getAcceptStates()) ids.add(s.id);
+    return ids;
+  }
+
+  /**
+   * Rough per-state case-code size estimate in bytecodes — used ONLY for bucketing decisions, never
+   * for correctness. Calibrated on generated classes: {@code (?i)^.*elasticsearch.*$} measures ~310
+   * bytes/state (29 states, 9.1 KB matchesAtStart), the suppressed-kind hybrid dfa-half ~400
+   * bytes/state (21.5 KB matchesAtStart). The formula tracks both within {@link
+   * #SIZE_ESTIMATE_SAFETY}.
+   */
+  private static long estimateStateCaseBytes(DFA.DFAState state) {
+    long bytes = 40;
+    for (Map.Entry<CharSet, DFA.DFATransition> e : state.transitions.entrySet()) {
+      CharSet cs = e.getKey();
+      long ranges =
+          cs.isSingleChar() ? 1 : cs.isSimpleRange() ? 2 : Math.max(1, cs.getRanges().size());
+      bytes += 20 + 40 * ranges;
+    }
+    bytes += 400L * state.assertionChecks.size();
+    bytes += 60L * state.acceptanceAnchorConditions.size();
+    return bytes;
+  }
+
+  /** Estimated total case-code bytes for all states (inline-mode size check). */
+  private long estimateAllStateCasesBytes() {
+    long total = 0;
+    for (DFA.DFAState s : dfa.getAllStates()) total += estimateStateCaseBytes(s);
+    return total;
+  }
+
+  /**
+   * True when the per-state switch should be split into bucket helpers: state count past the hard
+   * cap, or the estimated inline body over the JIT budget (fat states — wide charsets, assertion
+   * gates — blow the JIT limit well below 100 states).
+   */
+  private boolean shouldSplitStateSwitch() {
+    if (activeCw == null) return false;
+    int stateCount = dfa.getAllStates().size();
+    return stateCount > STATE_SPLIT_THRESHOLD
+        || estimateAllStateCasesBytes() * SIZE_ESTIMATE_SAFETY + 400 > JIT_METHOD_TARGET;
+  }
+
+  /**
+   * Plan bucket boundaries [lo, hi] over state ids so each bucket's estimated case-code total stays
+   * within the JIT budget (with safety factor) and the per-bucket state count stays within the
+   * pre-existing hard cap. Deterministic for a given DFA: every generate* method sharing the switch
+   * computes identical boundaries (required — bucket helpers are emitted once and matched by name).
+   */
+  private List<int[]> planStateBuckets() {
+    List<DFA.DFAState> states = dfa.getAllStates();
+    long budget = (long) (JIT_METHOD_TARGET / SIZE_ESTIMATE_SAFETY);
+    List<int[]> buckets = new ArrayList<>();
+    int lo = 0;
+    long acc = 0;
+    for (int id = 0; id < states.size(); id++) {
+      long sz = estimateStateCaseBytes(states.get(id));
+      if (id > lo && (acc + sz > budget || id - lo >= STATE_SPLIT_THRESHOLD)) {
+        buckets.add(new int[] {lo, id - 1});
+        lo = id;
+        acc = 0;
+      }
+      acc += sz;
+    }
+    buckets.add(new int[] {lo, states.size() - 1});
+    return buckets;
+  }
+
+  /** Bucket index containing state id (buckets are contiguous and ordered). */
+  private static int bucketIndexFor(List<int[]> buckets, int id) {
+    for (int b = 0; b < buckets.size(); b++) {
+      if (id >= buckets.get(b)[0] && id <= buckets.get(b)[1]) return b;
+    }
+    return -1;
   }
 
   /**
@@ -331,15 +435,14 @@ public class DFASwitchBytecodeGenerator {
 
     int stateCount = dfa.getAllStates().size();
 
-    if (stateCount > STATE_SPLIT_THRESHOLD && activeCw != null) {
-      // Split mode: emit one $ng_step_J helper per bucket of STATE_SPLIT_THRESHOLD states.
+    if (shouldSplitStateSwitch()) {
+      // Split mode: emit one $ng_step_J helper per planned bucket of states.
       // The routing switch calls the appropriate helper, stores the returned nextState into
       // stateVar, and jumps to loopStart. On -1 (no-match sentinel) it returns false.
-      int numBuckets = (stateCount + STATE_SPLIT_THRESHOLD - 1) / STATE_SPLIT_THRESHOLD;
+      List<int[]> buckets = planStateBuckets();
+      int numBuckets = buckets.size();
       for (int b = 0; b < numBuckets; b++) {
-        int lo = b * STATE_SPLIT_THRESHOLD;
-        int hi = Math.min(lo + STATE_SPLIT_THRESHOLD - 1, stateCount - 1);
-        emitNonGroupBucketHelperFull(b, lo, hi);
+        emitNonGroupBucketHelperFull(b, buckets.get(b)[0], buckets.get(b)[1]);
       }
 
       // Emit the routing switch: one case per bucket, calls $ng_step_B(state, ch, pos)
@@ -350,14 +453,10 @@ public class DFASwitchBytecodeGenerator {
       }
 
       // Routing key: which bucket does this state belong to?
-      // bucket = state / STATE_SPLIT_THRESHOLD  → emit tableswitch over bucket indices
-      // But we need to dispatch on bucket, not state. Push state / threshold.
-      // Simpler: emit a tableswitch over [0, numBuckets-1] with bucket = state >> log2(threshold)?
-      // Easiest: emit a full tableswitch over [0, stateCount-1] mapping each state to its bucket.
+      // Full tableswitch over [0, stateCount-1] mapping each state to its bucket.
       Label[] stateToBucketLabels = new Label[stateCount];
       for (int id = 0; id < stateCount; id++) {
-        int bucket = id / STATE_SPLIT_THRESHOLD;
-        stateToBucketLabels[id] = bucketLabels[bucket];
+        stateToBucketLabels[id] = bucketLabels[bucketIndexFor(buckets, id)];
       }
 
       mv.visitVarInsn(ILOAD, stateVar);
@@ -834,14 +933,20 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Check all assertions (both lookbehind and lookahead): the accepting state was the
-      // transition target on the last character, so generateStateCaseCode never ran its case for
-      // this position. None of its assertions were checked as transition guards.
-      for (AssertionCheck assertion : acceptState.assertionChecks) {
-        generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, checkNext, allocator);
-      }
-      if (!acceptState.acceptanceAnchorConditions.isEmpty()) {
-        emitAcceptanceAnchorChecks(mv, acceptState.acceptanceAnchorConditions, posVar, checkNext);
+      // Gate acceptance on the state's assertions (both lookbehind and lookahead) and anchor
+      // conditions via the $ng_accA helper. The accepting state was the transition target on the
+      // last character, so generateStateCaseCode never ran its case for this position; none of
+      // its assertions were checked as transition guards. Inline emission measured 21.5 KB on
+      // $-anchor alternation families (interpreted under HugeMethodLimit) — keep this body small.
+      if (!acceptState.assertionChecks.isEmpty()
+          || !acceptState.acceptanceAnchorConditions.isEmpty()) {
+        String helper = emitStringAcceptHelper(acceptState);
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, activeInternalClassName, helper, "(Ljava/lang/String;I)Z", false);
+        mv.visitJumpInsn(IFEQ, checkNext);
       }
       mv.visitInsn(ICONST_1);
       mv.visitInsn(IRETURN);
@@ -1616,28 +1721,31 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Found accepting state — gate acceptance on per-state assertions/anchor conditions.
-      // If any assertion fails, go to continueMatching to try a longer match (the assertion may
-      // be satisfied at a later position, e.g. a lookahead that needs more context or a lookbehind
-      // whose required predecessor character may appear at the end of a longer match).
-      // The accepting state was set as the TARGET of the previous transition, so its
-      // generateStateCaseCode has not yet run — none of its assertions were checked as transition
-      // guards. Check all assertions (both lookbehind and lookahead) here.
-      Label continueMatching = new Label();
-      for (AssertionCheck assertion : acceptState.assertionChecks) {
-        generateAssertionCheckAtCurrentPosition(mv, assertion, posVar, continueMatching, allocator);
-      }
-      if (acceptState.acceptanceAnchorConditions.isEmpty()) {
+      // Found accepting state — gate acceptance on per-state assertions/anchor conditions via the
+      // $ng_accA helper (checks both lookbehind and lookahead assertions: the accepting state was
+      // the TARGET of the previous transition, so generateStateCaseCode has not yet run its case
+      // — none of its assertions were checked as transition guards). On failure, continue
+      // matching: the assertion may be satisfied at a later position (e.g. a lookahead that needs
+      // more context or a lookbehind whose required predecessor character may appear at the end
+      // of a longer match).
+      if (!acceptState.assertionChecks.isEmpty()
+          || !acceptState.acceptanceAnchorConditions.isEmpty()) {
+        String helper = emitStringAcceptHelper(acceptState);
+        Label continueMatching = new Label();
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, activeInternalClassName, helper, "(Ljava/lang/String;I)Z", false);
+        mv.visitJumpInsn(IFEQ, continueMatching);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
+        mv.visitLabel(continueMatching);
+        mv.visitJumpInsn(GOTO, notAccepting);
       } else {
-        emitAcceptanceAnchorChecks(
-            mv, acceptState.acceptanceAnchorConditions, posVar, continueMatching);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
       }
-      mv.visitLabel(continueMatching);
-      mv.visitJumpInsn(GOTO, notAccepting);
 
       mv.visitLabel(checkNext);
     }
@@ -1947,7 +2055,7 @@ public class DFASwitchBytecodeGenerator {
     // End of input - check if in accept state
     mv.visitLabel(loopEnd);
 
-    // Check if state is accepting (bounded path — per-state conditions, CharSequence helper)
+    // Check if state is accepting (bounded path — per-state conditions via $ng_accC helper)
     for (DFA.DFAState acceptState : dfa.getAcceptStates()) {
       Label checkNext = new Label();
       mv.visitVarInsn(ILOAD, stateVar);
@@ -1958,12 +2066,15 @@ public class DFASwitchBytecodeGenerator {
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
       } else {
-        Label continueChecking = new Label();
-        emitAcceptanceAnchorChecksCharSequence(
-            mv, acceptState.acceptanceAnchorConditions, posVar, continueChecking);
+        String helper = emitCharSeqAcceptHelper(acceptState);
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, activeInternalClassName, helper, "(Ljava/lang/CharSequence;I)Z", false);
+        mv.visitJumpInsn(IFEQ, checkNext);
         mv.visitInsn(ICONST_1);
         mv.visitInsn(IRETURN);
-        mv.visitLabel(continueChecking);
       }
 
       mv.visitLabel(checkNext);
@@ -1989,6 +2100,46 @@ public class DFASwitchBytecodeGenerator {
       int posVar,
       Label loopStart,
       Label returnFalse) {
+    int stateCount = dfa.getAllStates().size();
+
+    if (shouldSplitStateSwitch()) {
+      // Split mode (JIT method-size budget): $nb_step_J(int state, int ch) -> next state or -1.
+      List<int[]> buckets = planStateBuckets();
+      int numBuckets = buckets.size();
+      for (int b = 0; b < numBuckets; b++) {
+        emitBoundedBucketHelper(b, buckets.get(b)[0], buckets.get(b)[1]);
+      }
+      Label defaultLabel = new Label();
+      Label[] bucketLabels = new Label[numBuckets];
+      for (int b = 0; b < numBuckets; b++) bucketLabels[b] = new Label();
+      Label[] stateToBucketLabels = new Label[stateCount];
+      for (int id = 0; id < stateCount; id++) {
+        stateToBucketLabels[id] = bucketLabels[bucketIndexFor(buckets, id)];
+      }
+      mv.visitVarInsn(ILOAD, stateVar);
+      mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, stateToBucketLabels);
+      for (int b = 0; b < numBuckets; b++) {
+        mv.visitLabel(bucketLabels[b]);
+        // state = $nb_step_b(state, ch); if (state == -1) goto returnFalse; goto loopStart
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ILOAD, stateVar);
+        mv.visitVarInsn(ILOAD, chVar);
+        mv.visitMethodInsn(INVOKESPECIAL, activeInternalClassName, "$nb_step_" + b, "(II)I", false);
+        mv.visitVarInsn(ISTORE, stateVar);
+        Label notReject = new Label();
+        mv.visitVarInsn(ILOAD, stateVar);
+        mv.visitInsn(ICONST_M1);
+        mv.visitJumpInsn(IF_ICMPNE, notReject);
+        mv.visitJumpInsn(GOTO, returnFalse);
+        mv.visitLabel(notReject);
+        mv.visitJumpInsn(GOTO, loopStart);
+      }
+      mv.visitLabel(defaultLabel);
+      mv.visitInsn(ICONST_0);
+      mv.visitInsn(IRETURN);
+      return;
+    }
+
     Label defaultLabel = new Label();
     Label[] caseLabels = new Label[dfa.getAllStates().size()];
     int[] caseKeys = new int[dfa.getAllStates().size()];
@@ -2010,6 +2161,50 @@ public class DFASwitchBytecodeGenerator {
     mv.visitLabel(defaultLabel);
     mv.visitInsn(ICONST_0);
     mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Emit one bounded-transition bucket helper: {@code private int $nb_step_J(int state, int ch)} →
+   * next state id on a charset hit, {@code -1} on no-match. Shared by the boolean and
+   * MatchResult-flavored bounded methods (identical transition logic).
+   */
+  private void emitBoundedBucketHelper(int bucketIndex, int lo, int hi) {
+    String helperName = "$nb_step_" + bucketIndex;
+    if (!emittedBucketHelpers.add(helperName)) {
+      return;
+    }
+    MethodVisitor hv = activeCw.visitMethod(ACC_PRIVATE, helperName, "(II)I", null, null);
+    hv.visitCode();
+    // slots: 0=this, 1=state, 2=ch
+    int stateSlot = 1;
+    int chSlot = 2;
+    Label defaultLabel = new Label();
+    int bucketSize = hi - lo + 1;
+    Label[] caseLabels = new Label[bucketSize];
+    for (int i = 0; i < bucketSize; i++) caseLabels[i] = new Label();
+
+    hv.visitVarInsn(ILOAD, stateSlot);
+    hv.visitTableSwitchInsn(lo, hi, defaultLabel, caseLabels);
+
+    List<DFA.DFAState> allStates = dfa.getAllStates();
+    for (int id = lo; id <= hi; id++) {
+      DFA.DFAState state = allStates.get(id);
+      hv.visitLabel(caseLabels[id - lo]);
+      for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
+        Label nextCheck = new Label();
+        generateCharSetCheck(hv, entry.getKey(), chSlot, nextCheck);
+        pushInt(hv, entry.getValue().target.id);
+        hv.visitInsn(IRETURN);
+        hv.visitLabel(nextCheck);
+      }
+      hv.visitInsn(ICONST_M1);
+      hv.visitInsn(IRETURN);
+    }
+    hv.visitLabel(defaultLabel);
+    hv.visitInsn(ICONST_M1);
+    hv.visitInsn(IRETURN);
+    hv.visitMaxs(0, 0);
+    hv.visitEnd();
   }
 
   /** Generate case code for bounded boolean state transitions. */
@@ -2164,10 +2359,16 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, acceptState.id);
       mv.visitJumpInsn(IF_ICMPNE, checkNext);
 
-      // Found accepting state — gate acceptance on per-state anchor conditions (CharSequence path).
+      // Found accepting state — gate acceptance on per-state anchor conditions (CharSequence path)
+      // via the $ng_accC helper; the MatchResult build stays inline (small, per-accept).
       if (!acceptState.acceptanceAnchorConditions.isEmpty()) {
-        emitAcceptanceAnchorChecksCharSequence(
-            mv, acceptState.acceptanceAnchorConditions, posVar, checkNext);
+        String helper = emitCharSeqAcceptHelper(acceptState);
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, activeInternalClassName, helper, "(Ljava/lang/CharSequence;I)Z", false);
+        mv.visitJumpInsn(IFEQ, checkNext);
       }
 
       // Accepting state - create MatchResult
@@ -2240,6 +2441,46 @@ public class DFASwitchBytecodeGenerator {
       int chVar,
       int posVar,
       Label loopStart) {
+    int stateCount = dfa.getAllStates().size();
+
+    if (shouldSplitStateSwitch()) {
+      // Split mode: reuse $nb_step_J (same transition logic); dead state -> reject (null).
+      List<int[]> buckets = planStateBuckets();
+      int numBuckets = buckets.size();
+      for (int b = 0; b < numBuckets; b++) {
+        emitBoundedBucketHelper(b, buckets.get(b)[0], buckets.get(b)[1]);
+      }
+      Label defaultLabel = new Label();
+      Label[] bucketLabels = new Label[numBuckets];
+      for (int b = 0; b < numBuckets; b++) bucketLabels[b] = new Label();
+      Label[] stateToBucketLabels = new Label[stateCount];
+      for (int id = 0; id < stateCount; id++) {
+        stateToBucketLabels[id] = bucketLabels[bucketIndexFor(buckets, id)];
+      }
+      mv.visitVarInsn(ILOAD, stateVar);
+      mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, stateToBucketLabels);
+      for (int b = 0; b < numBuckets; b++) {
+        mv.visitLabel(bucketLabels[b]);
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ILOAD, stateVar);
+        mv.visitVarInsn(ILOAD, chVar);
+        mv.visitMethodInsn(INVOKESPECIAL, activeInternalClassName, "$nb_step_" + b, "(II)I", false);
+        mv.visitVarInsn(ISTORE, stateVar);
+        Label notReject = new Label();
+        mv.visitVarInsn(ILOAD, stateVar);
+        mv.visitInsn(ICONST_M1);
+        mv.visitJumpInsn(IF_ICMPNE, notReject);
+        mv.visitInsn(ACONST_NULL);
+        mv.visitInsn(ARETURN);
+        mv.visitLabel(notReject);
+        mv.visitJumpInsn(GOTO, loopStart);
+      }
+      mv.visitLabel(defaultLabel);
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+      return;
+    }
+
     Label defaultLabel = new Label();
     Label[] caseLabels = new Label[dfa.getAllStates().size()];
     int[] caseKeys = new int[dfa.getAllStates().size()];
@@ -2384,7 +2625,7 @@ public class DFASwitchBytecodeGenerator {
 
     // Generate switch for state transitions
     generateFindMatchEndStateSwitch(
-        mv, stateVar, chVar, lastAcceptingVar, posVar, loopStart, loopEnd);
+        mv, stateVar, chVar, lastAcceptingVar, posVar, loopStart, loopEnd, allocator);
 
     // End of loop - return lastAccepting
     mv.visitLabel(loopEnd);
@@ -2403,7 +2644,90 @@ public class DFASwitchBytecodeGenerator {
       int lastAcceptingVar,
       int posVar,
       Label loopStart,
-      Label loopEnd) {
+      Label loopEnd,
+      LocalVarAllocator allocator) {
+    int stateCount = dfa.getAllStates().size();
+
+    if (shouldSplitStateSwitch()) {
+      // Split mode (JIT method-size budget): one $fe_step_J helper per bucket. The helper returns
+      // an ENCODED next state: (targetId + 1) | FE_ACCEPTING [| FE_PRIORITY_CUT] on a charset hit,
+      // 0 on no-match — the caller must update lastAccepting when the TARGET is accepting, and a
+      // by-value int return cannot carry both facts, hence the encoding (state ids < 300).
+      Set<Integer> accepting = acceptingIds();
+      List<int[]> buckets = planStateBuckets();
+      int numBuckets = buckets.size();
+      for (int b = 0; b < numBuckets; b++) {
+        emitFindMatchEndBucketHelper(b, buckets.get(b)[0], buckets.get(b)[1], accepting);
+      }
+
+      int encVar = allocator.allocate();
+      Label defaultLabel = new Label();
+      Label[] bucketLabels = new Label[numBuckets];
+      for (int b = 0; b < numBuckets; b++) {
+        bucketLabels[b] = new Label();
+      }
+      Label[] stateToBucketLabels = new Label[stateCount];
+      for (int id = 0; id < stateCount; id++) {
+        stateToBucketLabels[id] = bucketLabels[bucketIndexFor(buckets, id)];
+      }
+
+      mv.visitVarInsn(ILOAD, stateVar);
+      mv.visitTableSwitchInsn(0, stateCount - 1, defaultLabel, stateToBucketLabels);
+
+      for (int b = 0; b < numBuckets; b++) {
+        mv.visitLabel(bucketLabels[b]);
+        // enc = $fe_step_b(state, ch, pos)
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ILOAD, stateVar);
+        mv.visitVarInsn(ILOAD, chVar);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitMethodInsn(
+            INVOKESPECIAL, activeInternalClassName, "$fe_step_" + b, "(III)I", false);
+        mv.visitVarInsn(ISTORE, encVar);
+
+        // enc == 0 -> dead state, return lastAccepting
+        Label noMatch = new Label();
+        mv.visitVarInsn(ILOAD, encVar);
+        mv.visitJumpInsn(IFEQ, noMatch);
+
+        // if ((enc & FE_ACCEPTING) != 0) lastAccepting = pos
+        Label notAcceptingTarget = new Label();
+        mv.visitVarInsn(ILOAD, encVar);
+        pushInt(mv, 0x10000);
+        mv.visitInsn(IAND);
+        mv.visitJumpInsn(IFEQ, notAcceptingTarget);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ISTORE, lastAcceptingVar);
+        mv.visitLabel(notAcceptingTarget);
+
+        // if ((enc & FE_PRIORITY_CUT) != 0) goto loopEnd (commit)
+        Label notCut = new Label();
+        mv.visitVarInsn(ILOAD, encVar);
+        pushInt(mv, 0x20000);
+        mv.visitInsn(IAND);
+        mv.visitJumpInsn(IFEQ, notCut);
+        mv.visitJumpInsn(GOTO, loopEnd);
+        mv.visitLabel(notCut);
+
+        // state = (enc & 0xFFFF) - 1; continue
+        mv.visitVarInsn(ILOAD, encVar);
+        pushInt(mv, 0xFFFF);
+        mv.visitInsn(IAND);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitVarInsn(ISTORE, stateVar);
+        mv.visitJumpInsn(GOTO, loopStart);
+
+        mv.visitLabel(noMatch);
+        mv.visitVarInsn(ILOAD, lastAcceptingVar);
+        mv.visitInsn(IRETURN);
+      }
+      mv.visitLabel(defaultLabel);
+      mv.visitVarInsn(ILOAD, lastAcceptingVar);
+      mv.visitInsn(IRETURN);
+      return;
+    }
+
     Label defaultLabel = new Label();
     Label[] caseLabels = new Label[dfa.getAllStates().size()];
     int[] caseKeys = new int[dfa.getAllStates().size()];
@@ -2427,6 +2751,60 @@ public class DFASwitchBytecodeGenerator {
     mv.visitLabel(defaultLabel);
     mv.visitVarInsn(ILOAD, lastAcceptingVar);
     mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Emit one findMatchEnd bucket helper: {@code private int $fe_step_J(int state, int ch, int pos)}
+   * → encoded next state (see FE_ACCEPTING / FE_PRIORITY_CUT), or {@code 0} when no charset
+   * matches. Signature note: pos is unused by the helper's charset logic but kept for symmetry with
+   * $ng_step (and future assertion-bearing states).
+   */
+  private void emitFindMatchEndBucketHelper(
+      int bucketIndex, int lo, int hi, Set<Integer> accepting) {
+    String helperName = "$fe_step_" + bucketIndex;
+    if (!emittedBucketHelpers.add(helperName)) {
+      return;
+    }
+    MethodVisitor hv = activeCw.visitMethod(ACC_PRIVATE, helperName, "(III)I", null, null);
+    hv.visitCode();
+    // slots: 0=this, 1=state, 2=ch, 3=pos
+    int stateSlot = 1;
+    int chSlot = 2;
+    Label defaultLabel = new Label();
+    int bucketSize = hi - lo + 1;
+    Label[] caseLabels = new Label[bucketSize];
+    for (int i = 0; i < bucketSize; i++) caseLabels[i] = new Label();
+
+    hv.visitVarInsn(ILOAD, stateSlot);
+    hv.visitTableSwitchInsn(lo, hi, defaultLabel, caseLabels);
+
+    List<DFA.DFAState> allStates = dfa.getAllStates();
+    for (int id = lo; id <= hi; id++) {
+      DFA.DFAState state = allStates.get(id);
+      hv.visitLabel(caseLabels[id - lo]);
+      for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
+        CharSet chars = entry.getKey();
+        DFA.DFAState target = entry.getValue().target;
+        Label nextCheck = new Label();
+        generateCharSetCheck(hv, chars, chSlot, nextCheck);
+        int enc = target.id + 1;
+        if (accepting.contains(target.id)) {
+          enc |= FE_ACCEPTING;
+          if (target.acceptIsPriorityCut) enc |= FE_PRIORITY_CUT;
+        }
+        pushInt(hv, enc);
+        hv.visitInsn(IRETURN);
+        hv.visitLabel(nextCheck);
+      }
+      hv.visitInsn(ICONST_0);
+      hv.visitInsn(IRETURN);
+    }
+
+    hv.visitLabel(defaultLabel);
+    hv.visitInsn(ICONST_0);
+    hv.visitInsn(IRETURN);
+    hv.visitMaxs(0, 0);
+    hv.visitEnd();
   }
 
   /** Generate case code for findMatchEnd state transitions. */
@@ -3007,7 +3385,7 @@ public class DFASwitchBytecodeGenerator {
 
     int stateCount = dfa.getAllStates().size();
 
-    if (stateCount > STATE_SPLIT_THRESHOLD && activeCw != null) {
+    if (shouldSplitStateSwitch()) {
       emitGroupTrackingSplitSwitch(
           mv,
           stateVar,
@@ -3067,7 +3445,7 @@ public class DFASwitchBytecodeGenerator {
 
     int stateCount = dfa.getAllStates().size();
 
-    if (stateCount > STATE_SPLIT_THRESHOLD && activeCw != null) {
+    if (shouldSplitStateSwitch()) {
       emitGroupTrackingSplitSwitch(
           mv,
           stateVar,
@@ -3131,13 +3509,12 @@ public class DFASwitchBytecodeGenerator {
       boolean returnFalseOnMiss) {
 
     int stateCount = dfa.getAllStates().size();
-    int numBuckets = (stateCount + STATE_SPLIT_THRESHOLD - 1) / STATE_SPLIT_THRESHOLD;
+    List<int[]> buckets = planStateBuckets();
+    int numBuckets = buckets.size();
 
     // Emit one helper per bucket (idempotent if already emitted for this generator instance)
     for (int b = 0; b < numBuckets; b++) {
-      int lo = b * STATE_SPLIT_THRESHOLD;
-      int hi = Math.min(lo + STATE_SPLIT_THRESHOLD - 1, stateCount - 1);
-      emitGroupTrackingBucketHelper(b, lo, hi);
+      emitGroupTrackingBucketHelper(b, buckets.get(b)[0], buckets.get(b)[1]);
     }
 
     // Routing tableswitch: maps each state to its bucket's entry label
@@ -3149,7 +3526,7 @@ public class DFASwitchBytecodeGenerator {
 
     Label[] stateToBucketLabels = new Label[stateCount];
     for (int id = 0; id < stateCount; id++) {
-      stateToBucketLabels[id] = bucketLabels[id / STATE_SPLIT_THRESHOLD];
+      stateToBucketLabels[id] = bucketLabels[bucketIndexFor(buckets, id)];
     }
 
     mv.visitVarInsn(ILOAD, stateVar);
@@ -3442,6 +3819,70 @@ public class DFASwitchBytecodeGenerator {
     for (NFA.AnchorType anchor : conditions) {
       emitSingleAnchorCheck(mv, anchor, posVar, failed, true);
     }
+  }
+
+  /**
+   * Emit (once per accept state, name-guarded) the String-flavored acceptance gate: {@code private
+   * boolean $ng_accA_<id>(String input, int pos)}. Checks the state's assertions (lookbehind AND
+   * lookahead — mirrors the inline blocks it replaces) followed by its acceptance anchor conditions
+   * at {@code pos}. Slot layout (this=0, input=1, pos=2) matches the emitters' hardcoded slot-1
+   * input access. Factored out of the per-iteration loop bodies so fat anchor families ($-anchor
+   * alternations with dozens of accept states) don't push matchesAtStart / matches past the JIT
+   * method-size limit (HugeMethodLimit) — the inline form measured 21.5 KB on the suppressed-kind
+   * hybrid dfa-half and ran interpreted.
+   */
+  private String emitStringAcceptHelper(DFA.DFAState acceptState) {
+    String name = "$ng_accA_" + acceptState.id;
+    if (!emittedBucketHelpers.add(name)) {
+      return name;
+    }
+    MethodVisitor hv =
+        activeCw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;I)Z", null, null);
+    hv.visitCode();
+    LocalVarAllocator alloc = new LocalVarAllocator(3);
+    Label failed = new Label();
+    for (AssertionCheck assertion : acceptState.assertionChecks) {
+      generateAssertionCheckAtCurrentPosition(hv, assertion, 2, failed, alloc);
+    }
+    if (!acceptState.acceptanceAnchorConditions.isEmpty()) {
+      emitAcceptanceAnchorChecks(hv, acceptState.acceptanceAnchorConditions, 2, failed);
+    }
+    hv.visitInsn(ICONST_1);
+    hv.visitInsn(IRETURN);
+    hv.visitLabel(failed);
+    hv.visitInsn(ICONST_0);
+    hv.visitInsn(IRETURN);
+    hv.visitMaxs(0, 0);
+    hv.visitEnd();
+    return name;
+  }
+
+  /**
+   * Emit (once per accept state, name-guarded) the CharSequence-flavored acceptance gate: {@code
+   * private boolean $ng_accC_<id>(CharSequence input, int pos)}. Anchor conditions only — the
+   * bounded-path sites it replaces do not re-check assertions (their transition-time guards already
+   * ran); emitting them here would change matching semantics, not just size.
+   */
+  private String emitCharSeqAcceptHelper(DFA.DFAState acceptState) {
+    String name = "$ng_accC_" + acceptState.id;
+    if (!emittedBucketHelpers.add(name)) {
+      return name;
+    }
+    MethodVisitor hv =
+        activeCw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/CharSequence;I)Z", null, null);
+    hv.visitCode();
+    Label failed = new Label();
+    if (!acceptState.acceptanceAnchorConditions.isEmpty()) {
+      emitAcceptanceAnchorChecksCharSequence(hv, acceptState.acceptanceAnchorConditions, 2, failed);
+    }
+    hv.visitInsn(ICONST_1);
+    hv.visitInsn(IRETURN);
+    hv.visitLabel(failed);
+    hv.visitInsn(ICONST_0);
+    hv.visitInsn(IRETURN);
+    hv.visitMaxs(0, 0);
+    hv.visitEnd();
+    return name;
   }
 
   /**

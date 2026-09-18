@@ -62,3 +62,23 @@ SAME span. Strictly worse than the engine it replaced.
 MatchSweepProbe2 (converged per-pattern matched sweep), HybridCensus (routing census),
 RealFindParityProbe, HybridSplit (hybrid half-cost split), FlipBisect (routing-flip bisector),
 WbMatrix/WbCheck2 (\b matrix), R1-R5 (routing probes). All need asm jars on classpath.
+
+## UPDATE (2026-09-17, 6ad33a0): PARTIAL RESOLUTION — unanchored admission landed
+Third measurement (per-pattern classification, C2-converged) split the 10b1a43 flip:
+- REGRESSORS (matched 110+63us local) = BOTH whole-line ^...$ patterns (suppressed-kind,
+  created-by). Their loss is in find() — the DFA_SWITCH matchesAtStart costs ~140ns/char
+  on alternation shapes vs ~25ns/char BitState — NOT just findMatchFrom.
+- All unanchored flips = flat/wins.
+Admission rule LANDED (6ad33a0): exclude requiresStartAnchor || hasWordBoundaryAnchor;
+admit unanchored. Box: matched 327→320-327us (flat), no-match 955us FLAT — the 10b1a43
+no-match win (951→671) came from the START-ANCHORED flips too (BitState seeds at every
+position and pays the ^-check-per-seed stack churn; the DFA tries pos 0 only). So
+start-anchored flips = matched-loss AND no-match-win — NET NEGATIVE on the box sweeps
+(10b1a43: matched +347, no-match -280). Rejected; the remaining blocker for them:
+DFA_SWITCH matchesAtStart codegen efficiency (140ns/char on these shapes — where the
+time goes is NOT yet profiled; HybridSplit/HybridSplit2/DumpGen harnesses ready in
+/tmp/prefilter, javap disassembly of the generated class in /tmp/prefilter/dfa-switch.asm).
+
+## ITEM B (lazy families) — attempted, rolled back
+-> dead-bitstate-lazy-fastconsume (own node now: implemented, all gates green,
+box JMH flat because the corpus lazy families don't pay lazy-consumption costs).

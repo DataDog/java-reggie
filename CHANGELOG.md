@@ -11,6 +11,16 @@
 - [x] Thread-safety stress test for `RuntimeCompiler` concurrent compile/match (`RuntimeCompilerTest.testConcurrentCompilation`, `DfaMatcherConcurrencyTest`)
 
 ### Changes since 0.3.0
+- perf: JIT-size DFA_SWITCH codegen (state-set bucketing by estimated bytecode size + per-accept anchor helpers) — generated methods over HotSpot's HugeMethodLimit ran INTERPRETED; target shape 21,477 → 2,386 bytecodes, dfa.find 120.6 → 4.7 ns/char
+- perf: hybrid re-admission for start-anchored PIKEVM/BITSTATE patterns + hybrid nfa-half mirrors the standalone engine choice (BitState for BITSTATE_CAPTURE originals)
+- perf: lazy-aware captureless DFA retry — lazy patterns hybridize via a lazy-aware NFA rebuild with central leftmost-first certification
+- perf: RE2 leftmost-first thread pruning in the subset construction (priority-aware captureless retries, anchor-free NFAs) — stack-frame family DFAs go 19 states/13 unresolved conflicts → 12/0 with JDK-identical spans
+- perf: priority-aware retry for alternation/optional-quantifier originals and hybrid admission for capture give-back RECURSIVE_DESCENT originals (PikeVM capture half)
+- perf: JIT method-size gate — generated classes whose largest method exceeds 8000 bytecodes decline to the JDK fallback when ALLOW_JDK_FALLBACK is set (strict compile keeps the native matcher; refusal set unchanged)
+- Benchmarked on the 513-pattern logs-backend corpus (workspace-jb, same-run rust/jdk controls): matched sweep 340 → 182 µs (1.26x faster than rust-regex, 3.5x faster than JDK), no-match sweep 943 → 637 µs (2.7x faster than rust, 52x faster than JDK); hybrid routing 28 → 102 patterns
+- fix: find() parity battery caught MULTI_GROUP_GREEDY word-boundary acceptance and RECURSIVE_DESCENT (.*)end no-match (both routed away from the diverging engines)
+- fix: hybrid capture extraction re-matches the DFA span as a standalone string — END anchors inside alternation branches now decline the hybrid (out-of-context $/\Z firing at the span boundary)
+- fix: hybrid admission mirrors the standalone FallbackPatternDetector guards
 - fix: route B-CGG-1 (negated CharClass in SPECIALIZED_CONCAT_GREEDY_GROUP) to JDK fallback — eliminates false negatives for patterns like `[1]([^b]{2})`
 - fix: route B-SQG-1 (inner quantifier min>1 in SPECIALIZED_QUANTIFIED_GROUP) to JDK fallback — eliminates false positives for patterns like `(c{2}){1,}`
 - fix: fuzz divergence budget 34 → 28 (B-CGG-1 + B-SQG-1 guards)

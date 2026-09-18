@@ -39,7 +39,19 @@ public class PatternAnalyzer {
   private static final int DFA_TABLE_ESTIMATED_BYTES_LIMIT = 1 << 20;
 
   private final RegexNode ast;
-  private final NFA nfa;
+
+  /**
+   * The NFA the strategy ladder builds DFAs from. Normally the standard (greedy-ordered) build; the
+   * lazy-aware captureless retry temporarily substitutes a lazy-aware rebuild — see {@link
+   * #analyzeAndRecommend(boolean, NFA)}. Not final for that swap; the analyzer instance is
+   * per-compile (RuntimeCompiler constructs one per pattern), so no cross-call state leaks.
+   */
+  private NFA nfa;
+
+  /**
+   * True during a lazy-aware captureless retry — see {@link #analyzeAndRecommend(boolean, NFA)}.
+   */
+  private boolean capturelessPriorityRetry;
 
   /** Accumulated guard trace entries for the most recent {@link #analyzeAndRecommend} call. */
   private final List<String> guardTrace = new ArrayList<>();
@@ -386,11 +398,126 @@ public class PatternAnalyzer {
    *     RuntimeCompiler for hybrid DFA+NFA approach)
    */
   public MatchingStrategyResult analyzeAndRecommend(boolean ignoreGroupCount) {
+    return analyzeAndRecommend(ignoreGroupCount, null);
+  }
+
+  /**
+   * Captureless re-analysis with an optional lazy-aware NFA. When {@code lazyAwareNfa} is non-null
+   * (RuntimeCompiler's hybrid-DFA retry for {@code lazyNfa} patterns), the NFA used for all subset
+   * constructions is swapped for the lazy-aware rebuild and the lazy-quantifier gates (the {@code
+   * lazyQuantifierPikeVm} early return and the lazy term of the recursive-descent flag) are
+   * bypassed so the strategy ladder can attempt a DFA. Soundness is the ladder's own priority
+   * machinery: a DFA state where a lower-priority consuming thread can override the accept
+   * (hasPriorityConflictTransition without acceptIsPriorityCut) declines the DFA, so the result
+   * stays dfa == null and the caller falls back to the pure lazy NFA engine. With the standard
+   * greedy-ordered NFA a lazy pattern's subset DFA would compute the longest end — wrong for find()
+   * — which is why the retry must bring its own NFA.
+   */
+  public MatchingStrategyResult analyzeAndRecommend(boolean ignoreGroupCount, NFA lazyAwareNfa) {
+    if (lazyAwareNfa == null) {
+      return analyzeAndRecommendInternal(ignoreGroupCount);
+    }
+    return analyzeAndRecommendPriorityAware(lazyAwareNfa);
+  }
+
+  /**
+   * Captureless re-analysis in priority-aware retry mode (see {@link #capturelessPriorityRetry}).
+   * {@code lazyAwareNfa} non-null (lazy originals: the standard NFA normalizes lazy to greedy)
+   * swaps the analysis NFA for a lazy-aware rebuild; null keeps the standard NFA (alternation /
+   * optional-quantifier priority originals — greedy ordering already encodes their preference).
+   */
+  public MatchingStrategyResult analyzeAndRecommendPriorityAware(NFA lazyAwareNfa) {
+    NFA prevNfa = this.nfa;
+    boolean prevRetry = this.capturelessPriorityRetry;
+    if (lazyAwareNfa != null) {
+      this.nfa = lazyAwareNfa;
+    }
+    this.capturelessPriorityRetry = true;
+    try {
+      return analyzeAndRecommendInternal(true);
+    } finally {
+      this.nfa = prevNfa;
+      this.capturelessPriorityRetry = prevRetry;
+    }
+  }
+
+  private MatchingStrategyResult analyzeAndRecommendInternal(boolean ignoreGroupCount) {
     guardTrace.clear();
     MatchingStrategyResult result = doAnalyze(ignoreGroupCount);
     result.guardTrace.addAll(guardTrace);
     result.hasAtomicGroups = hasAtomicGroups(ast);
+    if (capturelessPriorityRetry
+        && result.dfa != null
+        && (lazyCapturelessDfaIsUnsound(result.dfa)
+            || hasStringEndAnchorInAlternation(ast)
+            || hasBareEndAnchorLeadingInAlternation(ast))) {
+      // Priority-aware captureless retry declined. Either the DFA's accepting states are not
+      // certified leftmost-first (see lazyCapturelessDfaIsUnsound), or an END-class anchor sits
+      // inside an alternation branch: the hybrid extracts captures by re-matching the DFA's
+      // span as a STANDALONE string (HybridMatcher.findMatchFrom -> nfaMatcher.match(span)),
+      // and a $/\Z in a branch fires at the span boundary in that re-match where it would not
+      // in-context — proven by fuzz seed 48879 on 0*(-\Z|[1b_-b])|.[--aac]+ (group 1 span
+      // [-1,-1) vs [1,2)). Decline; the caller falls back to the pure NFA engine.
+      addTrace("priorityCapturelessDfaDeclined", true);
+      MatchingStrategyResult declined =
+          new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE, null, null, false, result.requiredLiterals);
+      declined.lazyNfa = true;
+      return declined;
+    }
     return routeBitState(result);
+  }
+
+  /**
+   * Leftmost-first certification for the lazy-aware captureless DFA attempt (see {@link
+   * #analyzeAndRecommend(boolean, NFA)}). The generated longest-match executors return Perl's
+   * leftmost-first end only when:
+   *
+   * <ol>
+   *   <li>No accepting state has an unresolved priority conflict (hasPriorityConflictTransition
+   *       without acceptIsPriorityCut — a lower-priority consuming thread can override the accept;
+   *       {@link #hasUnresolvedAcceptingTransitionState}).
+   *   <li>No END-class anchor can race a consuming thread: END/STRING_END fire at end of input or
+   *       before the final \n, END_MULTILINE at every \n, so a race requires an outgoing transition
+   *       that can consume '\n'; STRING_END_ABSOLUTE fires only at end of input where nothing
+   *       remains to consume and can never race. This refines the conservative
+   *       any-outgoing-transition rule in {@link #dfaHasPriorityConflictTransition} to the actual
+   *       interference.
+   *   <li>A diluted mid-pattern START anchor (hasStartAnchor/hasStringStartAnchor without
+   *       requiresStartAnchor) can't widen acceptance: the subset construction drops the position-0
+   *       condition, so any accepting state with outgoing transitions would accept where the NFA
+   *       would not (mirrors {@link #dfaHasPriorityConflictTransition}).
+   * </ol>
+   */
+  private boolean lazyCapturelessDfaIsUnsound(DFA dfa) {
+    if (hasUnresolvedAcceptingTransitionState(dfa)) {
+      return true;
+    }
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.accepting || state.transitions.isEmpty()) continue;
+      boolean endClass = false;
+      for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+        if (a == NFA.AnchorType.END
+            || a == NFA.AnchorType.STRING_END
+            || a == NFA.AnchorType.END_MULTILINE) {
+          endClass = true;
+          break;
+        }
+      }
+      if (endClass) {
+        for (CharSet chars : state.transitions.keySet()) {
+          if (chars.contains('\n')) return true;
+        }
+      }
+    }
+    if (nfa != null
+        && !nfa.requiresStartAnchor()
+        && (nfa.hasStartAnchor() || nfa.hasStringStartAnchor())) {
+      for (DFA.DFAState state : dfa.getAllStates()) {
+        if (state.accepting && !state.transitions.isEmpty()) return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -546,24 +673,35 @@ public class PatternAnalyzer {
         && !hasConditionals(ast)
         && !hasBranchReset(ast)
         && !FallbackPatternDetector.hasCapturingGroupWithNullableBodyInRepeatableQuantifier(ast)) {
-      addTrace("lazyQuantifierPikeVm", true);
-      MatchingStrategyResult lazyResult =
-          new MatchingStrategyResult(
-              MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
-      lazyResult.lazyNfa = true;
-      return lazyResult;
+      // Lazy-aware captureless retry (analyzeAndRecommend(true, lazyNfa)): fall through to the
+      // strategy ladder so the subset construction can attempt a priority-correct DFA from the
+      // lazy-aware NFA. The ladder's own priority machinery (acceptIsPriorityCut /
+      // hasPriorityConflictTransition, see dfaHasPriorityConflictTransition and
+      // hasUnresolvedAcceptingTransitionState) certifies leftmost-first semantics or declines
+      // with dfa == null, in which case the caller falls back to the pure lazy NFA engine — the
+      // same result this early return would have produced, minus the redundant rebuild.
+      if (!capturelessPriorityRetry) {
+        addTrace("lazyQuantifierPikeVm", true);
+        MatchingStrategyResult lazyResult =
+            new MatchingStrategyResult(
+                MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+        lazyResult.lazyNfa = true;
+        return lazyResult;
+      }
+      addTrace("lazyCapturelessDfaAttempt", true);
     }
 
     // Lazy patterns that did not qualify above (e.g. capturing group with nullable body under a
     // repeated quantifier) fall through here. The hasNonGreedyQuantifiers condition in
     // requiresRecursiveDescentFlag routes them to RECURSIVE_DESCENT, which then falls back to
-    // JDK via the lazy-quantifier guard in FallbackPatternDetector.
+    // JDK via the lazy-quantifier guard in FallbackPatternDetector. Exception: the lazy-aware
+    // captureless retry — the ladder below owns the (priority-checked) DFA attempt there.
     boolean requiresRecursiveDescentFlag =
         hasSubroutines(ast)
             || hasConditionals(ast)
             || hasBranchReset(ast)
             || hasQuantifiedBackrefs
-            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs);
+            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs && !capturelessPriorityRetry);
     addTrace("requiresRecursiveDescent", requiresRecursiveDescentFlag);
     if (requiresRecursiveDescentFlag) {
       return new MatchingStrategyResult(
@@ -709,6 +847,7 @@ public class PatternAnalyzer {
         // Passing it lets the ladder's sub-DFA gates decline (SubsetConstructor throws), so the
         // gate never preempts the indexOf tier on the (?=.*foo)(?=.*bar).*baz shapes - the
         // gate's per-candidate char-loop scan loses to String.indexOf there.
+        constructor.setLeftmostFirst(capturelessPriorityRetry);
         boolean literalTierCandidate = false;
         List<LiteralLookaheadInfo> literalTierLookaheads = extractLiteralLookaheads();
         if (literalTierLookaheads != null && literalTierLookaheads.size() >= 2) {
@@ -1147,16 +1286,24 @@ public class PatternAnalyzer {
       // Try DFA with Tagged group tracking
       try {
         SubsetConstructor constructor = new SubsetConstructor();
+        // Leftmost-first pruning for the lazy-aware captureless retry (boolean/find semantics;
+        // the hybrid dfa-half never reads this DFA's tags).
+        constructor.setLeftmostFirst(capturelessPriorityRetry);
         // Build DFA with tag computation enabled for Tagged DFA
         DFA dfa = constructor.buildDFA(nfa, true);
 
         if (hasMisplacedStartAnchorInAlternation(ast)
             && !dfaHasAcceptingStateWithTransitions(dfa)) {
           // Anchor condition diluted in DFA (misplaced anchor in alternation or
-          // string-end anchor in alternation). OPTIMIZED_NFA handles anchors as
-          // zero-width NFA assertions and gives correct JDK-compatible results.
+          // string-end anchor in alternation). PIKEVM evaluates anchors as zero-width
+          // assertions at every position and gives correct JDK-compatible results.
+          // (Was OPTIMIZED_NFA, which miscompiles a mid-alternation consumer-then-^ into a
+          // global start anchor — measured, fuzz seed 777: "-^.|(?:1-)" on "011--b-" (and
+          // even plain "1-") returned no-match where JDK matches [2,4) via the second
+          // alternation branch; PikeVM/BitState evaluate checkAnchor per position and are
+          // unaffected — verified by NfaCaret probe over the shape family.)
           return new MatchingStrategyResult(
-              MatchingStrategy.OPTIMIZED_NFA,
+              MatchingStrategy.PIKEVM_CAPTURE,
               null,
               null,
               false,
@@ -1235,9 +1382,13 @@ public class PatternAnalyzer {
         // capturing groups route to PIKEVM_CAPTURE (Pike VM, leftmost-first, correct group spans).
         // The nullable-branch exclusion was removed: ThompsonBuilder now wraps {0,n} fragments
         // in a skip-entry state so the PikeVM correctly handles greedy quantifiers with zero-rep.
+        // Priority-aware captureless retry: bypassed — the flagged capture divergence is a
+        // TAGGED-DFA concern; the captureless dfa-half only serves booleans/find and the
+        // certification gate (lazyCapturelessDfaIsUnsound) owns leftmost-first soundness.
         if (quantifiedAltWithGroupBug
             && !hasAnchorInNfa(nfa)
-            && !hasQuantifiedCapturingGroup(ast)) {
+            && !hasQuantifiedCapturingGroup(ast)
+            && !capturelessPriorityRetry) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1248,7 +1399,11 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         // DFA-condition sub-case and remaining patterns: JDK fallback.
-        if ((containsAlternation(ast) || containsOptionalQuantifier(ast))
+        // Priority-aware captureless retry: bypassed — the alternation/optional priority these
+        // blocks protect against is exactly what leftmost-first pruning expresses; the
+        // certification gate declines any DFA it cannot make sound.
+        if (!capturelessPriorityRetry
+            && (containsAlternation(ast) || containsOptionalQuantifier(ast))
             && (quantifiedAltWithGroupBug
                 || (containsAnyQuantifier(ast)
                     ? dfaHasAcceptingStateWithTransitions(dfa)
@@ -1698,6 +1853,7 @@ public class PatternAnalyzer {
     MatchingStrategyResult result;
     try {
       SubsetConstructor constructor = new SubsetConstructor();
+      constructor.setLeftmostFirst(capturelessPriorityRetry);
       DFA dfa = constructor.buildDFA(nfa);
 
       // A START-class anchor placed after a consumer inside an alternation branch makes that branch
@@ -1707,10 +1863,12 @@ public class PatternAnalyzer {
       // priority conflict); otherwise fall through to the priority-conflict handling below.
       if (hasMisplacedStartAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
         // Anchor condition diluted in DFA (misplaced anchor in alternation or
-        // string-end anchor in alternation). OPTIMIZED_NFA handles anchors as
-        // zero-width NFA assertions and gives correct JDK-compatible results.
+        // string-end anchor in alternation). PIKEVM evaluates anchors as zero-width
+        // assertions at every position and gives correct JDK-compatible results. (Was
+        // OPTIMIZED_NFA — it miscompiles mid-alternation consumer-then-^ into a global
+        // start anchor; see the capturing-path sibling above for the measured divergence.)
         return new MatchingStrategyResult(
-            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+            MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
       boolean b3bFlag =
           (hasStringEndAnchorInAlternation(ast) || hasBareEndAnchorLeadingInAlternation(ast))
@@ -1747,7 +1905,7 @@ public class PatternAnalyzer {
       }
       addTrace(
           "containsAlternation && dfaHasAcceptingStateWithTransitions", altWithAcceptingTransFlag);
-      if (altWithAcceptingTransFlag) {
+      if (altWithAcceptingTransFlag && !capturelessPriorityRetry) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
@@ -3478,6 +3636,7 @@ public class PatternAnalyzer {
 
         // Attempt DFA construction
         SubsetConstructor constructor = new SubsetConstructor();
+        constructor.setLeftmostFirst(capturelessPriorityRetry);
         DFA lookaheadDFA = constructor.buildDFA(subNFA);
 
         // Success! Store the DFA mapping
