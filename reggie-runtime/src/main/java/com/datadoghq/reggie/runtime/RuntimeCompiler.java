@@ -710,6 +710,9 @@ public class RuntimeCompiler {
     if ((flags & ReggieFlags.DOTALL) != 0) {
       normalized.append("(?s)");
     }
+    if ((flags & ReggieFlags.UNICODE_CHARACTER_CLASS) != 0) {
+      normalized.append("(?U)");
+    }
     normalized.append(
         (flags & ReggieFlags.LITERAL) != 0 ? java.util.regex.Pattern.quote(pattern) : pattern);
     return normalized.toString();
@@ -2116,6 +2119,7 @@ public class RuntimeCompiler {
   private static int countGroups(String pattern) {
     int count = 0;
     boolean escaped = false;
+    boolean inClass = false; // inside a [...] character class: '(' is a literal, never a group
     for (int i = 0; i < pattern.length(); i++) {
       char c = pattern.charAt(i);
       if (c == '\\' && i + 1 < pattern.length() && pattern.charAt(i + 1) == 'Q') {
@@ -2135,6 +2139,15 @@ public class RuntimeCompiler {
       }
       if (c == '\\') {
         escaped = true;
+      } else if (inClass) {
+        // A ']' closes the class (a ']' as the very first class character is a literal
+        // per java.util.regex; for group counting that distinction cannot change the count,
+        // so treating any unescaped ']' as the closer is safe).
+        if (c == ']') {
+          inClass = false;
+        }
+      } else if (c == '[') {
+        inClass = true;
       } else if (c == '(' && i + 1 < pattern.length()) {
         // Check if it's a capturing group
         // Named groups like (?<name>...) and (?'name'...) ARE capturing groups

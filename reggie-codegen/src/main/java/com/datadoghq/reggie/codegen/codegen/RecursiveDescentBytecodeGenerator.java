@@ -1898,7 +1898,7 @@ public class RecursiveDescentBytecodeGenerator {
     @Override
     public Void visitLiteral(LiteralNode node) {
       // Check for epsilon (empty match) - represented as '\0'
-      if (node.ch == 0) {
+      if (node instanceof EpsilonNode) {
         // Epsilon: match without consuming any input
         // Just return current position
         mv.visitVarInsn(ILOAD, 2); // pos
@@ -3663,14 +3663,14 @@ public class RecursiveDescentBytecodeGenerator {
         List<RegexNode> mandatoryChildren =
             innerConcat.children.subList(0, innerConcat.children.size() - 1);
         if (mandatoryChildren.isEmpty()) {
-          mandatoryChild = new LiteralNode((char) 0); // epsilon
+          mandatoryChild = EpsilonNode.INSTANCE; // epsilon
         } else if (mandatoryChildren.size() == 1) {
           mandatoryChild = mandatoryChildren.get(0);
         } else {
           mandatoryChild = new ConcatNode(new ArrayList<>(mandatoryChildren));
         }
       } else {
-        mandatoryChild = new LiteralNode((char) 0); // epsilon
+        mandatoryChild = EpsilonNode.INSTANCE; // epsilon
       }
 
       generateParserMethod(cw, className, backtrackGroup);

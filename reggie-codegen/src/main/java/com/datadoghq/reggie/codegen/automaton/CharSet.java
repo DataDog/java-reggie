@@ -169,6 +169,9 @@ public final class CharSet {
               new Range(' ', ' '),
               new Range('\t', '\t'),
               new Range('\n', '\n'),
+              // \x0B (vertical tab): java.util.regex \s is [ \t\n\x0B\f\r]; it was
+              // missing here, so \s diverged from the JDK on vertical-tab input.
+              new Range('\u000B', '\u000B'),
               new Range('\r', '\r'),
               new Range('\f', '\f')));
 
@@ -220,6 +223,76 @@ public final class CharSet {
 
   /** \p{L} ∪ \p{N} — letters or numbers */
   public static final CharSet UNICODE_ALNUM = UNICODE_L.union(UNICODE_N);
+
+  // =====================================================================================
+  // JDK UNICODE_CHARACTER_CLASS ((?U)) definitions — verified differentially against
+  // java.util.regex.Pattern.compile(pat, UNICODE_CHARACTER_CLASS) over the whole BMP
+  // (see UnicodeCharacterClassTest). These differ from the plain Unicode properties in a
+  // few JDK-specific ways (e.g. \s excludes U+001C-001F, \w includes Join_Control).
+  // =====================================================================================
+
+  /** (?U) \d and \p{Digit}: exactly Nd (Character.isDigit). */
+  public static final CharSet UNICODE_CLASSES_DIGIT = UNICODE_Nd;
+
+  /**
+   * (?U) \s and \p{Space}: {@code Character.isSpaceChar} ∪ [\t-\r] ∪ {NEL U+0085} — the JDK's
+   * set, which (unlike the Unicode White_Space property) excludes the information separators
+   * U+001C-001F.
+   */
+  public static final CharSet UNICODE_CLASSES_SPACE =
+      buildPredicateRanges(
+          c -> Character.isSpaceChar(c) || (c >= '\t' && c <= '\r') || c == 0x85);
+
+  /**
+   * (?U) \w: UTS#18 word = Alphabetic ∪ Nd ∪ M (Mn+Mc+Me) ∪ Pc ∪ Join_Control (U+200C/U+200D).
+   */
+  public static final CharSet UNICODE_CLASSES_WORD =
+      buildPredicateRanges(
+          c ->
+              Character.isAlphabetic(c)
+                  || Character.isDigit(c)
+                  || Character.getType(c) == Character.NON_SPACING_MARK
+                  || Character.getType(c) == Character.COMBINING_SPACING_MARK
+                  || Character.getType(c) == Character.ENCLOSING_MARK
+                  || Character.getType(c) == Character.CONNECTOR_PUNCTUATION
+                  || c == 0x200C
+                  || c == 0x200D);
+
+  /** (?U) \p{Alpha}: Character.isAlphabetic. */
+  public static final CharSet UNICODE_CLASSES_ALPHA =
+      buildPredicateRanges(Character::isAlphabetic);
+
+  /** (?U) \p{Alnum}: Alphabetic ∪ Nd. */
+  public static final CharSet UNICODE_CLASSES_ALNUM =
+      buildPredicateRanges(c -> Character.isAlphabetic(c) || Character.isDigit(c));
+
+  /** (?U) \p{Lower}: Character.isLowerCase. */
+  public static final CharSet UNICODE_CLASSES_LOWER =
+      buildPredicateRanges(Character::isLowerCase);
+
+  /** (?U) \p{Upper}: Character.isUpperCase. */
+  public static final CharSet UNICODE_CLASSES_UPPER =
+      buildPredicateRanges(Character::isUpperCase);
+
+  /** (?U) \p{Cntrl}: Cc (Character.CONTROL). */
+  public static final CharSet UNICODE_CLASSES_CNTRL =
+      buildUnicodeCategoryRanges(Character.CONTROL);
+
+  /** (?U) \p{Punct}: Pd, Ps, Pe, Pc, Po, Pi, Pf. */
+  public static final CharSet UNICODE_CLASSES_PUNCT =
+      buildUnicodeCategoryRanges(
+          Character.DASH_PUNCTUATION,
+          Character.START_PUNCTUATION,
+          Character.END_PUNCTUATION,
+          Character.CONNECTOR_PUNCTUATION,
+          Character.OTHER_PUNCTUATION,
+          Character.INITIAL_QUOTE_PUNCTUATION,
+          Character.FINAL_QUOTE_PUNCTUATION);
+
+  /** (?U) \p{Blank}: Zs ∪ {\t}. */
+  public static final CharSet UNICODE_CLASSES_BLANK =
+      buildPredicateRanges(
+          c -> Character.getType(c) == Character.SPACE_SEPARATOR || c == '\t');
 
   /** \p{Zs} — space separators */
   public static final CharSet UNICODE_Zs = buildUnicodeCategoryRanges(Character.SPACE_SEPARATOR);
@@ -381,7 +454,61 @@ public final class CharSet {
     map.put("space", WHITESPACE.union(of('')));
     map.put("word", WORD);
 
+    // java.util.regex POSIX-style property classes (\p{Alnum}, \p{Alpha}, ...). Unlike the PCRE
+    // aliases above, the JDK forms are ASCII-only unless UNICODE_CHARACTER_CLASS is set (inline
+    // (?U) / ReggieFlags.UNICODE_CHARACTER_CLASS — see ofUnicodeCategory(name, true) for the
+    // Unicode variants). IsAlphabetic/IsLetter/IsDigit are the JDK "IsXxx" Unicode-property
+    // forms and stay Unicode-aware.
+    map.put("Alnum", ALNUM);
+    map.put("Alpha", ALPHA);
+    map.put("Digit", DIGIT);
+    map.put("Lower", LOWER);
+    map.put("Upper", UPPER);
+    map.put("Blank", of(' ').union(of('\t')));
+    map.put("XDigit", DIGIT.union(range('a', 'f')).union(range('A', 'F')));
+    map.put("ASCII", range((char) 0, (char) 0x7F));
+    map.put(
+        "Cntrl",
+        fromRanges(List.of(new Range((char) 0, (char) 0x1F), new Range((char) 0x7F, (char) 0x7F))));
+    map.put(
+        "Space",
+        fromRanges(
+            List.of(
+                new Range('\t', '\r'), // \t \n \x0B \f \r
+                new Range(' ', ' '))));
+    map.put("Graph", range((char) 0x21, (char) 0x7E));
+    map.put("Print", range((char) 0x20, (char) 0x7E));
+    map.put(
+        "Punct",
+        fromRanges(
+            List.of(
+                new Range((char) 0x21, (char) 0x2F),
+                new Range((char) 0x3A, (char) 0x40),
+                new Range((char) 0x5B, (char) 0x60),
+                new Range((char) 0x7B, (char) 0x7E))));
+    map.put("IsAlphabetic", buildPredicateRanges(Character::isAlphabetic));
+    map.put("IsLetter", UNICODE_L);
+    map.put("IsDigit", UNICODE_Nd);
+
     return Collections.unmodifiableMap(map);
+  }
+
+  /** Builds a CharSet from a code-point predicate over the BMP (0..0xFFFF), as a range list. */
+  private static CharSet buildPredicateRanges(java.util.function.IntPredicate predicate) {
+    List<Range> result = new ArrayList<>();
+    int start = -1;
+    for (int c = 0; c <= 0xFFFF; c++) {
+      if (predicate.test(c)) {
+        if (start < 0) start = c;
+      } else if (start >= 0) {
+        result.add(new Range((char) start, (char) (c - 1)));
+        start = -1;
+      }
+    }
+    if (start >= 0) {
+      result.add(new Range((char) start, (char) 0xFFFF));
+    }
+    return result.isEmpty() ? empty() : new CharSet(List.copyOf(result));
   }
 
   /**
@@ -392,6 +519,49 @@ public final class CharSet {
    */
   public static CharSet ofUnicodeCategory(String category) {
     return UNICODE_CATEGORIES.get(category);
+  }
+
+  /**
+   * U-aware lookup for JDK POSIX-style property classes: with {@code unicodeClasses} (inline
+   * {@code (?U)} / ReggieFlags.UNICODE_CHARACTER_CLASS active), the JDK POSIX forms switch to
+   * their Unicode definitions ({@code \p{Alpha}} → isAlphabetic, {@code \p{Punct}} → the P*
+   * categories, ...), all verified differentially against the JDK. {@code \p{ASCII}} stays
+   * ASCII under the flag. {@code \p{Graph}}, {@code \p{Print}} and {@code \p{XDigit}} have
+   * JDK Unicode definitions that are not reproduced here — they are rejected loudly by the
+   * parser when the flag is active so consumers fall back instead of silently diverging.
+   */
+  public static CharSet ofUnicodeCategory(String category, boolean unicodeClasses) {
+    if (!unicodeClasses) {
+      return UNICODE_CATEGORIES.get(category);
+    }
+    switch (category) {
+      case "Alnum":
+        return UNICODE_CLASSES_ALNUM;
+      case "Alpha":
+        return UNICODE_CLASSES_ALPHA;
+      case "Digit":
+        return UNICODE_CLASSES_DIGIT;
+      case "Lower":
+        return UNICODE_CLASSES_LOWER;
+      case "Upper":
+        return UNICODE_CLASSES_UPPER;
+      case "Space":
+        return UNICODE_CLASSES_SPACE;
+      case "Blank":
+        return UNICODE_CLASSES_BLANK;
+      case "Cntrl":
+        return UNICODE_CLASSES_CNTRL;
+      case "Punct":
+        return UNICODE_CLASSES_PUNCT;
+      case "ASCII":
+        return UNICODE_CATEGORIES.get(category); // ASCII stays ASCII under the flag
+      case "Graph":
+      case "Print":
+      case "XDigit":
+        return null; // loud reject: JDK Unicode definition not reproduced (see javadoc)
+      default:
+        return UNICODE_CATEGORIES.get(category); // IsXxx/PCRE names are Unicode-aware already
+    }
   }
 
   private static CharSet buildUnicodeCategoryRanges(int... javaCharTypes) {

@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.codegen.analysis;
 
 import com.datadoghq.reggie.codegen.ast.AlternationNode;
+import com.datadoghq.reggie.codegen.ast.EpsilonNode;
 import com.datadoghq.reggie.codegen.ast.AnchorNode;
 import com.datadoghq.reggie.codegen.ast.AssertionNode;
 import com.datadoghq.reggie.codegen.ast.BackreferenceNode;
@@ -334,7 +335,7 @@ public final class PatternCategorizer {
     }
 
     private static boolean isEmptyAlternative(RegexNode node) {
-      if (node instanceof LiteralNode literal) return literal.ch == 0;
+      if (node instanceof LiteralNode literal) return literal instanceof EpsilonNode;
       return node instanceof ConcatNode concat && concat.children.isEmpty();
     }
 
