@@ -51,8 +51,9 @@ public class LaurikariHybridDisjointnessTest {
   void anchorOnlyGroupWithPosixQuantifiedGroup_compilesToBitStateMatcherNotHybrid() {
     ReggieMatcher m = RuntimeCompiler.compile("(^)(a)+b");
     assertTrue(
-        m instanceof BitStateMatcher,
-        "(^)(a)+b must compile to BitStateMatcher, not " + m.getClass().getSimpleName());
+        EngineRouting.unwrap(m) instanceof BitStateMatcher,
+        "(^)(a)+b must compile to BitStateMatcher, not "
+            + EngineRouting.engineClass(m).getSimpleName());
   }
 
   @Test

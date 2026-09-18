@@ -53,7 +53,14 @@
 
 - ev-rust-engine-bench-standardized | Rust regex = 4th benchmark lane (60db93c): JNI shim (regex-automata, marshal in timed path) + RustRegexEngine adapter + buildRustEngine task + MatchOperationBenchmark rust lanes + RealCorpusScanBenchmark (513 real logs-backend patterns, MATCH/NOMATCH split; reproduces smoke exactly 491/10/12) — the acceptance gate for prefilter roadmap R1/R2 | [benchmark, rust-regex, jni, real-corpus, 4th-lane, 60db93c]
 
+- ev-r1-prefilter-landed | 38eeb62: R1 SHIPPED — sound AST literal extraction (2 audit-caught extractor bugs fixed) + universal PrefilteringMatcher rejection at every compile() return; workspace-jb measured: no-match sweep 33.9ms -> 3.7ms (9.1x), reggie/rust 10.6x -> 1.17x, matched unchanged, jdk/rust controls flat; audit 287/513 literals, 63% of no-match pairs instant-reject, 0 divergences | [r1, prefilter, required-literal, workspace-jb, 9x, 38eeb62]
+
+- ev-r2-rd-landed | b5cf63e: R2 first half — recursive-descent .*-prefix find() made linear (anchor-start for fully-^-anchored spines + fast give-back via capture-free iteration-position arrays, slot-collision bug caught by span battery); box: no-match 3.73->2.66ms (R1+R2 total 12.7x), reggie 1.19x AHEAD of rust on no-match, blended corpus fastest overall (~16x jdk); R2b = HybridMatcher lane (~40% of residual) | [r2, recursive-descent, give-back, anchor-start, workspace-jb, b5cf63e]
+
+- ev-r2b-landed | 97ec426: R2b = ci-facts + R1b 1-char required facts; same-day box series no-match 15,571 -> 2,475 -> 2,070 -> 983us (15.8x; reggie 1.79x ahead of rust no-match), matched flat 338us; hybrid no-match collapsed 582->58us; methodology: 10k+ invocations needed for C2, box drift ~1.85x between days — same-run controls mandatory | [r2b, r1b, ci-facts, 97ec426]
+
 ## Questions
+- q-lazydfa-findfrom-leftmost | OPEN, LATENT (no corpus pattern routes LAZY_DFA): LazyDFACache.findFrom restarts at death+1 without re-walking — a later viable start can begin inside a dead attempt's span (ab|b on xaab) — fix before routing anything through it | [lazydfa, leftmost, soundness]
 - q-2pct-fallback-policy | ANSWERED: no silent JDK fallback needed — current services refuse/drop at every site (400/skip/disable/drop); reggie default maps 1:1; statics = per-pattern explicit decisions; dynamics never fall back | [fallback-policy, jdk-fallback, redos, refuse-by-default, degradation, migration-policy, dynamic-patterns]
 - q-prod-readiness | REVISED after user corrections: refuse-by-default code-verified + full 3-engine bench harness in-repo (9 classes) + attested reggie>both; remaining = fleet JVM census + service-corpus refuse-rate + optional current recorded bench run | [readiness, production, adoption, jdk-regex, re2j, backend-services, verdict]
 - q-l2-disposition | ANSWERED: DROPPED (2026-09-16); work preserved in reports/ | [disposition, decision, scope]

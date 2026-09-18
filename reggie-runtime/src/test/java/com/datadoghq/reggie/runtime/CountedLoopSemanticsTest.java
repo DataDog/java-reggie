@@ -26,10 +26,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * Counted-loop lowering (hyp-counted-loop-lowering): bounded quantifiers x{n,m} whose unrolled tail
- * would exceed the builder budget lower to one body copy plus a counter marker, executed by the
- * counter-aware backtracking matcher. Small quantifiers keep the exact unrolled representation and
- * their existing strategies. These tests pin:
+ * Counted-loop lowering: bounded quantifiers x{n,m} whose unrolled tail would exceed the builder
+ * budget lower to one body copy plus a counter marker, executed by the counter-aware backtracking
+ * matcher. Small quantifiers keep the exact unrolled representation and their existing strategies.
+ * These tests pin:
  *
  * <ol>
  *   <li>semantics parity with java.util.regex on both paths (min/max enforcement, greedy and lazy
@@ -49,7 +49,7 @@ class CountedLoopSemanticsTest {
    * Full parity: matches(), find(), and findMatch() spans + every group span vs java.util.regex.
    */
   private static void assertParity(String pattern, String... inputs) {
-    com.datadoghq.reggie.ReggieMatcher rm = Reggie.compile(pattern);
+    ReggieMatcher rm = Reggie.compile(pattern);
     Pattern jp = Pattern.compile(pattern);
     for (String input : inputs) {
       assertEquals(
@@ -69,6 +69,15 @@ class CountedLoopSemanticsTest {
         }
       }
     }
+  }
+
+  /** Strips the R1 PrefilteringMatcher wrapper so routing assertions see the engine class. */
+  private static Class<?> engineClass(Object matcher) {
+    Object m = matcher;
+    while (m instanceof PrefilteringMatcher p) {
+      m = p.delegate();
+    }
+    return m.getClass();
   }
 
   @Test
@@ -92,7 +101,7 @@ class CountedLoopSemanticsTest {
     // (first-alternative wins on ties) and last-iteration capture spans must match JDK exactly.
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("((?:ab|abc)){0,2000}").getClass().getSimpleName());
+        engineClass(Reggie.compile("((?:ab|abc)){0,2000}")).getSimpleName());
     assertParity(
         "((?:ab|abc)){0,2000}",
         "",
@@ -110,7 +119,8 @@ class CountedLoopSemanticsTest {
   void forcedCountedLazyParity() {
     // Lazy bounded quantifier: stop branch preferred; first find() must be the shortest.
     assertEquals(
-        "BackrefBacktrackMatcher", Reggie.compile("(?:(ab)){1,2000}?").getClass().getSimpleName());
+        "BackrefBacktrackMatcher",
+        engineClass(Reggie.compile("(?:(ab)){1,2000}?")).getSimpleName());
     assertParity(
         "(?:(ab)){1,2000}?", "ab", "abab", "ababab", "ab".repeat(2000), "ab".repeat(2001), "a");
   }
@@ -121,7 +131,7 @@ class CountedLoopSemanticsTest {
     // min=100 unrolled copies + counted tail (2900 x ~7 > budget).
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("(?:abcde){100,3000}").getClass().getSimpleName());
+        engineClass(Reggie.compile("(?:abcde){100,3000}")).getSimpleName());
     assertParity(
         "(?:abcde){100,3000}",
         "abcde".repeat(99), // below min: REJECT
@@ -137,7 +147,7 @@ class CountedLoopSemanticsTest {
     // both lower: two markers in one NFA, two counter slots on one frame.
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("(?:x(?:yy){0,3000}){0,500}").getClass().getSimpleName());
+        engineClass(Reggie.compile("(?:x(?:yy){0,3000}){0,500}")).getSimpleName());
     assertParity(
         "(?:x(?:yy){0,3000}){0,500}",
         "",
@@ -156,7 +166,7 @@ class CountedLoopSemanticsTest {
     // Counted marker + backref states in one DFS: memo key carries both ref spans and counters.
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("(?:(ab)\\1){0,2000}").getClass().getSimpleName());
+        engineClass(Reggie.compile("(?:(ab)\\1){0,2000}")).getSimpleName());
     assertParity(
         "(?:(ab)\\1){0,2000}",
         "",
@@ -178,7 +188,7 @@ class CountedLoopSemanticsTest {
             + "(?:\\.(?:0|[1-9]\\d{0,256}|\\d{0,256}[a-zA-Z-][0-9a-zA-Z-]{0,256})){0,256}))?"
             + "(?:\\+(?<buildmetadata>[0-9a-zA-Z-]{0,40}(?:\\.[0-9a-zA-Z-]{0,40}){0,256}))?$";
     long t0 = System.nanoTime();
-    com.datadoghq.reggie.ReggieMatcher m = Reggie.compile(semver);
+    ReggieMatcher m = Reggie.compile(semver);
     long compileMs = (System.nanoTime() - t0) / 1_000_000L;
     assertTrue(compileMs < 500, "semver compile must be milliseconds, took " + compileMs + "ms");
     // Parity, including the counter-enforced rejections JDK also makes.
@@ -202,8 +212,57 @@ class CountedLoopSemanticsTest {
     // (?:a|aa){0,3000}b against a^2999 requires exploring exponentially many decompositions
     // before failing — java.util.regex burns unbounded time on exactly this shape. The step
     // budget must convert it into a fast, bounded exception.
-    com.datadoghq.reggie.ReggieMatcher m = Reggie.compile("(?:a|aa){0,3000}b");
-    assertEquals("BackrefBacktrackMatcher", m.getClass().getSimpleName());
-    assertThrows(MatchBudgetExceededException.class, () -> m.matches("a".repeat(2999)));
+    ReggieMatcher m = Reggie.compile("(?:a|aa){0,3000}b");
+    assertEquals("BackrefBacktrackMatcher", engineClass(m).getSimpleName());
+    // The R1 prefilter rejects this input ('b' absent) before the engine runs, so the budget
+    // guard is asserted on the unwrapped engine — the public contract (fast false) also holds.
+    com.datadoghq.reggie.runtime.ReggieMatcher engine =
+        EngineRouting.unwrap((com.datadoghq.reggie.runtime.ReggieMatcher) m);
+    assertThrows(MatchBudgetExceededException.class, () -> engine.matches("a".repeat(2999)));
+  }
+
+  /**
+   * Review regression: a monster bounded quantifier combined with a lookaround must NOT take the
+   * counted-loop route — the counter-aware backtracker treats assertion states as plain epsilon and
+   * matched where the JDK rejects ((?=b)a{0,6000} matched "a" as [0,1)). Strict compile refuses;
+   * fallback delegates and keeps JDK parity.
+   */
+  @Test
+  void countedLoopWithLookaroundRefusedOrDelegated() {
+    assertThrows(
+        com.datadoghq.reggie.UnsupportedPatternException.class,
+        () -> Reggie.compile("(?=b)a{0,6000}"));
+    ReggieMatcher m = com.datadoghq.reggie.Reggie.compileAllowingFallback("(?=b)a{0,6000}");
+    Pattern jp = Pattern.compile("(?=b)a{0,6000}");
+    for (String input : new String[] {"a", "b", "ab", "ba", ""}) {
+      java.util.regex.Matcher jm = jp.matcher(input);
+      String jdk = jm.find() ? "[" + jm.start() + "," + jm.end() + ")" : "null";
+      MatchResult r = m.findMatch(input);
+      String reg = r == null ? "null" : "[" + r.start() + "," + r.end() + ")";
+      assertEquals(jdk, reg, "findMatch on " + input);
+      assertEquals(jp.matcher(input).matches(), m.matches(input), "matches on " + input);
+    }
+  }
+
+  /**
+   * Review regression: nested counted loops must reset the inner counter per outer iteration — the
+   * shared counter vector used to cap the inner loop across ALL outer iterations, so the second
+   * section matched partially ([0,12002) vs the JDK's [0,12004)) after the first inner loop ran to
+   * its maximum.
+   */
+  @Test
+  @Timeout(60)
+  void nestedLoopCountersResetPerOuterIteration() {
+    String pattern = "(?:x(?:yy){0,6000}){0,500}";
+    String input = "x" + "yy".repeat(6000) + "xyy";
+    ReggieMatcher rm = Reggie.compile(pattern);
+    Pattern jp = Pattern.compile(pattern);
+    for (String in : new String[] {"x", "xyy", "xyyxyy", input}) {
+      Matcher jm = jp.matcher(in);
+      String jdk = jm.find() ? "[" + jm.start() + "," + jm.end() + ")" : "null";
+      MatchResult r = rm.findMatch(in);
+      String reg = r == null ? "null" : "[" + r.start() + "," + r.end() + ")";
+      assertEquals(jdk, reg, "len=" + in.length());
+    }
   }
 }

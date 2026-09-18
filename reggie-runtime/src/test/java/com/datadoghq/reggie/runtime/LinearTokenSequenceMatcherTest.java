@@ -599,22 +599,24 @@ class LinearTokenSequenceMatcherTest {
 
   private static void assertDelegateType(ReggieMatcher matcher, Class<?> expectedType)
       throws Exception {
-    if (matcher.getClass() == expectedType) {
+    ReggieMatcher engine = EngineRouting.unwrap(matcher); // strips the R1 prefilter wrapper
+    if (engine.getClass() == expectedType) {
       return;
     }
-    Field delegate = matcher.getClass().getDeclaredField("delegate");
+    Field delegate = engine.getClass().getDeclaredField("delegate");
     delegate.setAccessible(true);
-    assertEquals(expectedType, delegate.get(matcher).getClass());
+    assertEquals(expectedType, delegate.get(engine).getClass());
   }
 
   private static void assertNotLinearTokenSequenceDelegate(ReggieMatcher matcher) throws Exception {
     if (matcher.getClass() == LinearTokenSequenceMatcher.class) {
       throw new AssertionError("matcher unexpectedly used LinearTokenSequenceMatcher");
     }
+    ReggieMatcher engine = EngineRouting.unwrap(matcher);
     try {
-      Field delegate = matcher.getClass().getDeclaredField("delegate");
+      Field delegate = engine.getClass().getDeclaredField("delegate");
       delegate.setAccessible(true);
-      assertNotEquals(LinearTokenSequenceMatcher.class, delegate.get(matcher).getClass());
+      assertNotEquals(LinearTokenSequenceMatcher.class, delegate.get(engine).getClass());
     } catch (NoSuchFieldException ignored) {
       // A non-wrapper matcher cannot be an LTS matcher because the direct type was checked above.
     }

@@ -302,7 +302,7 @@ public class FallbackDetectorBugFixTest {
   void nonCapturingAlternation_usesNativePath(String pat) throws Exception {
     ReggieMatcher m = Reggie.compile(pat);
     assertFalse(
-        m instanceof JavaRegexFallbackMatcher,
+        m.isJdkFallback(),
         "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
   }
 
@@ -348,7 +348,7 @@ public class FallbackDetectorBugFixTest {
   void capturingAltNonAmbiguous_usesNativePath(String pat) throws Exception {
     ReggieMatcher m = Reggie.compile(pat);
     assertFalse(
-        m instanceof JavaRegexFallbackMatcher,
+        m.isJdkFallback(),
         "Expected native matcher for: " + pat + " but got: " + m.getClass().getSimpleName());
     // BITSTATE_CAPTURE substitutes in for PIKEVM_CAPTURE where eligible (see
     // PatternAnalyzer#isBitStateEligible), and DETERMINISTIC_CHAIN_BYTECODE substitutes
@@ -420,7 +420,7 @@ public class FallbackDetectorBugFixTest {
   @MethodSource("anchorDiluted")
   void anchorDiluted_usesNativePathAndAgreesWithJdk(String pat, String in) throws Exception {
     ReggieMatcher reggie = Reggie.compile(pat, WITH_FALLBACK);
-    assertFalse(reggie instanceof JavaRegexFallbackMatcher, "Expected native matcher for: " + pat);
+    assertFalse(reggie.isJdkFallback(), "Expected native matcher for: " + pat);
     Pattern jdk = Pattern.compile(pat);
     String ctx = "pat=" + pat + " in=" + in;
     assertEquals(jdk.matcher(in).matches(), reggie.matches(in), "matches() " + ctx);
@@ -455,7 +455,7 @@ public class FallbackDetectorBugFixTest {
   void nonCapturingAltWithQuantifier_usesNativePath(String pat) throws Exception {
     ReggieMatcher m = Reggie.compile(pat);
     assertFalse(
-        m instanceof JavaRegexFallbackMatcher,
+        m.isJdkFallback(),
         "Expected native matcher for: " + pat + " got: " + m.getClass().getSimpleName());
   }
 
@@ -495,8 +495,7 @@ public class FallbackDetectorBugFixTest {
   void b2AnchorInQuantifierCapturing_usesJdkFallback(String pat) throws Exception {
     ReggieMatcher m = Reggie.compile(pat, WITH_FALLBACK);
     assertTrue(
-        m instanceof JavaRegexFallbackMatcher,
-        "B2 anchor-in-quantifier-capturing should fall back to JDK: " + pat);
+        m.isJdkFallback(), "B2 anchor-in-quantifier-capturing should fall back to JDK: " + pat);
   }
 
   static Stream<Arguments> anchorDilutedResidual() {

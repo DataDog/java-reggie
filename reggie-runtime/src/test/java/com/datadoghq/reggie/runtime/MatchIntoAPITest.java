@@ -74,10 +74,13 @@ class MatchIntoAPITest {
 
   @Test
   void dfaSwitchMatcherOverridesMatchInto() throws Exception {
-    // Complex body (nested quantifier) keeps this on the DFA-switch path rather than PIKEVM.
-    ReggieMatcher matcher = Reggie.compile("([a-z]+|[0-9]|[A-Z]|_){10}x", WITH_FALLBACK);
+    // Bounded quantifiers keep this on the DFA-switch path rather than PIKEVM. (The original
+    // pattern ([a-z]+|[0-9]|[A-Z]|_){10}x now re-routes to PikeVM: its alternation priority
+    // conflicts with DFA longest-match — see AlternationPriorityPikeVmRouteTest.)
+    ReggieMatcher matcher = Reggie.compile("([a-z]{3,30}~[a-z]+)", WITH_FALLBACK);
     int[] starts = new int[2];
     int[] ends = new int[2];
+    matcher = EngineRouting.unwrap(matcher);
 
     assertNotEquals(
         ReggieMatcher.class,
@@ -85,9 +88,9 @@ class MatchIntoAPITest {
             .getClass()
             .getMethod("matchInto", String.class, int[].class, int[].class)
             .getDeclaringClass());
-    assertTrue(matcher.matchInto("abcdefghi1x", starts, ends));
+    assertTrue(matcher.matchInto("abc~def", starts, ends));
 
-    MatchResult match = matcher.match("abcdefghi1x");
+    MatchResult match = matcher.match("abc~def");
     assertArrayEquals(new int[] {match.start(0), match.start(1)}, starts);
     assertArrayEquals(new int[] {match.end(0), match.end(1)}, ends);
   }
@@ -116,6 +119,7 @@ class MatchIntoAPITest {
     ReggieMatcher matcher = Reggie.compile("(a(?R)?b)");
     int[] starts = new int[2];
     int[] ends = new int[2];
+    matcher = EngineRouting.unwrap(matcher);
 
     assertNotEquals(
         ReggieMatcher.class,
