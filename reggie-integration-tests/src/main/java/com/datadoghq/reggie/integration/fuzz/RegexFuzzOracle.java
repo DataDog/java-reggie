@@ -17,7 +17,6 @@ package com.datadoghq.reggie.integration.fuzz;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
-import com.datadoghq.reggie.runtime.JavaRegexFallbackMatcher;
 import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import java.util.ArrayList;

@@ -2533,98 +2533,11 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitJumpInsn(IF_ICMPGE, endOfInput);
 
-    // Special check for \Z (STRING_END): accepting and at a final terminator position — record and
-    // return.
-    // Handles lone '\n' (CRLF guard), lone '\r', '\r\n' pair, NEL, LS, PS.
-    if (state.accepting && hasStringEndAnchor) {
-      Label notStringEnd = new Label();
-      Label checkEndMinus2U = new Label();
-      Label acceptU = new Label();
-
-      // pos == length-1?
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, checkEndMinus2U);
-
-      // charAt(pos) == '\n'?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      Label notNewlineU = new Label();
-      mv.visitJumpInsn(IF_ICMPNE, notNewlineU);
-      // '\n': CRLF guard — lone \n only
-      Label loneNewlineU = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitJumpInsn(IFEQ, loneNewlineU); // pos==0 → lone \n
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPEQ, notStringEnd); // CRLF tail → skip
-      mv.visitLabel(loneNewlineU);
-      mv.visitJumpInsn(GOTO, acceptU);
-      mv.visitLabel(notNewlineU);
-      // '\r'?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      // NEL?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u0085');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      // LS?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u2028');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      // PS?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u2029');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      mv.visitJumpInsn(GOTO, notStringEnd);
-
-      // pos == length-2? '\r\n' pair
-      mv.visitLabel(checkEndMinus2U);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-      mv.visitInsn(ICONST_2);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(IADD);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-
-      mv.visitLabel(acceptU);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ISTORE, longestMatchEndVar);
-      mv.visitVarInsn(ILOAD, longestMatchEndVar);
-      mv.visitInsn(IRETURN);
-
-      mv.visitLabel(notStringEnd);
-    }
+    // \Z-before-terminator acceptance needs no special case here: the accepting-state record
+    // above is gated by emitAcceptanceAnchorChecks, which evaluates $/\Z (and \z) at the
+    // current position — including the before-final-terminator positions — and falls through
+    // to the consuming transitions so greedy matching still prefers the longest viable end
+    // (e.g. [^a]*$\Z on "x\n" must consume the '\n' and end at 2, not stop at 1).
 
     // char ch = input.charAt(pos);
     int chVar = allocator.allocate();
