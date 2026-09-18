@@ -34,7 +34,7 @@ class DFAStateBudgetFallbackTest {
   void largePureDFAUsesTableBackend() {
     // x(?:[a-z][0-9]){150}: the leading literal 'x' prevents COUNTING_GLUSHKOV interception
     // (extractSingleQuantifier returns null for concat), so this routes to DFA_TABLE (302 states).
-    ReggieMatcher matcher = Reggie.compile("x(?:[a-z][0-9]){150}");
+    ReggieMatcher matcher = EngineRouting.unwrap(Reggie.compile("x(?:[a-z][0-9]){150}"));
     String input = "x" + "a1".repeat(150);
 
     assertDoesNotThrow(() -> matcher.getClass().getDeclaredField("DFA_TRANSITIONS"));

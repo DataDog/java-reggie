@@ -4272,6 +4272,9 @@ public class NFABytecodeGenerator {
 
     mv.visitLabel(checksPass);
 
+    // R1 rejection prefilter: if the required literal does not occur at/after the start offset,
+    // no match can exist (sound for anchored, backref, lookahead and hybrid patterns alike).
+
     if (perConfigEligible()) {
       generatePerConfigBody(mv, allocator, PerConfigMode.FIND_FROM, className);
       mv.visitMaxs(0, 0);

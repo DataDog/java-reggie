@@ -58,6 +58,15 @@ class DeadlineCoverageHolesTest {
    * fallback matcher (correct lookahead semantics), without it an UnsupportedPatternException —
    * never an OutOfMemoryError, never a multi-GB, multi-second size/frame computation.
    */
+
+  /** Strips the R1 PrefilteringMatcher wrapper so routing assertions see the engine class. */
+  private static ReggieMatcher unwrap(ReggieMatcher m) {
+    while (m instanceof PrefilteringMatcher p) {
+      m = p.delegate();
+    }
+    return m;
+  }
+
   @Test
   @Timeout(60)
   void thousandLookaheadCascadeIsBoundedNotFatal() {
@@ -73,7 +82,7 @@ class DeadlineCoverageHolesTest {
     assertTrue(
         elapsedMs < 30_000,
         "1000-lookahead compile must be bounded by the emission budget, took " + elapsedMs + "ms");
-    assertEquals("JavaRegexFallbackMatcher", m.getClass().getSimpleName());
+    assertTrue(unwrap(m) instanceof JavaRegexFallbackMatcher);
     // The fallback must be semantically correct, not just cheap to reach.
     StringBuilder input = new StringBuilder();
     for (int i = 0; i < 1000; i++) {
@@ -110,7 +119,7 @@ class DeadlineCoverageHolesTest {
         "6000-group alternation compile must be deadline-bounded (was 22s before the fix), took "
             + elapsedMs
             + "ms");
-    String kind = m.getClass().getSimpleName();
+    String kind = unwrap(m).getClass().getSimpleName();
     assertTrue(
         kind.equals("BitStateMatcher")
             || kind.equals("PikeVMMatcher")

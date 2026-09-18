@@ -71,6 +71,15 @@ class CountedLoopSemanticsTest {
     }
   }
 
+  /** Strips the R1 PrefilteringMatcher wrapper so routing assertions see the engine class. */
+  private static Class<?> engineClass(Object matcher) {
+    Object m = matcher;
+    while (m instanceof PrefilteringMatcher p) {
+      m = p.delegate();
+    }
+    return m.getClass();
+  }
+
   @Test
   void smallQuantifiersKeepUnrolledSemantics() {
     // Tails far under the 5k-state budget: exact unrolled representation, existing strategies.
@@ -92,7 +101,7 @@ class CountedLoopSemanticsTest {
     // (first-alternative wins on ties) and last-iteration capture spans must match JDK exactly.
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("((?:ab|abc)){0,2000}").getClass().getSimpleName());
+        engineClass(Reggie.compile("((?:ab|abc)){0,2000}")).getSimpleName());
     assertParity(
         "((?:ab|abc)){0,2000}",
         "",
@@ -110,7 +119,8 @@ class CountedLoopSemanticsTest {
   void forcedCountedLazyParity() {
     // Lazy bounded quantifier: stop branch preferred; first find() must be the shortest.
     assertEquals(
-        "BackrefBacktrackMatcher", Reggie.compile("(?:(ab)){1,2000}?").getClass().getSimpleName());
+        "BackrefBacktrackMatcher",
+        engineClass(Reggie.compile("(?:(ab)){1,2000}?")).getSimpleName());
     assertParity(
         "(?:(ab)){1,2000}?", "ab", "abab", "ababab", "ab".repeat(2000), "ab".repeat(2001), "a");
   }
@@ -121,7 +131,7 @@ class CountedLoopSemanticsTest {
     // min=100 unrolled copies + counted tail (2900 x ~7 > budget).
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("(?:abcde){100,3000}").getClass().getSimpleName());
+        engineClass(Reggie.compile("(?:abcde){100,3000}")).getSimpleName());
     assertParity(
         "(?:abcde){100,3000}",
         "abcde".repeat(99), // below min: REJECT
@@ -137,7 +147,7 @@ class CountedLoopSemanticsTest {
     // both lower: two markers in one NFA, two counter slots on one frame.
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("(?:x(?:yy){0,3000}){0,500}").getClass().getSimpleName());
+        engineClass(Reggie.compile("(?:x(?:yy){0,3000}){0,500}")).getSimpleName());
     assertParity(
         "(?:x(?:yy){0,3000}){0,500}",
         "",
@@ -156,7 +166,7 @@ class CountedLoopSemanticsTest {
     // Counted marker + backref states in one DFS: memo key carries both ref spans and counters.
     assertEquals(
         "BackrefBacktrackMatcher",
-        Reggie.compile("(?:(ab)\\1){0,2000}").getClass().getSimpleName());
+        engineClass(Reggie.compile("(?:(ab)\\1){0,2000}")).getSimpleName());
     assertParity(
         "(?:(ab)\\1){0,2000}",
         "",
@@ -203,7 +213,11 @@ class CountedLoopSemanticsTest {
     // before failing — java.util.regex burns unbounded time on exactly this shape. The step
     // budget must convert it into a fast, bounded exception.
     com.datadoghq.reggie.ReggieMatcher m = Reggie.compile("(?:a|aa){0,3000}b");
-    assertEquals("BackrefBacktrackMatcher", m.getClass().getSimpleName());
-    assertThrows(MatchBudgetExceededException.class, () -> m.matches("a".repeat(2999)));
+    assertEquals("BackrefBacktrackMatcher", engineClass(m).getSimpleName());
+    // The R1 prefilter rejects this input ('b' absent) before the engine runs, so the budget
+    // guard is asserted on the unwrapped engine — the public contract (fast false) also holds.
+    com.datadoghq.reggie.runtime.ReggieMatcher engine =
+        EngineRouting.unwrap((com.datadoghq.reggie.runtime.ReggieMatcher) m);
+    assertThrows(MatchBudgetExceededException.class, () -> engine.matches("a".repeat(2999)));
   }
 }

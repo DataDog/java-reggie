@@ -37,6 +37,7 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
+import com.datadoghq.reggie.codegen.analysis.RequiredLiteralAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.SpecializedOptionalGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
@@ -347,14 +348,15 @@ public class RuntimeCompiler {
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
     PikeVMEntry pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
     if (pikevmEntry != null) {
-      return reportPattern(pikevmEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(pikevmEntry.newMatcher(pattern), pattern), reportedPattern);
     }
 
     // Fast path: BITSTATE_CAPTURE patterns are in BITSTATE_NFA_CACHE — return a fresh matcher.
     // BitStateMatcher carries mutable per-call buffers and must not be shared across calls.
     BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
     if (bitStateEntry != null) {
-      return reportPattern(bitStateEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(
+          wrapCompiled(bitStateEntry.newMatcher(pattern), pattern), reportedPattern);
     }
 
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
@@ -362,7 +364,7 @@ public class RuntimeCompiler {
     // threads or calls; we cache a factory and instantiate per-call instead.
     NfaMatcherFactory factory = NFA_CLASS_CACHE.get(cacheKey);
     if (factory != null) {
-      return reportPattern(factory.newInstance(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(factory.newInstance(pattern), pattern), reportedPattern);
     }
 
     // Slow path: compile and cache the result.
@@ -370,12 +372,18 @@ public class RuntimeCompiler {
     // the L1 entry is immediately removed so that subsequent calls hit the fast path above.
     // The reported pattern is set inside the mapping function so the instance published to
     // PATTERN_CACHE is already fully initialized and is never mutated again after publication.
+    // Wrap at insert: L1-cached instances are shared across compile() calls (thread-safe engine
+    // strategies), so the prefilter wrapper must be part of the cached instance to preserve the
+    // same-instance contract. NFA-backed patterns never stay in L1 (removed below) and keep the
+    // fresh-instance-per-call contract with a fresh wrapper per call.
     ReggieMatcher compiled =
         PATTERN_CACHE.computeIfAbsent(
             cacheKey,
             k ->
                 reportPattern(
-                    compileInternal(pattern, options, k, linearTokenSequenceAdmission.get()),
+                    wrapCompiled(
+                        compileInternal(pattern, options, k, linearTokenSequenceAdmission.get()),
+                        pattern),
                     reportedPattern));
 
     // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
@@ -383,7 +391,7 @@ public class RuntimeCompiler {
     pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
     if (pikevmEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(pikevmEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(pikevmEntry.newMatcher(pattern), pattern), reportedPattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as BITSTATE_CAPTURE,
@@ -391,7 +399,8 @@ public class RuntimeCompiler {
     bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
     if (bitStateEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(bitStateEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(
+          wrapCompiled(bitStateEntry.newMatcher(pattern), pattern), reportedPattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
@@ -399,9 +408,95 @@ public class RuntimeCompiler {
     factory = NFA_CLASS_CACHE.get(cacheKey);
     if (factory != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(factory.newInstance(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(factory.newInstance(pattern), pattern), reportedPattern);
     }
     return compiled;
+  }
+
+  /**
+   * R1 (hyp-unanchored-find-prefilter): required-literal per pattern string, computed once. Null
+   * when no usable (>=2 char) literal exists. Guards the rejection prefilter wrap so the fast paths
+   * pay only one map hit.
+   */
+  private record PrefilterFact(String literal, boolean asciiCaseInsensitive) {}
+
+  private static final java.util.concurrent.ConcurrentHashMap<String, PrefilterFact> LITERAL_CACHE =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private static PrefilterFact computeRequiredLiteral(String pattern) {
+    try {
+      // Leading global (?i): the parser bakes case folding into char classes, so cased literals
+      // never surface as AST facts. Extract from the pattern with the leading (?i) stripped and
+      // scan the fact ASCII case-insensitively instead. Java (?i) without (?u) folds ASCII only,
+      // so the scan is exact (not merely conservative) as long as every cased fact char is ASCII —
+      // guarded below. Scoped (?i:...) groups inside survive the strip and stay folded in the AST,
+      // so their chars simply contribute no fact letters; the case-insensitive scan is the
+      // permissive side for any chars that were case-sensitive in the stripped parse.
+      if (isCaseInsensitive(pattern)) {
+        // Only strip the leading (?i) the flag check validated (never a mid-pattern one).
+        String head = pattern.startsWith("^") ? "^" : "";
+        String rest = pattern.substring(head.length());
+        if (rest.startsWith("(?i)")) {
+          String strippedPattern = head + rest.substring(4);
+          try {
+            String fact =
+                RequiredLiteralAnalyzer.longestLiteral(
+                    new RegexParser().parse(strippedPattern), false);
+            if (fact != null && fact.length() >= 2 && allCasedCharsAscii(fact)) {
+              return new PrefilterFact(fact, true);
+            }
+            // R1b: no multi-char ci fact — fall back to a 1-char fact scanned case-insensitively
+            String ciChar =
+                RequiredLiteralAnalyzer.requiredChar(
+                    new RegexParser().parse(strippedPattern), false);
+            if (ciChar != null && allCasedCharsAscii(ciChar)) {
+              return new PrefilterFact(ciChar, true);
+            }
+          } catch (Exception ignored) {
+            // stripped parse failed: fall through to the original AST path
+          }
+        }
+      }
+      RegexNode ast = new RegexParser().parse(pattern);
+      boolean ci = isCaseInsensitive(pattern);
+      String fact = RequiredLiteralAnalyzer.longestLiteral(ast, ci);
+      if (fact != null) {
+        return new PrefilterFact(fact, false);
+      }
+      // R1b: 1-char required fact as last resort (absence falsifies every match).
+      String ch = RequiredLiteralAnalyzer.requiredChar(ast, ci);
+      return ch == null ? null : new PrefilterFact(ch, false);
+    } catch (Exception e) {
+      return null; // refused pattern: other paths will surface the error
+    }
+  }
+
+  /** True when every cased letter in the fact is ASCII (a-z, A-Z). */
+  private static boolean allCasedCharsAscii(String fact) {
+    for (int i = 0; i < fact.length(); i++) {
+      char c = fact.charAt(i);
+      if (Character.isLetter(c) && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Applies the R1 rejection prefilter to every compiled matcher, regardless of engine strategy
+   * (DFA, NFA, PikeVM, BitState, hybrid, recursive descent, ...). Wrapping is a pure input
+   * rejection: it can only return no-match earlier, never a different match.
+   */
+  private static ReggieMatcher wrapCompiled(ReggieMatcher matcher, String pattern) {
+    if (matcher == null) {
+      return null;
+    }
+    PrefilterFact fact =
+        LITERAL_CACHE.computeIfAbsent(pattern, RuntimeCompiler::computeRequiredLiteral);
+    if (fact == null) {
+      return matcher;
+    }
+    return PrefilteringMatcher.wrap(matcher, fact.literal(), fact.asciiCaseInsensitive());
   }
 
   private static ReggieMatcher reportPattern(ReggieMatcher matcher, String pattern) {
@@ -523,9 +618,10 @@ public class RuntimeCompiler {
         throw new IllegalStateException(
             "Cache key '" + key + "' is already mapped to a different pattern");
       }
+      // Pre-wrapped at insert; same-instance contract preserved for repeat calls.
       return existing;
     }
-    return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern));
+    return PATTERN_CACHE.computeIfAbsent(key, k -> wrapCompiled(compileInternal(pattern), pattern));
   }
 
   /** Compile with explicit cache key and runtime compilation options. */
@@ -536,9 +632,11 @@ public class RuntimeCompiler {
         throw new IllegalStateException(
             "Cache key '" + key + "' is already mapped to a different pattern");
       }
+      // Pre-wrapped at insert; same-instance contract preserved for repeat calls.
       return existing;
     }
-    return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern, options));
+    return PATTERN_CACHE.computeIfAbsent(
+        key, k -> wrapCompiled(compileInternal(pattern, options), pattern));
   }
 
   /**
@@ -819,11 +917,75 @@ public class RuntimeCompiler {
     if (!options.has(ReggieOption.ALLOW_JDK_FALLBACK)) {
       throw new UnsupportedPatternException(reason);
     }
+    noteRouting("JAVA_FALLBACK: " + reason);
     ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, reason);
     if (nameMap != null && !nameMap.isEmpty()) {
       fallback.setNameToIndex(nameMap);
     }
     return fallback;
+  }
+
+  // ---- routing introspection (debug tooling; see BytecodeDebugger) ----
+
+  /**
+   * Last routing decision made by this thread's compile pipeline: set at every decision point
+   * (fallback, hybrid, PikeVM, BitState, counted-loop, linear-token-sequence, generated bytecode)
+   * so tooling can report the ACTUAL routing rather than an isolated re-analysis, which diverges
+   * from the real pipeline (guards, admissions, caches).
+   */
+  static final ThreadLocal<String> ROUTING_NOTE = new ThreadLocal<>();
+
+  /** Debug API (BytecodeDebugger, tests): result of a fresh full-pipeline compile. */
+  public static final class RoutingInfo {
+    public final String routing; // strategy/decision note from the pipeline
+    public final String engineChain; // matcher class chain, wrapper -> engine
+    public final ReggieMatcher matcher;
+
+    RoutingInfo(String routing, String engineChain, ReggieMatcher matcher) {
+      this.routing = routing;
+      this.engineChain = engineChain;
+      this.matcher = matcher;
+    }
+  }
+
+  /**
+   * Runs the real compile pipeline for {@code pattern} on a cleared cache and reports the actual
+   * routing decision, the engine class chain, and the compiled matcher. Debug tooling API: it
+   * CLEARS ALL COMPILATION CACHES first (fresh-compile behavior) and compiles with {@code
+   * allowJdkFallback} so the routing note carries the fallback reason instead of throwing.
+   */
+  public static RoutingInfo describeRouting(String pattern) {
+    clearCache();
+    ROUTING_NOTE.remove();
+    ReggieMatcher m = compile(pattern, ReggieOptions.builder().allowJdkFallback().build());
+    String note = ROUTING_NOTE.get();
+    if (note == null) {
+      note = "unknown (pipeline did not record a decision)";
+    }
+    return new RoutingInfo(note, engineChainOf(m), m);
+  }
+
+  /** Unwraps PrefilteringMatcher/NameEnrichingMatcher layers to describe the engine chain. */
+  private static String engineChainOf(ReggieMatcher m) {
+    StringBuilder sb = new StringBuilder(m.getClass().getSimpleName());
+    java.lang.reflect.Field delegate;
+    try {
+      while (true) {
+        java.lang.reflect.Field f = m.getClass().getDeclaredField("delegate");
+        f.setAccessible(true);
+        m = (ReggieMatcher) f.get(m);
+        sb.append(" -> ").append(m.getClass().getSimpleName());
+      }
+    } catch (NoSuchFieldException done) {
+      // leaf engine reached
+    } catch (ReflectiveOperationException e) {
+      sb.append(" -> (unwrap failed: ").append(e).append(')');
+    }
+    return sb.toString();
+  }
+
+  static void noteRouting(String note) {
+    ROUTING_NOTE.set(note);
   }
 
   /**
@@ -849,6 +1011,7 @@ public class RuntimeCompiler {
         ReggieMatcher linearTokenSequenceMatcher =
             tryCompileLinearTokenSequence(pattern, ast, nameMap, linearTokenSequenceAdmission);
         if (linearTokenSequenceMatcher != null) {
+          noteRouting("LINEAR_TOKEN_SEQUENCE (named-only admission)");
           return linearTokenSequenceMatcher;
         }
       }
@@ -879,6 +1042,7 @@ public class RuntimeCompiler {
       if (nfa != null && nfa.hasCountedLoops()) {
         NFA countedNfa = new ThompsonBuilder(true).build(ast, groupCount);
         COUNTED_LOOP_NFA_CACHE.putIfAbsent(cacheKey, new CountedLoopEntry(countedNfa, nameMap));
+        noteRouting("COUNTED_LOOP_BACKTRACK (lowered bounded quantifiers)");
         return COUNTED_LOOP_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -910,6 +1074,21 @@ public class RuntimeCompiler {
             pattern, "anchor condition diluted in DFA construction", nameMap, options);
       }
       if (result.alternationPriorityConflict) {
+        // Re-route to PikeVM instead of refusing: the conflict only means the DFA (longest-match)
+        // cannot express Java's first-alternative preference, which PikeVM expresses by
+        // construction and still runs in linear time (find-refusal-set-parity: tableName /
+        // requirements.txt / semver pre-post-dev rules measured 0 JDK-oracle findings on PikeVM).
+        // FallbackPatternDetector stays the safety net: shapes where PikeVM itself diverges
+        // (nullable-nullable captures, anchors in quantifiers) keep the original refusal.
+        if (nfa != null
+            && FallbackPatternDetector.needsFallback(
+                    ast, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+                == null) {
+          NFA pikeVmNfa = new ThompsonBuilder(true).build(ast, groupCount);
+          PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(pikeVmNfa, nameMap));
+          noteRouting("PIKEVM_CAPTURE (alternation-priority conflict re-route from DFA strategy)");
+          return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+        }
         return fallbackOrThrow(
             pattern,
             "alternation priority conflict: DFA longest-match vs NFA first-alternative",
@@ -965,6 +1144,7 @@ public class RuntimeCompiler {
             ReggieMatcher hybrid =
                 compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);
             hybrid.setNameToIndex(nameMap);
+            noteRouting("HYBRID_DFA (DFA boolean + NFA spans)");
             return hybrid;
           }
           // Hybrid DFA anchor-diluted or no DFA: fall through to NFA-only routing below.
@@ -984,6 +1164,7 @@ public class RuntimeCompiler {
         }
         NFA pikeVmNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
         PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(pikeVmNfa, nameMap));
+        noteRouting("PIKEVM_CAPTURE");
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -999,6 +1180,7 @@ public class RuntimeCompiler {
         NFA bitStateNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
         BITSTATE_NFA_CACHE.putIfAbsent(
             cacheKey, new BitStateEntry(bitStateNfa, nameMap, result.usePosixLastMatch));
+        noteRouting("BITSTATE_CAPTURE");
         return BITSTATE_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -2140,6 +2322,9 @@ public class RuntimeCompiler {
 
     cw.visitEnd();
     byte[] bytecode = cw.toByteArray();
+
+    // Record the actual routing decision for debug tooling (see describeRouting).
+    noteRouting(result.strategy.name());
 
     // Debug: Trace bytecode if system property is set
     String tracePattern = System.getProperty("reggie.debug.trace");

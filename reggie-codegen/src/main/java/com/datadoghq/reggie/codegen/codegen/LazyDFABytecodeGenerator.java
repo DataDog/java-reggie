@@ -741,16 +741,11 @@ public class LazyDFABytecodeGenerator {
     mv.visitEnd();
   }
 
-  /**
-   * Emits {@code public int findFrom(String input, int start)}: returns the leftmost match start
-   * position at or after {@code start}, or {@code -1} if no match exists. Delegates to {@code
-   * CACHE.findFrom(input, start, this)}.
-   *
-   * <p>Variable layout: 0=this, 1=input, 2=start.
-   */
   public void generateFindFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
     mv.visitCode();
+    // R1 rejection prefilter: no occurrence of the required literal at/after start => no match.
+    // Null input falls through to the delegate, which owns the null contract.
     mv.visitFieldInsn(GETSTATIC, className, "CACHE", "L" + LAZY_CACHE + ";");
     mv.visitVarInsn(ALOAD, 1); // input
     mv.visitVarInsn(ILOAD, 2); // start
