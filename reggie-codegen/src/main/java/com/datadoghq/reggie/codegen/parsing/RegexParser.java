@@ -567,9 +567,11 @@ public class RegexParser {
       case 'W':
         return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_WORD : CharSet.WORD, true);
       case 's':
-        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, false);
+        return new CharClassNode(
+            unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, false);
       case 'S':
-        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, true);
+        return new CharClassNode(
+            unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, true);
       case 'b':
       case 'B':
         if (unicode) {

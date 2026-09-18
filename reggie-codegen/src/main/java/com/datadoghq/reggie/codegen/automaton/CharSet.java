@@ -235,17 +235,14 @@ public final class CharSet {
   public static final CharSet UNICODE_CLASSES_DIGIT = UNICODE_Nd;
 
   /**
-   * (?U) \s and \p{Space}: {@code Character.isSpaceChar} ∪ [\t-\r] ∪ {NEL U+0085} — the JDK's
-   * set, which (unlike the Unicode White_Space property) excludes the information separators
+   * (?U) \s and \p{Space}: {@code Character.isSpaceChar} ∪ [\t-\r] ∪ {NEL U+0085} — the JDK's set,
+   * which (unlike the Unicode White_Space property) excludes the information separators
    * U+001C-001F.
    */
   public static final CharSet UNICODE_CLASSES_SPACE =
-      buildPredicateRanges(
-          c -> Character.isSpaceChar(c) || (c >= '\t' && c <= '\r') || c == 0x85);
+      buildPredicateRanges(c -> Character.isSpaceChar(c) || (c >= '\t' && c <= '\r') || c == 0x85);
 
-  /**
-   * (?U) \w: UTS#18 word = Alphabetic ∪ Nd ∪ M (Mn+Mc+Me) ∪ Pc ∪ Join_Control (U+200C/U+200D).
-   */
+  /** (?U) \w: UTS#18 word = Alphabetic ∪ Nd ∪ M (Mn+Mc+Me) ∪ Pc ∪ Join_Control (U+200C/U+200D). */
   public static final CharSet UNICODE_CLASSES_WORD =
       buildPredicateRanges(
           c ->
@@ -259,24 +256,20 @@ public final class CharSet {
                   || c == 0x200D);
 
   /** (?U) \p{Alpha}: Character.isAlphabetic. */
-  public static final CharSet UNICODE_CLASSES_ALPHA =
-      buildPredicateRanges(Character::isAlphabetic);
+  public static final CharSet UNICODE_CLASSES_ALPHA = buildPredicateRanges(Character::isAlphabetic);
 
   /** (?U) \p{Alnum}: Alphabetic ∪ Nd. */
   public static final CharSet UNICODE_CLASSES_ALNUM =
       buildPredicateRanges(c -> Character.isAlphabetic(c) || Character.isDigit(c));
 
   /** (?U) \p{Lower}: Character.isLowerCase. */
-  public static final CharSet UNICODE_CLASSES_LOWER =
-      buildPredicateRanges(Character::isLowerCase);
+  public static final CharSet UNICODE_CLASSES_LOWER = buildPredicateRanges(Character::isLowerCase);
 
   /** (?U) \p{Upper}: Character.isUpperCase. */
-  public static final CharSet UNICODE_CLASSES_UPPER =
-      buildPredicateRanges(Character::isUpperCase);
+  public static final CharSet UNICODE_CLASSES_UPPER = buildPredicateRanges(Character::isUpperCase);
 
   /** (?U) \p{Cntrl}: Cc (Character.CONTROL). */
-  public static final CharSet UNICODE_CLASSES_CNTRL =
-      buildUnicodeCategoryRanges(Character.CONTROL);
+  public static final CharSet UNICODE_CLASSES_CNTRL = buildUnicodeCategoryRanges(Character.CONTROL);
 
   /** (?U) \p{Punct}: Pd, Ps, Pe, Pc, Po, Pi, Pf. */
   public static final CharSet UNICODE_CLASSES_PUNCT =
@@ -291,8 +284,7 @@ public final class CharSet {
 
   /** (?U) \p{Blank}: Zs ∪ {\t}. */
   public static final CharSet UNICODE_CLASSES_BLANK =
-      buildPredicateRanges(
-          c -> Character.getType(c) == Character.SPACE_SEPARATOR || c == '\t');
+      buildPredicateRanges(c -> Character.getType(c) == Character.SPACE_SEPARATOR || c == '\t');
 
   /** \p{Zs} — space separators */
   public static final CharSet UNICODE_Zs = buildUnicodeCategoryRanges(Character.SPACE_SEPARATOR);
@@ -522,13 +514,13 @@ public final class CharSet {
   }
 
   /**
-   * U-aware lookup for JDK POSIX-style property classes: with {@code unicodeClasses} (inline
-   * {@code (?U)} / ReggieFlags.UNICODE_CHARACTER_CLASS active), the JDK POSIX forms switch to
-   * their Unicode definitions ({@code \p{Alpha}} → isAlphabetic, {@code \p{Punct}} → the P*
-   * categories, ...), all verified differentially against the JDK. {@code \p{ASCII}} stays
-   * ASCII under the flag. {@code \p{Graph}}, {@code \p{Print}} and {@code \p{XDigit}} have
-   * JDK Unicode definitions that are not reproduced here — they are rejected loudly by the
-   * parser when the flag is active so consumers fall back instead of silently diverging.
+   * U-aware lookup for JDK POSIX-style property classes: with {@code unicodeClasses} (inline {@code
+   * (?U)} / ReggieFlags.UNICODE_CHARACTER_CLASS active), the JDK POSIX forms switch to their
+   * Unicode definitions ({@code \p{Alpha}} → isAlphabetic, {@code \p{Punct}} → the P* categories,
+   * ...), all verified differentially against the JDK. {@code \p{ASCII}} stays ASCII under the
+   * flag. {@code \p{Graph}}, {@code \p{Print}} and {@code \p{XDigit}} have JDK Unicode definitions
+   * that are not reproduced here — they are rejected loudly by the parser when the flag is active
+   * so consumers fall back instead of silently diverging.
    */
   public static CharSet ofUnicodeCategory(String category, boolean unicodeClasses) {
     if (!unicodeClasses) {

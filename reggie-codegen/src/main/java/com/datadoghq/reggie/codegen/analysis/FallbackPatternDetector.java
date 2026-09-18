@@ -16,7 +16,6 @@
 package com.datadoghq.reggie.codegen.analysis;
 
 import com.datadoghq.reggie.codegen.ast.AlternationNode;
-import com.datadoghq.reggie.codegen.ast.EpsilonNode;
 import com.datadoghq.reggie.codegen.ast.AnchorNode;
 import com.datadoghq.reggie.codegen.ast.AssertionNode;
 import com.datadoghq.reggie.codegen.ast.BackreferenceNode;
@@ -24,6 +23,7 @@ import com.datadoghq.reggie.codegen.ast.BranchResetNode;
 import com.datadoghq.reggie.codegen.ast.CharClassNode;
 import com.datadoghq.reggie.codegen.ast.ConcatNode;
 import com.datadoghq.reggie.codegen.ast.ConditionalNode;
+import com.datadoghq.reggie.codegen.ast.EpsilonNode;
 import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
 import com.datadoghq.reggie.codegen.ast.QuantifierNode;

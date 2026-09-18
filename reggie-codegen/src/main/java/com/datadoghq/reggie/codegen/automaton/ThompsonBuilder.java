@@ -29,14 +29,15 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   /**
    * Hard cap on NFA state count for a single pattern. Nested bounded quantifiers multiply their
-   * unrolled copies exponentially in {@link #buildCountedQuantifier} (e.g. 20 nested {0,8}
-   * groups would request 8^20 states); this cap converts that into a graceful {@code
-   * UnsupportedPatternException} instead of an OutOfMemoryError that could take down the host
-   * JVM. Calibrated above the largest legitimate pattern observed in consumer repositories (the
-   * ~300-char semver pattern with {0,256} bounded quantifiers builds ~0.3-0.6M states).
-   * Override via -Dreggie.nfa.maxStates.
+   * unrolled copies exponentially in {@link #buildCountedQuantifier} (e.g. 20 nested {0,8} groups
+   * would request 8^20 states); this cap converts that into a graceful {@code
+   * UnsupportedPatternException} instead of an OutOfMemoryError that could take down the host JVM.
+   * Calibrated above the largest legitimate pattern observed in consumer repositories (the
+   * ~300-char semver pattern with {0,256} bounded quantifiers builds ~0.3-0.6M states). Override
+   * via -Dreggie.nfa.maxStates.
    */
   private static final int MAX_NFA_STATES = Integer.getInteger("reggie.nfa.maxStates", 1_000_000);
+
   private int nextAtomicId = 0;
   private final boolean lazyAware;
 

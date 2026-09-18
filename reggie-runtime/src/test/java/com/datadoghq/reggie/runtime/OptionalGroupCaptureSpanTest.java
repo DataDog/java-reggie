@@ -1,15 +1,17 @@
 /*
  * Copyright 2026-Present Datadog, Inc.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
- * except in compliance with the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the
- * License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
- * either express or implied. See the License for the specific language governing permissions
- * and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package com.datadoghq.reggie.runtime;
 
@@ -30,19 +32,18 @@ import org.junit.jupiter.params.provider.CsvSource;
  * <ol>
  *   <li><b>DETERMINISTIC_CHAIN_BYTECODE</b> (DeterministicChainBytecodeGenerator): the OPT skip
  *       path and the ALT_CHAIN downstream-fail path restore the capture slots snapshotted before
- *       the with-path attempt. Before the fix, {@code (?:(\d+):)?(\d+)} on "123" reported
- *       g1="123" (the failed with-path's stale slots) while the JDK reports null.
- *   <li><b>B17 routing</b> (PatternAnalyzer.hasNfaBypassCharsetOverlap): a bypass-able group
- *       whose body charset overlaps the bypass path, or whose enter marker sits behind a
- *       consuming element (a non-start DFA state), routes to PikeVM instead of the tagged TDFA —
- *       the TDFA merges the with-path thread's tags onto transitions a bypass thread also rides
- *       and cannot pick the winner at determinization time. Before the fix, {@code
- *       x(?:(a):)?b} on "xb" reported g1=[0,-1) and {@code (?:(a))?(?:(b))?b} on "ab" bound g2
- *       from a losing thread.
+ *       the with-path attempt. Before the fix, {@code (?:(\d+):)?(\d+)} on "123" reported g1="123"
+ *       (the failed with-path's stale slots) while the JDK reports null.
+ *   <li><b>B17 routing</b> (PatternAnalyzer.hasNfaBypassCharsetOverlap): a bypass-able group whose
+ *       body charset overlaps the bypass path, or whose enter marker sits behind a consuming
+ *       element (a non-start DFA state), routes to PikeVM instead of the tagged TDFA — the TDFA
+ *       merges the with-path thread's tags onto transitions a bypass thread also rides and cannot
+ *       pick the winner at determinization time. Before the fix, {@code x(?:(a):)?b} on "xb"
+ *       reported g1=[0,-1) and {@code (?:(a))?(?:(b))?b} on "ab" bound g2 from a losing thread.
  * </ol>
  *
- * <p>All expectations are computed from {@code java.util.regex} at runtime (JDK-differential) —
- * do not hand-derive them.
+ * <p>All expectations are computed from {@code java.util.regex} at runtime (JDK-differential) — do
+ * not hand-derive them.
  */
 class OptionalGroupCaptureSpanTest {
 
@@ -84,7 +85,17 @@ class OptionalGroupCaptureSpanTest {
       assertEquals(
           jm.group(g),
           rr.group(g),
-          "group " + g + " for " + pattern + " on " + input + " (jdk=[" + jm.start(g) + "," + jm.end(g) + "))");
+          "group "
+              + g
+              + " for "
+              + pattern
+              + " on "
+              + input
+              + " (jdk=["
+              + jm.start(g)
+              + ","
+              + jm.end(g)
+              + "))");
     }
   }
 
@@ -111,9 +122,9 @@ class OptionalGroupCaptureSpanTest {
   }
 
   /**
-   * Alternation bypasses without an optional quantifier (b|(b), (b)|b) stay on the tagged TDFA
-   * and are handled correctly by the C2.4/C2.4B thread suppression — B17 must not divert them
-   * (pinned by DfaUnrolledGroupAndFindRegressionTest as well; this test pins the SPANS).
+   * Alternation bypasses without an optional quantifier (b|(b), (b)|b) stay on the tagged TDFA and
+   * are handled correctly by the C2.4/C2.4B thread suppression — B17 must not divert them (pinned
+   * by DfaUnrolledGroupAndFindRegressionTest as well; this test pins the SPANS).
    */
   @ParameterizedTest
   @CsvSource({"b|(b),b", "(b)|b,b", ".|([^c]),a", "x(a)y|(z),xay"})

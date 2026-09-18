@@ -24,6 +24,7 @@ public final class ReggieFlags {
   public static final int MULTILINE = 1 << 25;
   public static final int DOTALL = 1 << 26;
   public static final int LITERAL = 1 << 27;
+
   /** java.util.regex {@code UNICODE_CHARACTER_CLASS}: \w/\d/\s and POSIX \p{...} go Unicode. */
   public static final int UNICODE_CHARACTER_CLASS = 1 << 23;
 
