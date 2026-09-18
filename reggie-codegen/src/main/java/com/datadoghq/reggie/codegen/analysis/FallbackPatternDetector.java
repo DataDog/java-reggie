@@ -23,6 +23,7 @@ import com.datadoghq.reggie.codegen.ast.BranchResetNode;
 import com.datadoghq.reggie.codegen.ast.CharClassNode;
 import com.datadoghq.reggie.codegen.ast.ConcatNode;
 import com.datadoghq.reggie.codegen.ast.ConditionalNode;
+import com.datadoghq.reggie.codegen.ast.EpsilonNode;
 import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
 import com.datadoghq.reggie.codegen.ast.QuantifierNode;
@@ -492,7 +493,8 @@ public final class FallbackPatternDetector {
 
   /** Returns true if the branch is an epsilon (empty) node or nullable (can match empty string). */
   private static boolean isNullableOrEmptyBranch(RegexNode node) {
-    if (node instanceof LiteralNode) return ((LiteralNode) node).ch == 0;
+    if (node instanceof EpsilonNode) return true;
+    if (node instanceof LiteralNode) return false;
     return subtreeIsNullable(node);
   }
 
@@ -780,7 +782,7 @@ public final class FallbackPatternDetector {
    */
   private static int subtreeMaxCaptureLength(RegexNode node) {
     if (node instanceof LiteralNode) {
-      return ((LiteralNode) node).ch == 0 ? 0 : 1; // epsilon literal is always empty
+      return node instanceof EpsilonNode ? 0 : 1; // epsilon literal is always empty
     }
     if (node instanceof CharClassNode) {
       return 1; // always matches exactly one character
@@ -872,7 +874,7 @@ public final class FallbackPatternDetector {
     // "(.|)" where the second alternative is empty. AnchorNode is zero-width (nullable).
     // CharClassNode and non-epsilon LiteralNode consume at least one character.
     if (node instanceof LiteralNode) {
-      return ((LiteralNode) node).ch == 0;
+      return node instanceof EpsilonNode;
     }
     return node instanceof AnchorNode;
   }
@@ -1656,7 +1658,7 @@ public final class FallbackPatternDetector {
    */
   private static int altMinLength(RegexNode node) {
     if (node instanceof LiteralNode) {
-      return ((LiteralNode) node).ch == 0 ? 0 : 1; // epsilon is 0; normal literal is 1
+      return node instanceof EpsilonNode ? 0 : 1; // epsilon is 0; normal literal is 1
     }
     if (node instanceof CharClassNode) return 1;
     if (node instanceof AnchorNode || node instanceof AssertionNode) return 0; // zero-width
@@ -2116,7 +2118,7 @@ public final class FallbackPatternDetector {
       return isNullable(((GroupNode) node).child);
     }
     if (node instanceof LiteralNode) {
-      return ((LiteralNode) node).ch == 0; // epsilon (empty string literal)
+      return node instanceof EpsilonNode; // epsilon (empty string literal)
     }
     if (node instanceof AssertionNode || node instanceof AnchorNode) {
       return true; // zero-width

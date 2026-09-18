@@ -1,0 +1,536 @@
+	at java.base/java.util.concurrent.FutureTask.get(FutureTask.java:204)
+ === VRLProcessor post-write-back type/value (untouched) ===
+     at PythonShell.parseError (/app/node_modules/python-shell/index.js:298:21)
+    at relative (debug/first.wasm:wasm-function[7]:0x2a)
+ 2022-08-26 09:34:47+00:00
+ 2022-08-26T09:34:47+00:00
+ execute   File "/app/tasks/bridge.py", line 42, in transform ValueError: bad input
+"categories": ["alert", "info", "change", "v1", "deployment"]
+"categories": ["alert", "info", "change", "v1"]
+#0 /dir/guzzlehttp/guzzle/src/Subscriber/HttpError.php(32): GuzzleHttp\Exception\RequestException::create() #1 /dir/guzzlehttp/guzzle/src/Event/Emitter.php(108): GuzzleHttp\Subscriber\HttpError->onComplete() #2 /dir/guzzlehttp/guzzle/src/RequestFsm.php(91): GuzzleHttp\Event\Emitter->emit() #3 /dir/guzzlehttp/guzzle/src/RequestFsm.php(132): GuzzleHttp\RequestFsm->__invoke() #4 /dir/react/promise/src/FulfilledPromise.php(25): GuzzleHttp\RequestFsm->GuzzleHttp\{closure}() #5 {main}
+'ip-10-113-17-192.ec2.internal-vaporeon-b', false
+'logs-event-store-api-canary-78796b65f-4lbhm10.130.68.119', false
+'logs-event-store-api-canary-7964bcd657-trg9t10.132.21.209', false
+*error.WithStack
+.1.3.1.3.4.5.6.3.4.6.45
+.1.3.1.3.4.5.6.3.4.6.45.0
+.1.3.6.1.2.1.192.1.2.1.3
+.1.3.6.1.2.1.192.1.2.1.3.0.4
+.1.3.6.1.2.1.2.2.1.7.0
+.1.3.6.1.2.1.2.2.1.7.0.2.3.4.5.
+.1.3.6.1.2.1.2.2.1.8.1.2.3.4.5.
+.1.3.6.1.2.1.43.18.1.1.2
+.1.3.6.1.2.1.43.18.1.1.2.3.4.5.6
+.1.3.6.1.6.3.1.1.5.3.0
+.1.3.6.1.6.3.1.1.5.4.0
+.status = "ERROR"
+.status = "error"
+/usr/local/bundle/gems/actionpack-6.0.2.2/lib/action_controller/metal/rendering.rb
+01/02/2006 15:04:05-0700
+01/02/2006T15:04:05-0700
+1.0.8802.1.1.2.1.2.4
+1.2.3.4.5.6.7.8.9.0.1.2.3.4.5.6.7
+1.3.1.3.4.5.6.3.4.6.45
+1.3.1.3.4.5.6.3.4.6.45.0
+1.3.6.1.2.1.192.1.2.1.3
+1.3.6.1.2.1.2.2.1.7
+1.3.6.1.2.1.2.2.1.8
+1.3.6.1.2.1.43.18.1.1.2
+1.3.6.1.2.1.43.18.1.1.2.3.4.5.6
+1.3.6.1.4.1.8072.3.2.10
+1.3.6.1.4.1.9967.2.2.2.0.1
+1.3.6.1.6.3.1.1.5.3
+1.3.6.1.6.3.1.1.5.4
+10-60-160-172.my-service.namespace.svc.abc.cluster.local
+10.0.1.2:33313 [06/Feb/2009:12:12:51.443] fnt bck/srv1 0/0/5007 212 -- 0/0/0/0/3 0/0
+10.0.1.2:33317 [06/Feb/2009:12:14:14.655] http-in static/srv1 10/0/30/69/109 200 2750 - - ---- 1/1/1/1/0 0/0 {1wt.eu} {} "GET /index.html HTTP/1.1"
+10.10.10.10.10/32
+10.10.10.10/-12
+100.127.255.255
+104.248.155.133
+11/08/2017 00:00:00.001
+111.222.333.444.555.track
+112.169.19.192 - - [06/Mar/2013:01:36:30 +0900] "GET / HTTP/1.1" 200 -
+112.169.19.192 identity author [06/Mar/2013:01:36:30 +0900] "GET / HTTP/1.1" 200 44346
+112.169.19.192 identity author [06/Mar/2013:01:36:30 +0900] "GET / HTTP/1.1" 200 44346 "some referrer" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_8_2) AppleWebKit/537.22 (KHTML, like Gecko) Chrome/25.0.1364.152 Safari/537.22"
+122.225.109.196
+123 info ignored
+169.254.169.254
+172.16.72.1-254
+179.93.217.39, 198.41.231.137
+18.231.105.0/28
+188.207.78.182, 141.101.104.34
+191.255.255.255
+192.168.1.1 - admin [01/Jan/2024:12:00:00] "GET /api/users" 200
+192.168.1.1.2.3.4.5
+192.168.1.1.foo
+192.168.1.1:1234
+192.168.1.1:1234,10.23.1.1:53,10.23.1.1,fe80::1ff:fe23:4567:890a,foo.dog
+192.168.1.1:xxxx
+192.168.1.64/26
+192.168.10.0/24
+192.168.10.3/24
+1967-08-30T00:00
+1970-01-01T09:41:37.655Z
+1977-07-22T15:30:00.000 Something important happened
+198.51.100.0/24
+2001:db8:3:4::192.0.2.33
+2006-01-02 15:04:05-0700
+2014-12-30 16:59:14,613 fail2ban.actions: WARNING [ssh] Unban 103.41.124.101
+2015-01-05 16:14:20 212.119.18.53 post /c-308228-les-bas - 80 - 81.93.176.225 mozilla/5.0+(windows+nt+6.1;+wow64;+rv:23.0)+gecko/20100101+firefox/23.0 200 0 0 312
+2015-05-13T23:39:43.945958123Z
+2015-05-13T23:39:43.945958Z
+2015-05-13T23:39:43.945Z
+2015-05-13T23:39:43Z
+2016-06-16 19:22:22.427 ADT
+2016-06-16 23:37:07 +00:00
+2016-06-16 23:37:07,123+00:00
+2016-06-16T16:21:36.431+0000
+2016-06-16T16:21:36.431+00:00
+2016-11-29T16:21:36.431+0000
+2016-11-29T16:21:36.431+00:00
+2016-11-29T16:21:36.431+0100
+2016-11-29T16:21:36.431+01:00
+2016/06/16 23:37:07,123456+00:00
+2016/06/16 23:37:07.123456+00:00
+2017-07-31T09:27:07+00:00
+2017-07-31T09:27:07Z
+2017-07-31T09:27:08+00:00
+2017-07-31T10:27:07+0100
+2017-07-31T10:27:07+01:00
+2017-07-31T10:27:07.926+01:00
+2017-08-31T15:50:48.658+0000
+2018-02-27 14:35:59+01:00
+2020-01-01T00:00:00.00Z
+2020-01-02T00:03:04Z
+2020-03-14T07:24:22.100Z
+2020-03-14T07:24:22Z
+2020-03-14T07:25:13.100Z
+2020-03-14T07:25:13Z
+2021-01-01T00:00:00Z
+2021-03-14T07:24:22Z
+2022-02-09T09:50:01Z
+2022-08-10T15:24:35.000Z
+2022-08-10T15:24:35.000Z garbage
+2022-08-17 09:59:06+02:00
+2022-08-17T09:59:06+02:00
+2022-08-17T10:29:12-0500
+2022-08-26 09:34:47+00:00
+2022-08-26 17:14:43 +0000 UTC
+2022-08-26 17:14:43 -0700 PDT
+2022-08-26T09:34:47+00:00
+2022-08-26T17:14:43 +0000 GMT
+2022-08-28 11:13:57 -0500
+2022-08-28T11:13:57 +0500
+2022-10-20T00:22:08.359
+2023-01-01T00:00:00Z
+2023-07-31T13:35:20Z
+2023-07-31T15:33:47+02:00
+2023-12-15T12:03:17-03:00
+2024-01-01T00:00:00Z
+2024-06-10T12:00:00Z
+2024-06-11T12:00:00Z
+2024-11-11T12:00:00Z
+2024/01/15/My-Function[$LATEST]abc123def456
+2024/01/15/[$LATEST]abc123def456
+2025-01-01T00:00:00Z
+2025-01-17T07:44:33Z
+2025-06-04T01:20:02Z
+2025-07-01T09:27:07+00:00
+2025-08-18T13:25:18Z
+2026-01-19T14:12:58Z
+2026-08-21T12:00:00Z
+23.95.226.0/255.255.0.0
+23.95.226.155/24
+23.95.226.155/255.255.0.0
+2333-01-01T00:00:00.000Z
+235.235.235.235
+255.255.255.255
+3.1.6.8.3.7.56.0
+3.1.6.8.3.7.58.1
+35.219.128.0/18
+50.31.164.139,108.162.216.226
+5133-01-01T00:00:00.000Z
+54.247.188.179,162.158.39.120
+6 TransitGateway 802015701852 tgw-0a20b79eeda906fc4 tgw-attach-0f973a4f946d33f1a 802015701852 802015701852 vpc-027e1e20446cbc9da vpc-08d568fd99e4bfcb0 subnet-0cde52e925f520285 subnet-09630c81ba01f7571 eni-08a2a8e7fe0ee6518 eni-058f9b3118bf6fae5 use1-az6 use1-az6 tgw-attach-0903f9bfb8bbcf26d 10.245.0.10 10.244.0.10 0 0 1 2 168 1787635010 1787635011 OK IPv4 0 0 0 0 0 us-east-1 egress - -
+62.169.84.20, 141.101.98.206
+86.151.31.194, 141.101.99.199
+91.197.136.0/24
+:wasm-function[10]:0x20)
+:wasm-function[10]:0x20)
+:wasm-function[11]:0x30)
+:wasm-function[7]:0x2a)
+@$sourceElem.status:critical
+@application.id:test-service-error-message-rewritten
+@custom.status:info,
+@error.type:MyError
+@error.type:MySpanError
+@error.type:MySpanEventError
+@evtType:Delete
+@exception.type:MySpanEventError
+@http.client_ip:"1.1.1.1"
+@http.method:GET
+@peer.hostname:127.0.0.1
+AWSLogs/123456779121/redshift/us-east-1/2020/10/21/123456779121_redshift_us-east-1_mycluster_userlog_2020-10-21T18:01.gz
+AWSLogs/123456779121/redshift/us-gov-east-1/2020/10/21/123456779121_redshift_us-gov-east-1_mycluster_
+AWSLogs/802015701852/WAFLogs/cloudfront/cloudfront-waf/2025/08/20/12/00/802015701852_waflogs_cloudfront_cloudfront-waf_20250820T1200Z_dc7c26aa.log.gz
+AWSLogs/aws-account-id=123456789012/CloudFront/DistributionId=SOMETHING/year=2025/month=06/day=30/hour=15/SOMETHING.2025-06-30-15.1075f1ef.gz
+Accepted password for fred from 192.0.2.60 port 6647 ssh2
+Accepted publickey for fred from 192.0.2.60 port 60594 ssh2
+Accepted publickey for fred from 192.0.2.60 port 60594 ssh2: RSA e8:31:68:c7:01:2d:25:20:36:8f:50:5d:f9:ee:70:4c
+ActionView::Template::Error
+An error occurred with scanning_group_id=
+AxiosError: Request failed with status code 400
+Build failed with error
+CIDR(@http.client_ip,1.1.1.1/24)
+CONTAINER ERROR OCCURRED
+Chrome/10.10.10.10
+Chrome/105.0.0.1
+Chrome/107.0.0.1
+Chrome/14.35.45.20
+Chrome/17.29.12.04
+Connection closed by 122.225.109.196
+Container Error
+Container [error] occurred
+Container error occurred
+Container-error-occurred
+ERROR \[\w+\] (?<msg>.+)
+Error Tracking but already billed on Errors track
+Error Tracking excluded issue
+Error Tracking excluded issue but already billed on Errors track
+Error retrieving filter
+Error while processing pipeline
+Error: Minified React error #284; visit https://reactjs.org/docs/error-decoder.html?invariant=284 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+Error: Minified React error #284; visit https://reactjs.org/docs/error-decoder.html?invariant=284 for the full message or use the non-minified dev environment for full errors and additional helpful warnings. something
+Error: Network Error
+Error: Network Error
+Error: Script error.
+Error: Traceback (most recent call last):   File "/app/tasks/runner.py", line 88, in
+Error: an error message
+Error: an error message   at f @ https://static.datadoghq.com/static/v/35.2198459/js/chunk.min.js:12:16829
+Error: rails-ujs has already been loaded! 	at Object.Rails.start @ https://api.shopist.io/assets/rails-ujs.self-81c572f39b69ead02e3f97fe43b76954a434591bc2837e3a35af212315e67569.js?body=1:658:17
+Error: some message
+Error: test   at f @ https://static.datadoghq.com/min.js:4:5   at g @ https://static.datadoghq.com/min.js:5:6   at h @ https://static.datadoghq.com/min.js:7:8
+Error: test unhandled rejection - updated
+Error: unreachable
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to dial error dial tcp connect connection refused dial error dial tcp connect connection refused dial error dial tcp connect connection refused server error FATAL the database system is not yet accepting connections dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to dial error dial tcp connect connection refused dial error dial tcp connect connection refused server error FATAL the database system is not yet accepting connections dial error dial tcp connect connection refused dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to dial error dial tcp connect connection refused dial error dial tcp connect connection refused server error FATAL the database system is starting up dial error dial tcp connect connection refused server error FATAL the database system is starting up
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to dial error dial tcp connect connection refused server error FATAL the database system is not yet accepting connections dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to dial error dial tcp connect connection refused server error FATAL the database system is starting up
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is not yet accepting connections dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is not yet accepting connections dial error dial tcp connect connection refused dial error dial tcp connect connection refused dial error dial tcp connect connection refused dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is shutting down tls error read tcp read connection reset by peer dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is shutting down tls error read tcp read connection reset by peer tls error read tcp read connection reset by peer dial error dial tcp connect connection refused dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is starting up dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is starting up dial error dial tcp connect connection refused dial error dial tcp connect connection refused server error FATAL the database system is starting up dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is starting up dial error dial tcp connect connection refused server error FATAL the database system is starting up dial error dial tcp connect connection refused dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is starting up server error FATAL the database system is not yet accepting connections dial error dial tcp connect connection refused
+FATAL closing pg-proxy session with err error linking session to a postgres conn failed to connect to server error FATAL the database system is starting up server error FATAL the database system is not yet accepting connections dial error dial tcp connect connection refused dial error dial tcp connect connection refused dial error dial tcp connect connection refused
+Failed password for root from 188.124.3.41 port 32889 ssh2
+File "/django-email/api/views.py", line 39, in post email = serializer.save()
+File "/django-email/emails/models.py", line 45, in save raise DatabaseError('Database timeout') emails.models.DatabaseError: 'Database timeout'
+GET request made to /api/v2/current_user by zeinab.tofaili@datadoghq.com with response 200
+Get compass deals error, glide transaction id:55358942
+Info: System Up
+Info: this is an info log
+Invalid character ('[', ']') in variable: region[0]
+Invalid user vyatta from 37.205.60.194
+It's a haskell error
+It's a perl error
+It's a rust error
+It's an elixir error
+It's an erlang error
+Just a simple error message
+Load users: %{users[0]} spent %{duration} milliseconds
+Main.ErrorTrackerLogger.(unknown context at $103a5d19c).MessageError - 0
+Microsoft Windows NT 6.3.9600.0
+Minified React error #2834; visit https://reactjs.org/docs/error-decoder.html?invariant=2834 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+Minified React error #284; visit https://reactjs.org/docs/error-decoder.html?invariant=284 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+Mozilla%2F5.0%20(Macintosh%3B%20Intel%20Mac%20OS%20X%2010_10_3)%20AppleWebKit%2F537.36%20(KHTML%2C%20like%20Gecko)%20Chrome%2F42.0.2311.90%20Safari%2F537.36
+Mozilla/5.0 (Linux; Android 7.0; Moto G (4)) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4590.2 Mobile Safari/537.36 Chrome-Lighthouse
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.90 Safari/537.36
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.132 Safari/537.36
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_8_2) AppleWebKit/537.22 (KHTML, like Gecko) Chrome/25.0.1364.152 Safari/537.22
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.105 Safari/537.36
+Mozilla/5.0 (iPhone; CPU iPhone OS 10_3_2 like Mac OS X) AppleWebKit/603.1.30 (KH TML, like Gecko) CriOS/59.0.3071.102 Mobile/14F89 Safari/602.1
+Mozilla/5.0 Chrome/152.0.0.0
+Mozilla/5.0 Chrome/192.168.1.1
+Mozilla/5.0 Safari/172.16.0.1
+MyApp.MyCustomException: Outer error message .... ---> System.Exception: Inner error message 	at MyApp.SomeObject.OtherMethod() in C:\MyApp\SomeObject.cs:line 24 	at MyApp.SomeObject..ctor() in C:\MyApp\SomeObject.cs:line 14 	--- End of inner exception stack trace --- 	at MyApp.SomeObject..ctor() in C:\MyApp\SomeObject.cs:line 18 	at MyApp.Program.DoSomething() in C:\MyApp\Program.cs:line 23 	at MyApp.Program.Main(String[] args) in C:\MyApp\Program.cs:line 13
+MySpanEventError
+No error type to be found here, just a message
+No stack, consider using an instance of Error
+NoMethodError: undefined method `push_cart_views_count' for #<CartsController:0x00007fd1fa3737b8> 	/rails-storefront/app/controllers/carts_controller.rb:25:in `show'
+POST /api/v1/users
+Processor encountered a unrecoverable error.
+Received disconnect from 85.170.92.101: 11: Bye Bye
+Received disconnect from 85.170.92.101: 11: disconnected by user
+RuntimeError: unreachable
+Safari/92.0.0.44
+Sentry SDK (Error Tracking) log
+Term embedded in word should match (e.g., 'myErrorCode' matches 'error')
+Term surrounded by hyphens should match (e.g., 'error-message' matches 'error')
+Term with prefix word attached should match (e.g., 'containerError' matches 'error')
+Term with suffix word attached should match (e.g., 'errorHandler' matches 'error')
+Test error message
+The event post-processing does not match the event stored in the snapshot.
+There is no error type: but there is a colon
+There's no place like 127.0.0.1
+ToolExecutionError
+TypeError: cannot read properties of undefined
+TypeError: e is null
+Unix 5.10.179.166
+VMError::report(outputStream*, bool)
+VMError::report_and_die(...)
+X-Endpoint-Api-Userinfo
+XHR error POST https://app.datadoghq.com/api/v1/logs-analytics/aggregate?type=rum
+ZeroDivisionError
+[ { "device_ip": "127.0.0.1", "source_resource_type": "ndm_ip_address" } ]
+[ { "device_ip": "127.0.0.1", "source_resource_type": "ndm_ip_address" },
+["warn", "error", "ok"]
+[1746862.282899] [UFW BLOCK] IN=eth0 OUT= MAC=de:ad:be:ef:12:34:56:78:00:00:00:00:00:00 SRC=1.2.3.4 DST=2.3.4.5 LEN=40 TOS=0x00 PREC=0x00 TTL=249 ID=4368 PROTO=TCP SPT=45983 DPT=3389 WINDOW=1024 RES=0x00 SYN URGP=0
+[32767.122900] [UFW ALLOW] IN= OUT=eth0 SRC=10.0.2.15 DST=10.0.2.2 LEN=60 TOS=0x00 PREC=0x00 TTL=64 ID=59053 DF PROTO=TCP SPT=47436 DPT=10514 WINDOW=29200 RES=0x00 SYN URGP=0
+[fe80::1ff:fe23:4567:890a]:
+[fe80::1ff:fe23:4567:890a]:8080
+[fe80::1ff:fe23:4567:890a]:xxxx
+^There was an error fetching the embed code (?<remove>.*)$
+^rpc error: code = Canceled desc = error querying event-query: Post (?<remove>.*: ).*$
+a-kind-of-error
+a.b.c: error message
+aliens.visitors.111.222.333.444.555
+amazon_vpn/AWSLogs/123456789012/vpnconnection/vpn-0ab12cd34ef567890/52.1.2.3-BGP.log
+at run (https://example.com/app.wasm:wasm-function[42]:0x1a3)
+at=error code=H12 desc="Request timeout" method=HEAD path="/" host=sfr-staging.coorpacademy.com request_id=bd72b633-41cc-4037-9282-fd46fd357220 fwd="54.247.188.179,162.158.39.120" dyno=web.1 connect=1ms service=30000ms status=503 bytes=0
+at=info method=HEAD path="/" host=digital-staging.coorpacademy.com request_id=52b02376-126f-4ab6-b0c9-360e701be4e0 fwd="50.31.164.139,108.162.216.226" dyno=web.1 connect=1ms service=7ms status=302 bytes=495
+authorizationInfo.resource
+blocked-ip-address.2.3.4.5
+com.example.myClass$Subclass&get
+connection error
+connection_error
+console error: ReferenceError: profile is not defined 	at f.discardEdit @ https://shopist.io/_nuxt/pages/profile-edit.3be79f6.js:1:321483
+containerError occurred
+context canceled GetTagsForMetric returned with error canceled context canceled
+context canceled GetTagsForMetric returned with error canceled context canceled GetTagsForMetric returned with error canceled GetTagsForMetric returned with error canceled context canceled context canceled
+context canceled context canceled GetTagsForMetric returned with error canceled context canceled context canceled context canceled context canceled context canceled context canceled context canceled
+custom.error.is_crash
+custom.error.kind
+custom.error.message
+custom.error.stack
+custom.list[0].value
+custom.meta.error.fingerprint
+datadog:%{region[0]}:db:%{instance_id}
+default:127.0.0.1
+default:2.2.2.3
+default:2.2.2.3:3
+default:2.2.2.3:5
+default|2.2.2.3|1.2.3.4
+default|2.2.2.3|1.2.3.4|4.3.2.1
+default|2.2.2.3|1.2.3.4|4.3.2.1|TCP
+default|2.2.2.3|4.3.2.1
+default|2.2.2.3|TCP|1.2.3.4:2000
+default|2.2.2.3|TCP|1.2.3.4:2000|4.3.2.1:1100|1|2
+default|2.2.2.3|TCP|1.2.3.4:2000|4.3.2.1:1100|false|data
+default|2.2.2.3|TCP|4.3.2.1:1100
+device:default:127.0.0.1
+device:mononoke:1.2.3.4
+dnspoll:///10.21.120.145:6400
+error error error
+error connection failed
+error occurred in container
+error on validating commitment data failed validation for usedCost failed validation for usedHours
+error on validating commitment data failed validation for usedCost failed validation for usedHours failed validation for usedCost failed validation for usedHours
+error on validating commitment data failed validation for usedCost/usedHours
+error on validating commitment data failed validation for usedHours
+error on validating commitment data failed validation for usedHours 4x
+error on validating commitment data failed validation for usedHours failed validation for usedHours failed validation for usedHours failed validation for usedHours
+error parsing regexp: invalid or unsupported Perl syntax: `(?n`
+error with minified error with valid code IN STACKTRACE ONLY should also be modified
+error with minified error with valid code should be modified
+error with minified error with wrong code should not be modified
+error with no error message should not be modified
+error with random error message should not be modified
+error-tracking-datasets/apm
+error-tracking-datasets/apm-span-events
+error-tracking-datasets/error-message/extractor
+error-tracking-datasets/error-message/lexer
+error-tracking-datasets/error-message/parser
+error-tracking-datasets/errorsintake
+error-tracking-datasets/llmobs
+error-tracking-datasets/logs
+error-tracking-datasets/rum
+error-tracking-search
+error.fingerprint
+error.handling_stack
+error.resource.url
+error.source_type
+error: Received disconnect from 212.129.57.236: 3: com.jcraft.jsch.JSchException: Auth fail [preauth]
+error: connection refused
+error_tracking_standalone.error
+exception.type:MySpanEventError
+exclusion rule on APM error type
+exclusion rule on APM error type FOR CARRIED SPAN EVENT
+exclusion rule on APM error type FOR CARRYING SPAN
+execution_error
+extracted event info was not stored
+fetching time series for listing time series rpc error canceled fetching time series for listing time series rpc error
+fetching time series for listing time series rpc error executor is overloaded fetching time series for listing time series rpc error canceled
+fetching time series for listing time series rpc error executor is overloaded fetching time series for listing time series rpc error canceled fetching time series for listing time series rpc error executor is overloaded fetching time series for listing time series rpc error executor is overloaded fetching time series for listing time series rpc error canceled
+fetching time series for listing time series rpc error fetching time series for listing time series rpc error canceled fetching time series for listing time series rpc error canceled fetching time series for listing time series rpc error canceled fetching time series for listing time series rpc error fetching time series for listing time series rpc error
+fetching time series for listing time series rpc error gRPC request failure error canceled fetching time series for listing time series rpc error canceled
+fetching time series for listing time series rpc error gRPC request failure error canceled fetching time series for listing time series rpc error gRPC request failure error canceled fetching time series for listing time series rpc error fetching time series for listing time series rpc error fetching time series for listing time series rpc error canceled
+fetching time series — repeated rpc error blocks
+foobar, 8.8.8.8
+from-vibioh/601427279990/eu-west-3/vibioh/2025/03/17/2025-03-17-00-00-00-822E70599891A8C6
+fsmatic.resolvers.error-tracking-enrichment.resolvers.create-issue.max-in-flight-requests
+fsmatic.resolvers.error-tracking-enrichment.resolvers.get-issue.max-in-flight-requests
+fsmatic.resolvers.error-tracking-enrichment.resolvers.get-issue.max-queue-size
+fsmatic.resolvers.get-repo-id.resolver
+garbage 2022-08-10T15:24:35.000Z
+great error message except: this
+http-get-2a5c746e--
+http-get-2a5c746e-abc-def
+http.method:GET
+http://10.21.120.145:6400
+http://172.24.160.151:8091,172.24.163.33:8091,172.24.164.111:8091,172.24.165.203:8091,172.24.168.235:8091,172.24.170.130:8091
+http://greynoise.io/190.22.3.40
+http://greynoise.io/23.95.226.155
+http://signal_sciences.com/ip/23.95.226.155
+https//datadoghq.com/static_debug.html
+https://10.21.120.145:6400
+https://domaininfo.io/
+https://example.com/assets/debug/first.wasm
+https://hashinfo.io/
+https://ipinfo.io/
+https://ipinfo.io/190.22.3.40
+https://ipinfo.io/23.95.226.155
+image_tag:release-1.2.0.8
+inclusion rule on APM error type
+inclusion rule on APM error type FOR CARRIED SPAN EVENT
+inclusion rule on APM error type FOR CARRYING SPAN
+ipTag:92.93.94.75
+ipv4 (?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))
+it should not modify if the error message has a prefix
+it should not modify if the error message has a suffix
+j - this status maps to default Info
+java.lang.RuntimeException: Test error 	at com.test.Main.main(Main.java:10)
+java.util.MyException: error message
+logs-to-forward/cloudfront-logs/E1Y5XJON9VSWX8.2024-09-02-08.a000b47c.gz
+logs-to-forward/vibioh-elb/AWSLogs/601427279990/elasticloadbalancing/eu-west-3/2025/01/20/601427279990_elasticloadbalancing_eu-west-3_app.vibioh-elb.5e1b9e193fdcc512_20250120T1715Z_15.236.244.18_vgn5dxjo.log.gz
+meta.error.message
+meta.error.type
+missing error type and message
+mononoke:1.2.3.4
+name:(WithSyntaxError
+non-critical-step
+ocsf.device.network_interfaces[0].ip
+ocsf.evidences[0].actor.idp.auth_factors[0].device.network_interfaces[0].ip
+ocsf.evidences[0].actor.user
+ocsf.evidences[0].actor.user.name
+ocsf.evidences[0].device
+ocsf.evidences[0].device.hostname
+ocsf.evidences[0].file
+ocsf.evidences[0].file.hashes[0]
+ocsf.evidences[0].file.hashes[0].value
+ocsf.evidences[0].file.hashes[1]
+ocsf.evidences[0].file.hashes[1].value
+ocsf.evidences[0].file.name
+ocsf.evidences[0].file.path
+ocsf.evidences[0].resources[0].ip
+ocsf.evidences[0].src_endpoint
+ocsf.evidences[0].src_endpoint.ip
+ocsf.http_request.x_forwarded_for[0]
+ocsf.resources[0].name
+ocsf.response.data.error
+os_info.architecture
+processing atom for integration processing resource batch fetching and reporting metrics querying resources from single resource API GET RESPONSE ERROR CODE UNAVAILABLE
+processing atom for integration processing resource batch fetching and reporting metrics querying resources from single resource API GET RESPONSE ERROR CODE UNAVAILABLE querying resources from single resource API GET RESPONSE ERROR CODE UNAVAILABLE querying resources from single resource API GET RESPONSE ERROR CODE UNAVAILABLE
+processing error
+processing.default_service_naming.debug
+resolver.elfPeSymbolicate.error
+resolver.flutterSymbolicate.error
+resolver.ndkSymbolicate.error
+resolver.reactNativeUnMinify.error
+response.data.error
+reverse mapping checking getaddrinfo for 177.154.45.40.dynamic.efit.net.br [177.154.45.40] failed - POSSIBLE BREAK-IN ATTEMPT!
+rpc error argument found while handling Rule didn't match at
+rpc error argument found while handling to parse trend_line as_rate as_rate as_rate trend_line as_rate as_rate trend_line as_rate trend_line as_rate trend_line trend_line as_rate as_rate as_rate as_rate as_rate as_rate as_rate as_rate as_rate as_rate as_rate as_rate trend_line trend_line as_rate as_rate trend_line Rule didn't match at
+rpc error argument found while handling to parse trend_line as_rate trend_line Rule didn't match at
+rpc error to process request context deadline exceeded request AND AND AND NOT AND NOT AND NOT AND NOT AND NOT AND NOT AND NOT AND NOT AND
+rpc error to process request context deadline exceeded request AND NOT AND
+rpc error to process request error downloading initializing numpang iterator memory mapping open no such file or directory request AND NOT AND
+rpc error to process request error downloading initializing numpang iterator memory mapping open no such file or directory request AND NOT AND NOT AND NOT AND NOT AND
+rpc error: code = Canceled desc = error querying event-query: Post \"https://event-query-canary-proxy.logs-general.all-clusters.local-dc.fabric.dog:9091/api/orgs/2/beta/analytics/aggregate?type=trace&listenTimeout=4998&resumeTimeout=0\": context canceled
+rpc error: code = Canceled desc = error querying event-query: Post context canceled
+rpc error… memory mapping… AND NOT AND NOT…
+rule error:%{word:error_type}
+run.wasm-function[10]@[wasm code]
+run.wasm-function[10]@[wasm code]
+service:test-service AND @error.stack:java.io.IOException*
+service:test-service-error-message-rewritten
+service:test-service-error-message-rewritten AND @error.stack:gopkg.in/DataDog/dd-trace-go.v1*
+should not report an error for custom event issues
+should report modified=true despite custom event error
+snmp Device:127.0.0.1
+snmp device:127.0.0.1
+snmp_device:127.0.0.1
+snmp_device:172.20.0.1
+snmp_version:2,device_namespace:ken-test,snmp_device:10.0.0.81
+snmp_version:2,existingKeyOnlyTag,snmp_device:195.1.4.2,device_namespace:test-namespace
+snmp_version:2,snmp_device:195.1.4.2
+snmp_version:2,snmp_device:195.1.4.2,device_namespace:test-namespace
+some other error
+some unexpected error
+something Error: Minified React error #284; visit https://reactjs.org/docs/error-decoder.html?invariant=284 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.
+spansWithCommitInfo
+status not error is a no-op
+status:remote_error
+status=200 method=GET url=/api/test
+status=200 method=POST
+stepStatusDeletingGitInfo
+tableName:threat_intel_ip_ipinfo
+test-namespace:195.1.4.2
+this is a bad error
+this is a bad long error
+this message has no error keyword
+threat_intel_ip_ipinfo
+timestamp: 2015-05-13T23:39:43Z
+validateQueryAndBuildSqlStatement buildSqlStatement resolveColumns extractColumnsFromSql error running query WITH AS SELECT FROM LIMIT rpc error authenticators were not loaded at
+validateQueryAndBuildSqlStatement buildSqlStatement resolveColumns extractColumnsFromSql error running query WITH AS SELECT FROM LIMIT rpc error terminated by RST_STREAM with error code CANCEL context deadline exceeded
+validateQueryAndBuildSqlStatement buildSqlStatement resolveColumns resolveColumns resolveColumns extractColumnsFromSql error running query WITH AS AS SELECT FROM LIMIT rpc error authenticators were not loaded at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at at
+validateQueryAndBuildSqlStatement buildSqlStatement resolveColumns resolveColumns resolveColumns resolveColumns resolveColumns extractColumnsFromSql error running query WITH AS SELECT FROM LIMIT rpc error terminated by RST_STREAM with error code CANCEL context deadline exceeded
+versionBrowser:118.218.118.218
+vpc/AWSLogs/802015701852/vpcflowlogs/us-east-1/2025/12/02/802015701852_vpcflowlogs_us-east-1_fl-006fe39837efb634a_20251202T0520Z_3ee291ad.log.gz
+vpn-0ab12cd34ef567890_52.1.2.3
+vpn-0ab12cd34ef567890_52.1.2.3-BGP.log
+wasm-function[10]
+wasm-function[42]:0x1a3
+with%7Cpipe|2.2.2.3|1.2.3.4
+with%7Cpipe|2.2.2.3|1.2.3.4|4.3.2.1
+with%7Cpipe|2.2.2.3|1.2.3.4|4.3.2.1|TCP
+with%7Cpipe|2.2.2.3|4.3.2.1
+with%7Cpipe|2.2.2.3|TCP|1.2.3.4:54
+with%7Cpipe|2.2.2.3|TCP|1.2.3.4:54|4.3.2.1:23|12|21
+with%7Cpipe|2.2.2.3|TCP|4.3.2.1:23
+{ "device_ip": "127.0.0.2", "source_resource_type": "ndm_device" },
+{ "device_ip": "127.0.0.3", "source_resource_type": "ndm_device" },
+{ "device_ip": "127.0.0.3", "source_resource_type": "ndm_ip_address" }
+{ "device_ip": "127.0.0.4", "source_resource_type": "ndm_ip_address" }
+{"10.10.10.10/32" : "v4Cidr1", "2600:1ff2:4000::/40" : "v6Cidr1"}
+{"http": {"method": "GET", "status_code": 200}}
+{"name":"DomainInfo.io","type":"managed","url":"https://domaininfo.io/%s"}
+{"name":"HashInfo.io","url":"https://hashinfo.io/%s"}
+{"name":"IPInfo.io","url":"https://ipinfo.io/%s"}
+{"name":"IPInfo.io","url":"https://ipinfo.io/190.22.3.40"}
+{"name":"IPInfo.io","url":"https://ipinfo.io/23.95.226.155"}
+{"name":"greynoise","url":"http://greynoise.io/190.22.3.40"}
+elapsed duration=12.5ms elapsed=3s total
+request from 10.0.0.1 via 192.168.1.100 ok
+nic aa:bb:cc:dd:ee:ff peer 00:11:22:33:44:55
+notify x@dd.net and root@example.com
+cfg k=v k2=v2 end=y tail
+arch file.tar.gz next a.b. done
+level=warn status=error retry
+trace: pid=42 tid=99 exited
+id logs_backend_check_42 and java_reggie_7

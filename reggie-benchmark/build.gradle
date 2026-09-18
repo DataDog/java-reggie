@@ -156,6 +156,18 @@ tasks.register('saveBaseline', Copy) {
     }
 }
 
+// Build the Rust regex JNI engine — the optional fourth benchmark lane
+// (java.util.regex / reggie / RE2J / rust-regex). Requires cargo on PATH.
+tasks.register('buildRustEngine', Exec) {
+    description = 'Build the Rust regex JNI engine for the 4-engine benchmark lane (requires cargo)'
+    group = 'benchmark'
+    workingDir = file('rust-regex-engine')
+    commandLine 'cargo', 'build', '--release'
+    doLast {
+        println "✅ Rust regex engine built: reggie-benchmark/rust-regex-engine/target/release/"
+    }
+}
+
 // Custom task to download test corpora
 tasks.register('downloadCorpora', JavaExec) {
     description = 'Download large test corpora for benchmarking'

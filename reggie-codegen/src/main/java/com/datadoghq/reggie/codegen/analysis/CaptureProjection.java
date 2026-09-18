@@ -227,7 +227,7 @@ public final class CaptureProjection {
   }
 
   private static boolean isEmpty(RegexNode node) {
-    return node instanceof LiteralNode literal && literal.ch == 0
+    return node instanceof EpsilonNode
         || node instanceof ConcatNode concat && concat.children.isEmpty();
   }
 

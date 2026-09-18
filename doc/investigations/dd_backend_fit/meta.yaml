@@ -1,0 +1,15 @@
+name: dd_backend_fit
+description: "Prepare reggie for dd backend fit"
+status: done
+generator: cairn
+repo: datadog--java-reggie
+branch: feat-dd-backend-check
+worktree: /Users/jaroslav.bachorik/go/src/github.com/DataDog/.worktrees/java-reggie-dd-backend-check
+created: 2026-09-16
+updated: 2026-09-16
+completed: 2026-09-16
+last_commit: 2fc44ccaa86a30ee2695695c2dbd0e26116536f7
+last_session: fa653c80-628f-4c9b-9e71-e45c19523352
+retired_reason: null
+retired_by: null
+last_checkpoint: 2026-09-16T14:06:35

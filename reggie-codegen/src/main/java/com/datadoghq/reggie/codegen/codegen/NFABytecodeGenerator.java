@@ -28,7 +28,9 @@ import com.datadoghq.reggie.codegen.automaton.ProductDFA;
 import com.datadoghq.reggie.codegen.automaton.SubsetConstructor;
 import java.util.*;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodTooLargeException;
 import org.objectweb.asm.MethodVisitor;
 
 /**
@@ -222,6 +224,130 @@ public class NFABytecodeGenerator {
   // Phase 2C: Dual-long optimization for 65-128 states (enabled)
   // Uses two long primitives (128 bits) for inline state tracking
   private static final int DUAL_LONG_THRESHOLD = 128;
+
+  /**
+   * Caps instructions emitted per generated method. The JVM's 64 KB per-method limit makes any
+   * method of this size {@link MethodTooLargeException} at ClassWriter.toByteArray anyway, so
+   * legitimate compiles are unaffected; what changes is that adversarial patterns (e.g.
+   * 1000-lookahead cascades whose matches()/matchInto() emission reaches hundreds of thousands of
+   * instructions) abort DURING emission, long before ASM's per-method maxs/frames computation —
+   * previously that pass exhausted multi-GB heaps and killed the host JVM inside the total compile
+   * deadline. RuntimeCompiler converts the thrown MethodTooLargeException into the standard
+   * graceful fallback, so the compile outcome is unchanged, only the cost of reaching it.
+   */
+  private static final int MAX_EMITTED_INSNS_PER_METHOD = 65_535;
+
+  /**
+   * Opens a method on {@code cw} through the per-method emission budget (see {@link
+   * #MAX_EMITTED_INSNS_PER_METHOD}). Every generated method in this class is opened via this
+   * helper; the returned visitor counts real instructions (labels and frames are not code size) and
+   * throws {@link MethodTooLargeException} past the cap.
+   */
+  private static MethodVisitor boundedMethod(
+      ClassWriter cw, String className, int access, String name, String descriptor) {
+    return new BoundedMethodVisitor(
+        cw.visitMethod(access, name, descriptor, null, null), className, name, descriptor);
+  }
+
+  /** Counting visitor implementing the per-method emission budget. */
+  private static final class BoundedMethodVisitor extends MethodVisitor {
+    private final String className;
+    private final String methodName;
+    private final String descriptor;
+    private int emittedInsns;
+
+    BoundedMethodVisitor(
+        MethodVisitor delegate, String className, String methodName, String descriptor) {
+      super(ASM9, delegate);
+      this.className = className;
+      this.methodName = methodName;
+      this.descriptor = descriptor;
+    }
+
+    private void tick() {
+      if (++emittedInsns > MAX_EMITTED_INSNS_PER_METHOD) {
+        throw new MethodTooLargeException(className, methodName, descriptor, emittedInsns);
+      }
+    }
+
+    @Override
+    public void visitInsn(int opcode) {
+      tick();
+      super.visitInsn(opcode);
+    }
+
+    @Override
+    public void visitIntInsn(int opcode, int operand) {
+      tick();
+      super.visitIntInsn(opcode, operand);
+    }
+
+    @Override
+    public void visitVarInsn(int opcode, int var) {
+      tick();
+      super.visitVarInsn(opcode, var);
+    }
+
+    @Override
+    public void visitTypeInsn(int opcode, String type) {
+      tick();
+      super.visitTypeInsn(opcode, type);
+    }
+
+    @Override
+    public void visitFieldInsn(int opcode, String owner, String name, String desc) {
+      tick();
+      super.visitFieldInsn(opcode, owner, name, desc);
+    }
+
+    @Override
+    public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {
+      tick();
+      super.visitMethodInsn(opcode, owner, name, desc, itf);
+    }
+
+    @Override
+    public void visitInvokeDynamicInsn(String name, String desc, Handle bsm, Object... bsmArgs) {
+      tick();
+      super.visitInvokeDynamicInsn(name, desc, bsm, bsmArgs);
+    }
+
+    @Override
+    public void visitJumpInsn(int opcode, Label label) {
+      tick();
+      super.visitJumpInsn(opcode, label);
+    }
+
+    @Override
+    public void visitLdcInsn(Object value) {
+      tick();
+      super.visitLdcInsn(value);
+    }
+
+    @Override
+    public void visitIincInsn(int var, int increment) {
+      tick();
+      super.visitIincInsn(var, increment);
+    }
+
+    @Override
+    public void visitTableSwitchInsn(int min, int max, Label dflt, Label... labels) {
+      tick();
+      super.visitTableSwitchInsn(min, max, dflt, labels);
+    }
+
+    @Override
+    public void visitLookupSwitchInsn(Label dflt, int[] keys, Label[] labels) {
+      tick();
+      super.visitLookupSwitchInsn(dflt, keys, labels);
+    }
+
+    @Override
+    public void visitMultiANewArrayInsn(String desc, int dims) {
+      tick();
+      super.visitMultiANewArrayInsn(desc, dims);
+    }
+  }
 
   public NFABytecodeGenerator(NFA nfa) {
     this(nfa, null, null, java.util.Collections.emptySet(), null, false, false);
@@ -2952,7 +3078,7 @@ public class NFABytecodeGenerator {
    * </ul>
    */
   public void generateMatchesMethod(ClassWriter cw, String className) {
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
+    MethodVisitor mv = boundedMethod(cw, className, ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z");
     mv.visitCode();
 
     // Create local variable allocator
@@ -4018,7 +4144,7 @@ public class NFABytecodeGenerator {
    * }</pre>
    */
   public void generateFindMethod(ClassWriter cw, String className) {
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "find", "(Ljava/lang/String;)Z", null, null);
+    MethodVisitor mv = boundedMethod(cw, className, ACC_PUBLIC, "find", "(Ljava/lang/String;)Z");
     mv.visitCode();
 
     // if (input == null) return false;
@@ -4110,7 +4236,8 @@ public class NFABytecodeGenerator {
    * Start position of first match, or -1 if no match found.
    */
   public void generateFindFromMethod(ClassWriter cw, String className) {
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
+    MethodVisitor mv =
+        boundedMethod(cw, className, ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I");
     mv.visitCode();
 
     // Create local variable allocator
@@ -4143,6 +4270,9 @@ public class NFABytecodeGenerator {
     mv.visitInsn(IRETURN);
 
     mv.visitLabel(checksPass);
+
+    // R1 rejection prefilter: if the required literal does not occur at/after the start offset,
+    // no match can exist (sound for anchored, backref, lookahead and hybrid patterns alike).
 
     if (perConfigEligible()) {
       generatePerConfigBody(mv, allocator, PerConfigMode.FIND_FROM, className);
@@ -4410,6 +4540,21 @@ public class NFABytecodeGenerator {
     String longestLiteral =
         (skipLiteralOptimization || hybridInfo != null) ? null : extractLongestRequiredLiteral(nfa);
 
+    // The indexOf jumps below start the candidate scan at occurrences of the literal. That is
+    // only sound when every match STARTS with the literal: requiredLiterals merely guarantee it
+    // appears somewhere inside the match ((.c)+ requires 'c' at offset 1 — jumping to the first
+    // 'c' would skip the leftmost match start at 0), and extractLongestRequiredLiteral can return
+    // branch-local or mid-pattern runs that are not at offset 0 either. Non-prefix literals keep
+    // the sound rejection below (indexOf == -1 => the required char is in no match) but scan
+    // from `start`.
+    boolean literalIsPrefix = longestLiteral != null && everyMatchStartsWith(longestLiteral);
+    if (!literalIsPrefix) {
+      longestLiteral = null;
+    }
+    boolean requiredCharIsPrefix =
+        requiredLiterals.size() == 1
+            && everyMatchStartsWith(String.valueOf(requiredLiterals.iterator().next()));
+
     // Skip indexOf optimization for:
     // 1. Patterns that require start anchor (^ or \A) - indexOf would skip position 0
     // 2. Patterns with backrefs to lookahead captures - lookahead needs to match from
@@ -4440,19 +4585,35 @@ public class NFABytecodeGenerator {
       mv.visitVarInsn(ILOAD, tryPosVar);
       mv.visitJumpInsn(IFLT, returnMinusOne);
     } else if (!skipIndexOfOptimization && requiredLiterals.size() == 1) {
-      // Fall back to single-character indexOf
+      // Single required char: the indexOf == -1 rejection is sound (the char appears in every
+      // match); the jump to the first occurrence only when every match starts with it.
       char requiredChar = requiredLiterals.iterator().next();
 
-      // tryPos = input.indexOf(requiredChar, start)
-      mv.visitVarInsn(ALOAD, 1); // input
-      pushInt(mv, (int) requiredChar);
-      mv.visitVarInsn(ILOAD, 2); // start
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-      mv.visitVarInsn(ISTORE, tryPosVar);
+      if (requiredCharIsPrefix) {
+        // tryPos = input.indexOf(requiredChar, start)
+        mv.visitVarInsn(ALOAD, 1); // input
+        pushInt(mv, (int) requiredChar);
+        mv.visitVarInsn(ILOAD, 2); // start
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
+        mv.visitVarInsn(ISTORE, tryPosVar);
 
-      // if (tryPos == -1) return -1; (character not found in string)
-      mv.visitVarInsn(ILOAD, tryPosVar);
-      mv.visitJumpInsn(IFLT, returnMinusOne);
+        // if (tryPos == -1) return -1; (character not found in string)
+        mv.visitVarInsn(ILOAD, tryPosVar);
+        mv.visitJumpInsn(IFLT, returnMinusOne);
+      } else {
+        // Sound rejection only: required char absent => no match; scan starts at `start`.
+        mv.visitVarInsn(ALOAD, 1); // input
+        pushInt(mv, (int) requiredChar);
+        mv.visitVarInsn(ILOAD, 2); // start
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
+        mv.visitVarInsn(ISTORE, tryPosVar);
+
+        mv.visitVarInsn(ILOAD, tryPosVar);
+        mv.visitJumpInsn(IFLT, returnMinusOne);
+
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitVarInsn(ISTORE, tryPosVar); // tryPos = start
+      }
     } else {
       // No optimization: start from the given position
       mv.visitVarInsn(ILOAD, 2);
@@ -4699,6 +4860,8 @@ public class NFABytecodeGenerator {
     if (longestLiteral != null && longestLiteral.length() >= 3) {
       // Use multi-character indexOf for next iteration (Tier 1 optimization)
       // tryPos = input.indexOf("literal", tryPos + 1)
+      // longestLiteral is a verified match prefix (see init above), so every candidate start
+      // is an occurrence of it.
       mv.visitVarInsn(ALOAD, 1); // input
       mv.visitLdcInsn(longestLiteral);
       mv.visitVarInsn(ILOAD, tryPosVar);
@@ -4714,8 +4877,9 @@ public class NFABytecodeGenerator {
 
       // Continue to outerLoopStart (will check tryPos <= len there)
       mv.visitJumpInsn(GOTO, outerLoopStart);
-    } else if (!skipIndexOfOptimization && requiredLiterals.size() == 1) {
-      // Fall back to single-character indexOf (only when indexOf optimisation is not suppressed)
+    } else if (!skipIndexOfOptimization && requiredLiterals.size() == 1 && requiredCharIsPrefix) {
+      // Single-char retry jump: only when every match starts with the required char
+      // (verified at init). Otherwise starts between occurrences are viable candidates.
       char requiredChar = requiredLiterals.iterator().next();
 
       // tryPos = input.indexOf(requiredChar, tryPos + 1)
@@ -5536,6 +5700,85 @@ public class NFABytecodeGenerator {
   }
 
   /**
+   * True iff every match of the pattern starts by consuming exactly {@code literal} (the literal
+   * sits at offset 0 of every match). Soundness contract for the findFrom indexOf jumps: the
+   * candidate scan may start at (or jump to) an occurrence of the literal only under this condition
+   * — requiredLiterals only guarantee the literal appears SOMEWHERE inside the match, so for e.g.
+   * (.c)+ (required char 'c' at offset 1) jumping to the first 'c' would skip the leftmost match
+   * start.
+   *
+   * <p>Walks the NFA prefix deterministically: S(0) is the epsilon closure of the start state;
+   * every consuming transition out of S(i) must match exactly {literal[i]} and no accept state may
+   * appear in S(i) before the literal is fully consumed (a shorter match would end before the
+   * literal completes, so the literal is not at offset 0 of every match). Zero-width
+   * context-dependent states (assertions, backrefs, conditionals, counted-loop markers, anchors
+   * other than at an already-verified position) make the answer unknowable without input context —
+   * the walk returns false (no jump) whenever it meets one.
+   *
+   * <p>Anchor states are followed unconditionally: including their successors only enlarges the set
+   * of possible first characters, so a verified literal remains sound (the jump is suppressed
+   * whenever any anchor-conditional path diverges).
+   */
+  private boolean everyMatchStartsWith(String literal) {
+    if (literal == null || literal.isEmpty()) {
+      return false;
+    }
+    Set<NFA.NFAState> current = new HashSet<>();
+    if (!collectContextAwareEpsilonClosure(nfa.getStartState(), current)) {
+      return false;
+    }
+    java.util.Set<NFA.NFAState> accepts = nfa.getAcceptStates();
+
+    for (int i = 0; i < literal.length(); i++) {
+      Set<NFA.NFAState> next = new HashSet<>();
+      boolean anyConsumer = false;
+      boolean closureOk = true;
+      for (NFA.NFAState state : current) {
+        if (accepts.contains(state)) {
+          return false; // a match can end before the literal completes
+        }
+        for (NFA.Transition t : state.getTransitions()) {
+          if (!t.chars.isSingleChar() || t.chars.getSingleChar() != literal.charAt(i)) {
+            return false; // some match starts with a different char at offset i
+          }
+          closureOk &= collectContextAwareEpsilonClosure(t.target, next);
+          anyConsumer = true;
+        }
+      }
+      if (!anyConsumer || !closureOk) {
+        return false;
+      }
+      current = next;
+    }
+    return true;
+  }
+
+  /**
+   * Add {@code state} and everything reachable via plain epsilon transitions to {@code closure}.
+   * Bails by marking the walk context-dependent: assertions, backreference checks, conditionals and
+   * counted-loop markers are zero-width but their passability depends on input context, so the
+   * caller must not trust a literal verified through them.
+   *
+   * <p>Returns false when such a state is met; the closure may then be incomplete.
+   */
+  private boolean collectContextAwareEpsilonClosure(NFA.NFAState state, Set<NFA.NFAState> closure) {
+    if (!closure.add(state)) {
+      return true;
+    }
+    if (state.assertionType != null
+        || state.backrefCheck != null
+        || state.conditionalGroup != null
+        || state.countedLoopId != null) {
+      return false;
+    }
+    boolean ok = true;
+    for (NFA.NFAState next : state.getEpsilonTransitions()) {
+      ok &= collectContextAwareEpsilonClosure(next, closure);
+    }
+    return ok;
+  }
+
+  /**
    * Extract longest required literal from NFA main pattern (excluding lookaheads). For patterns
    * like (?=\w+@)(?=.*example).*@\w+\.com, extracts literals from the main matching path, not from
    * assertion sub-patterns.
@@ -5544,14 +5787,6 @@ public class NFABytecodeGenerator {
    * @return Longest literal string found, or null if no suitable literal exists
    */
   private String extractLongestRequiredLiteral(NFA nfa) {
-    // A multi-char literal is only valid for indexOf skipping when it must appear in EVERY
-    // possible match. For alternation patterns (start state has 2+ epsilon transitions),
-    // literals found inside one branch are not required for all matches, so skip the
-    // optimization entirely to avoid false negatives.
-    NFA.NFAState startState = nfa.getStartState();
-    if (startState != null && startState.getEpsilonTransitions().size() > 1) {
-      return null;
-    }
 
     String longestLiteral = null;
     int maxLength = 0;
@@ -7707,12 +7942,12 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "match",
-            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // Create local variable allocator
@@ -8047,7 +8282,7 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchIntoMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
+        boundedMethod(cw, className, ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z");
     mv.visitCode();
 
     // Method signature: matchInto(String input, int[] outStarts, int[] outEnds)
@@ -8445,12 +8680,12 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchBoundedMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "matchBounded",
-            "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // Create local variable allocator
@@ -9413,7 +9648,7 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchesBoundedMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
+        boundedMethod(cw, className, ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z");
     mv.visitCode();
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
@@ -9444,12 +9679,12 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchBoundedCharSequenceMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
@@ -9482,12 +9717,12 @@ public class NFABytecodeGenerator {
    */
   public void generateFindMatchMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "findMatch",
-            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // return findMatchFrom(input, 0);
@@ -9544,12 +9779,12 @@ public class NFABytecodeGenerator {
    */
   public void generateFindMatchFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "findMatchFrom",
-            "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // int matchStart = findFrom(input, start);
@@ -9685,7 +9920,7 @@ public class NFABytecodeGenerator {
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", null, null);
+        boundedMethod(cw, className, ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z");
     mv.visitCode();
 
     // if (input == null) return false;
@@ -9818,7 +10053,7 @@ public class NFABytecodeGenerator {
    */
   public void generateFindLongestMatchEndMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PRIVATE, "findLongestMatchEnd", "(Ljava/lang/String;I)I", null, null);
+        boundedMethod(cw, className, ACC_PRIVATE, "findLongestMatchEnd", "(Ljava/lang/String;I)I");
     mv.visitCode();
 
     // Create local variable allocator

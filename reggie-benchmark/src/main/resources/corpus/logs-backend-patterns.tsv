@@ -1,0 +1,528 @@
+([a-z0-9_\\-]+)\\.([a-z0-9]+)	logs,prof
+\\s+	logs,prof
+[0-9A-Fa-f]{5}-(.+?)(/|$)	logs
+v2/track/(?<tracktype>[^/]+)	logs
+[0-9]+\\.wal	logs
+.*-shadow(-.*)?-sep	logs
+[A-Z0-9_]+_CONTEXT	logs
+^(.+)\\.(\\d+)$	logs
+[A-Za-z_][A-Za-z0-9_]*	logs
+^jdbc:snowflake://([^/?:]+)\\.snowflakecomputing\\.com(?::\\d+)?(?:/.*)?$	logs
+^(?<field>\\w+)(?:\\[(?:(?<index>\\d+)|"(?<key>[^"]*)")])?$	logs
+t1_([a-z2-7]+)	logs
+org(?<orgId>\\d+)_(?<tableName>\\w+)(\\$(?<metadataTable>\\w+))?	logs
+[\\s\\t\\n\\r]+	logs
+[a-z][a-z0-9]*	logs
+bucket\\[(\\d+)]	logs
+truncate\\[(\\d+)]	logs
+mortar\\.research_.*	logs
+^Fragment \\d+ \\[(\\w+)]$	logs
+Tasks count: (\\d+)	logs
+(?i)^.*\\.datadoghq\\.(com|eu)$	logs
+(?i)^api\\.pagerduty\\.com$	logs
+(?i)^api\\.amplitude\\.com$	logs
+(?i)^.*\\.atlassian\\.net$	logs
+(?i)^.*\\.auth0\\.com$	logs
+(?i)^api\\.braintreegateway\\.com$	logs
+(?i)^api\\.cloudflare\\.com$	logs
+(?i)^api\\.github\\.com$	logs
+(?i)^api\\.hubspot\\.com$	logs
+(?i)^api\\.intercom\\.io$	logs
+(?i)^api\\.mapbox\\.com$	logs
+(?i)^api\\.mixpanel\\.com$	logs
+(?i)^.*openai\\.com$	logs
+(?i)^api\\.urlcloud\\.paloaltonetworks\\.com$	logs
+(?i)^api\\.render\\.com$	logs
+(?i)^smtp\\.sendgrid\\.com$	logs
+(?i)^.*\\.slack\\.com$	logs
+(?i)^api\\.soundcloud\\.com$	logs
+(?i)^.*\\.splunkcloud\\.com$	logs
+(?i)^api\\.stripe\\.com$	logs
+(?i)^api\\.towerdata\\.com$	logs
+(?i)^api\\.twitter\\.com$	logs
+(?i)^(requests\\.request|.*http.*|get)$	logs
+(?i)^.*flask.*$	logs
+(?i)^.*grpc.*$	logs
+(?i)^.*cassandra.*$	logs
+(?i)^(.*postgres.*|dd_pq.*|dd_pgx.*)$	logs
+(?i)^(spark\\.application)$	logs
+(?i)^(spark\\.streaming_batch)$	logs
+(?i)^(databricks\\.job)$	logs
+(?i)^.*mysql.*$	logs
+(?i)^.*s3.*$	logs
+(?i)^.*redis.*$	logs
+(?i)^.*elasticsearch.*$	logs
+(?i)^.*mongo.*$	logs
+(?i)^.*temporal.*$	logs
+(?i)^.*consul.*$	logs
+(?i)^.*kafka\\.consume.*$	logs
+(?i)^.*kafka\\.produce.*$	logs
+(?i)^.*kafka.*$	logs
+(?i)^.*sns.*$	logs
+(?<tableName>\\w+)(\\[org=>(?<orgIdColumnName>\\w+)(:(?<orgIdColumnType>string|int))?])?	logs
+((?<cname>[^/]+)/)?(?<ip>.+):(?<port>\\d+)	logs
+^(\\d+)	logs
+(?<time>\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,12})?)\\s*(?<offset>[+-]\\d{2}:\\d{2})	logs
+(?<date>-?\\d{4,}-\\d{2}-\\d{2}) (?<time>\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,12})?)	logs
+(?<date>-?\\d{4,}-\\d{2}-\\d{2}) (?<time>\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,12})?) (?<zone>.+)	logs
+\\.[a-zA-Z][a-zA-Z0-9]{0,5}$	logs
+([a-zA-Z0-9\\.\\-\\_\\[\\]]+)=[a-zA-Z0-9%\\.\\-\\_]+	logs
+[a-fA-F0-9]{8}(-|_)[a-fA-F0-9]{4}(-|_)[a-fA-F0-9]{4}(-|_)[a-fA-F0-9]{4}(-|_)[a-fA-F0-9]{12}	logs
+([^a-zA-Z0-9]|)[0-9]{6,}([^a-zA-Z0-9]|$)	logs
+Root=([a-z0-9-]*);?	logs
+^azure[^a-z0-9]+functions$	logs
+^azure[^a-z0-9]+app_service$	logs
+^azure[^a-z0-9]+container_apps$	logs
+(https?://)[^/\\?]+?:[^/\\?]+?@	logs
+\\[\\[(.*?)\\]\\((.*?)\\)\\]	logs
+^[a-z0-9]{3}-[a-z0-9]{3}-[a-z0-9]{3}$	logs
+^v?(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][a-zA-Z0-9-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][a-zA-Z0-9-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$	logs
+[{}()\\[\\].+*?^$\\\\|]	logs
+\\{\\{\\s*\\^is_match(\\s+[^{}]*)}}(.*?)\\{\\{/is_match	logs
+\\{\\{\\s*\\^is_exact_match(\\s+[^{}]*)}}(.*?)\\{\\{/is_exact_match	logs
+\\{\\{\\s*(#?)(local_time|is_match|is_not_match|is_exact_match|is_not_exact_match|urlencode)\\s+"([^\\s]*?)"([^}{]*?)}}	logs
+\\{\\{\\s*urlencode\\s+"([^\\s]*?)"}}	logs
+\\{\\{\\s*((:?#if)?)\\s*(eval)\\s+("[^"]*?")\\s*}}	logs
+\\{\\{\\s*#if\\s*(eval\\s*this\\s*"([^}{"]*?)")([^}{]*?)}}	logs
+(?s)\\{\\{\\s*[#^].*	logs
+(?s)\\{\\{\\s*else\\s*.*	logs
+(?s)(\\{\\{\\s*/.*)	logs
+workforcePools/[^/]+/subject/	logs
+^[a-z][a-z0-9_]*\\s*>\\s*0\\.995\\s*$	logs
+.*?\\{\\{([^}{]*\\s)?(")?this(\\.|\\s|(}})|").*	logs
+.*?\\{\\{([^}{]*)?>.*	logs
+.*?\\{\\{\\s*([^}{]*\\s)?eval\\s+"[^}{"]+".*	logs
+.*\\{\\{\\s*([#^])?(is_match|is_exact_match)\\s+"([^"]*\\s+[^"]*)".*}}.*	logs
+^([1-9]\\d*)\\.(\\d+)\\.(\\d+).*$	logs
+\n([ \t]+)"	logs
+linux-image-(?:[^-]+-)*(aws|azure|gcp|generic)(-fips)?	logs
+[^a-z0-9_./\\-]	logs
+^arn:aws:lambda:(?<region>[^:]+):(?<account>\\d+):function:(?<name>[^:]+)(?::[^:]+)?$	logs
+^//cloudfunctions\\.googleapis\\.com/projects/(?<account>[^/]+)/locations/(?<region>[^/]+)/functions/(?<name>.+)$	logs
+^/subscriptions/(?<account>[^/]+)/resourceGroups/(?<resourceGroup>[^/]+)/providers/Microsoft\\.Web/sites/(?<name>.+)$	logs
+^arn:aws:([^:]+):([^:]*):([^:]*):(.+)$	logs
+dynamicclasses\\d+	logs
+^\\s*\\^\\s*([^\\s,]+)\\s*$	logs
+^[vV]	logs
+v\\d+/\\d{4}-\\d{2}-\\d{2}	logs
+(^[^:"*']+):[^"']+$	logs
+input\\.resources\\s*\\[\\s*['"]reference_tables\\.([a-zA-Z0-9_-]+)['"]\\s*\\]	logs
+input\\s*\\[\\s*"resources"\\s*\\]\\s*\\[\\s*"reference_tables\\.([a-zA-Z0-9_-]+)"\\s*\\]	logs
+input\\s*\\[\\s*'resources'\\s*\\]\\s*\\[\\s*'reference_tables\\.([a-zA-Z0-9_-]+)'\\s*\\]	logs
+(^[^:]*):?(.*)	logs
+\\{\\{(@*([a-z0-9]+\\.)*[a-z0-9]*)}}	logs
+ami-[a-zA-Z0-9]+	logs
+\\bor\\b	logs
+\\s*(?<pkgname>[\\w.-]+)\\s*(\\[(?<optnames>[\\w.,\\s-]+)])?\\s*(\\(?\\s*(?<requirement>(,?\\s*(?<constraint>~=|==|!=|<=|>=|<|>|===)\\s*(?<version>[\\w.!*+:-]+))+|(@\\s*(?<wheel>[^;]+)))\\s*\\)?)?\\s*(;\\s*(?<envmarkers>.*))?\\s*	logs
+\\s*#.*	logs
+extra\\s*==\\s*['"]([^'"]+)['"]	logs
+sys_platform\\s*(?<op>[!=]=)\\s*['"](?<platform>[^'"]+)['"]	logs
+^.*?/(?<distribution>[^-/]+)-(?<version>[^-/]+)(-(?<buildtag>[^-/]+))?-(?<pythontag>[^-/]+)-(?<abitag>[^-/]+)-(?<platformtag>[^-/]+)\\.whl\\s*$	logs
+\\w{3}\\s+\\d{1,2},\\s+\\d{4}	logs
+(?i)(license :: |osi approved :: )	logs
+ +	logs
+goToDetails\\("([a-zA-Z0-9-]+)"\\)	logs
+\\((KB[0-9]+)\\)	logs
+url:\\s*"([^"]+)"	logs
+from:\\s*"([^"]+)"	logs
+exact:\\s*"([^"]+)"	logs
+\\.upToNextMinor\\(from:\\s*"([^"]+)"\\)	logs
+"([^"]+)"\\s*\\.\\.<\\s*"([^"]+)"	logs
+recipes/([a-zA-Z0-9_.-]*)/	logs
+^npm:(?<name>(?:@[^/]+/)?[^@]+)(?:@(?<requirement>.+))?$	logs
+"continuationToken"\\s*:\\s*"([^"]*)"	logs
+([~=><!]+)?\\s*([\\w+*.:!-]+)	logs
+(?<op>upToNextMinor:|from:|\\^|>=|<=|>|<)?(?<version>[0-9A-Za-z.+:\\-_]+)	logs
+(\\.\\*)+	logs
+(?<=\\d)\\s+(?=\\d)	logs
+(?<op>\\^|~>|~|>=|<=|!=|=|>|<)?(?<version>[0-9A-Za-z.+*:\\-_]+)	logs
+^[\\^~]?(?:[*xX](?:\\.[*xX]){0,2})$	logs
+[a-z]{3,30}~.*	logs
+(?<op>\\^|>=|<=|>|<)?(?<version>[0-9A-Za-z.+:\\-_]+)	logs
+(?<op>\\^|~|>=|<=|!=|=|>|<)?(?<version>[0-9A-Za-z.+*:\\-_]+)	logs
+@(?:dev|alpha|beta|RC|stable)	logs
+([=><!~]+)([\\w+*.:!-]+)?	logs
+[-_.]+	logs
+CVE-\\d{4}-\\d{4,}	logs
+\\bCWE-\\d+\\b	logs
+(?:www\\.)?huntr\\.(com|dev)	logs
+.*?Service Pack (\\d+).*	logs
+.*?Build (\\d+).*	logs
+.*?Microsoft[(R)]{0,3} Windows[(R)?]{0,3} ?(Serverr? )?(\\d+\\.?\\d?( R2)?|XP|VistaT).*	logs
+\\bCVE-\\d{4}-\\d{4,}\\b	logs
+v?(?<major>0|[1-9]\\d*)\\.(?<minor>0|[1-9]\\d*)\\.(?<patch>0|[1-9]\\d*)(?:(?<prereleasesep>-)(?<prerelease>(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+(?<buildmetadata>[0-9a-zA-Z-]*(?:\\.[0-9a-zA-Z-]*)*))?	logs
+\\s*[vV]?(?:(?<epoch>\\d+)!)?(?<major>\\d+)([.](?<minor>\\d+))?([.](?<patch>\\d+))?(?<extranums>([.][0-9]{1,19}+)+)?(?:(?<prereleasesep>[._-])?(?<prerelease>[\\w*:!-]*(?:\\.[\\w*:!-]*)*))?(?:\\+(?<buildmetadata>[\\w+*:!-]*(?:\\.[\\w+*:!-]*)*))?\\s*	logs
+\\.	logs
+(?<pre>[-_.]?(?<prel>(a|b|c|rc|alpha|beta|pre|preview))[-_.]?(?<pren>[0-9]+)?)?(?<post>-(?<ipostn>[0-9]+)|[-_.]?(?<postl>post|rev|r)[-_.]?(?<postn>[0-9]+)?)?(?<dev>[-_.]?(?<devl>dev)[-_.]?(?<devn>[0-9]+)?)?	logs
+^([-_.]?(?<stabilityl>(a|b|rc|RC|alpha|beta|p|pl))[-_.]?(?<stabilityn>[0-9]+)?)$	logs
+^(?:(\\d+):)?([0-9A-Za-z.~^_]+)(?:-([0-9A-Za-z.~^_-]*))?$	logs
+(?<major>\\d+)\\.?(?<minor>\\d+)?\\.?(?<patch>\\d+)?	logs
+^[vV]\\d	logs
+^\\w+:(?://)?[^/?]+	logs
+^(\\w+:(?://)?)[^#]+	logs
+^\\w+:(?://)?	logs
+:\\d+$	logs
+^[^@]*@	logs
+^\\[[A-Fa-f0-9:]+]$	logs
+^([^:@\\s]+:[^:@\\s]+@)?(([^:@\\s]+)|(\\[[A-Fa-f0-9:]+]))(:\\d+)?$	logs
+https?$	logs
+^https?:?//	logs
+^\\w+=	logs
+^([^']*'+)	logs
+^([^"]*")	logs
+^([^`]*`)	logs
+^([^$]*\\$[^$\\s]*\\$)	logs
+https?://[a-zA-Z]*\\.[a-z]{3}:[a-zA-Z]	logs
+.git$	logs
+_\\d+(\\.\\d+)?+(\\.\\d+)?	logs
+[.\\-_](alpha|beta|milestone|previous|rc|cr|snapshot|dev|preview|next|experimental|nightly|canary|m[\\d]+$|pre\\.[\\d]+$)	logs
+[.-](android)	logs
+Key: (.*?), Value: (.*)	logs
+[`\\-=~!@#$%^&*()_+\\[\\]{};\\'\\\\:"|<,./<>?]+	logs
+(?<!(^|[A-Z]))(?=[A-Z])|(?<!^)(?=[A-Z][a-z])	logs
+[a-zA-Z0-9]*[0-9]+[a-zA-Z0-9]*	logs
+(?<=[/?&=.])[^\\s/?&=.]+\\d+[^\\s/?&=.]*	logs
+[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?	logs
+spiffe://([^/]+)/kubernetes/([^/]+)/([^/]+)	logs
+^v(\\d+-[0-9a-f]+)(?:-.*)?$	logs
+[a-zA-Z0-9]{8,32}	logs
+^[\\w.]*[\\w]+$	logs
+^(.*)/Microsoft.Compute/virtualMachineScaleSets/(?<vmss>.*)/virtualMachines/(?<instance>\\d+)$	logs
+\\$(\\w+)	logs
+\\$\\{(.*?)\\}	logs
+MongoDB starting.*"pid"\\s*:\\s*(\\d+)	logs
+^==== (\\d+) files ====$	logs
+^[a-zA-Z0-9-_@$]+(\\.[a-zA-Z0-9-_@$]+)*$	logs
+(\\\\[nrtf]|[\\s\\p{Z},>":\\(\\[}]|^)@([\\p{L}\\p{N}.+\\-_#&!]+@?[\\p{L}\\p{N}.\\-]*[\\p{L}\\p{N}])	logs
+[^\\w:\\-\\.\\/]	logs
+_{2,}	logs
+^[_0-9]+	logs
+_+$	logs
+^arn:aws(-[a-z-]+)?:lambda:	logs
+^[0-9a-fA-F]+$	logs
+\\d+_CloudTrail_\\w{2}-\\w{4,9}-\\d_\\d{8}T\\d{4}Z.+.json.gz$	logs
+^arn:aws:sts::.*?:assumed-role/.*?/(?<host>i-[0-9a-f]{8}|i-[0-9a-f]{17})$	logs
+(?:\\.|\\\\d| |])(\\{1,\\d\\d\\d+})	logs
+[.\\]](\\{0,\\d\\d\\d+})	logs
+\\^\\.\\{0,\\d+}\\??	logs
+\\$(\\d+)	logs
+\\(	logs
+\\(\\?<([^>]+)>	logs
+\\(\\?>	logs
+\\s*((?<kind>[a-zA-Z0-9_:()$ -]+):( |$))?(?<message>.+)?	logs
+\\s*((?<function>[^@]*)@)?(?<file>.*?)(:?(?<line>[0-9]+))?(:(?<column>[0-9]+))?	logs
+\\s*at\\s+(?<function>\\S+)?\\s*\\((address at )?(?<file>.*?)(:(?<line>[0-9]+))?(:(?<column>[0-9]+))?\\)	logs
+^\\s*at 	logs
+(^|\\S)@[]/]	logs
+:[0-9]+$	logs
+^(?<kind>[^:#]+):\\s*(?<message>.*)$	logs
+^#\\d+\\s+(?<file>[^\\(]+)\\((?<line>\\d+)\\):\\s+(?<module>[^\\(]+)\\(.*\\)\\s*$	logs
+^(?<kind>[^:]+): (?<message>.*)$	logs
+^\\s*at(?: (?:async )?(?<function>\\S+?)(?: \\[as \\S+\\])?)? \\(?(?<file>\\S+?)(?::(?<line>\\d+))?(?::(?<column>\\d+))?\\)?$	logs
+(?<frameNumber>[0-9]+)\\s+pc\\s+(?<programCounter>\\p{XDigit}+)\\s+(?<library>\\S+)(\\s+(\\((?<symbol>.+)\\+(?<offset>[0-9]+)\\)))?	logs
+^(?<kind>[a-zA-Z0-9_:()$ -]+?): (?<message>.*)$	logs
+  at (?<function>.+?) @ (?<file>.*?)(:(?<line>\\d+)(:(?<column>\\d+))?)?	logs
+^\\s*at\\s+\\S+\\s+\\((\\S+):wasm-function\\[(\\d+)\\]:0x([0-9a-fA-F]+)\\)	logs
+^\\s*at\\s+.+?\\s+@\\s+(\\S+):wasm-function\\[(\\d+)\\]:0x([0-9a-fA-F]+)	logs
+^\\s*at\\s+(\\S+):wasm-function\\[(\\d+)\\]:0x([0-9a-fA-F]+)	logs
+^[^@]*@(\\S+):wasm-function\\[(\\d+)\\]:0x([0-9a-fA-F]+)	logs
+^.*wasm-function\\[(\\d+)\\]@\\[wasm code\\]	logs
+^\\s*#(?<stackdepth>\\d+)\\s+Function\\s+(?<function>.+\\S+)\\((?<arguments>.*)\\)\\s+As\\s+(?<returntype>\\w+)\\s*$	logs
+^file/line:\\s+pkg:(?<filepath>.+)\\((?<linenumber>\\d+)\\)$	logs
+^goroutine\\s+\\d+.*$	logs
+^(created by )?(\\S+\\w)(\\([^\\\\)]*\\))?( .*)?$	logs
+^(\\S+):(\\d+).*$	logs
+\\s*#(?<number>[0-9]+)\\s+abs\\s+(?<abs>\\p{XDigit}+)(\\s+virt\\s+(?<virt>\\p{XDigit}+))?\\s+(?<symbol>[^ +]+)\\+0x(?<offset>\\p{XDigit}+)	logs
+\\s*#(?<number>[0-9]+)\\s+(?<function>.+)\\s+\\((?<file>\\S+):(?<line>[0-9]+):(?<column>[0-9]+)\\)	logs
+^(?<kind>[^ ]+?)(: (?<message>.+?))?$	logs
+^\\s*at (\\w+ )?(?<function>[^(]+)\\(.+?( in (?<file>.+):line (?<line>\\d+))?$	logs
+^\\s*(?<suppressed>Suppressed:)?(Caused by:)?\\s*((?<kind>[^\\s:]+)( ?:\\s*(?<message1>.*))?|(?<message2>.+))$	logs
+^\\s*\\.\\.\\.\\s(?<omitted>\\d+)\\s(more|common frames omitted)\\s*$	logs
+^\\s*(?<file>[^\\s:]+)(?::(?<line>\\d+))?(?::in\\s+[`|'](?<function>\\S+)')?(?:: (?<message>.*) \\((?<kind>.*)\\))$	logs
+^\\s*(from\\s*)?(?<file>[^\\s:]+)(?::(?<line>\\d+))?(?::in\\s+[`|'](?<function>\\S+)')?$	logs
+^(?<kind>\\S+)(:\\s*(?<message>.*))?$	logs
+^\\s*File "(?<file>[^"]+)", line (?<line>\\d+), in (?<module>.*)$	logs
+^(?<kind>.+?): (?<message>.+?)( --->.+)?$	logs
+%\\{[^\\\\}]+\\}	logs
+(.yaml$)	logs
+_tests(.yaml)$	logs
+^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$	logs
+^[a-f0-9]{32}$	logs
+[\\w.@$-]*	logs
+^([\\w.~-]+@)?(?<host>[\\w.-]+):(?<path>[\\w./-]+)(?:\\?|$)(.*)$	logs
+^(?:[\\w.~-]+@)?ssh\\.dev\\.azure\\.com(:[^/]*)?/(?<org>[^/]*)/(?<project>[^/]*)/(?<repo>[^/]*)/?$	logs
+^[a-fA-F0-9]{40}$	logs
+^(\\d+)(\\s?)([+-]\\d{4})$	logs
+^(dnspoll:///)?(?<release>errors-api-.*\\.error-tracking)\\..*$	logs
+v(\\d+)\\.(\\w+)	logs
+(?i)(?<=/)(?!OAuth2)(?![vV]\\d{1,2}/)(?:[^\\/\\d\\?]*[\\d]+[^\\/\\?]*)	logs
+^(?<root>github\\.com/[\\w.\\-]+/[\\w.\\-]+)(/[\\w.\\-]+)*$	logs
+^gopkg\\.in/(?<user>[\\w.\\-]+)/(?<repo>[\\w.\\-]+)\\.[\\w.\\-]+$	logs
+^gopkg\\.in/(?<repo>[\\w.\\-]+)\\.[\\w.\\-]+$	logs
+^(?<root>bitbucket\\.org/(?<bitname>[\\w.\\-]+/[\\w.\\-]+))(/[\\w.\\-]+)*$	logs
+^(?<root>hub\\.jazz\\.net/git/[a-z0-9]+/[\\w.\\-]+)(/[\\w.\\-]+)*$	logs
+^(?<root>git\\.apache\\.org/[a-z0-9_.\\-]+\\.git)(/[\\w.\\-]+)*$	logs
+^(?<root>git\\.openstack\\.org/[\\w.\\-]+/[\\w.\\-]+)(\\.git)?(/[\\w.\\-]+)*$	logs
+^(?<root>chiselapp\\.com/user/[A-Za-z0-9]+/repository/[\\w.\\-]+)$	logs
+(?<root>(?<repo>([a-z0-9.\\-]+\\.)+[a-z0-9.\\-]+(:[0-9]+)?(/~?[\\w.\\-]+)+?)\\.(?<vcs>bzr|fossil|git|hg|svn))(/~?[\\w.\\-]+)*$	logs
+^/aws/rds/(instance|cluster)/(?<host>[^/]+)/(?<name>[^/]+)$	logs
+https?://[^:]+:[^@]+@	logs
+\\d	logs
+-+	logs
+(/\\-)?(/pipelines/)	logs
+\\u001B\\[[0-?]*[ -/]*[@-~]|\\u001B\\][^\\u0007\\u001B]*(?:\\u0007|\\u001B\\\\)	logs
+[a-zA-Z_]+	logs
+[0-9]{3}	logs
+^'(NS\\w+Exception)',?$	logs
+^\\p{Lower}+	logs
+\\.(?<extension>[a-zA-Z]{2,6})[(:")?]	logs
+[( ]node:[a-zA-Z_][a-zA-Z0-9_/]*:\\d+:\\d+\\)?	logs
+^(?<methodName>.*)__\\d+_(_)?\\d+$	logs
+[A-Za-z_-]*	logs
+[A-Za-z\\._-]*	logs
+^/home|Users/[^/]+	logs
+(Bundle|Data)/Application/[A-F0-9-]+/	logs
+^/rustc|/rustlib/	logs
+libc([/.])	logs
+pthread([/.])	logs
+jemalloc	logs
+ld-linux	logs
+linux-vdso	logs
+^(\\./)?(stdlib|nptl|misc|string|sysdeps|io|posix|signal|time|math|locale|socket|inet|malloc|debug|elf|csu|wcsmbs|dirent|ctype|dlfcn|resolv|rt|setjmp)/	logs
+/include/.*/bits/	logs
+libjvm	logs
+coreclr	logs
+corehost	logs
+hostpolicy	logs
+hostfxr	logs
+/src/(gc|native|pal|vm)/	logs
+/dotnet/	logs
+mscoree	logs
+/cpython/	logs
+/python([/-][\\d.]+)?/(?!.*/(site|dist)-packages/)	logs
+/(site|dist)-packages/pybind11/	logs
+/cpython-\\d+	logs
+/uvloop/	logs
+/ruby-[\\d.]+/(?!.*/gems/)	logs
+/error\\.c	logs
+/go(/.*)?/src/runtime/	logs
+/php-[\\d.]+/	logs
+/usr/lib\\d*/php	logs
+^(\\./)?Zend/	logs
+/node-v[\\d.]+/	logs
+/deps/(v8|uv)/	logs
+/backtrace-[\\d.]+/	logs
+/datadog-ipc/	logs
+/libdatadog/	logs
+/wrapt/	logs
+(^|!)System\\.	logs
+(^|!)Microsoft\\.	logs
+~<lambda>|~\\{closure}|^_M_(destroy|manager)$	logs
+^_ZN2v8	logs
+^v8::	logs
+^node::	logs
+^uv_	logs
+^heap::base::	logs
+^zend_	logs
+^php_	logs
+^execute_ex$	logs
+^rb_	logs
+^(mark_|gc_|sweep_)	logs
+__verbose_terminate_handler	logs
+^__(libc|pthread|cxa)_	logs
+^_start$	logs
+^_IO_	logs
+^Py[A-Z]	logs
+^_Py	logs
+^pymalloc	logs
+^std::(sys|thread|sync|rt|io|sys_common)::	logs
+^core::(panicking|sync)::	logs
+^VMError::	logs
+^JVM_	logs
+^signalHandler	logs
+^VM_	logs
+^GCIdMark::	logs
+^FreeListAllocator::	logs
+^MemAllocator::	logs
+^XPhysicalMemory	logs
+^G1CollectedHeap::	logs
+^ParallelScavenge	logs
+^backtrace::	logs
+datadog.*profiling	logs
+^alloc_prof_	logs
+^dd_pthread_entry$	logs
+Minified React error #(\\d+); visit https://reactjs\\.org/docs/error-decoder\\.html\\?invariant=\\1 for the full message or use the non-minified dev environment for full errors and additional helpful warnings\\.	logs
+^Error: Minified React error #(\\d+); visit https://reactjs\\.org/docs/error-decoder\\.html\\?invariant=\\1 for the full message or use the non-minified dev environment for full errors and additional helpful warnings\\.(\n(?s).*)?	logs
+^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)	logs
+^(?<prefix>Terminating app due to uncaught exception) '(?<exception>NS\\w+Exception)', reason: '(?<reason>.*)'.$	logs
+[\\p{Alnum}-]+	logs
+^(\\d{17})\\.([a-z]+)$	logs
+(?:logs-sharding-allocator-)?(?<shard>[a-zA-Z0-9_-]+)	logs
+^(.*)-([0-9]{1,4})$	logs
+^(.*)-([a-zA-Z0-9]+)-[a-zA-Z0-9]+$	logs
+^(.*)-([a-zA-Z0-9]+)-?[a-zA-Z0-9]{5}$	logs
+(?i)^\\s*\\$\\s*REGEXP_EXTRACTION\\s*\\(	logs
+%\\{([^:}]+):([^:}]+)\\}	logs
+\\(\\?P?<[a-zA-Z_][a-zA-Z0-9_]*>	logs
+\\bisOcsf:\\s*true|\\bis_ocsf:\\s*true	logs
+\\btarget:\\s*['"]?(ocsf\\.[a-zA-Z0-9_.]+)['"]?	logs
+\\btarget:\\s*['"]?ocsf\\.class_uid['"]?	logs
+\\btemplate:\\s*['"]?(\\d+)['"]?	logs
+\\btarget:\\s*['"]?ocsf\\.metadata\\.profiles['"]?	logs
+\\btemplate:\\s*['"]?\\[([a-zA-Z_,\\s]+)\\]['"]?	logs
+%\\{[^}]*:(ocsf\\.[a-zA-Z0-9_.]+)	logs
+^(.+)_(slow|dlt|parked)_([0-9a-f]{4})$	logs
+^(.+)_([0-9a-f]{4})$	logs
+-datadog(-[^-]+)?$	logs
+-low(-[^-]+)?$	logs
+\\.{2,}+	logs
+[*?][*?]+	logs
+\\?+	logs
+\\s	logs
+datacenter\\S*:(\\S+)	logs
+service:(\\S+)	logs
+\\bname:(\\S+)	logs
+\\bname IN \\(([^)]+)\\)	logs
+\\bresourceid:(\\S+)	logs
+\\d+-\\d+	logs
+[a-z]+_([a-z0-9_]+)_[a-z0-9]{4}	logs
+^(?:(?:\\d+ )?[\\w:-]+(?:\\n|$))+$	logs
+(\\d{10})\\.wal	logs
+^[a-z0-9]([-a-z0-9]*[a-z0-9])?$	logs
+[0-9a-fA-F]{24}	logs
+@application\\.id:([a-f0-9-]+)	logs
+[  ​‌‍‎‏⁠]	logs
+^.*_[a-fA-F0-9]{4}$	logs
+.*--(structured|raw)_.*	logs
+Reference:\\s*(\\S+)	logs
+[a-z\\d-]+_(segment|fragment|attachments_to_delete|blob)_([a-zA-Z0-9_-]+)_(\\d+)_(\\d+)	logs
+org_(\\d+)_([a-zA-Z_]+)_scope_(\\d+)[a-zA-Z0-9_-]*	logs
+org_(\\d+)_([a-zA-Z]+)[a-zA-Z0-9_-]*	logs
+multifragment[a-zA-Z0-9_-]*	logs
+__msgids[a-zA-Z0-9_-]*	logs
+.*/\\d+\\.wal$	logs
+^ruleId:\\(((?:[a-z0-9]{3}-){2}[a-z0-9]{3})(?: OR ((?:[a-z0-9]{3}-){2}[a-z0-9]{3}))*\\)$	logs
+scope_(\\d+)	logs
+.*[a-zA-Z].*	logs
+[^\\p{Alnum}.]+	logs
+^[^\\p{Alpha}]+	logs
+[_]+\\z	logs
+[_]*\\.[_]*	logs
+^[a-z0-9]+(-[a-z0-9]+)*$	logs
+^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$	logs
+[./\\\\]{2,}	logs
+[\\w\\-@\\.\\/\\\\\\?\\>\\<\\:\\="\\~\\$ ]+	logs
+[\\w\\-@\\.\\/]+	logs
+\\$[a-zA-Z_]\\w*(?:\\.\\w+)*	logs
+\\$targetElem(?:\\.[\\w\\-@./]+)?	logs
+%\\{([^}]+)\\}	logs
+^(\\*\\.)?[a-z0-9\\-\\.]+$	logs
+datadoghq\\.com|datadoghq\\.eu|ddog-gov\\.com	logs
+.*prod\\.dog|.*fabric\\.dog	logs
+.*ecr\\.[a-z0-9-]+\\.amazonaws\\.com	logs
+sts(-fips)?(\\.[a-z0-9-]+)?\\.amazonaws\\.com	logs
+.*\\.(ec2|compute).internal	logs
+[0-9A-Za-z_-]+	logs
+.*[\\p{IsAlphabetic}].*	logs
+\\bbyoc_index:([^\\s()]+)	logs
+(logs|evp).*-(ag|agent)	logs
+(logs|evp).*-internal	logs
+evp.*-pool3	logs
+hamr-(logs|evp)	logs
+(logs|evp).*-all	logs
+(-|^)all-.*rum	logs
+(logs|evp).*-api	logs
+apm|spans|trace	logs
+apm-browser	logs
+aws-*(mtr|metrics)	logs
+aws-*(kns|kinesis)	logs
+(logs|evp).*-browser	logs
+(logs|evp).*-cirepor	logs
+(logs|evp).*-compl	logs
+(logs|evp).*-gcp	logs
+network-*devices	logs
+orchestrator	logs
+(logs|evp|events).*-prof	logs
+profile-	logs
+(logs|evp).*-replay	logs
+srcmap	logs
+synthetic	logs
+(web|w)hook	logs
+(logs|evp).*livetail	logs
+rum-	logs
+logs-	logs
+(-|^)all-	logs
+^[0-9a-fA-F]{32}$	logs
+^[0-9a-fA-F]{16}$	logs
+^(\\S+)\\s+(/dbs/([^/]+)/colls/([^/]+).*)$	logs
+-[a-z]+\\d?$	logs
+^(\\S+)\\s+(/.*)$	logs
+^a[dlr][a-z]*_	logs
+(.*\\b(?:BUTTON|A)\\b[^>]*)>.*	logs
+[^\\p{ASCII}]+	logs
+[^a-zA-Z0-9]+	logs
+^_+	logs
+^(?<major>0|[1-9]\\d{0,256})\\.(?<minor>0|[1-9]\\d{0,256})\\.(?<patch>0|[1-9]\\d{0,256})(?:-(?<prerelease>(?:0|[1-9]\\d{0,256}|\\d{0,256}[a-zA-Z-][0-9a-zA-Z-]{0,256})(?:\\.(?:0|[1-9]\\d{0,256}|\\d{0,256}[a-zA-Z-][0-9a-zA-Z-]{0,256})){0,256}))?(?:\\+(?<buildmetadata>[0-9a-zA-Z-]{0,40}(?:\\.[0-9a-zA-Z-]{0,40}){0,256}))?$	logs
+com\\.fsmatic\\.map\\.MapBuilder	logs
+[^\\p{IsAlphabetic}\\d./:-]+	logs
+[_:]+$	logs
+(.*) \\((.*)\\)	logs
+@type:([A-Za-z_]+)	logs
+\\{[^}]+}	logs
+^(GET|POST|HEAD|OPTIONS|PATCH|PUT|DELETE|TRACE|CONNECT|PURGE)\\s+(\\S+)$	logs
+^(?<protocol>[a-z]+://(?<host>[^?/]+))?(?<path>/[^?]*)(?<query>(\\?).*)?$	logs
+(?i)[\\(\\[\\{]?(GET|POST|HEAD|OPTIONS|PATCH|PUT|DELETE|TRACE|CONNECT|PURGE)[\\}\\]\\)]?[\\s:\\-_]*(?:/\\S*)$	logs
+(?i)[\\(\\[\\{]?(?:GET|POST|HEAD|OPTIONS|PATCH|PUT|DELETE|TRACE|CONNECT|PURGE)[\\}\\]\\)]?[\\s:\\-_]*(/\\S*)$	logs
+username="(\\S+)"	logs
+password="(\\S+)"	logs
+/\\d+(/|$)	logs
+data\\[([a-z0-9_\\-]+\\.[a-z0-9]+)\\]	logs
+(?i)(?:^|,)\\s*max-age\\s*=\\s*(\\d+)\\s*(?:,|$)	logs
+^.*dt=\\d{8}/$	logs
+^arn:aws(-us-gov|-cn)?:.*:.*:.*:.*	logs
+^(?<prefix>archive_|frozen_)(?<body>.*?)\\.idx\\.(?<attribute>.+?)\\.(?<metadataKind>metadata|partitionMetadata)\\.zst$	logs
+^The ([a-z]{2}-(gov-)?[a-z]*-\\d) location constraint is incompatible for the region specific endpoint this request was sent to\\.$	logs
+["&~<>#@]	logs
+.*	logs
+[a-zA-Z0-9-]+_blob_[a-zA-Z0-9_-]+_(\\d+)_(\\d+)	logs
+^org_([0-9]+)_([a-z]+)_scope_([0-9]+)(_features_[-A-Z]+)?$	logs
+^org_([0-9]+)_([a-z]+)(_features_[-A-Z]+)?$	logs
+[a-z][a-z0-9-]{0,63}	logs
+(?i)retry after\\s+([^\\.]+)	logs
+^diff --git a/(.+?) b/(.+)$	logs
+^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*	logs
+[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}	logs
+\\bDD_([\\w\\d]{6})\\b	logs
+^github\\.com/DataDog/.*	logs
+^github\\.com/ddoghq/.*	logs
+^go\\.ddbuild\\.io/.*	logs
+\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z	logs
+\\S+ successfully logged in with (?<method>\\S+)$	logs
+\\S+ successfully updated email from \\S+ to (\\S+)$	logs
+\\S+ successfully created user "(\\S+)"$	logs
+Error while applying rule ([a-zA-Z]+),.*$	logs
+([a-zA-Z][a-zA-Z0-9_]*:[a-zA-Z0-9._]+)\\{[^}]*\\}	logs
+\\s+by\\s*\\{[^}]+\\}	logs
+\\.rollup\\([^,]+,\\s*(\\d+)\\)	logs
+^string_agg:(.*):str$	logs
+(?<scheme>[\\w-]+:/{2,3})?(?<host>[\\w.-]+):(?<port>[0-9]{1,5})	logs
+(?:main|canary|shadow|metrics|metrics-canary|devenv-[\\w-]+\\.[\\w-]+)	logs
+^[a-zA-Z0-9_]+(\\.[a-zA-Z0-9_]+)*$	logs
+(.*[a-z0-9/-]*)-([0-9]*)	logs
+(.*[a-z0-9/-]*)-([0-9]*)-([0-9]*)	logs
+^[a-z][a-z0-9-]*$	logs
+duration=([0-9]+(?:\\.[0-9]+)?)(ms|s)	logs,synthetic
+\\b([a-z]+)://([^/\\s]+)	logs,synthetic
+([a-f0-9]{2}:){5}[a-f0-9]{2}	logs,synthetic
+([0-9]{1,3}\\.){3}[0-9]{1,3}	logs,synthetic
+(?<=level=)([a-z]+)	logs,synthetic
+\\b(ERROR|WARN)\\b.*$	logs,synthetic
+@(\\S+)\\.(com|net|org)$	logs,synthetic
+([a-z]+)=([a-z0-9]+)( |$)	logs,synthetic
+\\b(pid|tid)=([0-9]+)\\b	logs,synthetic
+^([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]	logs,synthetic
+[a-z]+_([a-z0-9_]+)_([0-9]+)	logs,synthetic
+\\.([a-z]+)(\\.[a-z]+)?$	logs,synthetic
+\\b(stack|trace):\\s+(.*)$	logs,synthetic
+(\\w+)=(\\S+)	logs,synthetic
+(\\.[-a-z0-9]+){2,}( |$)	logs,synthetic

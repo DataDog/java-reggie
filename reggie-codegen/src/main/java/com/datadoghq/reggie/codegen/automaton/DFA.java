@@ -43,6 +43,14 @@ public final class DFA {
    */
   private final boolean captureAmbiguous;
 
+  /**
+   * True when the subset construction ran with leftmost-first thread pruning (see {@code
+   * SubsetConstructor#setLeftmostFirst} — the priority-aware captureless retry). The DFA's
+   * acceptance is Perl leftmost-first (search semantics), not longest-match: boolean matches() /
+   * anchored spans must be served by another engine (see {@code HybridMatcher} lazyFind routing).
+   */
+  private final boolean leftmostFirstPruned;
+
   public DFA(DFAState startState, Set<DFAState> acceptStates, List<DFAState> allStates) {
     this(startState, acceptStates, allStates, false);
   }
@@ -61,11 +69,27 @@ public final class DFA {
       List<DFAState> allStates,
       boolean anchorConditionDiluted,
       boolean captureAmbiguous) {
+    this(startState, acceptStates, allStates, anchorConditionDiluted, captureAmbiguous, false);
+  }
+
+  public DFA(
+      DFAState startState,
+      Set<DFAState> acceptStates,
+      List<DFAState> allStates,
+      boolean anchorConditionDiluted,
+      boolean captureAmbiguous,
+      boolean leftmostFirstPruned) {
     this.startState = startState;
     this.acceptStates = acceptStates;
     this.allStates = allStates;
     this.anchorConditionDiluted = anchorConditionDiluted;
     this.captureAmbiguous = captureAmbiguous;
+    this.leftmostFirstPruned = leftmostFirstPruned;
+  }
+
+  /** See {@link #leftmostFirstPruned}. */
+  public boolean isLeftmostFirstPruned() {
+    return leftmostFirstPruned;
   }
 
   public boolean isAnchorConditionDiluted() {

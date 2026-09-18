@@ -157,7 +157,9 @@ class BackrefEngineGapsTest {
         "B5: lazy backref must throw, not silently produce wrong spans");
     ReggieMatcher m =
         Reggie.compile("(a+?)\\1", ReggieOptions.builder().allowJdkFallback().build());
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "B5: with fallback enabled, must use JDK");
+    assertTrue(
+        EngineRouting.unwrap(m) instanceof JavaRegexFallbackMatcher,
+        "B5: with fallback enabled, must use JDK");
   }
 
   // ── B6: cross-alternative backref ──────────────────────────────────────────────────────────────
@@ -314,7 +316,9 @@ class BackrefEngineGapsTest {
 
     ReggieMatcher m =
         Reggie.compile("a*(a+)\\1", ReggieOptions.builder().allowJdkFallback().build());
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "B12: with fallback, must use JDK");
+    assertTrue(
+        EngineRouting.unwrap(m) instanceof JavaRegexFallbackMatcher,
+        "B12: with fallback, must use JDK");
 
     // JDK: a*="" (0 chars), (a+)="a", \1="a" → match at [0,2)
     MatchResult r = m.findMatch("aa");

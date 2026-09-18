@@ -938,6 +938,54 @@ public class DeterministicChainBytecodeGenerator {
     }
   }
 
+  /**
+   * Backtrack-capture hygiene (see the {@link #emitOpt}/{@link #emitAltChain} restore points):
+   * {@link #emitCapture} writes {@code capStart[g]} unconditionally at entry and {@code capEnd[g]}
+   * at nested completion, and neither is undone when a backtracking construct unwinds past the
+   * capture (e.g. an OPT's with-path captures a group, its downstream fails, and the skip path wins
+   * — JDK leaves the group unmatched, the stale slots reported a span). Emits {@code snapStart[g] =
+   * capStart[g]; snapEnd[g] = capEnd[g]} for every group before a retryable region, returning the
+   * snapshot's local base (2*groupCount consecutive slots: snap[2g-2]=start, snap[2g-1]=end). Pair
+   * with {@link #emitRestoreCaptures} at every unwind point that abandons the region's attempts.
+   */
+  private int emitSaveCaptures(EmitCtx ctx) {
+    if (ctx.capStart == null) {
+      return -1;
+    }
+    MethodVisitor mv = ctx.mv;
+    int snapBase = ctx.alloc.peek();
+    for (int g = 1; g <= groupCount; g++) {
+      int snapStart = ctx.alloc.allocate();
+      int snapEnd = ctx.alloc.allocate();
+      mv.visitVarInsn(ILOAD, ctx.capStart[g]);
+      mv.visitVarInsn(ISTORE, snapStart);
+      mv.visitVarInsn(ILOAD, ctx.capEnd[g]);
+      mv.visitVarInsn(ISTORE, snapEnd);
+    }
+    return snapBase;
+  }
+
+  /**
+   * Emits {@code capStart[g] = snapStart[g]; capEnd[g] = snapEnd[g]} for every group — the restore
+   * half of {@link #emitSaveCaptures}. Place BEFORE any closing-group end writes at the unwind
+   * point: enclosing groups must first return to their pre-region state (start set, end -1), and
+   * only then have their end slots written at the restored position by the closing machinery.
+   */
+  private void emitRestoreCaptures(EmitCtx ctx, int snapBase) {
+    if (ctx.capStart == null || snapBase < 0) {
+      return;
+    }
+    MethodVisitor mv = ctx.mv;
+    for (int g = 1; g <= groupCount; g++) {
+      int snapStart = snapBase + 2 * (g - 1);
+      int snapEnd = snapStart + 1;
+      mv.visitVarInsn(ILOAD, snapStart);
+      mv.visitVarInsn(ISTORE, ctx.capStart[g]);
+      mv.visitVarInsn(ILOAD, snapEnd);
+      mv.visitVarInsn(ISTORE, ctx.capEnd[g]);
+    }
+  }
+
   private static boolean anyStartAnchored(List<DeterministicChainInfo.ChainBranch> branches) {
     for (DeterministicChainInfo.ChainBranch b : branches) {
       if (b.startAnchored) {
@@ -1569,6 +1617,11 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitVarInsn(ISTORE, backupVar);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, altVar);
+    // Backtrack-capture hygiene: a failed alternative may have captured groups inside its body
+    // before its downstream failed; when a LATER alternative wins without entering them, JDK
+    // leaves those groups unmatched — snapshot every group slot and restore at downstreamFail
+    // (and its exhaustion routes, see below).
+    int snapBase = emitSaveCaptures(ctx);
 
     int n = e.alts.size();
     Label retryLoop = new Label();
@@ -1642,6 +1695,9 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitLabel(downstreamFail);
     mv.visitVarInsn(ILOAD, backupVar);
     mv.visitVarInsn(ISTORE, ctx.posVar);
+    // The failed alternative's stale capture slots must not leak into the next attempt: JDK
+    // backtracking un-binds the groups the failed alternative captured (see emitSaveCaptures).
+    emitRestoreCaptures(ctx, snapBase);
     mv.visitIincInsn(altVar, 1);
     mv.visitJumpInsn(GOTO, retryLoop);
 
@@ -2201,6 +2257,12 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitVarInsn(ISTORE, backupVar);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, skipFlagVar);
+    // Backtrack-capture hygiene: the with-path may fully capture groups inside the nested chain
+    // before its downstream fails and the skip path wins — JDK leaves those groups unmatched, so
+    // snapshot every group slot now and restore on the skip path (before the closingAtEnd writes
+    // below, so groups enclosing the OPT get their end written at the restored position after the
+    // restore resets their end to the pre-OPT state).
+    int snapBase = emitSaveCaptures(ctx);
 
     Label skipStart = new Label();
     Label optWithDone = new Label();
@@ -2243,6 +2305,10 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitLabel(skipStart);
     mv.visitVarInsn(ILOAD, backupVar);
     mv.visitVarInsn(ISTORE, ctx.posVar);
+    // The with-path's stale capture slots must not leak into the skip path's result: JDK
+    // backtracking un-binds the groups the failed with-path captured. Restore before the
+    // closing-group end writes below (see emitSaveCaptures).
+    emitRestoreCaptures(ctx, snapBase);
     if (isLast) {
       // The OPT is the seq's last element: the closing groups end at the restored position.
       for (int g : closingAtEnd) {

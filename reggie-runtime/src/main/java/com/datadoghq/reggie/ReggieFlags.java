@@ -25,7 +25,11 @@ public final class ReggieFlags {
   public static final int DOTALL = 1 << 26;
   public static final int LITERAL = 1 << 27;
 
-  private static final int SUPPORTED = CASE_INSENSITIVE | MULTILINE | DOTALL | LITERAL;
+  /** java.util.regex {@code UNICODE_CHARACTER_CLASS}: \w/\d/\s and POSIX \p{...} go Unicode. */
+  public static final int UNICODE_CHARACTER_CLASS = 1 << 23;
+
+  private static final int SUPPORTED =
+      CASE_INSENSITIVE | MULTILINE | DOTALL | LITERAL | UNICODE_CHARACTER_CLASS;
 
   private ReggieFlags() {}
 

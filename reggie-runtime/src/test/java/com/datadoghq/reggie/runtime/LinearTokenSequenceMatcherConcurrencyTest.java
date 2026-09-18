@@ -240,11 +240,12 @@ class LinearTokenSequenceMatcherConcurrencyTest {
 
   private static void assertDelegateType(ReggieMatcher matcher, Class<?> expectedType)
       throws Exception {
-    if (matcher.getClass() == expectedType) {
+    ReggieMatcher engine = EngineRouting.unwrap(matcher); // strips the R1 prefilter wrapper
+    if (engine.getClass() == expectedType) {
       return;
     }
-    Field delegate = matcher.getClass().getDeclaredField("delegate");
+    Field delegate = engine.getClass().getDeclaredField("delegate");
     delegate.setAccessible(true);
-    assertEquals(expectedType, delegate.get(matcher).getClass());
+    assertEquals(expectedType, delegate.get(engine).getClass());
   }
 }

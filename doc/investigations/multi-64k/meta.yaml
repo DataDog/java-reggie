@@ -1,0 +1,15 @@
+name: multi-64k
+description: "Work around max 64k per method"
+status: done
+generator: cairn
+repo: datadog--java-reggie
+branch: feat-dd-backend-check
+worktree: /Users/jaroslav.bachorik/go/src/github.com/DataDog/.worktrees/java-reggie-dd-backend-check
+created: 2026-09-16
+updated: 2026-09-17
+completed: 2026-09-17
+last_commit: a5ef0fb13a574013d8b7c64c81fa9f825ad82c3f
+last_session: fa653c80-628f-4c9b-9e71-e45c19523352
+retired_reason: null
+retired_by: null
+last_checkpoint: 2026-09-17T07:24:06
