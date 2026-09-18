@@ -28,7 +28,9 @@ import com.datadoghq.reggie.codegen.automaton.ProductDFA;
 import com.datadoghq.reggie.codegen.automaton.SubsetConstructor;
 import java.util.*;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodTooLargeException;
 import org.objectweb.asm.MethodVisitor;
 
 /**
@@ -222,6 +224,131 @@ public class NFABytecodeGenerator {
   // Phase 2C: Dual-long optimization for 65-128 states (enabled)
   // Uses two long primitives (128 bits) for inline state tracking
   private static final int DUAL_LONG_THRESHOLD = 128;
+
+  /**
+   * Caps instructions emitted per generated method. The JVM's 64 KB per-method limit makes any
+   * method of this size {@link MethodTooLargeException} at ClassWriter.toByteArray anyway, so
+   * legitimate compiles are unaffected; what changes is that adversarial patterns (e.g.
+   * 1000-lookahead cascades whose matches()/matchInto() emission reaches hundreds of thousands of
+   * instructions) abort DURING emission, long before ASM's per-method maxs/frames computation —
+   * previously that pass exhausted multi-GB heaps and killed the host JVM inside the total compile
+   * deadline (see find-deadline-coverage-gaps). RuntimeCompiler converts the thrown
+   * MethodTooLargeException into the standard graceful fallback, so the compile outcome is
+   * unchanged, only the cost of reaching it.
+   */
+  private static final int MAX_EMITTED_INSNS_PER_METHOD = 65_535;
+
+  /**
+   * Opens a method on {@code cw} through the per-method emission budget (see {@link
+   * #MAX_EMITTED_INSNS_PER_METHOD}). Every generated method in this class is opened via this
+   * helper; the returned visitor counts real instructions (labels and frames are not code size) and
+   * throws {@link MethodTooLargeException} past the cap.
+   */
+  private static MethodVisitor boundedMethod(
+      ClassWriter cw, String className, int access, String name, String descriptor) {
+    return new BoundedMethodVisitor(
+        cw.visitMethod(access, name, descriptor, null, null), className, name, descriptor);
+  }
+
+  /** Counting visitor implementing the per-method emission budget. */
+  private static final class BoundedMethodVisitor extends MethodVisitor {
+    private final String className;
+    private final String methodName;
+    private final String descriptor;
+    private int emittedInsns;
+
+    BoundedMethodVisitor(
+        MethodVisitor delegate, String className, String methodName, String descriptor) {
+      super(ASM9, delegate);
+      this.className = className;
+      this.methodName = methodName;
+      this.descriptor = descriptor;
+    }
+
+    private void tick() {
+      if (++emittedInsns > MAX_EMITTED_INSNS_PER_METHOD) {
+        throw new MethodTooLargeException(className, methodName, descriptor, emittedInsns);
+      }
+    }
+
+    @Override
+    public void visitInsn(int opcode) {
+      tick();
+      super.visitInsn(opcode);
+    }
+
+    @Override
+    public void visitIntInsn(int opcode, int operand) {
+      tick();
+      super.visitIntInsn(opcode, operand);
+    }
+
+    @Override
+    public void visitVarInsn(int opcode, int var) {
+      tick();
+      super.visitVarInsn(opcode, var);
+    }
+
+    @Override
+    public void visitTypeInsn(int opcode, String type) {
+      tick();
+      super.visitTypeInsn(opcode, type);
+    }
+
+    @Override
+    public void visitFieldInsn(int opcode, String owner, String name, String desc) {
+      tick();
+      super.visitFieldInsn(opcode, owner, name, desc);
+    }
+
+    @Override
+    public void visitMethodInsn(int opcode, String owner, String name, String desc, boolean itf) {
+      tick();
+      super.visitMethodInsn(opcode, owner, name, desc, itf);
+    }
+
+    @Override
+    public void visitInvokeDynamicInsn(String name, String desc, Handle bsm, Object... bsmArgs) {
+      tick();
+      super.visitInvokeDynamicInsn(name, desc, bsm, bsmArgs);
+    }
+
+    @Override
+    public void visitJumpInsn(int opcode, Label label) {
+      tick();
+      super.visitJumpInsn(opcode, label);
+    }
+
+    @Override
+    public void visitLdcInsn(Object value) {
+      tick();
+      super.visitLdcInsn(value);
+    }
+
+    @Override
+    public void visitIincInsn(int var, int increment) {
+      tick();
+      super.visitIincInsn(var, increment);
+    }
+
+    @Override
+    public void visitTableSwitchInsn(int min, int max, Label dflt, Label... labels) {
+      tick();
+      super.visitTableSwitchInsn(min, max, dflt, labels);
+    }
+
+    @Override
+    public void visitLookupSwitchInsn(Label dflt, int[] keys, Label[] labels) {
+      tick();
+      super.visitLookupSwitchInsn(dflt, keys, labels);
+    }
+
+    @Override
+    public void visitMultiANewArrayInsn(String desc, int dims) {
+      tick();
+      super.visitMultiANewArrayInsn(desc, dims);
+    }
+  }
 
   public NFABytecodeGenerator(NFA nfa) {
     this(nfa, null, null, java.util.Collections.emptySet(), null, false, false);
@@ -2952,7 +3079,7 @@ public class NFABytecodeGenerator {
    * </ul>
    */
   public void generateMatchesMethod(ClassWriter cw, String className) {
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
+    MethodVisitor mv = boundedMethod(cw, className, ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z");
     mv.visitCode();
 
     // Create local variable allocator
@@ -4018,7 +4145,7 @@ public class NFABytecodeGenerator {
    * }</pre>
    */
   public void generateFindMethod(ClassWriter cw, String className) {
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "find", "(Ljava/lang/String;)Z", null, null);
+    MethodVisitor mv = boundedMethod(cw, className, ACC_PUBLIC, "find", "(Ljava/lang/String;)Z");
     mv.visitCode();
 
     // if (input == null) return false;
@@ -4110,7 +4237,8 @@ public class NFABytecodeGenerator {
    * Start position of first match, or -1 if no match found.
    */
   public void generateFindFromMethod(ClassWriter cw, String className) {
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
+    MethodVisitor mv =
+        boundedMethod(cw, className, ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I");
     mv.visitCode();
 
     // Create local variable allocator
@@ -7707,12 +7835,12 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "match",
-            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // Create local variable allocator
@@ -8047,7 +8175,7 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchIntoMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z", null, null);
+        boundedMethod(cw, className, ACC_PUBLIC, "matchInto", "(Ljava/lang/String;[I[I)Z");
     mv.visitCode();
 
     // Method signature: matchInto(String input, int[] outStarts, int[] outEnds)
@@ -8445,12 +8573,12 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchBoundedMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "matchBounded",
-            "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // Create local variable allocator
@@ -9413,7 +9541,7 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchesBoundedMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
+        boundedMethod(cw, className, ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z");
     mv.visitCode();
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
@@ -9444,12 +9572,12 @@ public class NFABytecodeGenerator {
    */
   public void generateMatchBoundedCharSequenceMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
@@ -9482,12 +9610,12 @@ public class NFABytecodeGenerator {
    */
   public void generateFindMatchMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "findMatch",
-            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // return findMatchFrom(input, 0);
@@ -9544,12 +9672,12 @@ public class NFABytecodeGenerator {
    */
   public void generateFindMatchFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(
+        boundedMethod(
+            cw,
+            className,
             ACC_PUBLIC,
             "findMatchFrom",
-            "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
+            "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;");
     mv.visitCode();
 
     // int matchStart = findFrom(input, start);
@@ -9685,7 +9813,7 @@ public class NFABytecodeGenerator {
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", null, null);
+        boundedMethod(cw, className, ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z");
     mv.visitCode();
 
     // if (input == null) return false;
@@ -9818,7 +9946,7 @@ public class NFABytecodeGenerator {
    */
   public void generateFindLongestMatchEndMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
-        cw.visitMethod(ACC_PRIVATE, "findLongestMatchEnd", "(Ljava/lang/String;I)I", null, null);
+        boundedMethod(cw, className, ACC_PRIVATE, "findLongestMatchEnd", "(Ljava/lang/String;I)I");
     mv.visitCode();
 
     // Create local variable allocator

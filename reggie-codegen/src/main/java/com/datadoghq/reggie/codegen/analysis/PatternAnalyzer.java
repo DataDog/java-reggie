@@ -1818,9 +1818,9 @@ public class PatternAnalyzer {
   /**
    * True when any of the group's enter marker states is reachable from the NFA start via a path
    * that consumes at least one character (BFS with a consumed-any flag; epsilon steps keep the
-   * flag, character transitions set it). A pure-epsilon path (the group branches at the
-   * anchored start closure) does not count — that shape is handled correctly by the start
-   * position's special case.
+   * flag, character transitions set it). A pure-epsilon path (the group branches at the anchored
+   * start closure) does not count — that shape is handled correctly by the start position's special
+   * case.
    */
   private boolean enterMarkerReachableAfterConsume(
       NFA nfa, List<NFA.NFAState> entries, Map<Integer, NFA.NFAState> byId) {
@@ -1855,9 +1855,9 @@ public class PatternAnalyzer {
   /**
    * Counts capturing groups with a bypass path to acceptance (see {@link
    * #canReachAcceptWithoutEnteringGroupNfa}). Two or more bypass-able groups — e.g. sequential
-   * optional groups containing captures, {@code (?:(a))?(?:(b))?c} — make the priority-ordered
-   * TDFA attach two competing threads' start tags to the same character transition (both threads
-   * consume the same char on different paths); the winning thread's tags cannot be selected at
+   * optional groups containing captures, {@code (?:(a))?(?:(b))?c} — make the priority-ordered TDFA
+   * attach two competing threads' start tags to the same character transition (both threads consume
+   * the same char on different paths); the winning thread's tags cannot be selected at
    * DFA-construction time, producing spans the JDK never reports (observed: g2 start bound from a
    * losing thread). PikeVM resolves the thread priority at match time.
    */
@@ -1878,16 +1878,16 @@ public class PatternAnalyzer {
    *
    * <ol>
    *   <li><b>Charset overlap</b> — the group's body and the bypass path can consume the same
-   *       character ({@code (?:(a):)?(a)}, {@code (?:(a))?(?:(b))?b}, both even with disjoint
-   *       body charsets): the TDFA merges a with-path thread's start/end tag onto a char
-   *       transition a bypass thread also rides, and the winning thread cannot be selected at
-   *       determinization time.
+   *       character ({@code (?:(a):)?(a)}, {@code (?:(a))?(?:(b))?b}, both even with disjoint body
+   *       charsets): the TDFA merges a with-path thread's start/end tag onto a char transition a
+   *       bypass thread also rides, and the winning thread cannot be selected at determinization
+   *       time.
    *   <li><b>Post-consume branch point</b> — the group's enter marker is reachable from the NFA
-   *       start via a path that consumes at least one character ({@code x(?:(a):)?b},
-   *       {@code y(?:(a+)x)?b}): the branch decision then happens in a non-start DFA state,
-   *       where the state-entry group actions record the group start at a stale position (a
-   *       start-only leak, {@code g=[x,-1)}). When the branch point is only the anchored start
-   *       closure ({@code (?:(a):)?b}), the start-position special case handles it correctly.
+   *       start via a path that consumes at least one character ({@code x(?:(a):)?b}, {@code
+   *       y(?:(a+)x)?b}): the branch decision then happens in a non-start DFA state, where the
+   *       state-entry group actions record the group start at a stale position (a start-only leak,
+   *       {@code g=[x,-1)}). When the branch point is only the anchored start closure ({@code
+   *       (?:(a):)?b}), the start-position special case handles it correctly.
    * </ol>
    *
    * <p>Deliberately over-approximating: the charset test collects every character consumable
@@ -2141,9 +2141,8 @@ public class PatternAnalyzer {
       for (RegexNode alt : a.alternatives) {
         // LiteralNode(ch=0) is the parser's epsilon sentinel for syntactically empty branches
         // (e.g. the trailing arm of "a|" or the body of "()"). isNullable does not handle it.
-        if ((alt instanceof EpsilonNode)
-            || isNullable(alt)
-            || hasNullableAlternationBranch(alt)) return true;
+        if ((alt instanceof EpsilonNode) || isNullable(alt) || hasNullableAlternationBranch(alt))
+          return true;
       }
       return false;
     }

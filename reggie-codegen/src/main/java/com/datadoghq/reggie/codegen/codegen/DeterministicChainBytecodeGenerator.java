@@ -940,14 +940,13 @@ public class DeterministicChainBytecodeGenerator {
 
   /**
    * Backtrack-capture hygiene (see the {@link #emitOpt}/{@link #emitAltChain} restore points):
-   * {@link #emitCapture} writes {@code capStart[g]} unconditionally at entry and {@code
-   * capEnd[g]} at nested completion, and neither is undone when a backtracking construct unwinds
-   * past the capture (e.g. an OPT's with-path captures a group, its downstream fails, and the skip
-   * path wins — JDK leaves the group unmatched, the stale slots reported a span). Emits {@code
-   * snapStart[g] = capStart[g]; snapEnd[g] = capEnd[g]} for every group before a retryable region,
-   * returning the snapshot's local base (2*groupCount consecutive slots: snap[2g-2]=start,
-   * snap[2g-1]=end). Pair with {@link #emitRestoreCaptures} at every unwind point that abandons the
-   * region's attempts.
+   * {@link #emitCapture} writes {@code capStart[g]} unconditionally at entry and {@code capEnd[g]}
+   * at nested completion, and neither is undone when a backtracking construct unwinds past the
+   * capture (e.g. an OPT's with-path captures a group, its downstream fails, and the skip path wins
+   * — JDK leaves the group unmatched, the stale slots reported a span). Emits {@code snapStart[g] =
+   * capStart[g]; snapEnd[g] = capEnd[g]} for every group before a retryable region, returning the
+   * snapshot's local base (2*groupCount consecutive slots: snap[2g-2]=start, snap[2g-1]=end). Pair
+   * with {@link #emitRestoreCaptures} at every unwind point that abandons the region's attempts.
    */
   private int emitSaveCaptures(EmitCtx ctx) {
     if (ctx.capStart == null) {

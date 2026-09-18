@@ -444,6 +444,7 @@ public class RegexParser {
 
     // Apply case-insensitive modifier if active
     if (currentModifiers.isCaseInsensitive()) {
+      checkUnicodeCaseFold();
       ranges = applyCaseInsensitiveToRanges(ranges);
     }
 
@@ -567,9 +568,11 @@ public class RegexParser {
       case 'W':
         return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_WORD : CharSet.WORD, true);
       case 's':
-        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, false);
+        return new CharClassNode(
+            unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, false);
       case 'S':
-        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, true);
+        return new CharClassNode(
+            unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, true);
       case 'b':
       case 'B':
         if (unicode) {
@@ -944,8 +947,27 @@ public class RegexParser {
     }
   }
 
-  private RegexNode literalNode(char ch) {
+  /**
+   * Rejects case-insensitive matching under the Unicode-aware case folding of (?u) and (?U).
+   * Reggie's case folding is Unicode simple-case; the JDK adds the special folds (k/K U+212A,
+   * s/\u017F) when either UNICODE_CASE or UNICODE_CHARACTER_CLASS is active — accepting the
+   * combination would diverge exactly where the JDK matches. Like \b under (?U): reject loudly
+   * rather than diverge.
+   */
+  private void checkUnicodeCaseFold() throws ParseException {
+    if (currentModifiers.has(RegexModifiers.Flag.UNICODE_CASE)
+        || currentModifiers.has(RegexModifiers.Flag.UNICODE_CLASSES)) {
+      throw new UnsupportedPatternException(
+          "case-insensitive matching with Unicode-aware case folding ((?iu)/(?iU)): the special"
+              + " Unicode case folds (k/U+212A, s/U+017F) are not supported - reggie would match"
+              + " with simple case folding instead; drop the u/U flag for this pattern or use"
+              + " compileAllowingFallback");
+    }
+  }
+
+  private RegexNode literalNode(char ch) throws ParseException {
     if (currentModifiers.isCaseInsensitive() && Character.isLetter(ch)) {
+      checkUnicodeCaseFold();
       char lower = Character.toLowerCase(ch);
       char upper = Character.toUpperCase(ch);
       if (lower != upper) {

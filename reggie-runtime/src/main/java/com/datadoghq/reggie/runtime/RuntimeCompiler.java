@@ -296,6 +296,21 @@ public class RuntimeCompiler {
       Object cacheKey,
       String reportedPattern,
       java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
+    setTotalCompileDeadline();
+    try {
+      return compileWithDeadline(
+          pattern, options, cacheKey, reportedPattern, linearTokenSequenceAdmission);
+    } finally {
+      clearTotalCompileDeadline();
+    }
+  }
+
+  private static ReggieMatcher compileWithDeadline(
+      String pattern,
+      ReggieOptions options,
+      Object cacheKey,
+      String reportedPattern,
+      java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
 
     // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
@@ -694,6 +709,56 @@ public class RuntimeCompiler {
     return new FlaggedCacheKey(pattern, flags, cacheKeyFor(pattern, options));
   }
 
+  /**
+   * Total wall-clock budget for a single compile (all phases: parse, NFA build, analysis/
+   * determinization passes, code generation), in milliseconds; 0 disables. The per- determinization
+   * deadline (-Dreggie.dfa.deadlineMs) bounds each analysis pass; this bounds the WHOLE compile, so
+   * a pattern that needs several failing passes (e.g. the nested (a|b){0,256}x12 unrolling tries
+   * multiple DFA routes before PikeVM) cannot spend passes x deadline. The deadline is clamped into
+   * every determinization (see SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS), so a tight total
+   * actually binds. On expiry the compile falls back to java.util.regex (or throws
+   * UnsupportedPatternException without ALLOW_JDK_FALLBACK).
+   */
+  static final String TOTAL_COMPILE_DEADLINE_PROPERTY = "reggie.compile.totalDeadlineMs";
+
+  static final long TOTAL_COMPILE_DEADLINE_DEFAULT_MS = 10_000L;
+
+  /**
+   * Read per compile (not cached at class init) so tests and embedders can adjust the knob without
+   * restarting the JVM. 0 disables.
+   */
+  private static long totalCompileDeadlineMs() {
+    return Long.getLong(TOTAL_COMPILE_DEADLINE_PROPERTY, TOTAL_COMPILE_DEADLINE_DEFAULT_MS);
+  }
+
+  /** Sets the compile-scope deadline ThreadLocal for this thread; returns the absolute nanos. */
+  private static long setTotalCompileDeadline() {
+    long ms = totalCompileDeadlineMs();
+    long deadline = ms > 0 ? System.nanoTime() + ms * 1_000_000L : 0L;
+    if (deadline > 0) {
+      com.datadoghq.reggie.codegen.automaton.SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS.set(
+          deadline);
+    }
+    return deadline;
+  }
+
+  private static void clearTotalCompileDeadline() {
+    com.datadoghq.reggie.codegen.automaton.SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS.remove();
+  }
+
+  private static boolean totalDeadlineExceeded() {
+    Long deadline =
+        com.datadoghq.reggie.codegen.automaton.SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS.get();
+    return deadline != null && deadline > 0 && System.nanoTime() > deadline;
+  }
+
+  private static String totalDeadlineReason() {
+    return "total compile deadline exceeded ("
+        + totalCompileDeadlineMs()
+        + " ms; raise -Dreggie.compile.totalDeadlineMs, set 0 to disable) — pattern is too"
+        + " expensive to compile natively";
+  }
+
   private static String normalizePatternFlags(String pattern, int flags) {
     if (!ReggieFlags.areSupported(flags)) {
       throw new IllegalArgumentException("Unsupported Reggie regex flags: " + flags);
@@ -745,6 +810,9 @@ public class RuntimeCompiler {
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
+      if (totalDeadlineExceeded()) {
+        return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
+      }
       if (options.has(ReggieOption.CAPTURE_NAMED_ONLY)) {
         ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
         ReggieMatcher linearTokenSequenceMatcher =
@@ -772,6 +840,15 @@ public class RuntimeCompiler {
       // 3. Analyze and select strategy
       PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
+      if (totalDeadlineExceeded() && !isNfaBacked(result.strategy)) {
+        // Deadline expired mid-analysis. If the analysis already selected an NFA-backed
+        // strategy (PikeVM/BitState/OptimizedNFA), finish it anyway: the remaining work is a
+        // cheap linear NFA build, and such patterns (e.g. nested (a|b){0,256}x12 unrollings)
+        // are exactly the shapes java.util.regex CANNOT match in bounded time — falling back
+        // would move the denial of service from compile time to match time. Only patterns
+        // that still face expensive code generation fall back.
+        return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
+      }
 
       // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
@@ -916,6 +993,9 @@ public class RuntimeCompiler {
 
       if (matcherClass == null) {
         // 7. Cache miss (or collision): Generate bytecode and define hidden class
+        if (totalDeadlineExceeded()) {
+          return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
+        }
         byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
 
         MethodHandles.Lookup hiddenLookup =
@@ -979,6 +1059,17 @@ public class RuntimeCompiler {
               + e.getDescriptor()
               + " codeSize="
               + e.getCodeSize(),
+          null,
+          options);
+    } catch (OutOfMemoryError oom) {
+      // Compile-scope memory backstop, mirroring SubsetConstructor's determinization OOM
+      // conversion: the partially-built structures (AST, NFA, emission buffers) are garbage on
+      // unwind. Adversarial patterns (e.g. 1000-lookahead cascades) previously exhausted
+      // multi-GB heaps during codegen and killed the host JVM; convert to the same graceful
+      // explosion path the time budget uses (JDK fallback or UnsupportedPatternException).
+      return fallbackOrThrow(
+          pattern,
+          "native compile exhausted memory (pattern too large to generate natively)",
           null,
           options);
     } catch (RegexParser.UnsupportedPatternException | UnsupportedOperationException e) {
@@ -1384,6 +1475,7 @@ public class RuntimeCompiler {
 
   private static boolean isNfaBacked(PatternAnalyzer.MatchingStrategy strategy) {
     switch (strategy) {
+      case PIKEVM_CAPTURE:
       case OPTIMIZED_NFA:
       case OPTIMIZED_NFA_WITH_BACKREFS:
       case OPTIMIZED_NFA_WITH_LOOKAROUND:
@@ -1639,6 +1731,10 @@ public class RuntimeCompiler {
               cw, "com/datadoghq/reggie/runtime/" + className);
         }
         unrolled.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        // Static lookup tables for range-heavy charsets (>= LOOKUP_TABLE_RANGE_THRESHOLD ranges,
+        // e.g. \\p{IsAlphabetic}): replaces the inline cascade that could exceed the 64 KB
+        // per-method limit. No-op when no charset crossed the threshold.
+        unrolled.generateLookupTables(cw);
         unrolled.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);

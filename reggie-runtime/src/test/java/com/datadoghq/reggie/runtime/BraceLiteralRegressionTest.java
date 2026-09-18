@@ -1,15 +1,17 @@
 /*
  * Copyright 2026-Present Datadog, Inc.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file
- * except in compliance with the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the
- * License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
- * either express or implied. See the License for the specific language governing permissions
- * and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package com.datadoghq.reggie.runtime;
 
@@ -50,12 +52,14 @@ class BraceLiteralRegressionTest {
     assertEquals("foo.bar", placeholder.findMatch("a {foo.bar} b").group(1));
 
     // logs-backend mustache family: {{ ... }}
-    assertTrue(Reggie.compile("\\{\\{\\s*urlencode\\s+\"([^\\s]*?)\"}}").find("{{ urlencode \"x\"}}"));
+    assertTrue(
+        Reggie.compile("\\{\\{\\s*urlencode\\s+\"([^\\s]*?)\"}}").find("{{ urlencode \"x\"}}"));
     assertTrue(
         Reggie.compile("\\{\\{\\s*\\^is_match(\\s+[^{}]*)}}(.*?)\\{\\{/is_match")
             .find("{{ ^is_match a}}x{{/is_match"));
     assertTrue(Reggie.compile("~<lambda>|~\\{closure}|^_M_(destroy|manager)$").find("~{closure}"));
-    assertTrue(Reggie.compile(".*?\\{\\{([^}{]*\\s)?(\")?this(\\.|\\s|(}})|\").*").find("{{ this }}"));
+    assertTrue(
+        Reggie.compile(".*?\\{\\{([^}{]*\\s)?(\")?this(\\.|\\s|(}})|\").*").find("{{ this }}"));
   }
 
   @Test

@@ -50,35 +50,44 @@ public class SubsetConstructor {
    * Total determinization work charged so far by this constructor instance. One work unit ≈ one
    * innermost-loop iteration (transition visit, closure merge, charset collection, closure-edge
    * relaxation). Charging the innermost loops bounds total compile work even when DFA state count
-   * stays under the state cap but per-state cost is quadratic (e.g. unrolled {n,m} quantifiers
-   * over alternations).
+   * stays under the state cap but per-state cost is quadratic (e.g. unrolled {n,m} quantifiers over
+   * alternations).
    */
   private long determinizationWork;
 
   /**
    * Wall-clock deadline for a single determinization, in nanoseconds; 0 disables. Set when a
    * buildDFA* entry point starts. The deterministic work budget above bounds charged inner-loop
-   * iterations, but uncharged or allocation-dominated paths (and OutOfMemoryError-prone state
-   * sets) can still exceed any unit budget — the deadline is the backstop that guarantees
-   * bounded compile time regardless of where the time goes.
+   * iterations, but uncharged or allocation-dominated paths (and OutOfMemoryError-prone state sets)
+   * can still exceed any unit budget — the deadline is the backstop that guarantees bounded compile
+   * time regardless of where the time goes.
    */
   private long determinizationDeadlineNanos;
 
   /**
-   * Default wall-clock budget for a single determinization. Generous enough for legitimate
-   * large patterns (the ~300-char semver pattern with {0,256} quantifiers determinizes in well
-   * under a second after the flattenClosure/memoization fixes) while keeping adversarial
-   * patterns bounded. Override via -Dreggie.dfa.deadlineMs (0 disables).
+   * Default wall-clock budget for a single determinization. Generous enough for legitimate large
+   * patterns (the ~300-char semver pattern with {0,256} quantifiers determinizes in well under a
+   * second after the flattenClosure/memoization fixes) while keeping adversarial patterns bounded.
+   * Override via -Dreggie.dfa.deadlineMs (0 disables).
    */
   static final long DETERMINIZATION_DEADLINE_MS = Long.getLong("reggie.dfa.deadlineMs", 10_000L);
+
+  /**
+   * Compile-scope total deadline (absolute nanos, 0 = none), set by RuntimeCompiler for the
+   * duration of a compile and cleared afterwards. Each determinization clamps its own per-pass
+   * deadline to the remaining total, so a tight total deadline (e.g. 2s for request-driven
+   * untrusted patterns) actually binds instead of being defeated by the 10s per-pass default. The
+   * clamp only ever TIGHTENS: without a total deadline set, behavior is unchanged.
+   */
+  public static final ThreadLocal<Long> TOTAL_COMPILE_DEADLINE_NANOS = new ThreadLocal<>();
 
   /** NanoTime sampled at determinization start; re-sampled only every 64K work units. */
   private long lastDeadlineCheckNanos;
 
   /**
-   * Charges {@code units} of determinization work and throws {@link StateExplosionException} if
-   * the cumulative budget is exceeded, or if the wall-clock deadline has passed (checked
-   * periodically to keep the check cheap).
+   * Charges {@code units} of determinization work and throws {@link StateExplosionException} if the
+   * cumulative budget is exceeded, or if the wall-clock deadline has passed (checked periodically
+   * to keep the check cheap).
    */
   private void chargeWork(long units) throws StateExplosionException {
     determinizationWork += units;
@@ -104,16 +113,14 @@ public class SubsetConstructor {
   }
 
   /**
-   * Work budget for a single determinization. Exceeding it throws {@link
-   * StateExplosionException}, which callers already treat as "use an NFA strategy instead".
-   * Calibrated so that legitimate large patterns (e.g. the ~300-char semver pattern with
-   * {0,256} bounded quantifiers) determinize successfully while adversarial unrolled-quantifier
-   * bombs abort in well under a second. Override for tests/benchmarks via
-   * -Dreggie.dfa.workBudget=<n>.
+   * Work budget for a single determinization. Exceeding it throws {@link StateExplosionException},
+   * which callers already treat as "use an NFA strategy instead". Calibrated so that legitimate
+   * large patterns (e.g. the ~300-char semver pattern with {0,256} bounded quantifiers) determinize
+   * successfully while adversarial unrolled-quantifier bombs abort in well under a second. Override
+   * for tests/benchmarks via -Dreggie.dfa.workBudget=<n>.
    */
   static final long DETERMINIZATION_WORK_BUDGET =
       Long.getLong("reggie.dfa.workBudget", 200_000_000L);
-
 
   public DFA buildDFA(NFA nfa) throws StateExplosionException {
     return buildDFA(nfa, false);
@@ -140,6 +147,14 @@ public class SubsetConstructor {
         DETERMINIZATION_DEADLINE_MS > 0
             ? lastDeadlineCheckNanos + DETERMINIZATION_DEADLINE_MS * 1_000_000L
             : 0L;
+    // Clamp to the compile-scope total deadline's remaining time (if one is set): the per-pass
+    // deadline only ever tightens, never extends.
+    Long totalDeadline = TOTAL_COMPILE_DEADLINE_NANOS.get();
+    if (totalDeadline != null && totalDeadline > 0) {
+      if (determinizationDeadlineNanos == 0L || totalDeadline < determinizationDeadlineNanos) {
+        determinizationDeadlineNanos = totalDeadline;
+      }
+    }
     try {
       return buildDFAInternal(nfa, computeTags);
     } catch (OutOfMemoryError oom) {
@@ -947,7 +962,8 @@ public class SubsetConstructor {
    * entered.
    */
   private Set<Integer> computeGroupsWithBypass(
-      NFA nfa, Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures) {
+      NFA nfa, Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures)
+      throws StateExplosionException {
     int groupCount = nfa.getGroupCount();
     if (groupCount == 0) return Collections.emptySet();
 
@@ -967,18 +983,24 @@ public class SubsetConstructor {
    * Step-by-step BFS (epsilon + character). Blocks any branch at a state with {@code enterGroup ==
    * g} to avoid false bypasses from pre-computed transitive closures (which include states inside
    * the group reachable through the blocked entry). Returns true only if an accept state is
-   * reachable without crossing group g's enter marker.
+   * reachable without crossing group g's enter marker. Each dequeued state is charged to the
+   * determinization work budget: this BFS is O(groups × states), so patterns with thousands of
+   * capture groups (e.g. (wa0|wb0)(wa1|wb1)… × 6000) previously ran it unchecked for tens of
+   * seconds past the total compile deadline (see find-deadline-coverage-gaps); legitimate patterns
+   * (dozens of groups, moderate NFAs) charge only a few hundred thousand units.
    */
   private boolean canReachAcceptWithoutEnteringGroup(
       NFA.NFAState start,
       int g,
       Set<NFA.NFAState> acceptStates,
-      Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures) {
+      Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures)
+      throws StateExplosionException {
     Set<NFA.NFAState> visited = new HashSet<>();
     Queue<NFA.NFAState> queue = new ArrayDeque<>();
     queue.add(start);
     while (!queue.isEmpty()) {
       NFA.NFAState cur = queue.poll();
+      chargeWork(8); // dequeued state + its epsilon and character edge scans
       if (!visited.add(cur)) continue;
       // Block on entering group g — do not traverse through this state's entry marker
       if (cur.enterGroup != null && cur.enterGroup == g) continue;
@@ -1035,16 +1057,15 @@ public class SubsetConstructor {
   /**
    * Lazily-computed, memoized map: groupId -> set of NFA states that can reach that group's EXIT
    * marker via epsilon edges and/or character transitions. Computed once per group with a single
-   * reverse BFS instead of the previous per-call recursive closure crawl, which was
-   * O(|closure| × |transitions| × |closure|) per invocation and dominated compile time on
-   * alternation-heavy unrolled patterns (e.g. (a|b){0,256} chains).
+   * reverse BFS instead of the previous per-call recursive closure crawl, which was O(|closure| ×
+   * |transitions| × |closure|) per invocation and dominated compile time on alternation-heavy
+   * unrolled patterns (e.g. (a|b){0,256} chains).
    */
   private final Map<Integer, Set<NFA.NFAState>> groupExitReachability = new HashMap<>();
 
   /**
    * Check whether {@code state} can reach the EXIT marker of {@code groupId} — i.e. whether the
-   * state is "inside" the group. Memoized per group via reverse BFS from the group's EXIT
-   * markers.
+   * state is "inside" the group. Memoized per group via reverse BFS from the group's EXIT markers.
    */
   private boolean canReachGroupExit(
       NFA.NFAState state, int groupId, Map<NFA.NFAState, Set<NFA.NFAState>> epsilonClosures) {
@@ -1097,8 +1118,8 @@ public class SubsetConstructor {
    * a state is "inside" a group. Checks both epsilon transitions and character transitions
    * (recursively).
    *
-   * @deprecated replaced by the memoized reverse-BFS implementation above; retained signature
-   *     shape only via {@link #canReachGroupExit(NFA.NFAState, int, Map)}
+   * @deprecated replaced by the memoized reverse-BFS implementation above; retained signature shape
+   *     only via {@link #canReachGroupExit(NFA.NFAState, int, Map)}
    */
   private boolean canReachGroupExit(
       NFA.NFAState state,
