@@ -17,9 +17,12 @@
 - perf: RE2 leftmost-first thread pruning in the subset construction (priority-aware captureless retries, anchor-free NFAs) — stack-frame family DFAs go 19 states/13 unresolved conflicts → 12/0 with JDK-identical spans
 - perf: priority-aware retry for alternation/optional-quantifier originals and hybrid admission for capture give-back RECURSIVE_DESCENT originals (PikeVM capture half)
 - perf: JIT method-size gate — generated classes whose largest method exceeds 8000 bytecodes decline to the JDK fallback when ALLOW_JDK_FALLBACK is set (strict compile keeps the native matcher; refusal set unchanged)
-- Benchmarked on the 513-pattern logs-backend corpus (workspace-jb, same-run rust/jdk controls): matched sweep 340 → 182 µs (1.26x faster than rust-regex, 3.5x faster than JDK), no-match sweep 943 → 637 µs (2.7x faster than rust, 52x faster than JDK); hybrid routing 28 → 102 patterns
+- Benchmarked on the 528-pattern logs-backend corpus (513 real + 15 synthetic guards; workspace-jb, same-run rust/jdk controls): matched sweep 340 → 181 µs (1.25x faster than rust-regex, 3.5x faster than JDK), no-match sweep 943 → 636 µs (2.7x faster than rust, 49x faster than JDK); hybrid routing 28 → 106 patterns
 - fix: find() parity battery caught MULTI_GROUP_GREEDY word-boundary acceptance and RECURSIVE_DESCENT (.*)end no-match (both routed away from the diverging engines)
-- fix: hybrid capture extraction re-matches the DFA span as a standalone string — END anchors inside alternation branches now decline the hybrid (out-of-context $/\Z firing at the span boundary)
+- fix: hybrid capture extraction searches the NFA half from the DFA's leftmost start over the full input (all halves — anchors evaluate in-context); the span re-match remains as fallback when the search finds nothing
+- fix: generated OPTIMIZED_NFA findFrom literal scan: the candidate scan no longer jumps to the first occurrence of a required literal unless the literal is a verified match prefix (requiredLiterals only guarantee somewhere-in-match — (.c)+ on "-cc" previously skipped the leftmost match start, (.0){3,} returned -1); the sound indexOf == -1 rejection is kept for all required chars
+- test: findFrom parity battery for the generated-NFA give-back shapes (NfaFindFromRegressionTest, hybrid nfa-half via EngineRouting)
+- corpus: logs-backend parity corpus 513 → 528 patterns (15 synthetic give-back / anchor-in-branch / lookaround shapes guarding the NFA findFrom fix, tagged logs,synthetic) and 527 → 536 inputs
 - fix: hybrid admission mirrors the standalone FallbackPatternDetector guards
 - fix: route B-CGG-1 (negated CharClass in SPECIALIZED_CONCAT_GREEDY_GROUP) to JDK fallback — eliminates false negatives for patterns like `[1]([^b]{2})`
 - fix: route B-SQG-1 (inner quantifier min>1 in SPECIALIZED_QUANTIFIED_GROUP) to JDK fallback — eliminates false positives for patterns like `(c{2}){1,}`

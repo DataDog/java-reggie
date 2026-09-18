@@ -17,8 +17,9 @@ package com.datadoghq.reggie.runtime;
 
 /**
  * Hybrid matcher that uses DFA for fast matching and NFA for group extraction. DFA provides O(n)
- * matching without backtracking. NFA is only used when capturing groups are needed, and only on the
- * matched substring (bounded).
+ * matching without backtracking. NFA is only used when capturing groups are needed: it searches
+ * from the DFA's match start over the full input (context-true anchors), falling back to
+ * re-matching the DFA span as a standalone string when the search finds nothing.
  */
 public class HybridMatcher extends ReggieMatcher {
   private final ReggieMatcher dfaMatcher;
@@ -116,13 +117,29 @@ public class HybridMatcher extends ReggieMatcher {
       return null;
     }
 
+    // Re-match in context by searching the NFA half from the DFA's leftmost start over the
+    // full input. Searching re-evaluates anchors against the real input: re-matching the DFA
+    // span as a standalone string fired $/\Z/\z at the span boundary where they do not hold
+    // in-context (c+(b$|.*b): b$ fires at the substring end, reporting [10,12) where the
+    // in-context match via .*b is [10,14)), and re-derives the pruned-DFA end preference
+    // instead of trusting it. The DFA start is a sound search floor: it is leftmost, and
+    // anchor-diluted DFAs never enter the hybrid.
+    // All halves search correctly: PikeVM/BitState by construction, the generated OPTIMIZED_NFA
+    // half since its findFrom literal-scan jump is gated on verified match prefixes
+    // (NfaFindFromRegressionTest guards the give-back family). If a search still misses, the
+    // span re-match below extracts captures from the DFA span as a fallback.
+    MatchResult nfaResult = nfaMatcher.findMatchFrom(input, dfaResult.start());
+    if (nfaResult != null) {
+      return enrich(nfaResult);
+    }
+
     String matched = input.substring(dfaResult.start(), dfaResult.end());
-    MatchResult nfaResult = nfaMatcher.match(matched);
-    if (nfaResult == null) {
+    MatchResult spanMatch = nfaMatcher.match(matched);
+    if (spanMatch == null) {
       return dfaResult;
     }
 
-    return new OffsetMatchResult(input, enrich(nfaResult), dfaResult.start());
+    return new OffsetMatchResult(input, enrich(spanMatch), dfaResult.start());
   }
 
   private MatchResult enrich(MatchResult r) {

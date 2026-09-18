@@ -525,3 +525,12 @@ with%7Cpipe|2.2.2.3|TCP|4.3.2.1:23
 {"name":"IPInfo.io","url":"https://ipinfo.io/190.22.3.40"}
 {"name":"IPInfo.io","url":"https://ipinfo.io/23.95.226.155"}
 {"name":"greynoise","url":"http://greynoise.io/190.22.3.40"}
+elapsed duration=12.5ms elapsed=3s total
+request from 10.0.0.1 via 192.168.1.100 ok
+nic aa:bb:cc:dd:ee:ff peer 00:11:22:33:44:55
+notify x@dd.net and root@example.com
+cfg k=v k2=v2 end=y tail
+arch file.tar.gz next a.b. done
+level=warn status=error retry
+trace: pid=42 tid=99 exited
+id logs_backend_check_42 and java_reggie_7

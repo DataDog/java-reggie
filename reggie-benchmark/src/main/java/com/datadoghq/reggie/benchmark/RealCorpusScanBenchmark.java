@@ -29,8 +29,9 @@ import java.util.regex.Pattern;
 import org.openjdk.jmh.annotations.*;
 
 /**
- * Real-corpus scan benchmark: the 513 pattern literals actually used by logs-backend (from the
- * readiness survey, committed as {@code corpus/logs-backend-patterns.tsv}) swept against
+ * Real-corpus scan benchmark: the 528 pattern literals actually used by logs-backend (513 from the
+ * readiness survey, plus 15 synthetic give-back/anchor-in-branch/lookaround shapes guarding the
+ * generated-NFA findFrom fix; committed as {@code corpus/logs-backend-patterns.tsv}) swept against
  * representative log lines by three engines: JDK, reggie, and the Rust regex engine.
  *
  * <p>This is the benchmark that reproduces the 2026-09-17 real-mix smoke test as a permanent lane:
