@@ -183,6 +183,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
     super(pattern);
+    if (nfa.hasCountedLoops()) {
+      // Counted-loop markers carry no outgoing epsilons; this engine would misread the loops
+      // as unbounded. RuntimeCompiler routes such NFAs to BackrefBacktrackMatcher exclusively.
+      throw new IllegalStateException(
+          "PikeVMMatcher cannot execute counted-loop NFAs (see NFA#hasCountedLoops)");
+    }
+
     this.nfa = nfa;
     this.groupCount = nfa.getGroupCount();
     this.stateCount = nfa.getStates().size();
@@ -637,7 +644,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
         return false;
       }
       // Self-anchoring DFA: a non-negative result means the pattern matched some substring.
-      return findDfa.findFrom(input, 0, findStep) >= 0;
+      return findDfa.findFromUnion(input, 0, findStep) >= 0;
     }
     if (useBoolFind) {
       return findBoolPosFrom(input, 0) >= 0;
@@ -761,8 +768,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int findPosFrom(String input, int fromPos) {
     int regionEnd = input.length();
     if (findDfa != null && !findCanMatchEmpty) {
-      if (findDfa.findFrom(input, fromPos, findStep) < 0) return -1;
-    } else if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) {
+      if (findDfa.findFromUnion(input, fromPos, findStep) < 0) return -1;
+    } else if (rejectDfa != null && rejectDfa.findFromUnion(input, fromPos, rejectStep) < 0) {
       return -1;
     }
     // A match is known to exist at/after fromPos; tighten the loop's iteration bound (scanLimit)
@@ -829,7 +836,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int findBoolPosFrom(String input, int fromPos) {
     int regionEnd = input.length();
     if (singleFirstCharAscii >= 0 && input.indexOf(singleFirstCharAscii, fromPos) < 0) return -1;
-    if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) return -1;
+    if (rejectDfa != null && rejectDfa.findFromUnion(input, fromPos, rejectStep) < 0) return -1;
     Arrays.fill(boolCur, false);
     for (int pos = fromPos; pos <= regionEnd; pos++) {
       boolEpsilonClose(boolCur, nfa.getStartState(), pos, input, regionEnd);
@@ -898,10 +905,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // the
     // DFA would never report -1 anyway).
     if (findDfa != null && !findCanMatchEmpty) {
-      if (findDfa.findFrom(input, fromPos, findStep) < 0) {
+      if (findDfa.findFromUnion(input, fromPos, findStep) < 0) {
         return null;
       }
-    } else if (rejectDfa != null && rejectDfa.findFrom(input, fromPos, rejectStep) < 0) {
+    } else if (rejectDfa != null && rejectDfa.findFromUnion(input, fromPos, rejectStep) < 0) {
       // Over-approximating reject DFA proved no match exists at/after fromPos (sound: it accepts a
       // superset, so -1 means truly no match). Only built when it cannot match empty, so no
       // findCanMatchEmpty guard is needed here.

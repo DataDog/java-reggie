@@ -23,6 +23,7 @@ import com.datadoghq.reggie.codegen.ast.BranchResetNode;
 import com.datadoghq.reggie.codegen.ast.CharClassNode;
 import com.datadoghq.reggie.codegen.ast.ConcatNode;
 import com.datadoghq.reggie.codegen.ast.ConditionalNode;
+import com.datadoghq.reggie.codegen.ast.EpsilonNode;
 import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
 import com.datadoghq.reggie.codegen.ast.QuantifierNode;
@@ -334,7 +335,7 @@ public final class PatternCategorizer {
     }
 
     private static boolean isEmptyAlternative(RegexNode node) {
-      if (node instanceof LiteralNode literal) return literal.ch == 0;
+      if (node instanceof LiteralNode literal) return literal instanceof EpsilonNode;
       return node instanceof ConcatNode concat && concat.children.isEmpty();
     }
 

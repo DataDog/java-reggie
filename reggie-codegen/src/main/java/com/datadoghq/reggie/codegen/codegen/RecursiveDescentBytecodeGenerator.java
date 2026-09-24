@@ -451,6 +451,83 @@ public class RecursiveDescentBytecodeGenerator {
   }
 
   /**
+   * True when the node cannot write to the groups array (no capturing groups, backrefs,
+   * subroutines, conditionals or branch resets anywhere inside — lookaround bodies are checked
+   * recursively because Java captures inside lookaheads). A capture-free quantifier body is
+   * deterministic given (pos, end, groups), which is what the fast give-back path relies on.
+   */
+  private static boolean isCaptureFree(RegexNode node) {
+    if (node == null) {
+      return true;
+    }
+    if (node instanceof GroupNode g) {
+      if (g.groupNumber > 0) {
+        return false;
+      }
+      return isCaptureFree(g.child);
+    }
+    if (node instanceof ConcatNode c) {
+      for (RegexNode child : c.children) {
+        if (!isCaptureFree(child)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (node instanceof AlternationNode a) {
+      for (RegexNode alt : a.alternatives) {
+        if (!isCaptureFree(alt)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (node instanceof QuantifierNode q) {
+      return isCaptureFree(q.child);
+    }
+    if (node instanceof AssertionNode as) {
+      return isCaptureFree(as.subPattern);
+    }
+    // Backrefs write nothing but make results depend on mutable group contents; subroutines,
+    // conditionals and branch resets are context-free constructs — all conservative refusals.
+    return !(node instanceof BackreferenceNode
+        || node instanceof SubroutineNode
+        || node instanceof ConditionalNode
+        || node instanceof BranchResetNode);
+  }
+
+  /**
+   * True when every match must start at position 0: the leftmost mandatory spine of the AST begins
+   * with {\@code \A}, or with {\@code ^} in non-multiline mode. Conservative — optional
+   * quantifiers, alternations and consuming nodes on the spine stop the walk, so this can only miss
+   * opportunities, never claim a false anchor.
+   */
+  private static boolean isStartAnchoredAtZero(RegexNode node) {
+    while (true) {
+      if (node instanceof ConcatNode c && !c.children.isEmpty()) {
+        node = c.children.get(0);
+        continue;
+      }
+      if (node instanceof GroupNode g) {
+        node = g.child;
+        continue;
+      }
+      if (node instanceof QuantifierNode q) {
+        if (q.min >= 1) {
+          node = q.child;
+          continue;
+        }
+        return false; // optional content on the spine: the anchor is not guaranteed
+      }
+      if (node instanceof AnchorNode a) {
+        return a.type == AnchorNode.Type.STRING_START
+            || (a.type == AnchorNode.Type.START && !a.multiline);
+      }
+      return false; // consuming node, alternation, backref, assertion: not anchored-at-zero
+    }
+  }
+
+  /**
    * Compute the set of characters that can start a match for this pattern. Used for first-character
    * optimization in findBoundsFrom. Returns null if the optimization is not applicable (e.g.,
    * pattern starts with ^).
@@ -806,6 +883,10 @@ public class RecursiveDescentBytecodeGenerator {
     // Compute first-character set for optimization
     CharSet firstCharSet = computeFirstCharSet(ast);
     boolean canOptimize = firstCharSet != null && !firstCharSet.equals(CharSet.ANY);
+    // R2: an ^/\A-anchored pattern (non-multiline) can only match at position 0 — searching
+    // from a later offset cannot succeed, and scanning forward position by position is the
+    // O(n^2) that dominates .*-prefix anchored rules (e.g. ^(.*)-([0-9]{1,4})$).
+    boolean startAnchoredAtZero = isStartAnchoredAtZero(ast);
 
     MethodVisitor mv =
         cw.visitMethod(
@@ -866,6 +947,16 @@ public class RecursiveDescentBytecodeGenerator {
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ISTORE, 2);
     mv.visitLabel(startNotNeg);
+
+    // R2 anchor-start: only position 0 can match, so a search from any later offset fails.
+    if (startAnchoredAtZero) {
+      Label anchoredAtZero = new Label();
+      mv.visitVarInsn(ILOAD, 2); // fromIndex (clamped >= 0)
+      mv.visitJumpInsn(IFLE, anchoredAtZero); // fromIndex == 0 -> continue
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(anchoredAtZero);
+    }
 
     // pos starts at fromIndex (clamped)
     // S: []
@@ -972,8 +1063,13 @@ public class RecursiveDescentBytecodeGenerator {
     // No match at this position, try next
     // S: []
     mv.visitLabel(firstCharOptimizationSkip); // Landing point for first-char optimization
-    mv.visitIincInsn(posVar, 1); // pos++
-    mv.visitJumpInsn(GOTO, findMatchPositionLoop);
+    if (startAnchoredAtZero) {
+      // R2 anchor-start: position 0 was the only candidate — fail immediately.
+      mv.visitJumpInsn(GOTO, findMatchPositionLoopEnd);
+    } else {
+      mv.visitIincInsn(posVar, 1); // pos++
+      mv.visitJumpInsn(GOTO, findMatchPositionLoop);
+    }
 
     mv.visitLabel(foundMatch);
     // Set bounds[0] = pos (start), bounds[1] = result (end)
@@ -1898,7 +1994,7 @@ public class RecursiveDescentBytecodeGenerator {
     @Override
     public Void visitLiteral(LiteralNode node) {
       // Check for epsilon (empty match) - represented as '\0'
-      if (node.ch == 0) {
+      if (node instanceof EpsilonNode) {
         // Epsilon: match without consuming any input
         // Just return current position
         mv.visitVarInsn(ILOAD, 2); // pos
@@ -2391,7 +2487,7 @@ public class RecursiveDescentBytecodeGenerator {
         // Complex case: backtracking needed
         // Strategy: save groups before greedy child, try it, then try remaining children
         // If remaining children fail, restore groups and have greedy child backtrack
-        generateConcatWithBacktracking(node, backtrackChildIndex);
+        generateConcatWithBacktracking(node, backtrackChildIndex, 16);
       }
 
       return null;
@@ -2561,7 +2657,8 @@ public class RecursiveDescentBytecodeGenerator {
      * <p>Greedy quantifiers (a+b): Start from maxMatches, decrement to min on failure. Non-greedy
      * quantifiers (a+?b): Start from min, increment to maxMatches on failure.
      */
-    private void generateConcatWithBacktracking(ConcatNode node, int backtrackChildIndex) {
+    private void generateConcatWithBacktracking(
+        ConcatNode node, int backtrackChildIndex, int localBase) {
       // Local variable allocation:
       // slot 2: depth (repurposed from pos — pos is dead once moved to slot 5)
       // slot 5: currentPos (repurposed from depth parameter)
@@ -2573,6 +2670,7 @@ public class RecursiveDescentBytecodeGenerator {
       // slot 11: result (temporary for method calls)
       // slot 14: greedyIterations (BacktrackConfig limit tracking)
       // slot 15: backtrackIterations (BacktrackConfig limit tracking)
+      // localBase: int[] iterEnd (R2 fast give-back; nested backtracking starts above it)
 
       // Preserve depth before repurposing slot 5 as currentPos.
       // Push pos then depth in order; store depth into the now-dead pos slot (2),
@@ -2668,6 +2766,24 @@ public class RecursiveDescentBytecodeGenerator {
       generateParserMethod(cw, className, quantNode.child);
       String quantChildMethod = getMethodNameForNode(quantNode.child);
 
+      // R2 fast give-back: when the quantifier body is capture-free, re-matching it k times
+      // from the start on every backtracking level is pure waste (deterministic body, no group
+      // writes): record each iteration's end position during the greedy consume and look it up
+      // instead. This turns .*-prefix give-back from O(n^2) into O(n). Slot 16: int[] iterEnd,
+      // iterEnd[k] = position after k iterations.
+      boolean fastGiveBack = quantNode.greedy && isCaptureFree(quantNode.child);
+      if (fastGiveBack) {
+        // iterEnd = new int[(end - quantifierStartPos) + min + 2]
+        // (progress iterations <= end-start; empty iterations counted only while below min)
+        mv.visitVarInsn(ILOAD, 3); // end
+        mv.visitVarInsn(ILOAD, 7); // quantifierStartPos
+        mv.visitInsn(ISUB);
+        BytecodeUtil.pushInt(mv, quantNode.min + 2);
+        mv.visitInsn(IADD);
+        mv.visitIntInsn(NEWARRAY, T_INT);
+        mv.visitVarInsn(ASTORE, localBase);
+      }
+
       // First, do a greedy match to find maxMatches
       // matchCount = 0 (slot 10)
       mv.visitInsn(ICONST_0);
@@ -2730,6 +2846,13 @@ public class RecursiveDescentBytecodeGenerator {
       // we must keep counting until matchCount reaches min before stopping, otherwise the
       // minimum repetition requirement won't be satisfied.
       mv.visitIincInsn(10, 1); // matchCount++
+      if (fastGiveBack) {
+        // iterEnd[matchCount] = currentPos (zero-width iteration)
+        mv.visitVarInsn(ALOAD, localBase);
+        mv.visitVarInsn(ILOAD, 10);
+        mv.visitVarInsn(ILOAD, 5);
+        mv.visitInsn(IASTORE);
+      }
       if (quantNode.min > 1) {
         // If matchCount is still below min, continue counting (safe: pos doesn't change)
         mv.visitVarInsn(ILOAD, 10); // matchCount
@@ -2743,6 +2866,13 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 11);
       mv.visitVarInsn(ISTORE, 5); // currentPos = result
       mv.visitIincInsn(10, 1); // matchCount++
+      if (fastGiveBack) {
+        // iterEnd[matchCount] = currentPos
+        mv.visitVarInsn(ALOAD, localBase);
+        mv.visitVarInsn(ILOAD, 10);
+        mv.visitVarInsn(ILOAD, 5);
+        mv.visitInsn(IASTORE);
+      }
       mv.visitJumpInsn(GOTO, greedyLoop);
 
       mv.visitLabel(greedyEnd);
@@ -2814,6 +2944,41 @@ public class RecursiveDescentBytecodeGenerator {
       generateGroupArrayRestore(
           6, 4); // System.arraycopy(savedGroups, 0, groups, 0, savedGroups.length)
 
+      Label matchEndFast = new Label();
+      if (fastGiveBack) {
+        // currentPos = (tryMatchCount == 0) ? quantifierStartPos : iterEnd[tryMatchCount]
+        Label kIsZero = new Label();
+        Label posSet = new Label();
+        mv.visitVarInsn(ILOAD, 9); // tryMatchCount
+        mv.visitJumpInsn(IFGT, kIsZero);
+        mv.visitVarInsn(ILOAD, 7); // quantifierStartPos
+        mv.visitVarInsn(ISTORE, 5);
+        mv.visitJumpInsn(GOTO, posSet);
+        mv.visitLabel(kIsZero);
+        mv.visitVarInsn(ALOAD, localBase); // iterEnd
+        mv.visitVarInsn(ILOAD, 9);
+        mv.visitInsn(IALOAD);
+        mv.visitVarInsn(ISTORE, 5);
+        mv.visitLabel(posSet);
+        // POSIX last-iteration tracking (slots 12/13): only ever read when tryMatchCount == 1
+        // (inner-shrink retry); k == 0 leaves them stale exactly like the re-match path.
+        Label noLastIter = new Label();
+        mv.visitVarInsn(ILOAD, 9);
+        mv.visitJumpInsn(IFLE, noLastIter);
+        mv.visitVarInsn(ALOAD, localBase);
+        mv.visitVarInsn(ILOAD, 9);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(ISUB);
+        mv.visitInsn(IALOAD);
+        mv.visitVarInsn(ISTORE, 12); // lastIterationStart = iterEnd[k-1]
+        mv.visitVarInsn(ALOAD, localBase);
+        mv.visitVarInsn(ILOAD, 9);
+        mv.visitInsn(IALOAD);
+        mv.visitVarInsn(ISTORE, 13); // lastIterationEnd = iterEnd[k]
+        mv.visitLabel(noLastIter);
+        mv.visitJumpInsn(GOTO, matchEndFast);
+      }
+
       // Reset position
       mv.visitVarInsn(ILOAD, 7); // quantifierStartPos
       mv.visitVarInsn(ISTORE, 5); // currentPos = quantifierStartPos
@@ -2868,6 +3033,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitIincInsn(10, 1);
       mv.visitJumpInsn(GOTO, matchLoop);
 
+      mv.visitLabel(matchEndFast); // fast give-back join (empty label when not emitted)
       mv.visitLabel(matchEnd);
 
       // If this is a capturing group, set boundaries for the ENTIRE quantifier match.
@@ -3217,9 +3383,10 @@ public class RecursiveDescentBytecodeGenerator {
         }
 
         // Generate nested backtracking for the remaining children
-        // Use slots 16-21 for nested backtracking (avoiding conflict with outer slots 5-15)
+        // Use localBase+1.. for nested backtracking (above this level's iterEnd, and clear of
+        // the fixed slots 2-15); each nested level grows its base by 6.
         generateNestedBacktracking(
-            node, nestedBacktrackIndex, backtrackLoop, quantNode.greedy ? -1 : 1, 9, 16);
+            node, nestedBacktrackIndex, backtrackLoop, quantNode.greedy ? -1 : 1, 9, localBase + 1);
       }
 
       // All remaining children succeeded.
@@ -3663,14 +3830,14 @@ public class RecursiveDescentBytecodeGenerator {
         List<RegexNode> mandatoryChildren =
             innerConcat.children.subList(0, innerConcat.children.size() - 1);
         if (mandatoryChildren.isEmpty()) {
-          mandatoryChild = new LiteralNode((char) 0); // epsilon
+          mandatoryChild = EpsilonNode.INSTANCE; // epsilon
         } else if (mandatoryChildren.size() == 1) {
           mandatoryChild = mandatoryChildren.get(0);
         } else {
           mandatoryChild = new ConcatNode(new ArrayList<>(mandatoryChildren));
         }
       } else {
-        mandatoryChild = new LiteralNode((char) 0); // epsilon
+        mandatoryChild = EpsilonNode.INSTANCE; // epsilon
       }
 
       generateParserMethod(cw, className, backtrackGroup);

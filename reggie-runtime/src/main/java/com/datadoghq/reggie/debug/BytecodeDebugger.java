@@ -96,12 +96,17 @@ public class BytecodeDebugger {
         System.out.println();
       }
 
-      // Analyze pattern and select strategy
-      System.out.println("4. STRATEGY SELECTION");
+      // Isolated PatternAnalyzer recommendation — NOT the routing the real compile pipeline
+      // chooses: the pipeline adds FallbackPatternDetector guards, hybrid/PikeVM/BitState
+      // routing, linear-token-sequence admission, structural caching and the alternation-priority
+      // PikeVM re-route, which this section does not model. The ACTUAL routing is reported in
+      // section 5 via RuntimeCompiler.describeRouting.
+      System.out.println("4. ISOLATED PATTERNANALYZER RECOMMENDATION (not the compile routing)");
       System.out.println("-".repeat(40));
       PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
-      System.out.println("   Strategy: " + result.strategy);
+      System.out.println("   Analyzer recommendation: " + result.strategy);
+      System.out.println("   (see section 5 for the pipeline's ACTUAL routing)");
       if (result.guardTrace != null && !result.guardTrace.isEmpty()) {
         System.out.println("   Guard trace:");
         for (String entry : result.guardTrace) {
@@ -116,12 +121,15 @@ public class BytecodeDebugger {
       }
       System.out.println();
 
-      // Compile pattern
-      System.out.println("5. COMPILING PATTERN");
+      // Compile pattern through the REAL pipeline and report the actual routing decision
+      System.out.println("5. ACTUAL ROUTING (full RuntimeCompiler pipeline)");
       System.out.println("-".repeat(40));
-      ReggieMatcher matcher = RuntimeCompiler.compile(pattern);
+      RuntimeCompiler.RoutingInfo routing = RuntimeCompiler.describeRouting(pattern);
+      System.out.println("   Routing decision: " + routing.routing);
+      System.out.println("   Engine chain: " + routing.engineChain);
+      ReggieMatcher matcher = routing.matcher;
       String className = matcher.getClass().getName();
-      System.out.println("   Generated Class: " + className);
+      System.out.println("   Compiled class: " + className);
       System.out.println();
 
       // List generated methods

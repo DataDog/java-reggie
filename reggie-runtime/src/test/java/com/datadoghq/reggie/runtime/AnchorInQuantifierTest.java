@@ -59,7 +59,7 @@ class AnchorInQuantifierTest {
   void dollarTwo_routedToFallback() {
     // ${2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("${2}", WITH_FALLBACK);
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "${2} must be routed to JDK fallback");
+    assertTrue(m.isJdkFallback(), "${2} must be routed to JDK fallback");
     assertEquals(jdkMatches("${2}", ""), m.matches(""), "must match JDK for empty string");
     assertEquals(jdkFind("${2}", "hello"), m.find("hello"), "must match JDK for 'hello'");
   }
@@ -68,7 +68,7 @@ class AnchorInQuantifierTest {
   void dollarZeroToTwo_routedToFallback() {
     // ${0,2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("${0,2}", WITH_FALLBACK);
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "${0,2} must be routed to JDK fallback");
+    assertTrue(m.isJdkFallback(), "${0,2} must be routed to JDK fallback");
     assertEquals(jdkFind("${0,2}", "hello"), m.find("hello"), "must match JDK for 'hello'");
     assertEquals(jdkFind("${0,2}", ""), m.find(""), "must match JDK for empty string");
     assertEquals(jdkMatches("${0,2}", ""), m.matches(""), "must match JDK matches() for empty");
@@ -78,7 +78,7 @@ class AnchorInQuantifierTest {
   void dollarPlus_routedToFallback() {
     // $+ is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("$+", WITH_FALLBACK);
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "$+ must be routed to JDK fallback");
+    assertTrue(m.isJdkFallback(), "$+ must be routed to JDK fallback");
     assertEquals(jdkFind("$+", "hello"), m.find("hello"), "must match JDK for 'hello'");
     assertEquals(jdkMatches("$+", ""), m.matches(""), "must match JDK matches() for empty");
   }
@@ -87,7 +87,7 @@ class AnchorInQuantifierTest {
   void dollarStar_routedToFallback() {
     // $* is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("$*", WITH_FALLBACK);
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "$* must be routed to JDK fallback");
+    assertTrue(m.isJdkFallback(), "$* must be routed to JDK fallback");
     assertEquals(jdkFind("$*", "hello"), m.find("hello"), "must match JDK for 'hello'");
     assertEquals(jdkMatches("$*", ""), m.matches(""), "must match JDK matches() for empty");
   }
@@ -96,7 +96,7 @@ class AnchorInQuantifierTest {
   void dollarQuestion_routedToFallback() {
     // $? is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("$?", WITH_FALLBACK);
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "$? must be routed to JDK fallback");
+    assertTrue(m.isJdkFallback(), "$? must be routed to JDK fallback");
     assertEquals(jdkFind("$?", "hello"), m.find("hello"), "must match JDK for 'hello'");
     assertEquals(jdkMatches("$?", ""), m.matches(""), "must match JDK matches() for empty");
   }
@@ -105,7 +105,7 @@ class AnchorInQuantifierTest {
   void caretTwo_routedToFallback() {
     // ^{2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("^{2}", WITH_FALLBACK);
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "^{2} must be routed to JDK fallback");
+    assertTrue(m.isJdkFallback(), "^{2} must be routed to JDK fallback");
     assertEquals(jdkFind("^{2}", "hello"), m.find("hello"), "must match JDK for 'hello'");
     assertEquals(jdkMatches("^{2}", ""), m.matches(""), "must match JDK matches() for empty");
   }
@@ -114,7 +114,7 @@ class AnchorInQuantifierTest {
   void stringEndTwo_routedToFallback() {
     // \z{2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("\\z{2}", WITH_FALLBACK);
-    assertTrue(m instanceof JavaRegexFallbackMatcher, "\\z{2} must be routed to JDK fallback");
+    assertTrue(m.isJdkFallback(), "\\z{2} must be routed to JDK fallback");
     assertEquals(jdkFind("\\z{2}", "hello"), m.find("hello"), "must match JDK for 'hello'");
     assertEquals(jdkMatches("\\z{2}", ""), m.matches(""), "must match JDK matches() for empty");
   }
@@ -124,7 +124,7 @@ class AnchorInQuantifierTest {
     // hello${2} is routed to JDK fallback — verify it agrees with JDK
     ReggieMatcher m = Reggie.compile("hello${2}", WITH_FALLBACK);
     assertTrue(
-        m instanceof JavaRegexFallbackMatcher,
+        m.isJdkFallback(),
         "hello${2} must be routed to JDK fallback (anchor-in-quantifier guard active)");
     assertEquals(
         jdkMatches("hello${2}", "hello"), m.matches("hello"), "must match JDK for 'hello'");

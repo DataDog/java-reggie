@@ -16,7 +16,7 @@
 package com.datadoghq.reggie.codegen.ast;
 
 /** Represents a literal character in the regex. */
-public final class LiteralNode implements RegexNode {
+public class LiteralNode implements RegexNode {
 
   public final char ch;
 

@@ -103,6 +103,19 @@ public class ReggieMatcherBytecodeGenerator {
     RegexNode ast = parser.parse(pattern);
     int groupCount = countGroups(pattern);
     NFA nfa = new ThompsonBuilder().build(ast, groupCount);
+    if (nfa.hasCountedLoops()) {
+      // The counted-loop lowering runs in this build too, but only the runtime pipeline
+      // executes the markers (BackrefBacktrackMatcher). No compile-time generator interprets
+      // them — the markers would read as dead states and reject valid matches.
+      if (allowJdkFallback) {
+        return Realization.DELEGATE_FALLBACK;
+      }
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' uses a bounded quantifier over the unrolling budget; the counted-loop engine is"
+              + " runtime-only. Use Reggie.compile() instead.");
+    }
     PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
     PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
     this.resolvedStrategy = result.strategy;
@@ -189,6 +202,14 @@ public class ReggieMatcherBytecodeGenerator {
     // Count groups in pattern for group tracking
     int groupCount = countGroups(pattern);
     NFA nfa = nfaBuilder.build(ast, groupCount);
+    if (nfa.hasCountedLoops()) {
+      // See resolveRealization: only the runtime pipeline executes counted-loop markers.
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' uses a bounded quantifier over the unrolling budget; the counted-loop engine is"
+              + " runtime-only. Use Reggie.compile() instead.");
+    }
 
     // Detect case-insensitive mode
     boolean caseInsensitive = isCaseInsensitive(pattern);

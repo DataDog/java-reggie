@@ -69,3 +69,4 @@ SECURITY-SCAN-SUMMARY.md
 reggie-benchmark/com.datadoghq.reggie.benchmark*/
 .cachebro/
 .worktrees/
+reggie-benchmark/rust-regex-engine/target/

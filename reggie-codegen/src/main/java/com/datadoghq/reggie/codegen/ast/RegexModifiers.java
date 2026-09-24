@@ -29,7 +29,17 @@ public class RegexModifiers {
     CASE_INSENSITIVE('i'), // (?i) - case insensitive matching
     MULTILINE('m'), // (?m) - ^ and $ match line boundaries, not just string boundaries
     DOTALL('s'), // (?s) - . matches newline characters
-    EXTENDED('x'); // (?x) - ignore whitespace and allow comments
+    EXTENDED('x'), // (?x) - ignore whitespace and allow comments
+    // (?U) - java.util.regex UNICODE_CHARACTER_CLASS: \w/\d/\s and the POSIX-style \p{...}
+    // property classes use their Unicode definitions (CharSet.ofUnicodeCategory(name, true)).
+    // \b under this flag is rejected loudly by the parser: the Unicode word boundary needs
+    // every engine's word-boundary evaluator to be mode-aware, which is out of scope —
+    // consumers fall back instead of silently diverging from the JDK.
+    UNICODE_CLASSES('U'),
+    // (?u) - java.util.regex UNICODE_CASE. Rejected when combined with (?i) at the point
+    // case folding applies: the JDK's UNICODE_CASE adds special/full case folds
+    // (k/U+212A, s/U+017F, ss/U+00DF) that reggie's simple Unicode folding does not implement.
+    UNICODE_CASE('u');
 
     public final char symbol;
 

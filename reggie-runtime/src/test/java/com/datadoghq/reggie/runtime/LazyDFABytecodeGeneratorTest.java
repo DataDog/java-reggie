@@ -56,7 +56,7 @@ class LazyDFABytecodeGeneratorTest {
 
   @Test
   void testNfaStepMethodPresent() throws Exception {
-    ReggieMatcher m = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
+    ReggieMatcher m = EngineRouting.unwrap(RuntimeCompiler.compile(LARGE_NFA_PATTERN));
     Method nfaStep = m.getClass().getDeclaredMethod("nfaStep", int[].class, int.class);
     assertNotNull(nfaStep);
   }
@@ -64,10 +64,12 @@ class LazyDFABytecodeGeneratorTest {
   @Test
   void testCacheIsSharedAcrossInstances() throws Exception {
     RuntimeCompiler.clearCache();
-    ReggieMatcher m1 = RuntimeCompiler.compile(LARGE_NFA_PATTERN);
+    ReggieMatcher m1 = EngineRouting.unwrap(RuntimeCompiler.compile(LARGE_NFA_PATTERN));
     // Use a distinct cache key to force a new ReggieMatcher instance while reusing the same
     // generated class from the level-2 structural cache, giving two distinct objects.
-    ReggieMatcher m2 = RuntimeCompiler.cached("alt-key-shared-cache-test", LARGE_NFA_PATTERN);
+    ReggieMatcher m2 =
+        EngineRouting.unwrap(
+            RuntimeCompiler.cached("alt-key-shared-cache-test", LARGE_NFA_PATTERN));
     assertNotSame(m1, m2); // different instances
     assertSame(m1.getClass(), m2.getClass()); // same generated class
     // Verify the static CACHE field is the same object across both instances.
@@ -81,8 +83,8 @@ class LazyDFABytecodeGeneratorTest {
   @Test
   void testCacheIsNotSharedAcrossPatterns() throws Exception {
     RuntimeCompiler.clearCache();
-    ReggieMatcher m1 = RuntimeCompiler.compile("x(?:a+b+|b+a+){75}");
-    ReggieMatcher m2 = RuntimeCompiler.compile("x(?:a+b+|b+a+){76}");
+    ReggieMatcher m1 = EngineRouting.unwrap(RuntimeCompiler.compile("x(?:a+b+|b+a+){75}"));
+    ReggieMatcher m2 = EngineRouting.unwrap(RuntimeCompiler.compile("x(?:a+b+|b+a+){76}"));
     Field f1 = m1.getClass().getDeclaredField("CACHE");
     Field f2 = m2.getClass().getDeclaredField("CACHE");
     f1.setAccessible(true);

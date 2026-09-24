@@ -125,6 +125,26 @@ public class DFAUnrolledBytecodeGenerator {
     this(dfa, groupCount, useTaggedDFA, null);
   }
 
+  /**
+   * Range-count threshold at which a charset's inline range cascade is replaced by a static {@code
+   * boolean[65536]} lookup table (see {@link #generateLookupTables}). A 1300-range class like
+   * {@code \p{IsAlphabetic}} unrolls to ~20 KB of comparisons per occurrence — a handful of
+   * occurrences exceeds the JVM 64 KB per-method limit and the whole pattern was rejected
+   * ("generated method too large"). The table check is one array load and also matches faster.
+   */
+  private static final int LOOKUP_TABLE_RANGE_THRESHOLD = 100;
+
+  /**
+   * Range-heavy charsets registered by {@link #generateCharSetCheck} (idempotent), keyed by CharSet
+   * identity. Fields and the {@code <clinit>} decoder are emitted by {@link #generateLookupTables},
+   * which RuntimeCompiler must call after all method generators and before {@code cw.visitEnd()}.
+   */
+  private final java.util.LinkedHashMap<CharSet, String> lookupTableFields =
+      new java.util.LinkedHashMap<>();
+
+  /** Internal name of the class being generated, for GETSTATIC owners. */
+  private String ownerInternalName;
+
   public DFAUnrolledBytecodeGenerator(DFA dfa, int groupCount, boolean useTaggedDFA, NFA nfa) {
     this.dfa = dfa;
     this.groupCount = groupCount;
@@ -223,6 +243,7 @@ public class DFAUnrolledBytecodeGenerator {
    * }</pre>
    */
   public void generateMatchesMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
     mv.visitCode();
 
@@ -312,24 +333,7 @@ public class DFAUnrolledBytecodeGenerator {
     // pos++;
     mv.visitIincInsn(posVar, 1);
 
-    // Generate transition checks (NO BitSet, direct char comparisons)
-    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-      CharSet chars = entry.getKey();
-      DFA.DFATransition trans = entry.getValue();
-      DFA.DFAState target = trans.target;
-
-      Label nextCheck = new Label();
-      generateCharSetCheck(mv, chars, chVar, nextCheck);
-      if (!trans.entryGuard.isEmpty()) {
-        emitTransitionEntryGuard(mv, trans.entryGuard, posVar, nextCheck);
-      }
-
-      // Match found - jump to target state
-      mv.visitJumpInsn(GOTO, stateLabels.get(target));
-
-      // No match - try next transition
-      mv.visitLabel(nextCheck);
-    }
+    emitTransitionChecks(mv, state, stateLabels, chVar, posVar);
 
     // No transition matched - reject
     mv.visitInsn(ICONST_0);
@@ -682,6 +686,114 @@ public class DFAUnrolledBytecodeGenerator {
    * Generate inline character checks (NO method calls to CharSet). Leaves execution at noMatch
    * label if character doesn't match.
    */
+  /** One merge group of a state's transitions: same target, and (when merging) same guard/tags. */
+  private static final class TransGroup {
+    final DFA.DFAState target;
+    final java.util.List<CharSet> sets = new java.util.ArrayList<>();
+    final java.util.List<DFA.DFATransition> members = new java.util.ArrayList<>();
+    boolean sameGuard = true;
+    boolean sameTagOps = true;
+
+    TransGroup(DFA.DFAState target) {
+      this.target = target;
+    }
+
+    CharSet mergedChars() {
+      CharSet merged = sets.get(0);
+      for (int i = 1; i < sets.size(); i++) {
+        merged = merged.union(sets.get(i));
+      }
+      return merged;
+    }
+  }
+
+  /**
+   * Groups a state's transitions by target, tracking whether all members share the entry guard and
+   * tag ops (a group may only be merged into one charset check when the guard — and, for
+   * tagOps-emitting paths, the tag ops — are identical; otherwise the site must fall back to
+   * per-transition emission).
+   */
+  private static java.util.List<TransGroup> transitionGroups(DFA.DFAState state) {
+    java.util.LinkedHashMap<DFA.DFAState, TransGroup> byTarget = new java.util.LinkedHashMap<>();
+    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
+      TransGroup g = byTarget.computeIfAbsent(entry.getValue().target, TransGroup::new);
+      g.sets.add(entry.getKey());
+      g.members.add(entry.getValue());
+    }
+    for (TransGroup g : byTarget.values()) {
+      for (DFA.DFATransition t : g.members) {
+        if (!t.entryGuard.equals(g.members.get(0).entryGuard)) g.sameGuard = false;
+        if (!t.tagOps.equals(g.members.get(0).tagOps)) g.sameTagOps = false;
+      }
+    }
+    return new java.util.ArrayList<>(byTarget.values());
+  }
+
+  /**
+   * Emits the per-state transition checks shared by {@code generateStateCode} and {@code
+   * generateMatchAtStartStateCode}: transitions sharing a target state and entry guard are merged
+   * into one charset check — subset construction can emit one map entry per partition piece of the
+   * same character class (the ~380 pieces of a large Unicode class under a {@code .*} wrapper), and
+   * unrolling each piece multiplies the code size past the JVM 64 KB per-method limit. Merged sets
+   * at or above LOOKUP_TABLE_RANGE_THRESHOLD ranges go through the static boolean[] lookup table
+   * (see generateLookupTables). Partition pieces are disjoint, so the merge cannot change which
+   * target wins.
+   */
+  private void emitTransitionChecks(
+      MethodVisitor mv,
+      DFA.DFAState state,
+      Map<DFA.DFAState, Label> stateLabels,
+      int chVar,
+      int posVar) {
+    emitTransitionChecks(
+        mv,
+        state,
+        stateLabels,
+        chVar,
+        posVar,
+        null,
+        (guard, nextCheck) -> emitTransitionEntryGuard(mv, guard, posVar, nextCheck));
+  }
+
+  /**
+   * Full variant: {@code boundedAccess} selects the bounded CharSequence guard emitter (the
+   * matchesBounded path); {@code null} uses the unbounded String guard. Both null means the emitter
+   * ignores entry guards entirely (plain scan paths) — then transitions merge by target alone.
+   */
+  private void emitTransitionChecks(
+      MethodVisitor mv,
+      DFA.DFAState state,
+      Map<DFA.DFAState, Label> stateLabels,
+      int chVar,
+      int posVar,
+      InputAccess boundedAccess, // unused here: bounded sites capture it in their guardEmitter
+      java.util.function.BiConsumer<EnumSet<NFA.AnchorType>, Label> guardEmitter) {
+    for (TransGroup group : transitionGroups(state)) {
+      if (group.sameGuard) {
+        Label nextCheck = new Label();
+        generateCharSetCheck(mv, group.mergedChars(), chVar, nextCheck);
+        if (guardEmitter != null && !group.members.get(0).entryGuard.isEmpty()) {
+          guardEmitter.accept(group.members.get(0).entryGuard, nextCheck);
+        }
+        mv.visitJumpInsn(GOTO, stateLabels.get(group.target));
+        mv.visitLabel(nextCheck);
+      } else {
+        // Guard mismatch inside the group: per-transition emission (guards are position
+        // predicates and must not be merged).
+        for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
+          if (entry.getValue().target != group.target) continue;
+          Label nextCheck = new Label();
+          generateCharSetCheck(mv, entry.getKey(), chVar, nextCheck);
+          if (guardEmitter != null && !entry.getValue().entryGuard.isEmpty()) {
+            guardEmitter.accept(entry.getValue().entryGuard, nextCheck);
+          }
+          mv.visitJumpInsn(GOTO, stateLabels.get(group.target));
+          mv.visitLabel(nextCheck);
+        }
+      }
+    }
+  }
+
   private void generateCharSetCheck(MethodVisitor mv, CharSet chars, int chVar, Label noMatch) {
     if (chars.isSingleChar()) {
       // ch == 'x'
@@ -702,6 +814,19 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitVarInsn(ILOAD, chVar);
       pushInt(mv, (int) range.end);
       mv.visitJumpInsn(IF_ICMPGT, noMatch);
+    } else if (chars.getRanges().size() >= LOOKUP_TABLE_RANGE_THRESHOLD
+        && ownerInternalName != null) {
+      // Range-heavy charset: boolean[] lookup instead of the unrolled cascade (see
+      // LOOKUP_TABLE_RANGE_THRESHOLD). $cs_N[ch] != 0 -> match.
+      String field = lookupTableFields.get(chars);
+      if (field == null) {
+        field = "$cs_" + lookupTableFields.size();
+        lookupTableFields.put(chars, field);
+      }
+      mv.visitFieldInsn(GETSTATIC, ownerInternalName, field, "[Z");
+      mv.visitVarInsn(ILOAD, chVar);
+      mv.visitInsn(BALOAD);
+      mv.visitJumpInsn(IFEQ, noMatch);
     } else {
       // Multiple ranges: unroll into sequential checks
       // if (ch in any range) continue, else goto noMatch
@@ -730,6 +855,81 @@ public class DFAUnrolledBytecodeGenerator {
   }
 
   /**
+   * Emits the static lookup-table fields and the {@code <clinit>} that builds them. Call after
+   * every generate*Method (they set {@link #ownerInternalName}); a no-op when no charset crossed
+   * the threshold.
+   *
+   * <p>Table construction decodes a compact string constant — start char followed by end char per
+   * range — into a {@code boolean[65536]}. The decoder reads raw {@code charAt} values; all BMP
+   * endpoints (including NUL) are legal in a string constant.
+   */
+  public void generateLookupTables(ClassWriter cw) {
+    if (lookupTableFields.isEmpty() || ownerInternalName == null) {
+      return;
+    }
+    for (Map.Entry<CharSet, String> e : lookupTableFields.entrySet()) {
+      cw.visitField(ACC_STATIC | ACC_FINAL, e.getValue(), "[Z", null, null).visitEnd();
+    }
+    MethodVisitor mv = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null);
+    mv.visitCode();
+    // Shared decode locals (clinit has no this): t=0, s=1, i=2, j=3.
+    for (Map.Entry<CharSet, String> e : lookupTableFields.entrySet()) {
+      StringBuilder encoded = new StringBuilder();
+      for (CharSet.Range r : e.getKey().getRanges()) {
+        encoded.append(r.start).append(r.end);
+      }
+      // boolean[] t = new boolean[65536];
+      pushInt(mv, 65536);
+      mv.visitIntInsn(NEWARRAY, T_BOOLEAN);
+      mv.visitVarInsn(ASTORE, 0);
+      // String s = "<encoded ranges>";
+      mv.visitLdcInsn(encoded.toString());
+      mv.visitVarInsn(ASTORE, 1);
+      // for (int i = 0; i < s.length(); i += 2)
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, 2);
+      Label loop = new Label();
+      Label done = new Label();
+      mv.visitLabel(loop);
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPGE, done);
+      // for (int j = s.charAt(i); j <= s.charAt(i + 1); j++) t[j] = true;
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      mv.visitVarInsn(ISTORE, 3);
+      Label inner = new Label();
+      Label innerDone = new Label();
+      mv.visitLabel(inner);
+      mv.visitVarInsn(ILOAD, 3);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      mv.visitJumpInsn(IF_ICMPGT, innerDone);
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitVarInsn(ILOAD, 3);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(BASTORE);
+      mv.visitIincInsn(3, 1);
+      mv.visitJumpInsn(GOTO, inner);
+      mv.visitLabel(innerDone);
+      mv.visitIincInsn(2, 2);
+      mv.visitJumpInsn(GOTO, loop);
+      mv.visitLabel(done);
+      // $cs_N = t;
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitFieldInsn(PUTSTATIC, ownerInternalName, e.getValue(), "[Z");
+    }
+    mv.visitInsn(RETURN);
+    mv.visitMaxs(4, 4);
+    mv.visitEnd();
+  }
+
+  /**
    * Generates find() method: delegates to findFrom(input, 0).
    *
    * <h3>Generated Algorithm</h3>
@@ -742,6 +942,7 @@ public class DFAUnrolledBytecodeGenerator {
    * }</pre>
    */
   public void generateFindMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "find", "(Ljava/lang/String;)Z", null, null);
     mv.visitCode();
 
@@ -817,6 +1018,7 @@ public class DFAUnrolledBytecodeGenerator {
    * JIT-optimized unrolled state machine.
    */
   public void generateFindFromMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
     mv.visitCode();
 
@@ -1283,19 +1485,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitIincInsn(posVar, 1);
 
     // Check transitions
-    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-      CharSet chars = entry.getKey();
-      DFA.DFATransition trans = entry.getValue();
-      DFA.DFAState target = trans.target;
-
-      Label nextCheck = new Label();
-      generateCharSetCheck(mv, chars, chVar, nextCheck);
-      if (!trans.entryGuard.isEmpty()) {
-        emitTransitionEntryGuard(mv, trans.entryGuard, posVar, nextCheck);
-      }
-      mv.visitJumpInsn(GOTO, stateLabels.get(target));
-      mv.visitLabel(nextCheck);
-    }
+    emitTransitionChecks(mv, state, stateLabels, chVar, posVar);
 
     // No transition - reject
     mv.visitInsn(ICONST_0);
@@ -1366,6 +1556,7 @@ public class DFAUnrolledBytecodeGenerator {
    * }</pre>
    */
   public void generateMatchMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -1505,6 +1696,7 @@ public class DFAUnrolledBytecodeGenerator {
    * }</pre>
    */
   public void generateFindMatchMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -1545,6 +1737,7 @@ public class DFAUnrolledBytecodeGenerator {
    * early to a shorter high-priority prefix match.
    */
   public void generateFindMatchFromMethodTaggedNoCut(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     generateFindMatchFromMethodTaggedImpl(
         cw, className, "findMatchFromForMatch", ACC_PRIVATE, false);
   }
@@ -1822,20 +2015,39 @@ public class DFAUnrolledBytecodeGenerator {
       // pos++
       mv.visitIincInsn(posVar, 1);
 
-      // Generate transition checks with tag updates
-      for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-        CharSet chars = entry.getKey();
-        DFA.DFATransition transition = entry.getValue();
-
+      // Generate transition checks with tag updates. Transitions sharing target AND tag ops
+      // merge into one check (subset construction can emit one entry per partition piece of a
+      // large class — see emitTransitionChecks); range-heavy merged sets use the static
+      // boolean[] lookup table. Groups whose tag ops differ emit per-transition.
+      for (TransGroup group : transitionGroups(state)) {
+        if (!group.sameTagOps) {
+          for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
+            if (entry.getValue().target != group.target) continue;
+            DFA.DFATransition transition = entry.getValue();
+            Label nextCheck = new Label();
+            generateCharSetCheck(mv, entry.getKey(), chVar, nextCheck);
+            for (DFA.TagOperation tagOp : transition.tagOps) {
+              mv.visitVarInsn(ALOAD, tagsVar);
+              pushInt(mv, tagOp.tagId);
+              if (tagOp.type == DFA.TagOperation.ActionType.START) {
+                mv.visitVarInsn(ILOAD, preIncrementPosVar);
+              } else {
+                mv.visitVarInsn(ILOAD, posVar);
+              }
+              mv.visitInsn(IASTORE);
+            }
+            mv.visitJumpInsn(GOTO, stateLabels.get(transition.target));
+            mv.visitLabel(nextCheck);
+          }
+          continue;
+        }
+        DFA.DFATransition transition = group.members.get(0);
         Label nextCheck = new Label();
-        generateCharSetCheck(mv, chars, chVar, nextCheck);
-
+        generateCharSetCheck(mv, group.mergedChars(), chVar, nextCheck);
         // Character matches - update tags
-        // Now both branches use consistent stack operations: ALOAD, pushInt, ILOAD, IASTORE
         for (DFA.TagOperation tagOp : transition.tagOps) {
           mv.visitVarInsn(ALOAD, tagsVar);
           pushInt(mv, tagOp.tagId);
-
           if (tagOp.type == DFA.TagOperation.ActionType.START) {
             // For START tags, use position BEFORE consuming character
             mv.visitVarInsn(ILOAD, preIncrementPosVar);
@@ -1843,13 +2055,10 @@ public class DFAUnrolledBytecodeGenerator {
             // For END tags, use position AFTER consuming character
             mv.visitVarInsn(ILOAD, posVar);
           }
-
           mv.visitInsn(IASTORE);
         }
-
         // Jump to target state
         mv.visitJumpInsn(GOTO, stateLabels.get(transition.target));
-
         mv.visitLabel(nextCheck);
       }
 
@@ -1961,6 +2170,7 @@ public class DFAUnrolledBytecodeGenerator {
    * }</pre>
    */
   public void generateFindMatchFromMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     if (useTaggedDFA && groupCount > 0) {
       generateFindMatchFromMethodTagged(cw, className);
       return;
@@ -2186,6 +2396,7 @@ public class DFAUnrolledBytecodeGenerator {
    * simulation. Used by findMatchFrom() and findBoundsFrom().
    */
   public void generateFindLongestMatchEndMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv =
         cw.visitMethod(ACC_PRIVATE, "findLongestMatchEnd", "(Ljava/lang/String;I)I", null, null);
     mv.visitCode();
@@ -2322,98 +2533,11 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitJumpInsn(IF_ICMPGE, endOfInput);
 
-    // Special check for \Z (STRING_END): accepting and at a final terminator position — record and
-    // return.
-    // Handles lone '\n' (CRLF guard), lone '\r', '\r\n' pair, NEL, LS, PS.
-    if (state.accepting && hasStringEndAnchor) {
-      Label notStringEnd = new Label();
-      Label checkEndMinus2U = new Label();
-      Label acceptU = new Label();
-
-      // pos == length-1?
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, checkEndMinus2U);
-
-      // charAt(pos) == '\n'?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      Label notNewlineU = new Label();
-      mv.visitJumpInsn(IF_ICMPNE, notNewlineU);
-      // '\n': CRLF guard — lone \n only
-      Label loneNewlineU = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitJumpInsn(IFEQ, loneNewlineU); // pos==0 → lone \n
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPEQ, notStringEnd); // CRLF tail → skip
-      mv.visitLabel(loneNewlineU);
-      mv.visitJumpInsn(GOTO, acceptU);
-      mv.visitLabel(notNewlineU);
-      // '\r'?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      // NEL?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u0085');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      // LS?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u2028');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      // PS?
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\u2029');
-      mv.visitJumpInsn(IF_ICMPEQ, acceptU);
-      mv.visitJumpInsn(GOTO, notStringEnd);
-
-      // pos == length-2? '\r\n' pair
-      mv.visitLabel(checkEndMinus2U);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-      mv.visitInsn(ICONST_2);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(IADD);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPNE, notStringEnd);
-
-      mv.visitLabel(acceptU);
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ISTORE, longestMatchEndVar);
-      mv.visitVarInsn(ILOAD, longestMatchEndVar);
-      mv.visitInsn(IRETURN);
-
-      mv.visitLabel(notStringEnd);
-    }
+    // \Z-before-terminator acceptance needs no special case here: the accepting-state record
+    // above is gated by emitAcceptanceAnchorChecks, which evaluates $/\Z (and \z) at the
+    // current position — including the before-final-terminator positions — and falls through
+    // to the consuming transitions so greedy matching still prefers the longest viable end
+    // (e.g. [^a]*$\Z on "x\n" must consume the '\n' and end at 2, not stop at 1).
 
     // char ch = input.charAt(pos);
     int chVar = allocator.allocate();
@@ -2425,20 +2549,9 @@ public class DFAUnrolledBytecodeGenerator {
     // pos++;
     mv.visitIincInsn(posVar, 1);
 
-    // Generate transition checks
-    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-      CharSet chars = entry.getKey();
-      DFA.DFAState target = entry.getValue().target;
-
-      Label nextCheck = new Label();
-      generateCharSetCheck(mv, chars, chVar, nextCheck);
-
-      // Match found - jump to target state
-      mv.visitJumpInsn(GOTO, stateLabels.get(target));
-
-      // No match - try next transition
-      mv.visitLabel(nextCheck);
-    }
+    // Generate transition checks (this path emits no entry guards; merge by target alone —
+    // see emitTransitionChecks).
+    emitTransitionChecks(mv, state, stateLabels, chVar, posVar, null, null);
 
     // No transition matched — return the best match seen so far. The lookahead (if any) was already
     // checked eagerly at state entry and gated longestMatchEnd; no re-evaluation needed here.
@@ -2496,6 +2609,7 @@ public class DFAUnrolledBytecodeGenerator {
    * (INVOKEINTERFACE vs INVOKEVIRTUAL for String).
    */
   public void generateMatchesBoundedMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
     mv.visitCode();
@@ -2573,6 +2687,7 @@ public class DFAUnrolledBytecodeGenerator {
    * tracking in bounded matches, Tagged DFA would need adaptation.
    */
   public void generateMatchBoundedMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv =
         cw.visitMethod(
             ACC_PUBLIC,
@@ -2695,25 +2810,19 @@ public class DFAUnrolledBytecodeGenerator {
     // pos++;
     mv.visitIincInsn(posVar, 1);
 
-    // Generate transition checks (bounded path uses CharSequence)
+    // Generate transition checks (bounded path uses CharSequence). Transitions sharing a target
+    // and guard merge into one check (see emitTransitionChecks); range-heavy merged sets use the
+    // static boolean[] lookup table.
     InputAccess boundedAccess = charSequenceInputAccess(mv, endVar);
-    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-      CharSet chars = entry.getKey();
-      DFA.DFATransition trans = entry.getValue();
-      DFA.DFAState target = trans.target;
-
-      Label nextCheck = new Label();
-      generateCharSetCheck(mv, chars, 5, nextCheck);
-      if (!trans.entryGuard.isEmpty()) {
-        emitTransitionEntryGuard(mv, trans.entryGuard, posVar, nextCheck, boundedAccess);
-      }
-
-      // Match found - jump to target state
-      mv.visitJumpInsn(GOTO, stateLabels.get(target));
-
-      // No match - try next transition
-      mv.visitLabel(nextCheck);
-    }
+    emitTransitionChecks(
+        mv,
+        state,
+        stateLabels,
+        5,
+        posVar,
+        null,
+        (guard, nextCheck) ->
+            emitTransitionEntryGuard(mv, guard, posVar, nextCheck, boundedAccess));
 
     // No transition matched - reject
     mv.visitInsn(ICONST_0);
@@ -3013,6 +3122,7 @@ public class DFAUnrolledBytecodeGenerator {
    * eliminates redundant ISTORE operations in monotonic acceptance regions.
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
+    this.ownerInternalName = className;
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", null, null);
     mv.visitCode();
@@ -3288,20 +3398,8 @@ public class DFAUnrolledBytecodeGenerator {
     // pos++;
     mv.visitIincInsn(posVar, 1);
 
-    // Generate transition checks
-    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-      CharSet chars = entry.getKey();
-      DFA.DFAState target = entry.getValue().target;
-
-      Label nextCheck = new Label();
-      generateCharSetCheck(mv, chars, chSlot, nextCheck);
-
-      // Match found - jump to target state
-      mv.visitJumpInsn(GOTO, stateLabels.get(target));
-
-      // No match - try next transition
-      mv.visitLabel(nextCheck);
-    }
+    // Generate transition checks (no entry guards on this scan path; merge by target alone)
+    emitTransitionChecks(mv, state, stateLabels, chSlot, posVar, null, null);
 
     // No transition matched - stop scanning
     mv.visitJumpInsn(GOTO, scanComplete);
@@ -3625,19 +3723,17 @@ public class DFAUnrolledBytecodeGenerator {
     // Increment position
     mv.visitIincInsn(posVar, 1);
 
-    // Check transitions and jump to target states
-    for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-      CharSet chars = entry.getKey();
-      DFA.DFAState target = entry.getValue().target;
+    // Check transitions and jump to target states. Group actions depend only on the TARGET
+    // state, so transitions sharing a target merge into one check (subset construction can emit
+    // one entry per partition piece of a large class — see emitTransitionChecks); range-heavy
+    // merged sets use the static boolean[] lookup table.
+    for (TransGroup group : transitionGroups(state)) {
       Label nextCheck = new Label();
-
-      // Generate group actions for target state BEFORE jumping to it
-      // This ensures group actions are processed at the right position
+      // Generate group actions for target state BEFORE jumping to it (once per target)
       generateGroupActionsForState(
-          mv, target, preIncrementPosVar, posVar, groupStartsVar, groupEndsVar);
-
-      generateCharSetCheck(mv, chars, chVar, nextCheck);
-      mv.visitJumpInsn(GOTO, stateLabels.get(target));
+          mv, group.target, preIncrementPosVar, posVar, groupStartsVar, groupEndsVar);
+      generateCharSetCheck(mv, group.mergedChars(), chVar, nextCheck);
+      mv.visitJumpInsn(GOTO, stateLabels.get(group.target));
       mv.visitLabel(nextCheck);
     }
 

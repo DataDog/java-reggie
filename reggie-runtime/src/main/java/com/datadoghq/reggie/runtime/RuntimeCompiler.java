@@ -37,6 +37,7 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
+import com.datadoghq.reggie.codegen.analysis.RequiredLiteralAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.SpecializedOptionalGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
@@ -178,6 +179,92 @@ public class RuntimeCompiler {
       new ConcurrentHashMap<>();
 
   /**
+   * Cached entry for counted-loop-lowered patterns: immutable NFA + name map.
+   * BackrefBacktrackMatcher is stateless per call (all instance state is final; the DFS allocates
+   * its own stack/memo), but we keep the PikeVM cache shape — fresh matcher per compile, shared NFA
+   * — for consistency and to leave room for per-call buffers later.
+   */
+  private static final class CountedLoopEntry {
+    final NFA nfa;
+    final Map<String, Integer> nameMap;
+
+    CountedLoopEntry(NFA nfa, Map<String, Integer> nameMap) {
+      this.nfa = nfa;
+      this.nameMap = nameMap;
+    }
+
+    ReggieMatcher newMatcher(String pattern) {
+      ReggieMatcher m = new BackrefBacktrackMatcher(nfa, pattern);
+      if (!nameMap.isEmpty()) {
+        m.setNameToIndex(nameMap);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
+      }
+      return m;
+    }
+  }
+
+  // Level 1d: Pattern string → CountedLoopEntry for counted-loop-lowered patterns.
+  private static final ConcurrentHashMap<Object, CountedLoopEntry> COUNTED_LOOP_NFA_CACHE =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Cached entry for hybrid patterns: the pieces needed to build a fresh {@link HybridMatcher} per
+   * compile() call. The generated DFA half is stateless (all per-call state lives in locals) and is
+   * shared; the NFA half (PikeVM/BitState — mutable per-call buffers; generated OPTIMIZED_NFA —
+   * instance state) is rebuilt per call, matching the fresh-instance contract PikeVM/BitState
+   * patterns already keep (see the compile() post-compilation fixups).
+   */
+  private static final class HybridEntry {
+    final ReggieMatcher dfaMatcher; // shared; null when the oversized dfa-half was dropped
+    final NFA captureNfa; // immutable NFA for the PikeVM/BitState half
+    final PatternAnalyzer.MatchingStrategyResult originalResult;
+    final Class<? extends ReggieMatcher>
+        nfaHalfClass; // OPTIMIZED_NFA half; null for PikeVM/BitState
+    final boolean pruned; // dfa-half carries leftmost-first pruning
+    final Map<String, Integer> nameMap;
+
+    HybridEntry(
+        ReggieMatcher dfaMatcher,
+        NFA captureNfa,
+        PatternAnalyzer.MatchingStrategyResult originalResult,
+        Class<? extends ReggieMatcher> nfaHalfClass,
+        boolean pruned,
+        Map<String, Integer> nameMap) {
+      this.dfaMatcher = dfaMatcher;
+      this.captureNfa = captureNfa;
+      this.originalResult = originalResult;
+      this.nfaHalfClass = nfaHalfClass;
+      this.pruned = pruned;
+      this.nameMap = nameMap;
+    }
+
+    ReggieMatcher newMatcher(String pattern) throws Exception {
+      ReggieMatcher nfaMatcher =
+          nfaHalfClass != null
+              ? nfaHalfClass.getDeclaredConstructor(String.class).newInstance(pattern)
+              : newHybridNfaHalf(captureNfa, originalResult, pattern);
+      ReggieMatcher m =
+          dfaMatcher == null
+              ? nfaMatcher
+              : new HybridMatcher(pattern, dfaMatcher, nfaMatcher, pruned);
+      if (!nameMap.isEmpty()) {
+        m.setNameToIndex(nameMap);
+        if (!m.embedsNameMap()) {
+          m = new NameEnrichingMatcher(m);
+        }
+      }
+      return m;
+    }
+  }
+
+  // Hybrid patterns: entry cache so compile() can return a fresh matcher per call. Hybrids carry
+  // a mutable nfa-half and must never be shared through the L1 pattern cache (see HybridEntry).
+  private static final ConcurrentHashMap<Object, HybridEntry> HYBRID_CACHE =
+      new ConcurrentHashMap<>();
+
+  /**
    * Cached entry for BITSTATE_CAPTURE patterns: holds the immutable NFA and the compile-time name
    * map so that every compile() call can produce a correctly-enriched fresh {@code BitStateMatcher}
    * without re-parsing the pattern. Parallel to {@link PikeVMEntry} rather than a generalization of
@@ -234,10 +321,14 @@ public class RuntimeCompiler {
   private static final class CachedStructure {
     final Class<? extends ReggieMatcher> clazz;
     final long verify;
+    // Largest method in bytecodes at generation time, so the JIT size gate can also apply on
+    // cache hits (see compileInternal step 6).
+    final int largestMethodBytecodes;
 
-    CachedStructure(Class<? extends ReggieMatcher> clazz, long verify) {
+    CachedStructure(Class<? extends ReggieMatcher> clazz, long verify, int largestMethodBytecodes) {
       this.clazz = clazz;
       this.verify = verify;
+      this.largestMethodBytecodes = largestMethodBytecodes;
     }
   }
 
@@ -296,19 +387,44 @@ public class RuntimeCompiler {
       Object cacheKey,
       String reportedPattern,
       java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
+    setTotalCompileDeadline();
+    try {
+      return compileWithDeadline(
+          pattern, options, cacheKey, reportedPattern, linearTokenSequenceAdmission);
+    } finally {
+      clearTotalCompileDeadline();
+    }
+  }
+
+  private static ReggieMatcher compileWithDeadline(
+      String pattern,
+      ReggieOptions options,
+      Object cacheKey,
+      String reportedPattern,
+      java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
 
     // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
     // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
     PikeVMEntry pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
     if (pikevmEntry != null) {
-      return reportPattern(pikevmEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(pikevmEntry.newMatcher(pattern), pattern), reportedPattern);
     }
 
     // Fast path: BITSTATE_CAPTURE patterns are in BITSTATE_NFA_CACHE — return a fresh matcher.
     // BitStateMatcher carries mutable per-call buffers and must not be shared across calls.
     BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
     if (bitStateEntry != null) {
-      return reportPattern(bitStateEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(
+          wrapCompiled(bitStateEntry.newMatcher(pattern), pattern), reportedPattern);
+    }
+
+    // Fast path: hybrid patterns are in HYBRID_CACHE — return a fresh matcher. The hybrid's
+    // nfa-half (PikeVM/BitState, or a generated NFA matcher) is mutable per call; only the
+    // stateless dfa-half instance is shared.
+    HybridEntry hybridEntry = HYBRID_CACHE.get(cacheKey);
+    if (hybridEntry != null) {
+      return reportPattern(
+          wrapCompiled(newHybridMatcher(hybridEntry, pattern), pattern), reportedPattern);
     }
 
     // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
@@ -316,7 +432,7 @@ public class RuntimeCompiler {
     // threads or calls; we cache a factory and instantiate per-call instead.
     NfaMatcherFactory factory = NFA_CLASS_CACHE.get(cacheKey);
     if (factory != null) {
-      return reportPattern(factory.newInstance(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(factory.newInstance(pattern), pattern), reportedPattern);
     }
 
     // Slow path: compile and cache the result.
@@ -324,12 +440,18 @@ public class RuntimeCompiler {
     // the L1 entry is immediately removed so that subsequent calls hit the fast path above.
     // The reported pattern is set inside the mapping function so the instance published to
     // PATTERN_CACHE is already fully initialized and is never mutated again after publication.
+    // Wrap at insert: L1-cached instances are shared across compile() calls (thread-safe engine
+    // strategies), so the prefilter wrapper must be part of the cached instance to preserve the
+    // same-instance contract. NFA-backed patterns never stay in L1 (removed below) and keep the
+    // fresh-instance-per-call contract with a fresh wrapper per call.
     ReggieMatcher compiled =
         PATTERN_CACHE.computeIfAbsent(
             cacheKey,
             k ->
                 reportPattern(
-                    compileInternal(pattern, options, k, linearTokenSequenceAdmission.get()),
+                    wrapCompiled(
+                        compileInternal(pattern, options, k, linearTokenSequenceAdmission.get()),
+                        pattern),
                     reportedPattern));
 
     // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
@@ -337,7 +459,7 @@ public class RuntimeCompiler {
     pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
     if (pikevmEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(pikevmEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(pikevmEntry.newMatcher(pattern), pattern), reportedPattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as BITSTATE_CAPTURE,
@@ -345,7 +467,17 @@ public class RuntimeCompiler {
     bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
     if (bitStateEntry != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(bitStateEntry.newMatcher(pattern), reportedPattern);
+      return reportPattern(
+          wrapCompiled(bitStateEntry.newMatcher(pattern), pattern), reportedPattern);
+    }
+
+    // Post-compilation fixup: hybrids carry a mutable nfa-half (PikeVM/BitState, generated NFA)
+    // and must not be shared through L1 either; the entry keeps the stateless dfa-half.
+    HybridEntry hybridFixup = HYBRID_CACHE.get(cacheKey);
+    if (hybridFixup != null) {
+      PATTERN_CACHE.remove(cacheKey, compiled);
+      return reportPattern(
+          wrapCompiled(newHybridMatcher(hybridFixup, pattern), pattern), reportedPattern);
     }
 
     // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
@@ -353,9 +485,99 @@ public class RuntimeCompiler {
     factory = NFA_CLASS_CACHE.get(cacheKey);
     if (factory != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(factory.newInstance(pattern), reportedPattern);
+      return reportPattern(wrapCompiled(factory.newInstance(pattern), pattern), reportedPattern);
     }
     return compiled;
+  }
+
+  /**
+   * Required-literal fact per pattern string, computed once. Null when no usable (>=2 char) literal
+   * exists. Guards the rejection prefilter wrap so the fast paths pay only one map hit.
+   */
+  private record PrefilterFact(String literal, boolean asciiCaseInsensitive) {}
+
+  // Sentinel for "analyzed, no usable fact" — computeIfAbsent keeps nulls out of the map, and an
+  // uncached miss would re-run the parse+analysis on every compile() of the pattern. The empty
+  // literal makes wrapCompiled treat it as absent.
+  private static final PrefilterFact NO_FACT = new PrefilterFact("", false);
+
+  private static final java.util.concurrent.ConcurrentHashMap<String, PrefilterFact> LITERAL_CACHE =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private static PrefilterFact computeRequiredLiteral(String pattern) {
+    try {
+      // Leading global (?i): the parser bakes case folding into char classes, so cased literals
+      // never surface as AST facts. Extract from the pattern with the leading (?i) stripped and
+      // scan the fact ASCII case-insensitively instead. Java (?i) without (?u) folds ASCII only,
+      // so the scan is exact (not merely conservative) as long as every cased fact char is ASCII —
+      // guarded below. Scoped (?i:...) groups inside survive the strip and stay folded in the AST,
+      // so their chars simply contribute no fact letters; the case-insensitive scan is the
+      // permissive side for any chars that were case-sensitive in the stripped parse.
+      if (isCaseInsensitive(pattern)) {
+        // Only strip the leading (?i) the flag check validated (never a mid-pattern one).
+        String head = pattern.startsWith("^") ? "^" : "";
+        String rest = pattern.substring(head.length());
+        if (rest.startsWith("(?i)")) {
+          String strippedPattern = head + rest.substring(4);
+          try {
+            String fact =
+                RequiredLiteralAnalyzer.longestLiteral(
+                    new RegexParser().parse(strippedPattern), false);
+            if (fact != null && fact.length() >= 2 && allCasedCharsAscii(fact)) {
+              return new PrefilterFact(fact, true);
+            }
+            // No multi-char ci fact — a 1-char fact still rejects when scanned case-insensitively
+            String ciChar =
+                RequiredLiteralAnalyzer.requiredChar(
+                    new RegexParser().parse(strippedPattern), false);
+            if (ciChar != null && allCasedCharsAscii(ciChar)) {
+              return new PrefilterFact(ciChar, true);
+            }
+          } catch (Exception ignored) {
+            // stripped parse failed: fall through to the original AST path
+          }
+        }
+      }
+      RegexNode ast = new RegexParser().parse(pattern);
+      boolean ci = isCaseInsensitive(pattern);
+      String fact = RequiredLiteralAnalyzer.longestLiteral(ast, ci);
+      if (fact != null) {
+        return new PrefilterFact(fact, false);
+      }
+      // 1-char required fact as last resort: absence falsifies every match.
+      String ch = RequiredLiteralAnalyzer.requiredChar(ast, ci);
+      return ch == null ? NO_FACT : new PrefilterFact(ch, false);
+    } catch (Exception e) {
+      return NO_FACT; // refused pattern: other paths will surface the error
+    }
+  }
+
+  /** True when every cased letter in the fact is ASCII (a-z, A-Z). */
+  private static boolean allCasedCharsAscii(String fact) {
+    for (int i = 0; i < fact.length(); i++) {
+      char c = fact.charAt(i);
+      if (Character.isLetter(c) && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Applies the R1 rejection prefilter to every compiled matcher, regardless of engine strategy
+   * (DFA, NFA, PikeVM, BitState, hybrid, recursive descent, ...). Wrapping is a pure input
+   * rejection: it can only return no-match earlier, never a different match.
+   */
+  private static ReggieMatcher wrapCompiled(ReggieMatcher matcher, String pattern) {
+    if (matcher == null) {
+      return null;
+    }
+    PrefilterFact fact =
+        LITERAL_CACHE.computeIfAbsent(pattern, RuntimeCompiler::computeRequiredLiteral);
+    if (fact == null || fact.literal().isEmpty()) {
+      return matcher;
+    }
+    return PrefilteringMatcher.wrap(matcher, fact.literal(), fact.asciiCaseInsensitive());
   }
 
   private static ReggieMatcher reportPattern(ReggieMatcher matcher, String pattern) {
@@ -477,9 +699,10 @@ public class RuntimeCompiler {
         throw new IllegalStateException(
             "Cache key '" + key + "' is already mapped to a different pattern");
       }
+      // Pre-wrapped at insert; same-instance contract preserved for repeat calls.
       return existing;
     }
-    return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern));
+    return PATTERN_CACHE.computeIfAbsent(key, k -> wrapCompiled(compileInternal(pattern), pattern));
   }
 
   /** Compile with explicit cache key and runtime compilation options. */
@@ -490,9 +713,11 @@ public class RuntimeCompiler {
         throw new IllegalStateException(
             "Cache key '" + key + "' is already mapped to a different pattern");
       }
+      // Pre-wrapped at insert; same-instance contract preserved for repeat calls.
       return existing;
     }
-    return PATTERN_CACHE.computeIfAbsent(key, k -> compileInternal(pattern, options));
+    return PATTERN_CACHE.computeIfAbsent(
+        key, k -> wrapCompiled(compileInternal(pattern, options), pattern));
   }
 
   /**
@@ -508,6 +733,9 @@ public class RuntimeCompiler {
     PIKEVM_NFA_CACHE.clear();
     BITSTATE_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
+    COUNTED_LOOP_NFA_CACHE.clear();
+    HYBRID_CACHE.clear();
+    LITERAL_CACHE.clear();
   }
 
   /** Get current pattern cache size (level 1). */
@@ -694,6 +922,56 @@ public class RuntimeCompiler {
     return new FlaggedCacheKey(pattern, flags, cacheKeyFor(pattern, options));
   }
 
+  /**
+   * Total wall-clock budget for a single compile (all phases: parse, NFA build, analysis/
+   * determinization passes, code generation), in milliseconds; 0 disables. The per- determinization
+   * deadline (-Dreggie.dfa.deadlineMs) bounds each analysis pass; this bounds the WHOLE compile, so
+   * a pattern that needs several failing passes (e.g. the nested (a|b){0,256}x12 unrolling tries
+   * multiple DFA routes before PikeVM) cannot spend passes x deadline. The deadline is clamped into
+   * every determinization (see SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS), so a tight total
+   * actually binds. On expiry the compile falls back to java.util.regex (or throws
+   * UnsupportedPatternException without ALLOW_JDK_FALLBACK).
+   */
+  static final String TOTAL_COMPILE_DEADLINE_PROPERTY = "reggie.compile.totalDeadlineMs";
+
+  static final long TOTAL_COMPILE_DEADLINE_DEFAULT_MS = 10_000L;
+
+  /**
+   * Read per compile (not cached at class init) so tests and embedders can adjust the knob without
+   * restarting the JVM. 0 disables.
+   */
+  private static long totalCompileDeadlineMs() {
+    return Long.getLong(TOTAL_COMPILE_DEADLINE_PROPERTY, TOTAL_COMPILE_DEADLINE_DEFAULT_MS);
+  }
+
+  /** Sets the compile-scope deadline ThreadLocal for this thread; returns the absolute nanos. */
+  private static long setTotalCompileDeadline() {
+    long ms = totalCompileDeadlineMs();
+    long deadline = ms > 0 ? System.nanoTime() + ms * 1_000_000L : 0L;
+    if (deadline > 0) {
+      com.datadoghq.reggie.codegen.automaton.SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS.set(
+          deadline);
+    }
+    return deadline;
+  }
+
+  private static void clearTotalCompileDeadline() {
+    com.datadoghq.reggie.codegen.automaton.SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS.remove();
+  }
+
+  private static boolean totalDeadlineExceeded() {
+    Long deadline =
+        com.datadoghq.reggie.codegen.automaton.SubsetConstructor.TOTAL_COMPILE_DEADLINE_NANOS.get();
+    return deadline != null && deadline > 0 && System.nanoTime() > deadline;
+  }
+
+  private static String totalDeadlineReason() {
+    return "total compile deadline exceeded ("
+        + totalCompileDeadlineMs()
+        + " ms; raise -Dreggie.compile.totalDeadlineMs, set 0 to disable) — pattern is too"
+        + " expensive to compile natively";
+  }
+
   private static String normalizePatternFlags(String pattern, int flags) {
     if (!ReggieFlags.areSupported(flags)) {
       throw new IllegalArgumentException("Unsupported Reggie regex flags: " + flags);
@@ -710,6 +988,9 @@ public class RuntimeCompiler {
     if ((flags & ReggieFlags.DOTALL) != 0) {
       normalized.append("(?s)");
     }
+    if ((flags & ReggieFlags.UNICODE_CHARACTER_CLASS) != 0) {
+      normalized.append("(?U)");
+    }
     normalized.append(
         (flags & ReggieFlags.LITERAL) != 0 ? java.util.regex.Pattern.quote(pattern) : pattern);
     return normalized.toString();
@@ -720,11 +1001,191 @@ public class RuntimeCompiler {
     if (!options.has(ReggieOption.ALLOW_JDK_FALLBACK)) {
       throw new UnsupportedPatternException(reason);
     }
+    noteRouting("JAVA_FALLBACK: " + reason);
     ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, reason);
     if (nameMap != null && !nameMap.isEmpty()) {
       fallback.setNameToIndex(nameMap);
     }
     return fallback;
+  }
+
+  // ---- routing introspection (debug tooling; see BytecodeDebugger) ----
+
+  /**
+   * HotSpot's HugeMethodLimit: methods whose bytecode exceeds this are not JIT-compiled and run
+   * interpreted (measured 20.8x/17.8x penalty via -XX:-DontCompileHugeMethods on identical code —
+   * see doc find-jit-hugemethodlimit). Generated classes whose largest method exceeds it are
+   * declined to the JDK fallback when allowed (see the generation gate in compileInternal), keeping
+   * the strict-compile contract unchanged: without ALLOW_JDK_FALLBACK the generated (interpreted
+   * but correct) matcher is still returned.
+   */
+  static final int JIT_HUGE_METHOD_LIMIT = 8000;
+
+  /**
+   * Largest single-method bytecode length in a generated class, by direct classfile walk (magic,
+   * constant pool, fields, then each method's Code attribute's u4 code_length). Returns -1 on any
+   * parse anomaly, which callers treat as "no gate" (the matcher is returned as before).
+   */
+  static int largestMethodBytecodes(byte[] classBytes) {
+    try {
+      java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(classBytes);
+      b.getInt(); // magic
+      b.getShort();
+      b.getShort(); // minor, major
+      int cpCount = Short.toUnsignedInt(b.getShort());
+      String[] utf8 = new String[cpCount];
+      for (int idx = 1; idx < cpCount; ) {
+        int tag = b.get() & 0xFF;
+        switch (tag) {
+          case 1: // CONSTANT_Utf8
+            {
+              int len = Short.toUnsignedInt(b.getShort());
+              byte[] s = new byte[len];
+              b.get(s);
+              utf8[idx] = new String(s, java.nio.charset.StandardCharsets.UTF_8);
+              break;
+            }
+          case 3:
+          case 4: // Integer, Float: u4 payload
+            b.getInt();
+            break;
+          case 5:
+          case 6: // Long, Double: 8-byte payload, two constant-pool slots
+            b.getLong();
+            idx++;
+            break;
+          case 7: // Class
+          case 8: // String
+          case 16: // MethodType
+          case 19: // Module
+          case 20: // Package
+            b.getShort();
+            break;
+          case 9:
+          case 10:
+          case 11: // Fieldref, Methodref, InterfaceMethodref
+          case 12: // NameAndType
+          case 17: // Dynamic
+          case 18: // InvokeDynamic
+            b.getShort();
+            b.getShort();
+            break;
+          case 15: // MethodHandle
+            b.get();
+            b.getShort();
+            break;
+          default:
+            return -1; // unknown tag: no gate
+        }
+        idx++;
+      }
+      b.getShort(); // access_flags
+      b.getShort(); // this_class
+      b.getShort(); // super_class
+      int interfaces = Short.toUnsignedInt(b.getShort());
+      for (int k = 0; k < interfaces; k++) b.getShort();
+      skipClassfileMembers(b); // fields
+      int methods = Short.toUnsignedInt(b.getShort());
+      int max = 0;
+      for (int m = 0; m < methods; m++) {
+        b.getShort(); // access_flags
+        b.getShort(); // name_index
+        b.getShort(); // descriptor_index
+        int attrs = Short.toUnsignedInt(b.getShort());
+        for (int at = 0; at < attrs; at++) {
+          int nameIdx = Short.toUnsignedInt(b.getShort());
+          int len = b.getInt();
+          int attrStart = b.position();
+          if ("Code".equals(nameIdx < cpCount ? utf8[nameIdx] : null)) {
+            b.getShort(); // max_stack
+            b.getShort(); // max_locals
+            int codeLen = b.getInt();
+            if (codeLen > max) max = codeLen;
+          }
+          b.position(attrStart + len);
+        }
+      }
+      return max;
+    } catch (Exception e) {
+      return -1;
+    }
+  }
+
+  /** Skips a fields/methods member table (u2 count + entries with attribute tables). */
+  private static void skipClassfileMembers(java.nio.ByteBuffer b) {
+    int count = Short.toUnsignedInt(b.getShort());
+    for (int f = 0; f < count; f++) {
+      b.getShort(); // access_flags
+      b.getShort(); // name_index
+      b.getShort(); // descriptor_index
+      int attrs = Short.toUnsignedInt(b.getShort());
+      for (int at = 0; at < attrs; at++) {
+        b.getShort(); // attribute_name_index
+        int len = b.getInt();
+        b.position(b.position() + len);
+      }
+    }
+  }
+
+  /**
+   * Last routing decision made by this thread's compile pipeline: set at every decision point
+   * (fallback, hybrid, PikeVM, BitState, counted-loop, linear-token-sequence, generated bytecode)
+   * so tooling can report the ACTUAL routing rather than an isolated re-analysis, which diverges
+   * from the real pipeline (guards, admissions, caches).
+   */
+  static final ThreadLocal<String> ROUTING_NOTE = new ThreadLocal<>();
+
+  /** Debug API (BytecodeDebugger, tests): result of a fresh full-pipeline compile. */
+  public static final class RoutingInfo {
+    public final String routing; // strategy/decision note from the pipeline
+    public final String engineChain; // matcher class chain, wrapper -> engine
+    public final ReggieMatcher matcher;
+
+    RoutingInfo(String routing, String engineChain, ReggieMatcher matcher) {
+      this.routing = routing;
+      this.engineChain = engineChain;
+      this.matcher = matcher;
+    }
+  }
+
+  /**
+   * Runs the real compile pipeline for {@code pattern} on a cleared cache and reports the actual
+   * routing decision, the engine class chain, and the compiled matcher. Debug tooling API: it
+   * CLEARS ALL COMPILATION CACHES first (fresh-compile behavior) and compiles with {@code
+   * allowJdkFallback} so the routing note carries the fallback reason instead of throwing.
+   */
+  public static RoutingInfo describeRouting(String pattern) {
+    clearCache();
+    ROUTING_NOTE.remove();
+    ReggieMatcher m = compile(pattern, ReggieOptions.builder().allowJdkFallback().build());
+    String note = ROUTING_NOTE.get();
+    if (note == null) {
+      note = "unknown (pipeline did not record a decision)";
+    }
+    return new RoutingInfo(note, engineChainOf(m), m);
+  }
+
+  /** Unwraps PrefilteringMatcher/NameEnrichingMatcher layers to describe the engine chain. */
+  private static String engineChainOf(ReggieMatcher m) {
+    StringBuilder sb = new StringBuilder(m.getClass().getSimpleName());
+    java.lang.reflect.Field delegate;
+    try {
+      while (true) {
+        java.lang.reflect.Field f = m.getClass().getDeclaredField("delegate");
+        f.setAccessible(true);
+        m = (ReggieMatcher) f.get(m);
+        sb.append(" -> ").append(m.getClass().getSimpleName());
+      }
+    } catch (NoSuchFieldException done) {
+      // leaf engine reached
+    } catch (ReflectiveOperationException e) {
+      sb.append(" -> (unwrap failed: ").append(e).append(')');
+    }
+    return sb.toString();
+  }
+
+  static void noteRouting(String note) {
+    ROUTING_NOTE.set(note);
   }
 
   /**
@@ -742,11 +1203,15 @@ public class RuntimeCompiler {
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
       Map<String, Integer> nameMap = parser.getGroupNameMap();
+      if (totalDeadlineExceeded()) {
+        return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
+      }
       if (options.has(ReggieOption.CAPTURE_NAMED_ONLY)) {
         ast = CaptureProjection.preserveNamedAndSemanticCaptures(ast);
         ReggieMatcher linearTokenSequenceMatcher =
             tryCompileLinearTokenSequence(pattern, ast, nameMap, linearTokenSequenceAdmission);
         if (linearTokenSequenceMatcher != null) {
+          noteRouting("LINEAR_TOKEN_SEQUENCE (named-only admission)");
           return linearTokenSequenceMatcher;
         }
       }
@@ -766,9 +1231,48 @@ public class RuntimeCompiler {
         nfa = nfaBuilder.build(ast, groupCount);
       }
 
+      // 2.5. Counted-loop lowering: bounded quantifiers whose
+      // unrolled tail exceeded the builder's budget were lowered to counted-loop markers (one
+      // body copy + counter instead of monster unrolling). Only the counter-aware backtracking
+      // matcher can execute them — every other engine, and the analysis passes below, would
+      // misread the loops as unbounded (x* instead of x{min,max}) — so skip analysis entirely.
+      // Rebuild the NFA lazy-aware so lazy quantifiers get correct marker priority (the main
+      // build above is not lazy-aware; the rebuild costs ~ms, which is the whole point of the
+      // lowering: the semver {0,256} family drops from 2.3s/567k states to ~100ms/~2.6k states).
+      if (nfa != null && nfa.hasCountedLoops()) {
+        String unsupported = countedLoopUnsupportedFeature(nfa);
+        if (unsupported != null) {
+          // The counter-aware matcher executes only plain NFA semantics (consuming states, group
+          // boundaries, backrefs, anchors). A pattern that ALSO needs lookaround assertions,
+          // conditionals or atomic groups would have those states misread as plain epsilon —
+          // e.g. (?=b)a{0,6000} matches "a" when the JDK rejects it. Such patterns cannot run on
+          // the lowered NFA; the unrolled form is the monster the lowering exists to bound.
+          return fallbackOrThrow(
+              pattern,
+              "bounded quantifier over the lowering budget combined with "
+                  + unsupported
+                  + " — the counted-loop engine does not execute it",
+              nameMap,
+              options);
+        }
+        NFA countedNfa = new ThompsonBuilder(true).build(ast, groupCount);
+        COUNTED_LOOP_NFA_CACHE.putIfAbsent(cacheKey, new CountedLoopEntry(countedNfa, nameMap));
+        noteRouting("COUNTED_LOOP_BACKTRACK (lowered bounded quantifiers)");
+        return COUNTED_LOOP_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+      }
+
       // 3. Analyze and select strategy
       PatternAnalyzer analyzer = new PatternAnalyzer(ast, nfa);
       PatternAnalyzer.MatchingStrategyResult result = analyzer.analyzeAndRecommend();
+      if (totalDeadlineExceeded() && !isNfaBacked(result.strategy)) {
+        // Deadline expired mid-analysis. If the analysis already selected an NFA-backed
+        // strategy (PikeVM/BitState/OptimizedNFA), finish it anyway: the remaining work is a
+        // cheap linear NFA build, and such patterns (e.g. nested (a|b){0,256}x12 unrollings)
+        // are exactly the shapes java.util.regex CANNOT match in bounded time — falling back
+        // would move the denial of service from compile time to match time. Only patterns
+        // that still face expensive code generation fall back.
+        return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
+      }
 
       // 3.5. Fall back to java.util.regex for DFA anchor-condition dilution not covered by
       // explicit misplaced-anchor or string-end-anchor checks: OPTIMIZED_NFA may produce wrong
@@ -785,6 +1289,21 @@ public class RuntimeCompiler {
             pattern, "anchor condition diluted in DFA construction", nameMap, options);
       }
       if (result.alternationPriorityConflict) {
+        // Re-route to PikeVM instead of refusing: the conflict only means the DFA (longest-match)
+        // cannot express Java's first-alternative preference, which PikeVM expresses by
+        // construction and still runs in linear time (find-refusal-set-parity: tableName /
+        // requirements.txt / semver pre-post-dev rules measured 0 JDK-oracle findings on PikeVM).
+        // FallbackPatternDetector stays the safety net: shapes where PikeVM itself diverges
+        // (nullable-nullable captures, anchors in quantifiers) keep the original refusal.
+        if (nfa != null
+            && FallbackPatternDetector.needsFallback(
+                    ast, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+                == null) {
+          NFA pikeVmNfa = new ThompsonBuilder(true).build(ast, groupCount);
+          PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(pikeVmNfa, nameMap));
+          noteRouting("PIKEVM_CAPTURE (alternation-priority conflict re-route from DFA strategy)");
+          return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+        }
         return fallbackOrThrow(
             pattern,
             "alternation priority conflict: DFA longest-match vs NFA first-alternative",
@@ -822,31 +1341,82 @@ public class RuntimeCompiler {
       // (dfaResult.dfa == null && result.dfa == null) or the DFA is anchor-diluted, hybrid is
       // skipped and the PIKEVM/BITSTATE early returns handle the pattern as before.
       if (groupCount > 0 && shouldUseHybrid(result)) {
-        // For PIKEVM/BITSTATE patterns whose NFA contains anchors (^, $, \A, \Z, \z):
-        // the DFA from ignoreGroupCount=true may mishandle anchors in find() context (e.g. \A
-        // inside a quantified group is treated as match-start instead of input-start). Skip
-        // hybrid and let the PIKEVM/BITSTATE early returns below handle them. Patterns without
-        // anchors (e.g. (a*b*c*d*e*)) still benefit from the DFA fast path.
+        // Admission rule for PIKEVM/BITSTATE patterns (measured, RealCorpusScanBenchmark +
+        // per-pattern sweeps, workspace-jb): \b/\B patterns stay out: the subset construction
+        // drops per-position boundary context (SubsetConstructor.isPositionAnchor excludes
+        // WORD_BOUNDARY/NON_WORD_BOUNDARY) without setting anchorConditionDiluted — the DFA-half
+        // would over-accept across word boundaries (measured on the no-guard build:
+        // \bname:(\S+) on "@peer.hostname:127.0.0.1" matched [10,24) where JDK finds no match).
+        // Lazy-quantifier and alternation-priority patterns also stay out: their captureless
+        // subset-DFA gives a longest end, not Perl's first-preference end, and the analyzer
+        // leaves dfa == null for them, failing the availability check below.
+        //
+        // START-ANCHORED patterns are ADMITTED (re-admitted after the 10b1a43 experiment): their
+        // earlier exclusion was a performance gate on the DFA-half — the generated DFA_SWITCH
+        // matchesAtStart/findMatchEnd methods exceeded HotSpot's HugeMethodLimit (8000 bytecodes)
+        // and ran INTERPRETED at ~120-200ns/char. DFASwitchBytecodeGenerator now buckets state
+        // cases and factors accept-anchor blocks into per-accept helpers, so every generated
+        // method compiles (measured headroom via -XX:-DontCompileHugeMethods: 20.8x). The NFA
+        // half mirrors the standalone engine choice (newHybridNfaHalf: BitState for
+        // BITSTATE_CAPTURE originals), keeping the capture path at BitState speed instead of
+        // PikeVM (which measured 3.4x slower on the whole-line capture rescan).
         boolean skipHybrid = false;
         if (result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
-            || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
-          if (nfa != null && nfaHasAnchor(nfa)) {
+            || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
+            || result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT) {
+          if (nfa != null && nfa.hasWordBoundaryAnchor()) {
+            skipHybrid = true;
+          }
+          // Mirror the standalone PIKEVM/BITSTATE fallback guards (sections 3.6/3.7 below): a
+          // pattern FallbackPatternDetector refuses for the NFA engines must not enter the
+          // hybrid either — its nfa-half IS that engine (PikeVM for every hybrid-eligible
+          // original: PIKEVM/BITSTATE originals per newHybridNfaHalf, and RECURSIVE_DESCENT
+          // originals whose capture half is PikeVM). Without this, the priority-aware retry
+          // could produce a DFA for a capture-divergent shape (nullable-nullable captures,
+          // anchors in quantifiers, lazy quantifiers) whose standalone routing is
+          // fallbackOrThrow — including lazy-RD shapes that today fall back to JDK.
+          if (FallbackPatternDetector.needsFallback(
+                  ast, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE)
+              != null) {
             skipHybrid = true;
           }
         }
         if (!skipHybrid) {
           PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+          NFA lazyNfa = null;
+          if (dfaResult.dfa == null) {
+            // Priority-aware captureless retry: the standard analysis declines lazy-quantifier
+            // patterns (the standard NFA build normalizes lazy to greedy, so its subset DFA
+            // returns the longest end) and alternation/optional priority patterns (its DFA is
+            // longest-match, not Java's first-preference). The retry rebuilds the NFA lazy-aware
+            // for lazy originals and runs the ladder with leftmost-first thread pruning
+            // (SubsetConstructor.setLeftmostFirst, anchor-free NFAs only): thread ranks then
+            // express exactly the preference the NFA engine would, and the certification gate
+            // (lazyCapturelessDfaIsUnsound) declines any DFA it cannot make sound — the caller
+            // falls back to the pure NFA engine, the same result no retry would produce.
+            lazyNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : null;
+            dfaResult = analyzer.analyzeAndRecommendPriorityAware(lazyNfa);
+          }
           if (!dfaResult.anchorConditionDiluted && (dfaResult.dfa != null || result.dfa != null)) {
             ReggieMatcher hybrid =
-                compileHybrid(pattern, ast, nfa, dfaResult, result, caseInsensitive, options);
-            hybrid.setNameToIndex(nameMap);
+                compileHybrid(
+                    pattern,
+                    ast,
+                    nfa,
+                    lazyNfa,
+                    dfaResult,
+                    result,
+                    caseInsensitive,
+                    options,
+                    cacheKey,
+                    nameMap);
+            noteRouting("HYBRID_DFA (DFA boolean + NFA spans)");
             return hybrid;
           }
           // Hybrid DFA anchor-diluted or no DFA: fall through to NFA-only routing below.
         }
         // skipHybrid: fall through to PIKEVM/BITSTATE early returns below.
       }
-
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
       // correctly-enriched PikeVMMatcher without re-parsing the pattern.
       // B16 guard: nullable group content under a nullable outer quantifier diverges even in PikeVM
@@ -859,6 +1429,7 @@ public class RuntimeCompiler {
         }
         NFA pikeVmNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
         PIKEVM_NFA_CACHE.putIfAbsent(cacheKey, new PikeVMEntry(pikeVmNfa, nameMap));
+        noteRouting("PIKEVM_CAPTURE");
         return PIKEVM_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -874,6 +1445,7 @@ public class RuntimeCompiler {
         NFA bitStateNfa = result.lazyNfa ? new ThompsonBuilder(true).build(ast, groupCount) : nfa;
         BITSTATE_NFA_CACHE.putIfAbsent(
             cacheKey, new BitStateEntry(bitStateNfa, nameMap, result.usePosixLastMatch));
+        noteRouting("BITSTATE_CAPTURE");
         return BITSTATE_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -894,6 +1466,19 @@ public class RuntimeCompiler {
       boolean cacheable = true;
       if (cached != null) {
         if (cached.verify == verifyHash) {
+          if (options.has(ReggieOption.ALLOW_JDK_FALLBACK)
+              && cached.largestMethodBytecodes > JIT_HUGE_METHOD_LIMIT) {
+            // The size gate applies to verified hits too: without this, a strict compile that
+            // cached an oversized class would hand it to a later fallback-enabled compile of the
+            // same structure — the very compile that opted into the faster JDK matcher.
+            return fallbackOrThrow(
+                pattern,
+                "generated method exceeds HotSpot's JIT method-size limit ("
+                    + JIT_HUGE_METHOD_LIMIT
+                    + " bytecodes) — interpreted execution would be slower than the JDK",
+                nameMap,
+                options);
+          }
           matcherClass = cached.clazz; // verified structural match — safe to reuse
         } else {
           // 64-bit key collision across structurally distinct patterns (~astronomically rare).
@@ -913,7 +1498,26 @@ public class RuntimeCompiler {
 
       if (matcherClass == null) {
         // 7. Cache miss (or collision): Generate bytecode and define hidden class
+        if (totalDeadlineExceeded()) {
+          return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
+        }
         byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
+        int largestMethod = largestMethodBytecodes(bytecode);
+        if (options.has(ReggieOption.ALLOW_JDK_FALLBACK) && largestMethod > JIT_HUGE_METHOD_LIMIT) {
+          // Generated method exceeds HotSpot's HugeMethodLimit (8000 bytecodes): the matcher
+          // would run INTERPRETED (find-jit-hugemethodlimit: measured 20.8x/17.8x penalty via
+          // -XX:-DontCompileHugeMethods on the same code). With JDK fallback allowed, the JDK
+          // matcher is faster than an interpreted generated one; without the option we keep
+          // the generated (correct, interpreted) matcher — the strict-compile contract
+          // (native-or-throw) is unchanged and the refusal set does not grow.
+          return fallbackOrThrow(
+              pattern,
+              "generated method exceeds HotSpot's JIT method-size limit ("
+                  + JIT_HUGE_METHOD_LIMIT
+                  + " bytecodes) — interpreted execution would be slower than the JDK",
+              nameMap,
+              options);
+        }
 
         MethodHandles.Lookup hiddenLookup =
             LOOKUP.defineHiddenClass(
@@ -925,7 +1529,8 @@ public class RuntimeCompiler {
 
         // 8. Cache for future structurally-identical patterns (skip on a detected key collision).
         if (cacheable) {
-          STRUCTURE_CACHE.put(structHash, new CachedStructure(matcherClass, verifyHash));
+          STRUCTURE_CACHE.put(
+              structHash, new CachedStructure(matcherClass, verifyHash, largestMethod));
         }
       }
 
@@ -978,9 +1583,24 @@ public class RuntimeCompiler {
               + e.getCodeSize(),
           null,
           options);
+    } catch (OutOfMemoryError oom) {
+      // Compile-scope memory backstop, mirroring SubsetConstructor's determinization OOM
+      // conversion: the partially-built structures (AST, NFA, emission buffers) are garbage on
+      // unwind. Adversarial patterns (e.g. 1000-lookahead cascades) previously exhausted
+      // multi-GB heaps during codegen and killed the host JVM; convert to the same graceful
+      // explosion path the time budget uses (JDK fallback or UnsupportedPatternException).
+      return fallbackOrThrow(
+          pattern,
+          "native compile exhausted memory (pattern too large to generate natively)",
+          null,
+          options);
     } catch (RegexParser.UnsupportedPatternException | UnsupportedOperationException e) {
-      throw new UnsupportedPatternException(
-          "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), e);
+      // Parse-time construct refusals (e.g. variable-width lookbehind) must honor
+      // ALLOW_JDK_FALLBACK like every engine-level refusal — the drop-in contract is zero
+      // functional refusals when the option is set. nameMap is unavailable here (the parse
+      // failed); the JDK fallback matcher serves groups from java.util.regex directly.
+      return fallbackOrThrow(
+          pattern, "Unsupported regex pattern: " + pattern + ": " + e.getMessage(), null, options);
     } catch (UnsupportedPatternException e) {
       throw e;
     } catch (RegexParser.ParseException e) {
@@ -1227,6 +1847,15 @@ public class RuntimeCompiler {
         || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
       return true;
     }
+    // RECURSIVE_DESCENT originals that landed there only because the DFA cannot track give-back
+    // capture spans (requiresBacktrackingForGroups: a([bc]*)(c+d) must give back chars): the
+    // captureless DFA serves boolean find, PikeVM serves captures with thread-priority give-back.
+    // Hard RD features (subroutines, conditionals, quantified backrefs, lookaround) never produce
+    // a captureless DFA — the availability check at the call site filters them — and the
+    // needsFallback guard keeps lazy-RD shapes on their JDK-fallback routing.
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT) {
+      return true;
+    }
     return false;
   }
 
@@ -1235,85 +1864,204 @@ public class RuntimeCompiler {
       String pattern,
       RegexNode ast,
       NFA nfa,
+      NFA lazyNfa,
       PatternAnalyzer.MatchingStrategyResult dfaResult,
       PatternAnalyzer.MatchingStrategyResult originalResult,
       boolean caseInsensitive,
-      ReggieOptions options)
+      ReggieOptions options,
+      Object cacheKey,
+      Map<String, Integer> nameMap)
       throws Exception {
     // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
     // When dfaResult.dfa==null but originalResult.dfa!=null, use original DFA for booleans + NFA.
+    // nfaHalf(): mirrors the non-hybrid engine choice — BITSTATE_CAPTURE originals get
+    // BitStateMatcher (with the Laurikari TDFA trial, like the standalone factory), PIKEVM_CAPTURE
+    // originals keep PikeVMMatcher. Measured on the suppressed-kind shape: PikeVM costs 45.5us
+    // vs BitState 13.5us on the 162-char capture path — picking PikeVM for both was 3.4x slower
+    // than the engine the hybrid replaced (10b1a43 flip, reverted 2db164b). RECURSIVE_DESCENT
+    // originals also take PikeVM: they landed on RD only for capture give-back (thread priority
+    // is the universal capture engine; OPTIMIZED_NFA shares the give-back bugs).
     boolean usePikeVm =
         originalResult.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
-            || originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE;
+            || originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
+            || originalResult.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
+    //
+    // lazyNfa != null iff originalResult.lazyNfa: the lazy-aware rebuild the standalone
+    // PikeVM/BitState paths use. Every NFA-consuming use below MUST run on the same NFA its
+    // analysis/DFA was built from: lazy captures and a lazy-certified DFA half take lazyNfa,
+    // originalResult.dfa (only produced by the standard-NFA analysis) takes the standard nfa.
+    // For a lazy originalResult, originalResult.dfa == null always (the analyzer's lazy gate),
+    // so the original-DFA branch below only ever runs on the standard NFA. (RECURSIVE_DESCENT
+    // originals never carry lazyNfa — lazy-RD shapes are skipHybrid via the needsFallback guard.)
+    NFA captureNfa = (originalResult.lazyNfa && lazyNfa != null) ? lazyNfa : nfa;
+    NFA dfaHalfNfa = lazyNfa != null && originalResult.dfa == null ? lazyNfa : nfa;
     if (dfaResult.dfa == null) {
       if (originalResult.dfa != null) {
         // Use the original DFA for boolean matching, NFA for group extraction.
         byte[] dfaBytecode = generateBytecode(pattern, originalResult, nfa, ast, caseInsensitive);
         ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
-        ReggieMatcher nfaMatcher =
+        Class<? extends ReggieMatcher> nfaHalfClass =
             usePikeVm
-                ? new PikeVMMatcher(nfa, pattern)
-                : instantiateMatcher(
+                ? null
+                : defineMatcherClass(
                     generateBytecode(
                         pattern,
-                        new PatternAnalyzer.MatchingStrategyResult(
-                            PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-                            null,
-                            null,
-                            false,
-                            originalResult.requiredLiterals,
-                            originalResult.lookaheadGreedyInfo,
-                            originalResult.usePosixLastMatch),
+                        optimizedNfaHalfResult(originalResult),
                         nfa,
                         ast,
-                        caseInsensitive),
-                    pattern);
-        return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
+                        caseInsensitive));
+        return hybridEntry(
+            pattern,
+            cacheKey,
+            dfaMatcher,
+            captureNfa,
+            originalResult,
+            nfaHalfClass,
+            false,
+            nameMap);
       }
-      // No DFA available: fall back to pure NFA
+      // No DFA available: fall back to pure NFA (same engine the standalone path builds).
       if (usePikeVm) {
-        return new PikeVMMatcher(nfa, pattern);
+        return hybridEntry(
+            pattern, cacheKey, null, captureNfa, originalResult, null, false, nameMap);
       }
-      PatternAnalyzer.MatchingStrategyResult nfaResult =
-          new PatternAnalyzer.MatchingStrategyResult(
-              PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-              null,
-              null,
-              false,
-              originalResult.requiredLiterals,
-              originalResult.lookaheadGreedyInfo,
-              originalResult.usePosixLastMatch);
-      byte[] bytecode = generateBytecode(pattern, nfaResult, nfa, ast, caseInsensitive);
-      return instantiateMatcher(bytecode, pattern);
+      Class<? extends ReggieMatcher> nfaHalfClass =
+          defineMatcherClass(
+              generateBytecode(
+                  pattern, optimizedNfaHalfResult(originalResult), nfa, ast, caseInsensitive));
+      return hybridEntry(
+          pattern, cacheKey, null, captureNfa, originalResult, nfaHalfClass, false, nameMap);
     }
 
-    // 2. Generate DFA matcher (for fast matching)
-    byte[] dfaBytecode = generateBytecode(pattern, dfaResult, nfa, ast, caseInsensitive);
-    ReggieMatcher dfaMatcher = instantiateMatcher(dfaBytecode, pattern);
-
-    // 3. Generate NFA matcher (for group extraction). For PIKEVM/BITSTATE patterns, use
-    // PikeVMMatcher directly — OPTIMIZED_NFA has known bugs with anchors in quantified groups,
-    // optional prefixes, and POSIX last-match that PikeVM handles correctly. The DFA fast path
-    // serves matches()/find(); PikeVM serves match()/findMatch() at the same speed as before.
-    ReggieMatcher nfaMatcher;
-    if (usePikeVm) {
-      nfaMatcher = new PikeVMMatcher(nfa, pattern);
-    } else {
-      PatternAnalyzer.MatchingStrategyResult nfaResult =
-          new PatternAnalyzer.MatchingStrategyResult(
-              PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-              null,
-              null,
-              false,
-              originalResult.requiredLiterals,
-              originalResult.lookaheadGreedyInfo,
-              originalResult.usePosixLastMatch);
-      byte[] nfaBytecode = generateBytecode(pattern, nfaResult, nfa, ast, caseInsensitive);
-      nfaMatcher = instantiateMatcher(nfaBytecode, pattern);
+    // 2. Generate DFA matcher (for fast matching). dfaHalfNfa: the lazy-aware NFA when the
+    // captureless DFA came from the lazy retry, the standard NFA otherwise (analysis and
+    // bytecode must share one NFA's state identities).
+    byte[] dfaBytecode = generateBytecode(pattern, dfaResult, dfaHalfNfa, ast, caseInsensitive);
+    if (largestMethodBytecodes(dfaBytecode) > JIT_HUGE_METHOD_LIMIT) {
+      // An oversized dfa-half would run interpreted (see JIT_HUGE_METHOD_LIMIT) — slower than
+      // the engine it replaced. Serve the NFA half alone (the same engine the standalone
+      // routing builds). The nfa-half generation below runs unchanged.
+      dfaBytecode = null;
     }
+    ReggieMatcher dfaMatcher =
+        dfaBytecode == null ? null : instantiateMatcher(dfaBytecode, pattern);
 
-    // 4. Return hybrid matcher
-    return new HybridMatcher(pattern, dfaMatcher, nfaMatcher);
+    // 3. Generate NFA matcher (for group extraction). For PIKEVM/BITSTATE originals, the
+    // hybrid nfa-half mirrors the non-hybrid engine choice (newHybridNfaHalf: BitState for
+    // BITSTATE_CAPTURE with the Laurikari TDFA trial, PikeVM for PIKEVM_CAPTURE) —
+    // OPTIMIZED_NFA has known bugs with anchors in quantified groups, optional prefixes, and
+    // POSIX last-match that PikeVM handles correctly. The DFA fast path serves
+    // matches()/find(); the NFA half serves match()/findMatch().
+    Class<? extends ReggieMatcher> nfaHalfClass =
+        usePikeVm
+            ? null
+            : defineMatcherClass(
+                generateBytecode(
+                    pattern, optimizedNfaHalfResult(originalResult), nfa, ast, caseInsensitive));
+
+    // 4. Return hybrid matcher. lazyFind: a pruned (leftmost-first) dfa-half encodes search
+    // semantics — boolean matches() and anchored spans are path-existence questions the pruned
+    // DFA can false-negative on, so they route to the NFA half (see HybridMatcher.lazyFind).
+    // The DFA carries the pruning marker (alternation-priority and lazy retries alike).
+    return hybridEntry(
+        pattern,
+        cacheKey,
+        dfaMatcher,
+        captureNfa,
+        originalResult,
+        nfaHalfClass,
+        dfaResult.dfa.isLeftmostFirstPruned(),
+        nameMap);
+  }
+
+  /** The OPTIMIZED_NFA analysis result the generated nfa-half is built from. */
+  private static PatternAnalyzer.MatchingStrategyResult optimizedNfaHalfResult(
+      PatternAnalyzer.MatchingStrategyResult originalResult) {
+    return new PatternAnalyzer.MatchingStrategyResult(
+        PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
+        null,
+        null,
+        false,
+        originalResult.requiredLiterals,
+        originalResult.lookaheadGreedyInfo,
+        originalResult.usePosixLastMatch);
+  }
+
+  /** Defines the generated matcher class without instantiating it (see HybridEntry). */
+  private static Class<? extends ReggieMatcher> defineMatcherClass(byte[] bytecode)
+      throws Exception {
+    MethodHandles.Lookup hiddenLookup =
+        LOOKUP.defineHiddenClass(bytecode, true, MethodHandles.Lookup.ClassOption.NESTMATE);
+    return hiddenLookup.lookupClass().asSubclass(ReggieMatcher.class);
+  }
+
+  /**
+   * Builds a fresh matcher from a hybrid entry, converting the reflective nfa-half instantiation
+   * into an unchecked failure: by the time an entry exists its class was already defined and
+   * instantiated once, so reconstruction can only fail through an internal invariant violation.
+   */
+  private static ReggieMatcher newHybridMatcher(HybridEntry entry, String pattern) {
+    try {
+      return entry.newMatcher(pattern);
+    } catch (Exception e) {
+      throw new IllegalStateException("hybrid matcher reconstruction failed for " + pattern, e);
+    }
+  }
+
+  /** Registers the hybrid entry under {@code cacheKey} and returns a fresh matcher from it. */
+  private static ReggieMatcher hybridEntry(
+      String pattern,
+      Object cacheKey,
+      ReggieMatcher dfaMatcher,
+      NFA captureNfa,
+      PatternAnalyzer.MatchingStrategyResult originalResult,
+      Class<? extends ReggieMatcher> nfaHalfClass,
+      boolean pruned,
+      Map<String, Integer> nameMap)
+      throws Exception {
+    HybridEntry entry =
+        new HybridEntry(dfaMatcher, captureNfa, originalResult, nfaHalfClass, pruned, nameMap);
+    HYBRID_CACHE.putIfAbsent(cacheKey, entry);
+    return HYBRID_CACHE.get(cacheKey).newMatcher(pattern);
+  }
+
+  /**
+   * Hybrid NFA half for capture extraction (see compileHybrid). BITSTATE_CAPTURE originals get
+   * BitStateMatcher with the Laurikari TDFA trial, exactly like the standalone factory;
+   * PIKEVM_CAPTURE originals keep PikeVMMatcher (the analyzer routed them away from BitState for a
+   * reason). Built bare: HybridMatcher.enrich applies the name map to the OUTER result, so the
+   * halves don't need name enrichment.
+   */
+  /**
+   * Names the first NFA feature the counted-loop backtracker cannot execute, or {@code null} when
+   * the NFA uses only constructs it implements (consuming states, group boundaries, backrefs,
+   * anchors, counted-loop markers). Lookaround/word-boundary assertions, conditionals and atomic
+   * groups are encoded as states only the PikeVM/BitState/generator engines interpret.
+   */
+  private static String countedLoopUnsupportedFeature(NFA nfa) {
+    for (NFA.NFAState s : nfa.getStates()) {
+      if (s.assertionType != null) {
+        return "a lookaround assertion";
+      }
+      if (s.conditionalGroup != null) {
+        return "a conditional (?(n)...)";
+      }
+      if (s.atomicEntry >= 0 || s.atomicExit >= 0) {
+        return "an atomic group";
+      }
+    }
+    return null;
+  }
+
+  private static ReggieMatcher newHybridNfaHalf(
+      NFA nfa, PatternAnalyzer.MatchingStrategyResult originalResult, String pattern) {
+    if (originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+      ReggieMatcher laurikari =
+          LaurikariDfaSupport.tryCreate(
+              nfa, pattern, nfa.getGroupCount(), originalResult.usePosixLastMatch);
+      return new BitStateMatcher(nfa, pattern, laurikari);
+    }
+    return new PikeVMMatcher(nfa, pattern);
   }
 
   /** Instantiate a matcher from bytecode. The pattern string is passed to the constructor. */
@@ -1371,6 +2119,16 @@ public class RuntimeCompiler {
    * fields (currentStates, nextStates, epsilonProcessed, configGroupStarts) during matching.
    * Instances of these matchers must not be shared across threads or sequential compile() calls.
    */
+  /**
+   * True when every match must span the whole region: all paths start-anchored AND the pattern
+   * carries an end-class anchor. The hybrid substring-narrowing trick cannot pay for such patterns
+   * (the DFA span always covers the full region), so findMatchFrom delegates to the NFA matcher
+   * instead — see HybridMatcher.wholeLineAnchored.
+   */
+  private static boolean wholeLineAnchored(NFA nfa) {
+    return nfa != null && nfa.requiresStartAnchor() && nfa.hasEndAnchor();
+  }
+
   /** True if the NFA contains any anchor states (^, $, \A, \Z, \z, \b, \B). */
   private static boolean nfaHasAnchor(NFA nfa) {
     for (NFA.NFAState s : nfa.getStates()) {
@@ -1381,6 +2139,7 @@ public class RuntimeCompiler {
 
   private static boolean isNfaBacked(PatternAnalyzer.MatchingStrategy strategy) {
     switch (strategy) {
+      case PIKEVM_CAPTURE:
       case OPTIMIZED_NFA:
       case OPTIMIZED_NFA_WITH_BACKREFS:
       case OPTIMIZED_NFA_WITH_LOOKAROUND:
@@ -1636,6 +2395,10 @@ public class RuntimeCompiler {
               cw, "com/datadoghq/reggie/runtime/" + className);
         }
         unrolled.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        // Static lookup tables for range-heavy charsets (>= LOOKUP_TABLE_RANGE_THRESHOLD ranges,
+        // e.g. \\p{IsAlphabetic}): replaces the inline cascade that could exceed the 64 KB
+        // per-method limit. No-op when no charset crossed the threshold.
+        unrolled.generateLookupTables(cw);
         unrolled.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -1997,6 +2760,9 @@ public class RuntimeCompiler {
     cw.visitEnd();
     byte[] bytecode = cw.toByteArray();
 
+    // Record the actual routing decision for debug tooling (see describeRouting).
+    noteRouting(result.strategy.name());
+
     // Debug: Trace bytecode if system property is set
     String tracePattern = System.getProperty("reggie.debug.trace");
     if (tracePattern != null && pattern.equals(tracePattern)) {
@@ -2116,6 +2882,7 @@ public class RuntimeCompiler {
   private static int countGroups(String pattern) {
     int count = 0;
     boolean escaped = false;
+    boolean inClass = false; // inside a [...] character class: '(' is a literal, never a group
     for (int i = 0; i < pattern.length(); i++) {
       char c = pattern.charAt(i);
       if (c == '\\' && i + 1 < pattern.length() && pattern.charAt(i + 1) == 'Q') {
@@ -2135,6 +2902,15 @@ public class RuntimeCompiler {
       }
       if (c == '\\') {
         escaped = true;
+      } else if (inClass) {
+        // A ']' closes the class (a ']' as the very first class character is a literal
+        // per java.util.regex; for group counting that distinction cannot change the count,
+        // so treating any unescaped ']' as the closer is safe).
+        if (c == ']') {
+          inClass = false;
+        }
+      } else if (c == '[') {
+        inClass = true;
       } else if (c == '(' && i + 1 < pattern.length()) {
         // Check if it's a capturing group
         // Named groups like (?<name>...) and (?'name'...) ARE capturing groups

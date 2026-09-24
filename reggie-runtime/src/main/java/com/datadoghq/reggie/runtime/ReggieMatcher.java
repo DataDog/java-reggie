@@ -299,6 +299,15 @@ public abstract class ReggieMatcher extends com.datadoghq.reggie.ReggieMatcher {
    * @param input the string to match
    * @return true if the entire string matches
    */
+  /**
+   * True when this matcher delegates to {@code java.util.regex} (JDK fallback) — possibly through
+   * wrapper layers such as the R1 prefilter. Lets callers and test oracles recognize fallback
+   * routing without depending on concrete classes.
+   */
+  public boolean isJdkFallback() {
+    return false;
+  }
+
   public abstract boolean matches(String input);
 
   /**

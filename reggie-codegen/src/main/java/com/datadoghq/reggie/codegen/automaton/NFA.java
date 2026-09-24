@@ -27,6 +27,7 @@ public final class NFA {
   private final NFAState startState;
   private final Set<NFAState> acceptStates;
   private final int groupCount;
+  private final boolean hasCountedLoops;
 
   public NFA(
       List<NFAState> states, NFAState startState, Set<NFAState> acceptStates, int groupCount) {
@@ -34,6 +35,14 @@ public final class NFA {
     this.startState = startState;
     this.acceptStates = Set.copyOf(acceptStates);
     this.groupCount = groupCount;
+    boolean counted = false;
+    for (NFAState s : this.states) {
+      if (s.countedLoopId != null) {
+        counted = true;
+        break;
+      }
+    }
+    this.hasCountedLoops = counted;
   }
 
   public List<NFAState> getStates() {
@@ -50,6 +59,15 @@ public final class NFA {
 
   public int getGroupCount() {
     return groupCount;
+  }
+
+  /**
+   * True if any state is a counted-loop re-entry marker (bounded-quantifier loop lowering). Such
+   * NFAs must only be executed by the counter-aware backtracking matcher; every other engine would
+   * misread the loops as unbounded (x* instead of x{min,max}).
+   */
+  public boolean hasCountedLoops() {
+    return hasCountedLoops;
   }
 
   /**
@@ -413,6 +431,23 @@ public final class NFA {
     public Integer conditionalGroup = null; // Group number to check
     public NFAState thenBranch = null; // Entry if group matched
     public NFAState elseBranch = null; // Entry if group didn't match (may be null)
+
+    // Counted-loop re-entry marker: when countedLoopId != null, this
+    // state is the decision point of a bounded-quantifier loop x{min,max} whose unrolled size
+    // exceeded the builder budget. It has NO outgoing epsilon transitions — the two branches are
+    // encoded as explicit target ids and interpreted by the counter-aware backtracking matcher:
+    //   - iterate: go to countedLoopBodyEntryId, permitted while count < countedLoopTailMax
+    //     (tail count; max - min — min copies are unrolled before the marker), incrementing it;
+    //   - stop: go to countedLoopStopId (the quantifier fragment's exit), always permitted
+    //     (reaching the marker means at least min body passes have completed).
+    // Priority between the branches: greedy prefers iterate, lazy prefers stop (countedLoopLazy).
+    // Every non-backtracking consumer (DFA/BitState/PikeVM/NFA codegen/analysis passes) must
+    // refuse NFAs containing these markers — see NFA#hasCountedLoops().
+    public Integer countedLoopId = null;
+    public int countedLoopTailMax = -1;
+    public boolean countedLoopLazy = false;
+    public int countedLoopBodyEntryId = -1;
+    public int countedLoopStopId = -1;
 
     public NFAState(int id) {
       this.id = id;

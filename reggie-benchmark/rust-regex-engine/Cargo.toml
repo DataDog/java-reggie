@@ -1,0 +1,15 @@
+[package]
+name = "rust_regex_engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The `regex` crate's meta engine (regex-automata: hybrid lazy DFA + SIMD literal
+# prefilters) — the same engine family as the dd_sds Rust scanner.
+regex = "1"
+
+[profile.release]
+lto = true

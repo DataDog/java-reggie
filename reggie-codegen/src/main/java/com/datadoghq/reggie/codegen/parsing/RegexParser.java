@@ -91,14 +91,14 @@ public class RegexParser {
     while (hasMore() && !isAlternationOrGroupEnd()) {
       RegexNode node = parseQuantified();
       // Filter out epsilon nodes (from global modifiers and comments)
-      if (!(node instanceof LiteralNode && ((LiteralNode) node).ch == 0)) {
+      if (!(node instanceof EpsilonNode)) {
         items.add(node);
       }
     }
 
     if (items.isEmpty()) {
       // Empty concatenation (e.g., from "()")
-      return new LiteralNode((char) 0); // Epsilon - handled specially
+      return EpsilonNode.INSTANCE; // Epsilon - handled specially
     }
 
     return items.size() == 1 ? items.get(0) : new ConcatNode(items);
@@ -242,6 +242,14 @@ public class RegexParser {
       // In standard mode, . does NOT match newline (\n)
       CharSet charSet = currentModifiers.isDotall() ? CharSet.ANY : CharSet.ANY_EXCEPT_NEWLINE;
       return new CharClassNode(charSet, false);
+    } else if (ch == '}') {
+      // A bare '}' is always a literal, matching java.util.regex: '}' can only be meaningful
+      // as the closing delimiter of a {n,m} quantifier spec, which is consumed by
+      // parseCountedQuantifier. If a '}' survives to atom position it must be a literal —
+      // patterns such as `\{([\w.]+)}`, `{{...}}` (mustache templates) and `a}b` rely on
+      // this JDK leniency.
+      consume();
+      return literalNode(ch);
     } else if (isMetachar(ch)) {
       throw new ParseException("Unexpected metacharacter '" + ch + "' at position " + pos);
     } else {
@@ -436,6 +444,7 @@ public class RegexParser {
 
     // Apply case-insensitive modifier if active
     if (currentModifiers.isCaseInsensitive()) {
+      checkUnicodeCaseFold();
       ranges = applyCaseInsensitiveToRanges(ranges);
     }
 
@@ -475,7 +484,9 @@ public class RegexParser {
     }
     consume('}');
     String category = name.toString();
-    CharSet cs = CharSet.ofUnicodeCategory(category);
+    CharSet cs =
+        CharSet.ofUnicodeCategory(
+            category, currentModifiers.has(RegexModifiers.Flag.UNICODE_CLASSES));
     if (cs == null) {
       throw new UnsupportedPatternException("Unsupported Unicode property: \\p{" + category + "}");
     }
@@ -483,19 +494,20 @@ public class RegexParser {
   }
 
   private CharSet getCharSetForEscape(char escapeChar) {
+    boolean unicode = currentModifiers.has(RegexModifiers.Flag.UNICODE_CLASSES);
     switch (escapeChar) {
       case 'd':
-        return CharSet.DIGIT;
+        return unicode ? CharSet.UNICODE_CLASSES_DIGIT : CharSet.DIGIT;
       case 'D':
-        return CharSet.DIGIT.complement();
+        return (unicode ? CharSet.UNICODE_CLASSES_DIGIT : CharSet.DIGIT).complement();
       case 'w':
-        return CharSet.WORD;
+        return unicode ? CharSet.UNICODE_CLASSES_WORD : CharSet.WORD;
       case 'W':
-        return CharSet.WORD.complement();
+        return (unicode ? CharSet.UNICODE_CLASSES_WORD : CharSet.WORD).complement();
       case 's':
-        return CharSet.WHITESPACE;
+        return unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE;
       case 'S':
-        return CharSet.WHITESPACE.complement();
+        return (unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE).complement();
       default:
         throw new IllegalArgumentException("Not a character class escape: " + escapeChar);
     }
@@ -545,23 +557,34 @@ public class RegexParser {
     consume('\\');
     char ch = consume();
 
+    boolean unicode = currentModifiers.has(RegexModifiers.Flag.UNICODE_CLASSES);
     switch (ch) {
       case 'd':
-        return new CharClassNode(CharSet.DIGIT, false);
+        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_DIGIT : CharSet.DIGIT, false);
       case 'D':
-        return new CharClassNode(CharSet.DIGIT, true);
+        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_DIGIT : CharSet.DIGIT, true);
       case 'w':
-        return new CharClassNode(CharSet.WORD, false);
+        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_WORD : CharSet.WORD, false);
       case 'W':
-        return new CharClassNode(CharSet.WORD, true);
+        return new CharClassNode(unicode ? CharSet.UNICODE_CLASSES_WORD : CharSet.WORD, true);
       case 's':
-        return new CharClassNode(CharSet.WHITESPACE, false);
+        return new CharClassNode(
+            unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, false);
       case 'S':
-        return new CharClassNode(CharSet.WHITESPACE, true);
+        return new CharClassNode(
+            unicode ? CharSet.UNICODE_CLASSES_SPACE : CharSet.WHITESPACE, true);
       case 'b':
-        return new AnchorNode(AnchorNode.Type.WORD_BOUNDARY);
       case 'B':
-        return new AnchorNode(AnchorNode.Type.NON_WORD_BOUNDARY);
+        if (unicode) {
+          // JDK \b with UNICODE_CHARACTER_CLASS uses the Unicode word set; every Reggie
+          // engine's word-boundary evaluator is ASCII. Reject loudly rather than diverge.
+          throw new UnsupportedPatternException(
+              "\\b/\\B with UNICODE_CHARACTER_CLASS ((?U)): the Unicode word boundary is not"
+                  + " supported - the pattern matches with the ASCII word set instead; use"
+                  + " compileAllowingFallback or drop (?U) for this pattern");
+        }
+        return new AnchorNode(
+            ch == 'b' ? AnchorNode.Type.WORD_BOUNDARY : AnchorNode.Type.NON_WORD_BOUNDARY);
       case 'A':
         return new AnchorNode(AnchorNode.Type.STRING_START);
       case 'Z':
@@ -665,7 +688,9 @@ public class RegexParser {
     }
     consume('}');
     String category = name.toString();
-    CharSet cs = CharSet.ofUnicodeCategory(category);
+    CharSet cs =
+        CharSet.ofUnicodeCategory(
+            category, currentModifiers.has(RegexModifiers.Flag.UNICODE_CLASSES));
     if (cs == null) {
       throw new UnsupportedPatternException("Unsupported Unicode property: \\p{" + category + "}");
     }
@@ -904,7 +929,7 @@ public class RegexParser {
     }
 
     if (parts.isEmpty()) {
-      return new LiteralNode((char) 0);
+      return EpsilonNode.INSTANCE;
     }
     return parts.size() == 1 ? parts.get(0) : new ConcatNode(parts);
   }
@@ -922,8 +947,27 @@ public class RegexParser {
     }
   }
 
-  private RegexNode literalNode(char ch) {
+  /**
+   * Rejects case-insensitive matching under the Unicode-aware case folding of (?u) and (?U).
+   * Reggie's case folding is Unicode simple-case; the JDK adds the special folds (k/K U+212A,
+   * s/\u017F) when either UNICODE_CASE or UNICODE_CHARACTER_CLASS is active — accepting the
+   * combination would diverge exactly where the JDK matches. Like \b under (?U): reject loudly
+   * rather than diverge.
+   */
+  private void checkUnicodeCaseFold() throws ParseException {
+    if (currentModifiers.has(RegexModifiers.Flag.UNICODE_CASE)
+        || currentModifiers.has(RegexModifiers.Flag.UNICODE_CLASSES)) {
+      throw new UnsupportedPatternException(
+          "case-insensitive matching with Unicode-aware case folding ((?iu)/(?iU)): the special"
+              + " Unicode case folds (k/U+212A, s/U+017F) are not supported - reggie would match"
+              + " with simple case folding instead; drop the u/U flag for this pattern or use"
+              + " compileAllowingFallback");
+    }
+  }
+
+  private RegexNode literalNode(char ch) throws ParseException {
     if (currentModifiers.isCaseInsensitive() && Character.isLetter(ch)) {
+      checkUnicodeCaseFold();
       char lower = Character.toLowerCase(ch);
       char upper = Character.toUpperCase(ch);
       if (lower != upper) {
@@ -1295,7 +1339,7 @@ public class RegexParser {
 
   /** Checks if the character is a valid modifier flag (i, m, s, x, -) */
   private boolean isModifierChar(char c) {
-    return c == 'i' || c == 'm' || c == 's' || c == 'x' || c == '-';
+    return c == 'i' || c == 'm' || c == 's' || c == 'x' || c == 'U' || c == 'u' || c == '-';
   }
 
   /** Parses (?#...) comment - consumes everything until ) */
@@ -1314,7 +1358,7 @@ public class RegexParser {
     consume(')');
 
     // Comments are no-ops, return empty literal (epsilon)
-    return new LiteralNode((char) 0);
+    return EpsilonNode.INSTANCE;
   }
 
   /** Parses (?i), (?-i), (?im), (?i:...) style modifier groups */
@@ -1370,7 +1414,7 @@ public class RegexParser {
       currentModifiers = newModifiers;
 
       // Return epsilon (no-op in the AST)
-      return new LiteralNode((char) 0);
+      return EpsilonNode.INSTANCE;
 
     } else {
       throw new ParseException("Expected ':' or ')' after modifiers at position " + pos);

@@ -165,6 +165,12 @@ final class BitStateMatcher extends ReggieMatcher {
 
   BitStateMatcher(NFA nfa, String pattern, ReggieMatcher laurikari) {
     super(pattern);
+    if (nfa.hasCountedLoops()) {
+      // Bit-parallel simulation cannot carry per-thread iteration counters; the loops would
+      // behave as unbounded. RuntimeCompiler routes such NFAs to BackrefBacktrackMatcher.
+      throw new IllegalStateException(
+          "BitStateMatcher cannot execute counted-loop NFAs (see NFA#hasCountedLoops)");
+    }
     this.laurikari = laurikari;
     this.nfa = nfa;
     this.patternText = pattern;
@@ -500,7 +506,7 @@ final class BitStateMatcher extends ReggieMatcher {
   private boolean localizeForFind(String input, int from, int regionEnd) {
     int scanStart = from;
     if (rejectDfa != null) {
-      scanStart = rejectDfa.findFrom(input, from, rejectStep);
+      scanStart = rejectDfa.findFromUnion(input, from, rejectStep);
       if (scanStart < 0) {
         return false;
       }

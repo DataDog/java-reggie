@@ -39,7 +39,19 @@ public class PatternAnalyzer {
   private static final int DFA_TABLE_ESTIMATED_BYTES_LIMIT = 1 << 20;
 
   private final RegexNode ast;
-  private final NFA nfa;
+
+  /**
+   * The NFA the strategy ladder builds DFAs from. Normally the standard (greedy-ordered) build; the
+   * lazy-aware captureless retry temporarily substitutes a lazy-aware rebuild — see {@link
+   * #analyzeAndRecommend(boolean, NFA)}. Not final for that swap; the analyzer instance is
+   * per-compile (RuntimeCompiler constructs one per pattern), so no cross-call state leaks.
+   */
+  private NFA nfa;
+
+  /**
+   * True during a lazy-aware captureless retry — see {@link #analyzeAndRecommend(boolean, NFA)}.
+   */
+  private boolean capturelessPriorityRetry;
 
   /** Accumulated guard trace entries for the most recent {@link #analyzeAndRecommend} call. */
   private final List<String> guardTrace = new ArrayList<>();
@@ -87,6 +99,96 @@ public class PatternAnalyzer {
    * 2. At most one non-marker epsilon transition per state 3. No backreferences (they require
    * backtracking)
    */
+  /**
+   * True when any capturing group's content can end at an earlier position than its longest
+   * possible consumption — i.e. the content's CONCAT spine ends with a skippable (nullable)
+   * element, such as {@code (\w+:(?://)?)} or {@code (a(b)?)}. The group's exit is then
+   * position-ambiguous and the tagged DFA records the END at the early exit; java.util.regex keeps
+   * the span through the consumed tail. Unambiguous tails ((a+), (ab|a)) re-fire the exit marker
+   * along the consuming path and are NOT flagged.
+   */
+  private static boolean hasTailNullableCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode group = (GroupNode) node;
+      if (group.capturing && isTailNullable(group.child)) {
+        return true;
+      }
+    }
+    for (RegexNode child : childrenOf(node)) {
+      if (hasTailNullableCapturingGroup(child)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Concat content whose last element is skippable; alternations recurse into branches. */
+  private static boolean isTailNullable(RegexNode node) {
+    if (node instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) node).children;
+      return !children.isEmpty() && isNullableAst(children.get(children.size() - 1));
+    }
+    if (node instanceof GroupNode) {
+      return isTailNullable(((GroupNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      // Different-length alternation branches are position-ambiguous too ((ab|a)), but the
+      // exit marker re-fires along each branch's consuming path, so spans stay correct —
+      // only recurse to find nested tail-nullable groups, do not flag the alternation itself.
+      for (RegexNode branch : ((AlternationNode) node).alternatives) {
+        if (isTailNullable(branch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+
+  /** True when the node can match the empty string (quantifier min=0, nullable group, etc.). */
+  private static boolean isNullableAst(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      return ((QuantifierNode) node).min == 0;
+    }
+    if (node instanceof GroupNode) {
+      return isNullableAst(((GroupNode) node).child);
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode branch : ((AlternationNode) node).alternatives) {
+        if (isNullableAst(branch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (node instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) node).children;
+      for (RegexNode child : children) {
+        if (!isNullableAst(child)) {
+          return false;
+        }
+      }
+      return !children.isEmpty();
+    }
+    return false;
+  }
+
+  private static List<RegexNode> childrenOf(RegexNode node) {
+    if (node instanceof ConcatNode) {
+      return ((ConcatNode) node).children;
+    }
+    if (node instanceof AlternationNode) {
+      return ((AlternationNode) node).alternatives;
+    }
+    if (node instanceof QuantifierNode) {
+      return java.util.List.of(((QuantifierNode) node).child);
+    }
+    if (node instanceof GroupNode) {
+      return java.util.List.of(((GroupNode) node).child);
+    }
+    return java.util.Collections.emptyList();
+  }
+
   private boolean isOnePassEligible() {
     // Backreferences require backtracking
     if (hasBackreferences(ast)) {
@@ -296,11 +398,126 @@ public class PatternAnalyzer {
    *     RuntimeCompiler for hybrid DFA+NFA approach)
    */
   public MatchingStrategyResult analyzeAndRecommend(boolean ignoreGroupCount) {
+    return analyzeAndRecommend(ignoreGroupCount, null);
+  }
+
+  /**
+   * Captureless re-analysis with an optional lazy-aware NFA. When {@code lazyAwareNfa} is non-null
+   * (RuntimeCompiler's hybrid-DFA retry for {@code lazyNfa} patterns), the NFA used for all subset
+   * constructions is swapped for the lazy-aware rebuild and the lazy-quantifier gates (the {@code
+   * lazyQuantifierPikeVm} early return and the lazy term of the recursive-descent flag) are
+   * bypassed so the strategy ladder can attempt a DFA. Soundness is the ladder's own priority
+   * machinery: a DFA state where a lower-priority consuming thread can override the accept
+   * (hasPriorityConflictTransition without acceptIsPriorityCut) declines the DFA, so the result
+   * stays dfa == null and the caller falls back to the pure lazy NFA engine. With the standard
+   * greedy-ordered NFA a lazy pattern's subset DFA would compute the longest end — wrong for find()
+   * — which is why the retry must bring its own NFA.
+   */
+  public MatchingStrategyResult analyzeAndRecommend(boolean ignoreGroupCount, NFA lazyAwareNfa) {
+    if (lazyAwareNfa == null) {
+      return analyzeAndRecommendInternal(ignoreGroupCount);
+    }
+    return analyzeAndRecommendPriorityAware(lazyAwareNfa);
+  }
+
+  /**
+   * Captureless re-analysis in priority-aware retry mode (see {@link #capturelessPriorityRetry}).
+   * {@code lazyAwareNfa} non-null (lazy originals: the standard NFA normalizes lazy to greedy)
+   * swaps the analysis NFA for a lazy-aware rebuild; null keeps the standard NFA (alternation /
+   * optional-quantifier priority originals — greedy ordering already encodes their preference).
+   */
+  public MatchingStrategyResult analyzeAndRecommendPriorityAware(NFA lazyAwareNfa) {
+    NFA prevNfa = this.nfa;
+    boolean prevRetry = this.capturelessPriorityRetry;
+    if (lazyAwareNfa != null) {
+      this.nfa = lazyAwareNfa;
+    }
+    this.capturelessPriorityRetry = true;
+    try {
+      return analyzeAndRecommendInternal(true);
+    } finally {
+      this.nfa = prevNfa;
+      this.capturelessPriorityRetry = prevRetry;
+    }
+  }
+
+  private MatchingStrategyResult analyzeAndRecommendInternal(boolean ignoreGroupCount) {
     guardTrace.clear();
     MatchingStrategyResult result = doAnalyze(ignoreGroupCount);
     result.guardTrace.addAll(guardTrace);
     result.hasAtomicGroups = hasAtomicGroups(ast);
+    if (capturelessPriorityRetry
+        && result.dfa != null
+        && (lazyCapturelessDfaIsUnsound(result.dfa)
+            || hasStringEndAnchorInAlternation(ast)
+            || hasBareEndAnchorLeadingInAlternation(ast))) {
+      // Priority-aware captureless retry declined. Either the DFA's accepting states are not
+      // certified leftmost-first (see lazyCapturelessDfaIsUnsound), or an END-class anchor sits
+      // inside an alternation branch: the hybrid extracts captures by re-matching the DFA's
+      // span as a STANDALONE string (HybridMatcher.findMatchFrom -> nfaMatcher.match(span)),
+      // and a $/\Z in a branch fires at the span boundary in that re-match where it would not
+      // in-context — proven by fuzz seed 48879 on 0*(-\Z|[1b_-b])|.[--aac]+ (group 1 span
+      // [-1,-1) vs [1,2)). Decline; the caller falls back to the pure NFA engine.
+      addTrace("priorityCapturelessDfaDeclined", true);
+      MatchingStrategyResult declined =
+          new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE, null, null, false, result.requiredLiterals);
+      declined.lazyNfa = true;
+      return declined;
+    }
     return routeBitState(result);
+  }
+
+  /**
+   * Leftmost-first certification for the lazy-aware captureless DFA attempt (see {@link
+   * #analyzeAndRecommend(boolean, NFA)}). The generated longest-match executors return Perl's
+   * leftmost-first end only when:
+   *
+   * <ol>
+   *   <li>No accepting state has an unresolved priority conflict (hasPriorityConflictTransition
+   *       without acceptIsPriorityCut — a lower-priority consuming thread can override the accept;
+   *       {@link #hasUnresolvedAcceptingTransitionState}).
+   *   <li>No END-class anchor can race a consuming thread: END/STRING_END fire at end of input or
+   *       before the final \n, END_MULTILINE at every \n, so a race requires an outgoing transition
+   *       that can consume '\n'; STRING_END_ABSOLUTE fires only at end of input where nothing
+   *       remains to consume and can never race. This refines the conservative
+   *       any-outgoing-transition rule in {@link #dfaHasPriorityConflictTransition} to the actual
+   *       interference.
+   *   <li>A diluted mid-pattern START anchor (hasStartAnchor/hasStringStartAnchor without
+   *       requiresStartAnchor) can't widen acceptance: the subset construction drops the position-0
+   *       condition, so any accepting state with outgoing transitions would accept where the NFA
+   *       would not (mirrors {@link #dfaHasPriorityConflictTransition}).
+   * </ol>
+   */
+  private boolean lazyCapturelessDfaIsUnsound(DFA dfa) {
+    if (hasUnresolvedAcceptingTransitionState(dfa)) {
+      return true;
+    }
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.accepting || state.transitions.isEmpty()) continue;
+      boolean endClass = false;
+      for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+        if (a == NFA.AnchorType.END
+            || a == NFA.AnchorType.STRING_END
+            || a == NFA.AnchorType.END_MULTILINE) {
+          endClass = true;
+          break;
+        }
+      }
+      if (endClass) {
+        for (CharSet chars : state.transitions.keySet()) {
+          if (chars.contains('\n')) return true;
+        }
+      }
+    }
+    if (nfa != null
+        && !nfa.requiresStartAnchor()
+        && (nfa.hasStartAnchor() || nfa.hasStringStartAnchor())) {
+      for (DFA.DFAState state : dfa.getAllStates()) {
+        if (state.accepting && !state.transitions.isEmpty()) return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -456,24 +673,35 @@ public class PatternAnalyzer {
         && !hasConditionals(ast)
         && !hasBranchReset(ast)
         && !FallbackPatternDetector.hasCapturingGroupWithNullableBodyInRepeatableQuantifier(ast)) {
-      addTrace("lazyQuantifierPikeVm", true);
-      MatchingStrategyResult lazyResult =
-          new MatchingStrategyResult(
-              MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
-      lazyResult.lazyNfa = true;
-      return lazyResult;
+      // Lazy-aware captureless retry (analyzeAndRecommend(true, lazyNfa)): fall through to the
+      // strategy ladder so the subset construction can attempt a priority-correct DFA from the
+      // lazy-aware NFA. The ladder's own priority machinery (acceptIsPriorityCut /
+      // hasPriorityConflictTransition, see dfaHasPriorityConflictTransition and
+      // hasUnresolvedAcceptingTransitionState) certifies leftmost-first semantics or declines
+      // with dfa == null, in which case the caller falls back to the pure lazy NFA engine — the
+      // same result this early return would have produced, minus the redundant rebuild.
+      if (!capturelessPriorityRetry) {
+        addTrace("lazyQuantifierPikeVm", true);
+        MatchingStrategyResult lazyResult =
+            new MatchingStrategyResult(
+                MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
+        lazyResult.lazyNfa = true;
+        return lazyResult;
+      }
+      addTrace("lazyCapturelessDfaAttempt", true);
     }
 
     // Lazy patterns that did not qualify above (e.g. capturing group with nullable body under a
     // repeated quantifier) fall through here. The hasNonGreedyQuantifiers condition in
     // requiresRecursiveDescentFlag routes them to RECURSIVE_DESCENT, which then falls back to
-    // JDK via the lazy-quantifier guard in FallbackPatternDetector.
+    // JDK via the lazy-quantifier guard in FallbackPatternDetector. Exception: the lazy-aware
+    // captureless retry — the ladder below owns the (priority-checked) DFA attempt there.
     boolean requiresRecursiveDescentFlag =
         hasSubroutines(ast)
             || hasConditionals(ast)
             || hasBranchReset(ast)
             || hasQuantifiedBackrefs
-            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs);
+            || (hasNonGreedyQuantifiers(ast) && !hasBackrefs && !capturelessPriorityRetry);
     addTrace("requiresRecursiveDescent", requiresRecursiveDescentFlag);
     if (requiresRecursiveDescentFlag) {
       return new MatchingStrategyResult(
@@ -557,8 +785,16 @@ public class PatternAnalyzer {
     // "ab00"). Declining lets such patterns fall through to the backtracking-capable routing
     // (the :753 requiresBacktrackingForGroups guard → RECURSIVE_DESCENT), which produces correct
     // spans. (GREEDY_BACKTRACK above already handles the (.*)literal shape.)
+    // /\B decline: the MULTI_GROUP_GREEDY generator has no word-boundary modeling (the
+    // assertion is a silent no-op), so find() accepts across boundaries. Measured divergence
+    // (real-input find battery): name:(\S+) on "@peer.hostname:127.0.0.1" matched [10,24)
+    // where JDK finds nothing (t|n is no boundary). Declined shapes fall through to the
+    // anchor-aware routes (the word-boundary PIKEVM re-route in the DFA section).
+    boolean wordBoundaryAnchor = nfa != null && nfa.hasWordBoundaryAnchor();
     MultiGroupGreedyInfo multiGroupInfo =
-        requiresBacktrackingForGroups(ast) ? null : detectMultiGroupGreedyPattern(ast);
+        requiresBacktrackingForGroups(ast) || wordBoundaryAnchor
+            ? null
+            : detectMultiGroupGreedyPattern(ast);
     if (multiGroupInfo != null) {
       return new MatchingStrategyResult(
           MatchingStrategy.SPECIALIZED_MULTI_GROUP_GREEDY,
@@ -611,6 +847,7 @@ public class PatternAnalyzer {
         // Passing it lets the ladder's sub-DFA gates decline (SubsetConstructor throws), so the
         // gate never preempts the indexOf tier on the (?=.*foo)(?=.*bar).*baz shapes - the
         // gate's per-candidate char-loop scan loses to String.indexOf there.
+        constructor.setLeftmostFirst(capturelessPriorityRetry);
         boolean literalTierCandidate = false;
         List<LiteralLookaheadInfo> literalTierLookaheads = extractLiteralLookaheads();
         if (literalTierLookaheads != null && literalTierLookaheads.size() >= 2) {
@@ -1033,7 +1270,11 @@ public class PatternAnalyzer {
       // Check if pattern requires backtracking for correct group capture
       // Pattern a([bc]*)(c+d) needs backtracking: ([bc]*) must give back chars to allow (c+d) to
       // match
-      if (requiresBacktrackingForGroups(ast)) {
+      // /\B decline: the recursive-descent generator mishandles word boundaries ((.*)end
+      // on "appendend" returned no-match where JDK matches [0,9) — measured, real-input find
+      // battery). Declined shapes fall through to the word-boundary-aware routes below
+      // (PIKEVM/OPTIMIZED_NFA evaluate  via checkAnchor at every position).
+      if (requiresBacktrackingForGroups(ast) && !(nfa != null && nfa.hasWordBoundaryAnchor())) {
         return new MatchingStrategyResult(
             MatchingStrategy.RECURSIVE_DESCENT,
             null,
@@ -1045,16 +1286,24 @@ public class PatternAnalyzer {
       // Try DFA with Tagged group tracking
       try {
         SubsetConstructor constructor = new SubsetConstructor();
+        // Leftmost-first pruning for the lazy-aware captureless retry (boolean/find semantics;
+        // the hybrid dfa-half never reads this DFA's tags).
+        constructor.setLeftmostFirst(capturelessPriorityRetry);
         // Build DFA with tag computation enabled for Tagged DFA
         DFA dfa = constructor.buildDFA(nfa, true);
 
         if (hasMisplacedStartAnchorInAlternation(ast)
             && !dfaHasAcceptingStateWithTransitions(dfa)) {
           // Anchor condition diluted in DFA (misplaced anchor in alternation or
-          // string-end anchor in alternation). OPTIMIZED_NFA handles anchors as
-          // zero-width NFA assertions and gives correct JDK-compatible results.
+          // string-end anchor in alternation). PIKEVM evaluates anchors as zero-width
+          // assertions at every position and gives correct JDK-compatible results.
+          // (Was OPTIMIZED_NFA, which miscompiles a mid-alternation consumer-then-^ into a
+          // global start anchor — measured, fuzz seed 777: "-^.|(?:1-)" on "011--b-" (and
+          // even plain "1-") returned no-match where JDK matches [2,4) via the second
+          // alternation branch; PikeVM/BitState evaluate checkAnchor per position and are
+          // unaffected — verified by NfaCaret probe over the shape family.)
           return new MatchingStrategyResult(
-              MatchingStrategy.OPTIMIZED_NFA,
+              MatchingStrategy.PIKEVM_CAPTURE,
               null,
               null,
               false,
@@ -1133,9 +1382,13 @@ public class PatternAnalyzer {
         // capturing groups route to PIKEVM_CAPTURE (Pike VM, leftmost-first, correct group spans).
         // The nullable-branch exclusion was removed: ThompsonBuilder now wraps {0,n} fragments
         // in a skip-entry state so the PikeVM correctly handles greedy quantifiers with zero-rep.
+        // Priority-aware captureless retry: bypassed — the flagged capture divergence is a
+        // TAGGED-DFA concern; the captureless dfa-half only serves booleans/find and the
+        // certification gate (lazyCapturelessDfaIsUnsound) owns leftmost-first soundness.
         if (quantifiedAltWithGroupBug
             && !hasAnchorInNfa(nfa)
-            && !hasQuantifiedCapturingGroup(ast)) {
+            && !hasQuantifiedCapturingGroup(ast)
+            && !capturelessPriorityRetry) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1146,7 +1399,11 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         // DFA-condition sub-case and remaining patterns: JDK fallback.
-        if ((containsAlternation(ast) || containsOptionalQuantifier(ast))
+        // Priority-aware captureless retry: bypassed — the alternation/optional priority these
+        // blocks protect against is exactly what leftmost-first pruning expresses; the
+        // certification gate declines any DFA it cannot make sound.
+        if (!capturelessPriorityRetry
+            && (containsAlternation(ast) || containsOptionalQuantifier(ast))
             && (quantifiedAltWithGroupBug
                 || (containsAnyQuantifier(ast)
                     ? dfaHasAcceptingStateWithTransitions(dfa)
@@ -1211,6 +1468,29 @@ public class PatternAnalyzer {
             }
             // B10: optional prefix before capturing group — TDFA group-start computation wrong.
             if (FallbackPatternDetector.hasOptionalPrefixBeforeCapturingGroup(ast)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // B17: a bypass-able group whose body charset overlaps the bypass path's charset
+            // — e.g. sequential optional captures ((?:(a))?(?:(b))?c) or an optional body
+            // whose first char the tail can also consume (x(?:(a)x)?a), both even with
+            // disjoint body charsets. The TDFA merges a with-path thread's start/end tag onto
+            // a char transition a bypass thread also rides; the winning thread's tags cannot
+            // be chosen at determinization time (observed: a losing thread's group-start
+            // leaking into the reported spans). PikeVM resolves thread priority at match time.
+            // Disjoint-overlap shapes ((?:(a):)?(b)) stay on the TDFA path.
+            boolean b17Flag =
+                nfa != null
+                    && hasNfaBypassCharsetOverlap(nfa, ast)
+                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            addTrace("B17: multipleBypassGroups", b17Flag);
+            if (b17Flag) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
                   null,
@@ -1314,6 +1594,24 @@ public class PatternAnalyzer {
             // (SubsetConstructor.isPositionAnchor excludes WORD_BOUNDARY/NON_WORD_BOUNDARY);
             // PIKEVM_CAPTURE evaluates checkAnchor correctly at each position instead.
             if (nfa.hasWordBoundaryAnchor()) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
+            // A capturing group with a NULLABLE TAIL (e.g. (\\w+:(?://)?) — the group can
+            // exit before consuming the optional tail, and the tagged DFA writes the group's
+            // END at the early exit with no later re-fire after the tail matched; jdk keeps
+            // the span through the tail (group 1 "http://" vs our "http:"). The C2 priority
+            // TDFA cannot express this position ambiguity — route to PIKEVM_CAPTURE, whose
+            // thread simulation tracks the span exactly. Guarded against the B16 nullable-
+            // content shape, which PikeVM also diverges on (needsFallback then rejects it).
+            if (hasTailNullableCapturingGroup(ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
                   null,
@@ -1469,6 +1767,41 @@ public class PatternAnalyzer {
               null,
               needsPosixSemantics);
         }
+        // B17 (non-captureAmbiguous path): dfa.isCaptureAmbiguous() only samples the start
+        // closure and accepting targets, so a bypass-able group whose enter marker first
+        // appears in a mid-pattern DFA state (a consuming head before the optional, e.g.
+        // x(?:(a):)?b) is reported unambiguous — yet the TDFA's state-entry group actions
+        // still record that group's start at a stale position (start-only span leak). The
+        // NFA-level B17 shape analysis (see hasNfaBypassCharsetOverlap) catches it.
+        boolean b17NonAmbiguousFlag =
+            nfa != null
+                && hasNfaBypassCharsetOverlap(nfa, ast)
+                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+        addTrace("B17: multipleBypassGroups (non-captureAmbiguous)", b17NonAmbiguousFlag);
+        if (b17NonAmbiguousFlag) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+        // Nullable-tail capturing groups diverge on the tagged DFA (see the Class A route
+        // above): route to PIKEVM_CAPTURE for exact spans, unless the B16 nullable-content
+        // shape is present (PikeVM diverges there too; needsFallback handles it).
+        if (hasTailNullableCapturingGroup(ast)
+            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
         int stateCount = dfa.getStateCount();
         if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
           return new MatchingStrategyResult(
@@ -1520,6 +1853,7 @@ public class PatternAnalyzer {
     MatchingStrategyResult result;
     try {
       SubsetConstructor constructor = new SubsetConstructor();
+      constructor.setLeftmostFirst(capturelessPriorityRetry);
       DFA dfa = constructor.buildDFA(nfa);
 
       // A START-class anchor placed after a consumer inside an alternation branch makes that branch
@@ -1529,10 +1863,12 @@ public class PatternAnalyzer {
       // priority conflict); otherwise fall through to the priority-conflict handling below.
       if (hasMisplacedStartAnchorInAlternation(ast) && !dfaHasAcceptingStateWithTransitions(dfa)) {
         // Anchor condition diluted in DFA (misplaced anchor in alternation or
-        // string-end anchor in alternation). OPTIMIZED_NFA handles anchors as
-        // zero-width NFA assertions and gives correct JDK-compatible results.
+        // string-end anchor in alternation). PIKEVM evaluates anchors as zero-width
+        // assertions at every position and gives correct JDK-compatible results. (Was
+        // OPTIMIZED_NFA — it miscompiles mid-alternation consumer-then-^ into a global
+        // start anchor; see the capturing-path sibling above for the measured divergence.)
         return new MatchingStrategyResult(
-            MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+            MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
       boolean b3bFlag =
           (hasStringEndAnchorInAlternation(ast) || hasBareEndAnchorLeadingInAlternation(ast))
@@ -1569,7 +1905,7 @@ public class PatternAnalyzer {
       }
       addTrace(
           "containsAlternation && dfaHasAcceptingStateWithTransitions", altWithAcceptingTransFlag);
-      if (altWithAcceptingTransFlag) {
+      if (altWithAcceptingTransFlag && !capturelessPriorityRetry) {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
@@ -1707,6 +2043,236 @@ public class PatternAnalyzer {
     for (int g = 1; g <= groupCount; g++) {
       if (canReachAcceptWithoutEnteringGroupNfa(nfa.getStartState(), g, acceptStates)) {
         return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * True when a {@code min == 0} quantifier wraps a subtree containing a capturing group — e.g.
+   * {@code (?:(a):)?}, {@code ((a)b)*} — the optional-quantifier bypass family the TDFA tag
+   * tracking cannot handle (see {@link #hasNfaBypassCharsetOverlap} part 1). Plain alternation
+   * bypasses ({@code b|(b)}) do not match.
+   */
+  private boolean hasMinZeroQuantifierOverCapturingGroup(RegexNode node) {
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      if (q.min == 0 && subtreeContainsCapturingGroup(q.child)) {
+        return true;
+      }
+      return hasMinZeroQuantifierOverCapturingGroup(q.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (hasMinZeroQuantifierOverCapturingGroup(c)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (hasMinZeroQuantifierOverCapturingGroup(a)) return true;
+      }
+      return false;
+    }
+    if (node instanceof GroupNode) {
+      return hasMinZeroQuantifierOverCapturingGroup(((GroupNode) node).child);
+    }
+    if (node instanceof AssertionNode) {
+      return false; // zero-width, no quantifier inside
+    }
+    return false;
+  }
+
+  private static boolean subtreeContainsCapturingGroup(RegexNode node) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing) return true;
+      return subtreeContainsCapturingGroup(g.child);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (subtreeContainsCapturingGroup(c)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (subtreeContainsCapturingGroup(a)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      return subtreeContainsCapturingGroup(((QuantifierNode) node).child);
+    }
+    return false;
+  }
+
+  /**
+   * True when any of the group's enter marker states is reachable from the NFA start via a path
+   * that consumes at least one character (BFS with a consumed-any flag; epsilon steps keep the
+   * flag, character transitions set it). A pure-epsilon path (the group branches at the anchored
+   * start closure) does not count — that shape is handled correctly by the start position's special
+   * case.
+   */
+  private boolean enterMarkerReachableAfterConsume(
+      NFA nfa, List<NFA.NFAState> entries, Map<Integer, NFA.NFAState> byId) {
+    Set<NFA.NFAState> entrySet = new java.util.HashSet<>(entries);
+    // Queue and visited set encode (stateId, consumedAny) pairs as (id << 1) | flag.
+    java.util.ArrayDeque<Long> queue = new java.util.ArrayDeque<>();
+    Set<Long> visited = new java.util.HashSet<>();
+    queue.add(((long) nfa.getStartState().id << 1));
+    while (!queue.isEmpty()) {
+      long frame = queue.poll();
+      if (!visited.add(frame)) continue;
+      NFA.NFAState state = byId.get((int) (frame >>> 1));
+      if (state == null) {
+        throw new IllegalStateException("B17: unknown NFA state id " + (frame >>> 1));
+      }
+      boolean consumed = (frame & 1L) != 0L;
+      if (consumed && entrySet.contains(state)) {
+        return true;
+      }
+      for (NFA.NFAState eps : state.getEpsilonTransitions()) {
+        long epsKey = ((long) eps.id << 1) | (consumed ? 1L : 0L);
+        if (!visited.contains(epsKey)) queue.add(epsKey);
+      }
+      for (NFA.Transition t : state.getTransitions()) {
+        long tKey = ((long) t.target.id << 1) | 1L;
+        if (!visited.contains(tKey)) queue.add(tKey);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Counts capturing groups with a bypass path to acceptance (see {@link
+   * #canReachAcceptWithoutEnteringGroupNfa}). Two or more bypass-able groups — e.g. sequential
+   * optional groups containing captures, {@code (?:(a))?(?:(b))?c} — make the priority-ordered TDFA
+   * attach two competing threads' start tags to the same character transition (both threads consume
+   * the same char on different paths); the winning thread's tags cannot be selected at
+   * DFA-construction time, producing spans the JDK never reports (observed: g2 start bound from a
+   * losing thread). PikeVM resolves the thread priority at match time.
+   */
+  private int countNfaBypassGroups(NFA nfa) {
+    Set<NFA.NFAState> acceptStates = nfa.getAcceptStates();
+    int count = 0;
+    for (int g = 1; g <= nfa.getGroupCount(); g++) {
+      if (canReachAcceptWithoutEnteringGroupNfa(nfa.getStartState(), g, acceptStates)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * B17 core: true when a bypass-able group's TDFA tag tracking cannot be trusted. Two proven
+   * conditions, either suffices:
+   *
+   * <ol>
+   *   <li><b>Charset overlap</b> — the group's body and the bypass path can consume the same
+   *       character ({@code (?:(a):)?(a)}, {@code (?:(a))?(?:(b))?b}, both even with disjoint body
+   *       charsets): the TDFA merges a with-path thread's start/end tag onto a char transition a
+   *       bypass thread also rides, and the winning thread cannot be selected at determinization
+   *       time.
+   *   <li><b>Post-consume branch point</b> — the group's enter marker is reachable from the NFA
+   *       start via a path that consumes at least one character ({@code x(?:(a):)?b}, {@code
+   *       y(?:(a+)x)?b}): the branch decision then happens in a non-start DFA state, where the
+   *       state-entry group actions record the group start at a stale position (a start-only leak,
+   *       {@code g=[x,-1)}). When the branch point is only the anchored start closure ({@code
+   *       (?:(a):)?b}), the start-position special case handles it correctly.
+   * </ol>
+   *
+   * <p>Deliberately over-approximating: the charset test collects every character consumable
+   * anywhere on the bypass path and inside the group body (not just branch-point first-sets), so
+   * safe shapes like {@code (?:(ab)c)?(b)} can also route to PikeVM — a performance cost only,
+   * never a correctness cost. Disjoint-overlap, start-anchored-branch shapes like {@code
+   * (?:(a):)?(b)} stay on the TDFA.
+   */
+  private boolean hasNfaBypassCharsetOverlap(NFA nfa, RegexNode ast) {
+    Set<NFA.NFAState> acceptStates = nfa.getAcceptStates();
+    int groupCount = nfa.getGroupCount();
+    if (groupCount == 0) {
+      return false;
+    }
+    // Part 1 applies to optional-QUANTIFIER bypasses ((?:(a):)?(a)); plain alternation
+    // bypasses (b|(b), (b)|b) are handled correctly on the TDFA by C2.4/C2.4B thread
+    // suppression and stay on the DFA (pinned by DfaUnrolledGroupAndFindRegressionTest).
+    boolean hasOptionalQuantifiedCapture = hasMinZeroQuantifierOverCapturingGroup(ast);
+    // Collect enterGroup marker states per group (single BFS over the whole NFA).
+    Map<Integer, List<NFA.NFAState>> entryStates = new java.util.HashMap<>();
+    Map<Integer, NFA.NFAState> byId = new java.util.HashMap<>();
+    Set<NFA.NFAState> visited = new java.util.HashSet<>();
+    java.util.Queue<NFA.NFAState> queue = new java.util.ArrayDeque<>();
+    queue.add(nfa.getStartState());
+    while (!queue.isEmpty()) {
+      NFA.NFAState cur = queue.poll();
+      if (!visited.add(cur)) continue;
+      byId.put(cur.id, cur);
+      if (cur.enterGroup != null) {
+        entryStates.computeIfAbsent(cur.enterGroup, k -> new ArrayList<>()).add(cur);
+      }
+      for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+        if (!visited.contains(eps)) queue.add(eps);
+      }
+      for (NFA.Transition t : cur.getTransitions()) {
+        if (!visited.contains(t.target)) queue.add(t.target);
+      }
+    }
+    for (int g = 1; g <= groupCount; g++) {
+      List<NFA.NFAState> entries = entryStates.get(g);
+      if (entries == null || entries.isEmpty()) continue;
+      if (!canReachAcceptWithoutEnteringGroupNfa(nfa.getStartState(), g, acceptStates)) continue;
+      // Condition 2: the enter marker is reachable via a consuming path — the branch decision
+      // can happen in a non-start DFA state, where the state-entry group actions record the
+      // group start at a stale position (observed: g=[x,-1) start-only leak on x(?:(a):)?b).
+      if (enterMarkerReachableAfterConsume(nfa, entries, byId)) {
+        return true;
+      }
+      // Body charset: everything consumable inside the group (BFS from the enter markers,
+      // blocked at the group's exit markers so post-group chars don't count).
+      List<CharSet> bodyChars = new ArrayList<>();
+      Set<NFA.NFAState> bodySeen = new java.util.HashSet<>();
+      java.util.Queue<NFA.NFAState> bodyQueue = new java.util.ArrayDeque<>(entries);
+      for (NFA.NFAState e : entries) bodySeen.add(e);
+      while (!bodyQueue.isEmpty()) {
+        NFA.NFAState cur = bodyQueue.poll();
+        if (cur.exitGroup != null && cur.exitGroup == g) continue; // group ended
+        for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+          if (bodySeen.add(eps)) bodyQueue.add(eps);
+        }
+        for (NFA.Transition t : cur.getTransitions()) {
+          bodyChars.add(t.chars);
+          if (bodySeen.add(t.target)) bodyQueue.add(t.target);
+        }
+      }
+      if (bodyChars.isEmpty()) continue; // zero-width body: no shared consume to merge on
+      if (!hasOptionalQuantifiedCapture) {
+        continue; // charset-overlap condition is OPT-specific (see above)
+      }
+      // Bypass charset: everything consumable from states reachable without entering g
+      // (blocked at g's enter markers).
+      List<CharSet> bypassChars = new ArrayList<>();
+      Set<NFA.NFAState> bypassSeen = new java.util.HashSet<>();
+      java.util.Queue<NFA.NFAState> bypassQueue = new java.util.ArrayDeque<>();
+      bypassQueue.add(nfa.getStartState());
+      while (!bypassQueue.isEmpty()) {
+        NFA.NFAState cur = bypassQueue.poll();
+        if (!bypassSeen.add(cur)) continue;
+        if (cur.enterGroup != null && cur.enterGroup == g) continue; // entering g: with-path
+        for (NFA.NFAState eps : cur.getEpsilonTransitions()) {
+          if (!bypassSeen.contains(eps)) bypassQueue.add(eps);
+        }
+        for (NFA.Transition t : cur.getTransitions()) {
+          bypassChars.add(t.chars);
+          if (!bypassSeen.contains(t.target)) bypassQueue.add(t.target);
+        }
+      }
+      for (CharSet body : bodyChars) {
+        for (CharSet bypass : bypassChars) {
+          if (body.intersects(bypass)) {
+            return true;
+          }
+        }
       }
     }
     return false;
@@ -1867,9 +2433,8 @@ public class PatternAnalyzer {
       for (RegexNode alt : a.alternatives) {
         // LiteralNode(ch=0) is the parser's epsilon sentinel for syntactically empty branches
         // (e.g. the trailing arm of "a|" or the body of "()"). isNullable does not handle it.
-        if ((alt instanceof LiteralNode l && l.ch == 0)
-            || isNullable(alt)
-            || hasNullableAlternationBranch(alt)) return true;
+        if ((alt instanceof EpsilonNode) || isNullable(alt) || hasNullableAlternationBranch(alt))
+          return true;
       }
       return false;
     }
@@ -2142,6 +2707,32 @@ public class PatternAnalyzer {
     if (node instanceof GroupNode) {
       return scanForMisplacedStartAnchor(((GroupNode) node).child, consumedBefore);
     }
+    if (node instanceof AlternationNode) {
+      // An alternation in the spine before a START-class anchor: if ANY branch consumes,
+      // the path through may have consumed when the anchor is reached (definite consumption
+      // would require every branch to consume — over-approximating here declines the DFA
+      // for the maybe-consumed shapes too, which is the safe direction). Without this case
+      // the alternation fell through to "non-consuming" below, so (?:c|a)^ scanned as
+      // anchor-at-start and the misplaced-anchor guard never fired — measured: the DFA for
+      // (?:c|a)^|.\z\z erased the [START] acceptance condition on the (?:c|a)-branch accept
+      // states (subset merge with the parallel branch's [STRING_END_ABSOLUTE] conditions
+      // collapsed to unconditional without the dilution flag), so find() fired ^ at
+      // position 1: "ax" matched [0,1) where JDK finds nothing until [1,2) via .\z\z.
+      boolean anyConsumed = false;
+      for (RegexNode alt : ((AlternationNode) node).alternatives) {
+        int r = scanForMisplacedStartAnchor(alt, consumedBefore);
+        if (r == SCAN_MISPLACED) {
+          return SCAN_MISPLACED;
+        }
+        if (r == SCAN_CONSUMED) {
+          anyConsumed = true;
+        }
+      }
+      if (anyConsumed) {
+        return SCAN_CONSUMED;
+      }
+      return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
+    }
     if (node instanceof QuantifierNode) {
       QuantifierNode q = (QuantifierNode) node;
       int r = scanForMisplacedStartAnchor(q.child, consumedBefore);
@@ -2152,7 +2743,7 @@ public class PatternAnalyzer {
     }
     if (node instanceof LiteralNode) {
       // Epsilon literal (char 0) consumes nothing.
-      if (((LiteralNode) node).ch == 0) {
+      if (node instanceof EpsilonNode) {
         return consumedBefore ? SCAN_CONSUMED : SCAN_NO_CONSUME;
       }
       return SCAN_CONSUMED;
@@ -3045,6 +3636,7 @@ public class PatternAnalyzer {
 
         // Attempt DFA construction
         SubsetConstructor constructor = new SubsetConstructor();
+        constructor.setLeftmostFirst(capturelessPriorityRetry);
         DFA lookaheadDFA = constructor.buildDFA(subNFA);
 
         // Success! Store the DFA mapping
@@ -4103,7 +4695,7 @@ public class PatternAnalyzer {
    */
   private boolean isEpsilon(RegexNode node) {
     if (node instanceof LiteralNode) {
-      return ((LiteralNode) node).ch == 0;
+      return node instanceof EpsilonNode;
     }
     return false;
   }
@@ -4298,6 +4890,14 @@ public class PatternAnalyzer {
     // Decline so the pattern falls through to OPTIMIZED_NFA_WITH_BACKREFS, which evaluates \b
     // correctly. START/STRING_START and END/STRING_END are handled via hasStartAnchor/hasEndAnchor.
     if (containsWordBoundaryAnchor(prefix) || containsWordBoundaryAnchor(suffix)) {
+      return null;
+    }
+
+    // The generator only matches prefix, group, separator and backref — it never emits trailing
+    // suffix nodes (a suffix like the 'z' in x(\d+)y\1z would be silently dropped, and the
+    // generator would then require the match to end at the backref). Decline non-empty suffixes
+    // so the pattern falls through to OPTIMIZED_NFA_WITH_BACKREFS, which matches the tail.
+    if (!suffix.isEmpty()) {
       return null;
     }
 
@@ -8436,7 +9036,7 @@ public class PatternAnalyzer {
     if (node instanceof LiteralNode) {
       LiteralNode lit = (LiteralNode) node;
       // Skip epsilon nodes (empty match marker)
-      if (lit.ch == 0) {
+      if (lit instanceof EpsilonNode) {
         return null;
       }
       return new BoundedLiteralElement(lit.ch);
@@ -9366,7 +9966,7 @@ public class PatternAnalyzer {
       LiteralNode lit = (LiteralNode) groupChild;
       // Check for epsilon (empty group) - represented as (char)0
       // Empty groups like (){3,5} can't be handled by QuantifiedGroupBytecodeGenerator
-      if (lit.ch == 0) {
+      if (lit instanceof EpsilonNode) {
         return null;
       }
       // (a)+

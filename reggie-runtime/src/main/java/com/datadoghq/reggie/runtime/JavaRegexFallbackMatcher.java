@@ -70,6 +70,11 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
   }
 
   @Override
+  public boolean isJdkFallback() {
+    return true;
+  }
+
+  @Override
   public boolean matches(String input) {
     return javaPattern.matcher(input).matches();
   }
