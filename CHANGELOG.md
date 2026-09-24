@@ -1,5 +1,51 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.4.0] - 2026-09-24
+
+- #48 feat: support self-referencing backreferences in RECURSIVE_DESCENT
+- #45 [feature] Named group extraction: add group(String name) to MatchResult
+- #47 [feature] split(String input, int limit) — add limit parameter to split()
+- #46 [feature] Stateful streaming replacement: appendReplacement / appendTail equivalent
+- #27 [bug] Multiple backreferences to same group produce false positives
+- #35 [pcre] Inline (?m) flag inside a group doesn't activate multiline mode mid-pattern
+- #30 [bug] Only first alternative in lookbehind alternation is checked
+- #29 [bug] Unbounded quantifier after lookbehind always fails to match
+- #36 [pcre] Lookahead combined with nested alternation produces wrong group captures
+- #67 feat: lazy DFA cache (R1+R2) over OPTIMIZED_NFA for large anchor-free patterns
+- #68 Improve runtime compatibility, capture extraction, and token-sequence execution
+- #81 feat: ReggieOption/@RegexPattern fallback substrate + PIKEVM routing groundwork
+- #82 fix: anchor/alternation PIKEVM routing + B5/B12 backref support
+- #86 docs: capture/perf week report, PR plan + 1.0.0 readiness assessment
+- #28 [bug] Lookahead inside quantified group produces wrong results
+- #31 [bug] Combined lookbehind + lookahead (sandwich pattern) always fails
+- #32 [pcre] Scoped inline flags not supported ((?i:...), (?m-i:...))
+- #34 [pcre] Nested groups with literal digits and backreferences produce wrong captures
+- #40 [feature] Unicode property escapes not supported (\p{L}, \p{N}, etc.)
+- #89 fix: per-config backref NFA, cache collision fixes, CRLF anchors, fallback guards
+- #90 fix: route DFA_UNROLLED_WITH_GROUPS group-span divergences (A1+A2) to PIKEVM_CAPTURE
+- #41 [feature] Atomic groups not supported ((?>...))
+- #42 [feature] Possessive quantifiers not supported (*+, ++, ?+, {n,m}+)
+- #74 perf: first-byte skip / literal-suffix acceleration for BITPARALLEL_GLUSHKOV find()
+- #93 fix: remove duplicate declarations from bad 3edd608↔ae96462 rebase merge
+- #94 perf: eliminate slow paths (BitState routing, dotall-sink, SIMD fast-reject, PINNED_BACKREFERENCE)
+- #96 test: cover alternation exclusion and zero-length matches for ONEPASS_NFA findMatch/findBoundsFrom
+- #97 fix: PINNED_BACKREFERENCE bugs from review
+- #98 docs: reframe PCRE conformance as architectural ceiling vs. fixable bugs
+- #99 feat: add BITSTATE_BYTECODE strategy for prefix-guarded scan patterns
+- #102 fix: OPTIONAL_GROUP_BACKREF backtracking, prefix/middle, end-anchor bugs
+- #103 perf: flatten BitStateMatcher anchor/group metadata, split ensureStackCapacity
+- #104 perf: flatten BitStateMatcher metadata, localize find() before fallback
+- #109 TDFA Laurikari capture engine (Phase 0-2) + \b/\B fixed-sequence fast path
+- #110 feat: add Reggie runtime compile flags
+- #124 chore(deps): update gradle high security fixes minor-patch
+- #125 feat: native pattern matching pipeline (cumulative of stacked PRs #111-#121)
+- #126 chore(deps): update gradle high security fixes minor-patch
+- #127 perf: DFA routing improvements, deterministic chain bytecode, and allocation-free split
+- #128 feat: alt-retry journaling for LOOP_ALT chains (v2-gamma), SQL_MYSQL chain win restored
+- #129 0.4.0: backend regex replacement readiness — literal-prefilter arc, hybrid engines, JIT sizing, parity batteries + review hardening (42 findings addressed)
+
 ## [0.4.0] - Unreleased
 
 ### 1.0.0 readiness tracking (not yet released; tracked here for visibility)
