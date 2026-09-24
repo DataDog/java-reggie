@@ -80,6 +80,61 @@ do_action() {
     fi
 }
 
+# ── Rollback ─────────────────────────────────────────────────────────────────
+# Undoes local state produced by a failed release run. Only active in execute
+# mode after the confirmation prompt (ROLLBACK_READY=1). Once the push
+# succeeded the remote cannot be rolled back automatically, so the trap only
+# prints the remaining manual steps.
+cleanup() {
+    local status=$?
+    rm -f "${TMPJSON:-}" "${NOTES_FILE:-}" 2>/dev/null || true
+
+    if [ $status -eq 0 ] || [ "${ROLLBACK_READY:-0}" -eq 0 ]; then
+        exit "$status"
+    fi
+
+    if [ "${PUSHED:-0}" -eq 1 ]; then
+        echo "" >&2
+        echo "ERROR: release failed AFTER the push — branches and tag are on the remote." >&2
+        echo "Nothing was rolled back. Finish manually:" >&2
+        echo "  gh release create $TAG --title $TAG --notes-file <notes> --repo $REPO_OWNER/$REPO_NAME" >&2
+        echo "  close milestone \"$VERSION\": gh api repos/$REPO_OWNER/$REPO_NAME/milestones/<num> -X PATCH -f state=closed" >&2
+        echo "  create the next-version milestone(s) if missing" >&2
+        exit "$status"
+    fi
+
+    echo "" >&2
+    echo "ERROR: release failed — rolling back local changes..." >&2
+    local cur
+    cur=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [ -n "$cur" ] && [ "$cur" != "$START_BRANCH" ]; then
+        if git -C "$ROOT" checkout -f "$START_BRANCH" >/dev/null 2>&1; then
+            echo "  switched back to '$START_BRANCH'" >&2
+        else
+            echo "  WARNING: failed to switch back to '$START_BRANCH'" >&2
+        fi
+    fi
+    # Discards both this run's commits (Release / Prepare-for) and any
+    # working-tree edits (build.gradle, CHANGELOG.md, *.md version refs).
+    if git -C "$ROOT" reset --hard "$START_HEAD" >/dev/null 2>&1; then
+        echo "  restored '$START_BRANCH' to ${START_HEAD:0:8}" >&2
+    else
+        echo "  WARNING: failed to reset '$START_BRANCH' to ${START_HEAD:0:8}" >&2
+    fi
+    if [ -n "${CREATED_BRANCH:-}" ] && git -C "$ROOT" show-ref --verify --quiet "refs/heads/$CREATED_BRANCH"; then
+        git -C "$ROOT" branch -D "$CREATED_BRANCH" >/dev/null 2>&1 \
+            && echo "  deleted branch '$CREATED_BRANCH'" >&2 \
+            || echo "  WARNING: failed to delete branch '$CREATED_BRANCH'" >&2
+    fi
+    if [ -n "${CREATED_TAG:-}" ] && git -C "$ROOT" rev-parse -q --verify "refs/tags/$CREATED_TAG" >/dev/null 2>&1; then
+        git -C "$ROOT" tag -d "$CREATED_TAG" >/dev/null 2>&1 \
+            && echo "  deleted tag '$CREATED_TAG'" >&2 \
+            || echo "  WARNING: failed to delete tag '$CREATED_TAG'" >&2
+    fi
+    echo "Rollback complete. Remote state untouched — PRs/issues may already be assigned to milestone \"$VERSION\"." >&2
+    exit "$status"
+}
+
 # Portable sed-in-place (BSD vs GNU).
 if sed --version 2>/dev/null | grep -q GNU; then
     sed_i() { sed -i "$@"; }
@@ -496,15 +551,24 @@ echo ""
 if [ $DRY_RUN -eq 0 ]; then
     read -p "Proceed with release? (yes/no): " -r </dev/tty
     [[ $REPLY =~ ^[Yy][Ee][Ss]$ ]] || die "Cancelled by user."
+    ROLLBACK_READY=1
 fi
 
 # ── Collect merged PRs (with linked issues) for release notes ─────────────────
 LAST_TAG=$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || echo "")
 SINCE=""
 [ -n "$LAST_TAG" ] && SINCE=$(git -C "$ROOT" log -1 --format=%aI "$LAST_TAG")
+START_BRANCH="$BRANCH"
+START_HEAD="$LOCAL_HEAD"
+CREATED_BRANCH=""
+CREATED_TAG=""
+PUSHED=0
+ROLLBACK_READY=0
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
 TMPJSON=$(mktemp)
 NOTES_FILE=$(mktemp)
-trap 'rm -f "$TMPJSON" "$NOTES_FILE"' EXIT
 
 echo "Collecting merged PRs with linked issues..."
 collect_prs_with_issues "$BRANCH" "$SINCE" "$TMPJSON"
@@ -535,6 +599,7 @@ if [ "$BUMP" = "patch" ]; then
     do_action "git add release files" \
         bash -c "git -C \"$ROOT\" add build.gradle CHANGELOG.md && git -C \"$ROOT\" ls-files -z -- '*.md' | xargs -0 git -C \"$ROOT\" add --"
     run git -C "$ROOT" commit -m "Release $VERSION"
+    CREATED_TAG="$TAG"
     run git -C "$ROOT" tag -a "$TAG" -m "Release $VERSION"
 
     do_action "Update build.gradle: $VERSION -> $MAINT_NEXT" \
@@ -545,6 +610,7 @@ if [ "$BUMP" = "patch" ]; then
     run git -C "$ROOT" commit -m "Prepare for $MAINT_NEXT"
 
     run git -C "$ROOT" push origin "$BRANCH" "$TAG"
+    PUSHED=1
 
     write_changelog_notes "$VERSION" "$NOTES_FILE"
     do_action "Create GitHub release $TAG" \
@@ -557,6 +623,7 @@ if [ "$BUMP" = "patch" ]; then
 else
     # major / minor: cut release branch FIRST so the release commit lives there, not on $DEFAULT_BRANCH.
     run git -C "$ROOT" checkout -b "$MAINT_BRANCH"
+    CREATED_BRANCH="$MAINT_BRANCH"
 
     do_action "Apply CHANGELOG release entry for $VERSION (release branch)" \
         apply_release_changelog "$VERSION" "$DATE" "$TMPJSON"
@@ -569,6 +636,7 @@ else
     do_action "git add release files (release branch)" \
         bash -c "git -C \"$ROOT\" add build.gradle CHANGELOG.md && git -C \"$ROOT\" ls-files -z -- '*.md' | xargs -0 git -C \"$ROOT\" add --"
     run git -C "$ROOT" commit -m "Release $VERSION"
+    CREATED_TAG="$TAG"
     run git -C "$ROOT" tag -a "$TAG" -m "Release $VERSION"
 
     MAINT_FIRST_SNAPSHOT="${REL_MAJOR}.${REL_MINOR}.1-SNAPSHOT"
@@ -599,6 +667,7 @@ else
     run git -C "$ROOT" commit -m "Prepare for $MAIN_NEXT"
 
     run git -C "$ROOT" push origin "$DEFAULT_BRANCH" "$MAINT_BRANCH" "$TAG"
+    PUSHED=1
 
     write_changelog_notes "$VERSION" "$NOTES_FILE"
     do_action "Create GitHub release $TAG" \
