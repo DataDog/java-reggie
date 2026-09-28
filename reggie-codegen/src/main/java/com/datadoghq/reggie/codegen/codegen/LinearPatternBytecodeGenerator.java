@@ -566,6 +566,16 @@ public class LinearPatternBytecodeGenerator {
     mv.visitInsn(IALOAD);
     mv.visitVarInsn(ISTORE, groupEndVar);
 
+    // if (groupEnd < 0) fail;
+    // A backref may only consult a COMPLETED group span. Without this guard a self- or
+    // forward-referencing backref (e.g. (\1), (a\1)) reads the groupEnds initializer (-1),
+    // computes a negative group length, passes the bounds check below, matches via
+    // regionMatches (negative length is vacuously true), and then moves pos BACKWARD —
+    // bogus matches at every position and an unbounded findAll (issue #122). The JDK
+    // (Pattern$BackRef) also never matches an unset group.
+    mv.visitVarInsn(ILOAD, groupEndVar);
+    mv.visitJumpInsn(IFLT, ctx.failLabel);
+
     // int groupLen = groupEnd - groupStart;
     mv.visitVarInsn(ILOAD, groupEndVar);
     mv.visitVarInsn(ILOAD, groupStartVar);
