@@ -1,5 +1,96 @@
 # Reggie - Agent Development Guide
 
+<!-- cairn:knowledgebase begin (managed by cairn; do not edit manually) -->
+## Cairn knowledgebase — consult before designing, implementing, or reviewing
+
+If `.knowledgebase/memories/` exists in this repo (sentinel: `.knowledgebase/.cairn`),
+it holds committed institutional memory: generally valid knowledge distilled from
+past cairn investigations — confirmed findings and refuted dead ends, one flat
+memory per file. The investigation trails themselves are personal (in ~/.cairn);
+the repo carries only the distilled knowledge. Use it instead of re-deriving:
+
+- **Before feature/design work on an area**: query it — run the cairn skill's
+  script: `python3 <cairn-skill-dir>/investigation.py brief <topic> [--paths <files>] [--diff]` (the cairn-memory skill — its directory is listed in your available skills; the `/cairn` plugin command wraps the same script on
+  Claude Code). Matched memories are design
+  constraints; dead-end memories are approaches already refuted here.
+- **Before/while implementing or reviewing**: check the diff against matched
+  memories; never re-introduce a refuted dead end.
+- **Cite** consumed memory ids (`kb/<memory-id>`) or their source nodes
+  (`<investigation>/<node-id>`) in designs/PRs (`cairn cite <doc>`) so the
+  memory's payoff stays measurable.
+- **Resuming interrupted work** (fresh session or after context compaction):
+  read the active investigation's wrap-up note (`notes/<name>-wrapup.md`, kept
+  fresh at every checkpoint) first — settled findings, refuted dead-ends,
+  open questions, next step — then query for specifics. The wrap-up is the
+  point-in-time refill artifact; the memories are canonical.
+- Memories live at `.knowledgebase/memories/<id>.md` (frontmatter: id, title,
+  kind, tags, applies_to, source — provenance back into the ~/.cairn trail).
+<!-- cairn:knowledgebase end -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 > Single source of truth for AI agents working in this repo. `CLAUDE.md` is a redirect stub —
 > all edits go here, never there.
 
