@@ -252,9 +252,11 @@ with open(changelog_path) as f:
     content = f.read()
 
 if '## [Unreleased]' in content:
+    # repl must be a callable: a plain string is parsed as a template and
+    # backslashes in entry titles (e.g. "\p{Alpha}") raise re.PatternError.
     content = re.sub(
         r'## \[Unreleased\].*?(?=\n## \[|\Z)',
-        new_section, content, count=1, flags=re.DOTALL,
+        lambda _m: new_section, content, count=1, flags=re.DOTALL,
     )
 else:
     pos = content.find('\n## [')
