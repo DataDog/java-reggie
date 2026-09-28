@@ -21,6 +21,7 @@ import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo.LinearOperation;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo.QuantifierData;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
+import java.util.BitSet;
 import java.util.List;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
@@ -353,7 +354,51 @@ public class LinearPatternBytecodeGenerator {
   /** Generate bytecode for a sequence of operations. */
   private void generateOperations(
       MethodVisitor mv, List<LinearOperation> operations, VarContext ctx) {
+    generateOperations(mv, operations, ctx, new BitSet(), false);
+  }
+
+  /**
+   * Generate bytecode for a sequence of operations, tracking which groups have a completed span at
+   * each point. The {@code groupEnds[group] < 0} backref guard is only emitted where a group can
+   * actually be observed incomplete (self-/forward-references, and anything inside a quantifier
+   * body where re-entry makes spans stale) — for a plain backward reference the guard is dead
+   * weight, and the extra bytes have pushed generated {@code matches()} methods past HotSpot's
+   * 325-byte {@code FreqInlineSize} cliff (measured: 323→329 bytes, ~25% throughput drop).
+   */
+  private void generateOperations(
+      MethodVisitor mv,
+      List<LinearOperation> operations,
+      VarContext ctx,
+      BitSet completedGroups,
+      boolean insideQuantifier) {
     for (LinearOperation op : operations) {
+      switch (op.type) {
+        case END_GROUP:
+          completedGroups.set((Integer) op.data);
+          break;
+        case CHECK_BACKREF:
+          // Backrefs inside a quantifier body re-execute: conservatively treat every referenced
+          // group as possibly stale/incomplete there.
+          boolean needsEndGuard = insideQuantifier || !completedGroups.get((Integer) op.data);
+          generateBackrefCheck(mv, (Integer) op.data, ctx, needsEndGuard);
+          continue;
+        case MATCH_QUANTIFIER:
+          {
+            QuantifierData quantData = (QuantifierData) op.data;
+            // Child ops re-execute: inside the body every backref gets the end-guard
+            // (re-entry makes spans stale). Completions from the body persist after the
+            // loop only if it always runs (min >= 1).
+            BitSet bodyCompleted = new BitSet();
+            bodyCompleted.or(completedGroups);
+            generateQuantifierMatch(mv, quantData, ctx, bodyCompleted);
+            if (quantData.min >= 1) {
+              completedGroups.or(bodyCompleted);
+            }
+            continue;
+          }
+        default:
+          break;
+      }
       generateOperation(mv, op, ctx);
     }
   }
@@ -377,7 +422,9 @@ public class LinearPatternBytecodeGenerator {
         generateGroupEnd(mv, (Integer) op.data, ctx);
         break;
       case CHECK_BACKREF:
-        generateBackrefCheck(mv, (Integer) op.data, ctx);
+        // Only reachable via the legacy single-op entry point; stateful emission goes through
+        // generateOperations' completed-group tracking, so assume the group may be incomplete.
+        generateBackrefCheck(mv, (Integer) op.data, ctx, true);
         break;
       case CHECK_ANCHOR:
         generateAnchorCheck(mv, (LinearPatternInfo.AnchorType) op.data, ctx);
@@ -449,6 +496,11 @@ public class LinearPatternBytecodeGenerator {
 
   /** Generate: quantifier loop (+ * ? {n,m}). */
   private void generateQuantifierMatch(MethodVisitor mv, QuantifierData quantData, VarContext ctx) {
+    generateQuantifierMatch(mv, quantData, ctx, new BitSet());
+  }
+
+  private void generateQuantifierMatch(
+      MethodVisitor mv, QuantifierData quantData, VarContext ctx, BitSet bodyCompleted) {
     if (!quantData.greedy) {
       throw new UnsupportedOperationException(
           "Reluctant quantifiers not yet supported in linear patterns");
@@ -464,7 +516,7 @@ public class LinearPatternBytecodeGenerator {
     // For fixed count {n}, just repeat n times
     if (min == max && max >= 0) {
       for (int i = 0; i < min; i++) {
-        generateOperations(mv, quantData.childOperations, ctx);
+        generateOperations(mv, quantData.childOperations, ctx, bodyCompleted, true);
       }
       return;
     }
@@ -499,7 +551,7 @@ public class LinearPatternBytecodeGenerator {
     Label originalFailLabel = ctx.failLabel;
     ctx.failLabel = childFailed;
 
-    generateOperations(mv, quantData.childOperations, ctx);
+    generateOperations(mv, quantData.childOperations, ctx, bodyCompleted, true);
 
     // Match succeeded
     ctx.failLabel = originalFailLabel;
@@ -541,11 +593,12 @@ public class LinearPatternBytecodeGenerator {
 
   /**
    * Generate: backreference check. int groupStart = groupStarts[groupNum]; int groupEnd =
-   * groupEnds[groupNum]; if (groupStart < 0) fail; // group not captured int groupLen = groupEnd -
-   * groupStart; if (pos + groupLen > len) fail; if (!input.regionMatches(pos, input, groupStart,
-   * groupLen)) fail; pos += groupLen;
+   * groupEnds[groupNum]; if (groupStart < 0) fail; // group not captured [if the group may be
+   * incomplete: if (groupEnd < 0) fail;] int groupLen = groupEnd - groupStart; if (pos + groupLen >
+   * len) fail; if (!input.regionMatches(pos, input, groupStart, groupLen)) fail; pos += groupLen;
    */
-  private void generateBackrefCheck(MethodVisitor mv, int groupNum, VarContext ctx) {
+  private void generateBackrefCheck(
+      MethodVisitor mv, int groupNum, VarContext ctx, boolean groupMayBeIncomplete) {
     int groupStartVar = ctx.allocateTemp();
     int groupEndVar = ctx.allocateTemp();
     int groupLenVar = ctx.allocateTemp();
@@ -573,8 +626,13 @@ public class LinearPatternBytecodeGenerator {
     // regionMatches (negative length is vacuously true), and then moves pos BACKWARD —
     // bogus matches at every position and an unbounded findAll (issue #122). The JDK
     // (Pattern$BackRef) also never matches an unset group.
-    mv.visitVarInsn(ILOAD, groupEndVar);
-    mv.visitJumpInsn(IFLT, ctx.failLabel);
+    // Emitted only when the group can actually be observed incomplete; for a plain backward
+    // reference the extra branch is dead weight and has crossed the HotSpot FreqInlineSize
+    // cliff on generated matches() methods sitting right at the 325-byte boundary.
+    if (groupMayBeIncomplete) {
+      mv.visitVarInsn(ILOAD, groupEndVar);
+      mv.visitJumpInsn(IFLT, ctx.failLabel);
+    }
 
     // int groupLen = groupEnd - groupStart;
     mv.visitVarInsn(ILOAD, groupEndVar);
