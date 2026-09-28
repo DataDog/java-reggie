@@ -128,15 +128,9 @@ public class DFASwitchBytecodeGenerator {
 
   private final DFA dfa;
   private final int groupCount;
-  private final NFA nfa; // Needed for anchor information
   private final boolean hasMultilineStart;
-  private final boolean hasMultilineEnd;
-  private final boolean hasStartAnchor;
   private final boolean requiresStartAnchor; // True only if ALL paths need start anchor
-  private final boolean hasEndAnchor;
-  private final boolean hasStringStartAnchor;
   private final boolean hasStringEndAnchor;
-  private final boolean hasStringEndAbsoluteAnchor;
 
   /**
    * Set before any code-generation method that may need to emit bucket-helper methods. Bucket
@@ -155,26 +149,18 @@ public class DFASwitchBytecodeGenerator {
    */
   private final Set<String> emittedBucketHelpers = new HashSet<>();
 
-  public DFASwitchBytecodeGenerator(DFA dfa) {
-    this(dfa, 0, null);
-  }
-
-  public DFASwitchBytecodeGenerator(DFA dfa, int groupCount) {
-    this(dfa, groupCount, null);
-  }
-
+  /**
+   * @param nfa required, not optional: DFA_SWITCH emits no per-transition anchor guards, so the
+   *     NFA-derived {@code requiresStartAnchor}/{@code hasMultilineStart} findFrom position guard
+   *     is the only enforcement of a leading {@code ^}/{@code \A}/multiline {@code ^}. Passing null
+   *     silently produces a matcher whose {@code find()} matches mid-input.
+   */
   public DFASwitchBytecodeGenerator(DFA dfa, int groupCount, NFA nfa) {
     this.dfa = dfa;
     this.groupCount = groupCount;
-    this.nfa = nfa;
     this.hasMultilineStart = (nfa != null) && nfa.hasMultilineStartAnchor();
-    this.hasMultilineEnd = (nfa != null) && nfa.hasMultilineEndAnchor();
-    this.hasStartAnchor = (nfa != null) && nfa.hasStartAnchor();
-    this.requiresStartAnchor = (nfa != null) && nfa.requiresStartAnchor();
-    this.hasEndAnchor = (nfa != null) && nfa.hasEndAnchor();
-    this.hasStringStartAnchor = (nfa != null) && nfa.hasStringStartAnchor();
     this.hasStringEndAnchor = (nfa != null) && nfa.hasStringEndAnchor();
-    this.hasStringEndAbsoluteAnchor = (nfa != null) && nfa.hasStringEndAbsoluteAnchor();
+    this.requiresStartAnchor = (nfa != null) && nfa.requiresStartAnchor();
   }
 
   /** Accepting state ids, precomputed for the findMatchEnd bucket-helper encoding. */
@@ -1305,7 +1291,7 @@ public class DFASwitchBytecodeGenerator {
    *
    *     for (int tryPos = start; tryPos < len; tryPos++) {
    *         // ANCHOR OPTIMIZATION: For ^ or \A, only try position 0
-   *         if (hasStartAnchor && tryPos != 0) return -1;
+   *         if (requiresStartAnchor && tryPos != 0) return -1;
    *
    *         // MULTILINE ^: Only try position 0 or after '\n'
    *         if (hasMultilineStart && tryPos != 0 && input.charAt(tryPos-1) != '\n') {
@@ -3883,101 +3869,5 @@ public class DFASwitchBytecodeGenerator {
     hv.visitMaxs(0, 0);
     hv.visitEnd();
     return name;
-  }
-
-  /**
-   * Emit a transition entry-guard check. {@code posVar} is the position AFTER the char was consumed
-   * (i.e. source pos + 1). END-class anchors in the guard are treated as dead (the transition is
-   * skipped) since SubsetConstructor should have pruned them at construction.
-   */
-  private void emitTransitionEntryGuard(
-      MethodVisitor mv, EnumSet<NFA.AnchorType> entryGuard, int posVar, Label skipTransition) {
-    for (NFA.AnchorType anchor : entryGuard) {
-      switch (anchor) {
-        case START:
-        case STRING_START:
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitInsn(ICONST_1);
-          mv.visitJumpInsn(IF_ICMPNE, skipTransition);
-          break;
-        case START_MULTILINE:
-          {
-            Label ok = new Label();
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitInsn(ICONST_1);
-            mv.visitJumpInsn(IF_ICMPEQ, ok);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitInsn(ICONST_2);
-            mv.visitJumpInsn(IF_ICMPLT, skipTransition);
-            mv.visitVarInsn(ALOAD, 1);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitInsn(ICONST_2);
-            mv.visitInsn(ISUB);
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-            pushInt(mv, '\n');
-            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
-            mv.visitLabel(ok);
-            break;
-          }
-        case END:
-        case STRING_END:
-          // $ / \Z before a consuming transition: the consumed char must be a line terminator
-          // at the end of input. After consuming, posVar == src_pos + 1.
-          // Case 1: src_pos == len-1 (line terminator at last position) → posVar == len.
-          //   CRLF guard: if the consumed char was '\n', the preceding char must not be '\r'.
-          // Case 2: src_pos == len-2 with \r\n → posVar == len-1, consumed '\r', next is '\n'.
-          {
-            Label ok = new Label();
-            Label checkCrlf = new Label();
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-            mv.visitJumpInsn(IF_ICMPEQ, checkCrlf);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-            mv.visitInsn(ICONST_1);
-            mv.visitInsn(ISUB);
-            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
-            mv.visitVarInsn(ALOAD, 1);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitInsn(ICONST_1);
-            mv.visitInsn(ISUB);
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-            pushInt(mv, '\r');
-            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
-            mv.visitVarInsn(ALOAD, 1);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-            pushInt(mv, '\n');
-            mv.visitJumpInsn(IF_ICMPNE, skipTransition);
-            mv.visitJumpInsn(GOTO, ok);
-            mv.visitLabel(checkCrlf);
-            mv.visitVarInsn(ALOAD, 1);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitInsn(ICONST_1);
-            mv.visitInsn(ISUB);
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-            pushInt(mv, '\n');
-            mv.visitJumpInsn(IF_ICMPNE, ok);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitInsn(ICONST_2);
-            mv.visitJumpInsn(IF_ICMPLT, ok);
-            mv.visitVarInsn(ALOAD, 1);
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitInsn(ICONST_2);
-            mv.visitInsn(ISUB);
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-            pushInt(mv, '\r');
-            mv.visitJumpInsn(IF_ICMPEQ, skipTransition);
-            mv.visitLabel(ok);
-            break;
-          }
-        case STRING_END_ABSOLUTE:
-        case END_MULTILINE:
-          mv.visitJumpInsn(GOTO, skipTransition);
-          break;
-        default:
-          break;
-      }
-    }
   }
 }

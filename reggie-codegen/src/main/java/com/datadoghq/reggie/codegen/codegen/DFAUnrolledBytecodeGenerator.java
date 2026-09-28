@@ -101,15 +101,8 @@ public class DFAUnrolledBytecodeGenerator {
   private final DFA dfa;
   private final int groupCount;
   private final boolean useTaggedDFA;
-  private final NFA nfa; // Needed for anchor information
   private final boolean hasMultilineStart;
-  private final boolean hasMultilineEnd;
-  private final boolean hasStartAnchor;
   private final boolean requiresStartAnchor; // True only if ALL paths need start anchor
-  private final boolean hasEndAnchor;
-  private final boolean hasStringStartAnchor;
-  private final boolean hasStringEndAnchor;
-  private final boolean hasStringEndAbsoluteAnchor;
   private final boolean
       skipEagerAssertionGroupCapture; // True when assertion groups conflict with regular groups
 
@@ -117,12 +110,19 @@ public class DFAUnrolledBytecodeGenerator {
     this(dfa, 0, false, null);
   }
 
-  public DFAUnrolledBytecodeGenerator(DFA dfa, int groupCount) {
-    this(dfa, groupCount, false, null);
-  }
-
-  public DFAUnrolledBytecodeGenerator(DFA dfa, int groupCount, boolean useTaggedDFA) {
-    this(dfa, groupCount, useTaggedDFA, null);
+  /**
+   * @param nfa optional; when non-null it enables the {@code requiresStartAnchor}/ {@code
+   *     hasMultilineStart} findFrom position guard. DFA_UNROLLED also emits per-transition anchor
+   *     entry guards, so unlike DFA_SWITCH omission degrades only find() throughput, never
+   *     correctness — but callers should pass the NFA (RuntimeCompiler does).
+   */
+  public DFAUnrolledBytecodeGenerator(DFA dfa, int groupCount, boolean useTaggedDFA, NFA nfa) {
+    this.dfa = dfa;
+    this.groupCount = groupCount;
+    this.useTaggedDFA = useTaggedDFA;
+    this.hasMultilineStart = (nfa != null) && nfa.hasMultilineStartAnchor();
+    this.requiresStartAnchor = (nfa != null) && nfa.requiresStartAnchor();
+    this.skipEagerAssertionGroupCapture = computeSkipEagerAssertionGroupCapture();
   }
 
   /**
@@ -144,22 +144,6 @@ public class DFAUnrolledBytecodeGenerator {
 
   /** Internal name of the class being generated, for GETSTATIC owners. */
   private String ownerInternalName;
-
-  public DFAUnrolledBytecodeGenerator(DFA dfa, int groupCount, boolean useTaggedDFA, NFA nfa) {
-    this.dfa = dfa;
-    this.groupCount = groupCount;
-    this.useTaggedDFA = useTaggedDFA;
-    this.nfa = nfa;
-    this.hasMultilineStart = (nfa != null) && nfa.hasMultilineStartAnchor();
-    this.hasMultilineEnd = (nfa != null) && nfa.hasMultilineEndAnchor();
-    this.hasStartAnchor = (nfa != null) && nfa.hasStartAnchor();
-    this.requiresStartAnchor = (nfa != null) && nfa.requiresStartAnchor();
-    this.hasEndAnchor = (nfa != null) && nfa.hasEndAnchor();
-    this.hasStringStartAnchor = (nfa != null) && nfa.hasStringStartAnchor();
-    this.hasStringEndAnchor = (nfa != null) && nfa.hasStringEndAnchor();
-    this.hasStringEndAbsoluteAnchor = (nfa != null) && nfa.hasStringEndAbsoluteAnchor();
-    this.skipEagerAssertionGroupCapture = computeSkipEagerAssertionGroupCapture();
-  }
 
   /**
    * Determines if we should skip eager assertion group capture. This returns true when: 1. There
@@ -1081,8 +1065,8 @@ public class DFAUnrolledBytecodeGenerator {
     // ANCHOR OPTIMIZATION: Skip positions that can't match due to anchors.
     // {@link NFA#requiresStartAnchor()} already treats both START (^) and STRING_START (\A) as
     // barriers, so it returns true only when ALL paths to a useful target go through one of
-    // them. Or-ing in {@code hasStringStartAnchor} on top short-circuits on patterns like
-    // `]\A|b` where only one branch has \A but the other can still match anywhere.
+    // them, short-circuiting on patterns like `]\A|b` where only one branch has \A but the
+    // other can still match anywhere.
     if (requiresStartAnchor) {
       // Non-multiline ^ or \A: Only try position 0
       // if (tryPos != 0) return -1;
