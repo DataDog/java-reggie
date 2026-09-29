@@ -463,6 +463,10 @@ public class ReggieMatcherBytecodeGenerator {
         unrolledGen.generateMatchBoundedMethod(cw, getJavaClassName());
         unrolledGen.generateFindMatchMethod(cw, getJavaClassName());
         unrolledGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        // findMatchFrom calls this helper, and findBoundsFrom delegates to it whenever the DFA
+        // carries lookaround assertions (same as RuntimeCompiler); without it every
+        // findAll/replaceAll/split use throws NoSuchMethodError
+        unrolledGen.generateFindLongestMatchEndMethod(cw, getJavaClassName());
         unrolledGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;
 
@@ -527,6 +531,9 @@ public class ReggieMatcherBytecodeGenerator {
         hybridGen.generateMatchBoundedMethod(cw, getJavaClassName());
         hybridGen.generateFindMatchMethod(cw, getJavaClassName());
         hybridGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        // No generateFindLongestMatchEndMethod: hybrid NFAs always carry lookaround assertions,
+        // and the shared findBoundsFrom routes assertion-bearing NFAs to findMatchFrom, so the
+        // helper would be unreferenced dead bytecode.
         hybridGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;
 
@@ -549,6 +556,12 @@ public class ReggieMatcherBytecodeGenerator {
         plainNfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
         plainNfaGen.generateFindMatchMethod(cw, getJavaClassName());
         plainNfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
+        // Defensive parity with RuntimeCompiler: today no pattern reaches this arm through the
+        // APT — every analyzer path that selects plain OPTIMIZED_NFA sets a refusal flag
+        // (anchorConditionDiluted / alternationPriorityConflict / captureAmbiguous) checked
+        // above — but if one ever does, findBoundsFrom calls the helper and a missing emission
+        // would be NoSuchMethodError on every findAll/replaceAll/split.
+        plainNfaGen.generateFindLongestMatchEndMethod(cw, getJavaClassName());
         plainNfaGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;
 
@@ -627,6 +640,9 @@ public class ReggieMatcherBytecodeGenerator {
           nfaGen.generateMatchBoundedMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchMethod(cw, getJavaClassName());
           nfaGen.generateFindMatchFromMethod(cw, getJavaClassName());
+          // No generateFindLongestMatchEndMethod: this arm is reached only with lookaround
+          // assertions, and the shared findBoundsFrom routes assertion-bearing NFAs to
+          // findMatchFrom, so the helper would be unreferenced dead bytecode.
           nfaGen.generateFindBoundsFromMethod(cw, getJavaClassName());
           break;
         }

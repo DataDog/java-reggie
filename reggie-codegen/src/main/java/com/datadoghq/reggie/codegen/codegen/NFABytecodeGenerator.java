@@ -9919,6 +9919,28 @@ public class NFABytecodeGenerator {
    * be expensive. The bounds array is reused across multiple calls.
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
+    // findLongestMatchEnd runs the NFA greedily without assertion evaluation, so for lookaround
+    // patterns it never reaches an accepting state and returns -1 — silently reporting "no match"
+    // (replaceAll/split would return the input unchanged). Derive the bounds from findMatchFrom
+    // instead, which evaluates assertions correctly.
+    //
+    // Cost note: this forfeits the O(n) greedy scan. findMatchFrom tries every candidate end via
+    // matchBounded (O(n) attempts, one MatchResult each) and the rich API repeats it per
+    // occurrence, so lookaround-bearing patterns pay a per-occurrence multiplicative cost plus
+    // allocation where assertion-free patterns get the zero-allocation bounds path. Lookarounds
+    // in replacement/split sites are rare; correctness comes first here.
+    //
+    // Semantics note: findMatchFrom keeps the longest successful candidate end (pre-existing NFA
+    // search semantics, shared with findAll). Patterns where Java's leftmost-first alternation
+    // would pick a shorter end (e.g. ((a|aa)(?=a)) on "aaa") therefore diverge on the rich API
+    // exactly like findAll does; fixing that needs priority-aware matching or an analyzer-level
+    // refusal, not a bounds-path change.
+    boolean hasLookarounds = nfa.getStates().stream().anyMatch(s -> s.assertionType != null);
+    if (hasLookarounds) {
+      generateFindBoundsFromMatchResult(cw, className);
+      return;
+    }
+
     MethodVisitor mv =
         boundedMethod(cw, className, ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z");
     mv.visitCode();
@@ -9987,6 +10009,73 @@ public class NFABytecodeGenerator {
     mv.visitInsn(IRETURN);
 
     mv.visitMaxs(0, 0); // Computed automatically
+    mv.visitEnd();
+  }
+
+  /**
+   * Emits a findBoundsFrom() that derives the bounds from {@code findMatchFrom} (assertion-
+   * correct) instead of {@code findLongestMatchEnd}. Used when the NFA contains lookaround
+   * assertions. Cost: one findMatchFrom call per bounds query — it scans candidate endpoints with
+   * matchBounded and allocates — so this path trades the zero-allocation O(n) greedy scan for
+   * correctness on the rare lookaround-bearing patterns.
+   */
+  private void generateFindBoundsFromMatchResult(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        boundedMethod(cw, className, ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z");
+    mv.visitCode();
+
+    // if (input == null) return false;
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notNull);
+
+    // MatchResult match = findMatchFrom(input, start);
+    // Slots: 0=this, 1=input, 2=start, 3=bounds, 4+=allocated
+    LocalVariableAllocator allocator = new LocalVariableAllocator(4);
+    int matchVar = allocator.allocateRef();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className.replace('.', '/'),
+        "findMatchFrom",
+        "(Ljava/lang/String;I)Lcom/datadoghq/reggie/runtime/MatchResult;",
+        false);
+    mv.visitVarInsn(ASTORE, matchVar); // match
+
+    // if (match == null) return false;
+    Label hasMatch = new Label();
+    mv.visitVarInsn(ALOAD, matchVar);
+    mv.visitJumpInsn(IFNONNULL, hasMatch);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(hasMatch);
+
+    // bounds[0] = match.start();
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ALOAD, matchVar);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "start", "()I", true);
+    mv.visitInsn(IASTORE);
+
+    // bounds[1] = match.end();
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ALOAD, matchVar);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "end", "()I", true);
+    mv.visitInsn(IASTORE);
+
+    // return true;
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
 

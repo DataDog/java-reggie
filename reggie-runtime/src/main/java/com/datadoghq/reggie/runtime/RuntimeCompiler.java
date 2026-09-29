@@ -2624,10 +2624,11 @@ public class RuntimeCompiler {
         hybridGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        hybridGen.generateFindLongestMatchEndMethod(
-            cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         hybridGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        // No generateFindLongestMatchEndMethod: hybrid NFAs always carry lookaround assertions,
+        // and the shared findBoundsFrom routes assertion-bearing NFAs to findMatchFrom, so the
+        // helper would be unreferenced dead bytecode.
         hybridGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
