@@ -3107,6 +3107,21 @@ public class DFAUnrolledBytecodeGenerator {
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
     this.ownerInternalName = className;
+    // The inline greedy scan below evaluates assertions eagerly at state entry and aborts the
+    // whole scan on the first failed lookahead. That is unsound for lookahead-bearing DFAs: a
+    // lookahead that fails at an earlier position can pass after consuming more input
+    // (a+(?=b) on "aab": (?=b) fails at pos=1 but passes at pos=2), so the scan reports no match
+    // and replaceAll/split silently return the input unchanged. Delegate to
+    // findLongestMatchEnd instead — its greedy state code gates only the lastAcceptingPos
+    // record on the lookahead (skipRecord) and keeps scanning, and also gates records on
+    // acceptance anchor conditions, which the inline scan ignores entirely.
+    boolean hasAssertions =
+        dfa.getAllStates().stream().anyMatch(state -> !state.assertionChecks.isEmpty());
+    if (hasAssertions) {
+      generateFindBoundsFromLongestEnd(cw, className);
+      return;
+    }
+
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", null, null);
     mv.visitCode();
@@ -3224,6 +3239,80 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ALOAD, 3); // bounds array
     mv.visitInsn(ICONST_1);
     mv.visitVarInsn(ILOAD, 6); // longestEnd
+    mv.visitInsn(IASTORE);
+
+    // return true;
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IRETURN);
+
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Emits a findBoundsFrom() that derives the bounds from {@code findLongestMatchEnd} instead of
+   * the inline greedy scan. Used when the DFA carries lookaround assertions: the helper's greedy
+   * state code gates the lastAcceptingPos record on lookahead assertions (skipping the record but
+   * continuing the scan when a lookahead fails at the current position) and on acceptance anchor
+   * conditions, whereas the inline scan aborts on the first failed assertion and ignores anchor
+   * conditions — both silently wrong for assertion-bearing patterns. Mirrors how findMatchFrom
+   * obtains its match end, so replaceAll/split bounds stay consistent with findAll.
+   */
+  private void generateFindBoundsFromLongestEnd(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", null, null);
+    mv.visitCode();
+
+    // Slots 0=this, 1=input, 2=start, 3=bounds; everything past the fixed layout is allocated.
+    LocalVarAllocator allocator = new LocalVarAllocator(4);
+    int matchStartVar = allocator.allocate();
+    int longestEndVar = allocator.allocate();
+
+    // int matchStart = findFrom(input, start);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className.replace('.', '/'), "findFrom", "(Ljava/lang/String;I)I", false);
+    mv.visitVarInsn(ISTORE, matchStartVar);
+
+    // if (matchStart < 0) return false;
+    Label found = new Label();
+    mv.visitVarInsn(ILOAD, matchStartVar);
+    mv.visitJumpInsn(IFGE, found);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+
+    mv.visitLabel(found);
+
+    // int longestEnd = findLongestMatchEnd(input, matchStart);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, matchStartVar);
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL,
+        className.replace('.', '/'),
+        "findLongestMatchEnd",
+        "(Ljava/lang/String;I)I",
+        false);
+    mv.visitVarInsn(ISTORE, longestEndVar);
+
+    // if (longestEnd < 0) return false;
+    Label hasMatch = new Label();
+    mv.visitVarInsn(ILOAD, longestEndVar);
+    mv.visitJumpInsn(IFGE, hasMatch);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(hasMatch);
+
+    // bounds[0] = matchStart; bounds[1] = longestEnd;
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, matchStartVar);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ILOAD, longestEndVar);
     mv.visitInsn(IASTORE);
 
     // return true;

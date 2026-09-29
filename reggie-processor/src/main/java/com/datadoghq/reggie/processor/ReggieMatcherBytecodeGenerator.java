@@ -463,8 +463,9 @@ public class ReggieMatcherBytecodeGenerator {
         unrolledGen.generateMatchBoundedMethod(cw, getJavaClassName());
         unrolledGen.generateFindMatchMethod(cw, getJavaClassName());
         unrolledGen.generateFindMatchFromMethod(cw, getJavaClassName());
-        // findMatchFrom/findBoundsFrom call this helper (same as RuntimeCompiler); without it
-        // every findAll/replaceAll/split use throws NoSuchMethodError
+        // findMatchFrom calls this helper, and findBoundsFrom delegates to it whenever the DFA
+        // carries lookaround assertions (same as RuntimeCompiler); without it every
+        // findAll/replaceAll/split use throws NoSuchMethodError
         unrolledGen.generateFindLongestMatchEndMethod(cw, getJavaClassName());
         unrolledGen.generateFindBoundsFromMethod(cw, getJavaClassName());
         break;

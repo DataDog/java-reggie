@@ -9929,6 +9929,12 @@ public class NFABytecodeGenerator {
     // occurrence, so lookaround-bearing patterns pay a per-occurrence multiplicative cost plus
     // allocation where assertion-free patterns get the zero-allocation bounds path. Lookarounds
     // in replacement/split sites are rare; correctness comes first here.
+    //
+    // Semantics note: findMatchFrom keeps the longest successful candidate end (pre-existing NFA
+    // search semantics, shared with findAll). Patterns where Java's leftmost-first alternation
+    // would pick a shorter end (e.g. ((a|aa)(?=a)) on "aaa") therefore diverge on the rich API
+    // exactly like findAll does; fixing that needs priority-aware matching or an analyzer-level
+    // refusal, not a bounds-path change.
     boolean hasLookarounds = nfa.getStates().stream().anyMatch(s -> s.assertionType != null);
     if (hasLookarounds) {
       generateFindBoundsFromMatchResult(cw, className);

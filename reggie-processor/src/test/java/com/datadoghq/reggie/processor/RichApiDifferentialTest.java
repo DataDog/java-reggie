@@ -45,6 +45,12 @@ class RichApiDifferentialTest {
           "[^0-9a-zA-Z._]",
           "-(\\d+)",
           "(^|\\s)(?:OR|AND|NOT)(?=\\s|\\()",
+          // DFA_UNROLLED_WITH_ASSERTIONS bounds: findBoundsFrom used to abort its inline greedy
+          // scan on the first failed lookahead instead of skipping the accepting-position record
+          // and continuing — on \"aab\" replaceAll(\"_\") returned the input unchanged while
+          // findAll
+          // was correct. Assertion-bearing DFAs now derive bounds from findLongestMatchEnd.
+          "a+(?=b)",
           // "^(.+?)\\.([^/]+)" is intentionally absent: the APT pipeline routes it to the
           // PIKEVM_CAPTURE fallback, whose lazy-group assignment diverges from the JDK —
           // fixed on fix/pikevm-lazy-group-priority; add it back there.
@@ -54,6 +60,7 @@ class RichApiDifferentialTest {
       List.of(
           "",
           "a'b",
+          "aab",
           "puma threadpool 42 and puma threadpool 7",
           "abc123",
           "/pkg/mod/github.com/pkg/errors@v0.9.1/x.go",
