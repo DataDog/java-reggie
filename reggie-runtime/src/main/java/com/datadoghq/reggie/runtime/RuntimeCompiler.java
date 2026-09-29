@@ -676,7 +676,10 @@ public class RuntimeCompiler {
       }
       Map<String, Integer> nameMap = decodeNameMap(encodedNames);
       int groupCount = countGroups(pattern);
-      NFA nfa = new ThompsonBuilder().build(ast, groupCount);
+      // lazyAware: lazy quantifiers must compile with lazy (shortest-first) priority, or the
+      // extracted capture spans take the greedy split and diverge from the JDK (group spans of
+      // both match() and findMatch*()). Every other PikeVM compile site builds lazy-aware.
+      NFA nfa = new ThompsonBuilder(true).build(ast, groupCount);
       PIKEVM_NFA_CACHE.putIfAbsent(pattern, new PikeVMEntry(nfa, nameMap));
       return PIKEVM_NFA_CACHE.get(pattern).newMatcher(pattern);
     } catch (RegexParser.ParseException e) {
