@@ -223,6 +223,119 @@ class DeterministicChainDetectorTest {
   }
 
   @Test
+  void lazyMinOneScanLoopAdmitted() throws Exception {
+    // x+? (lazy, min = 1) is a mandatory-iteration scan loop: k starts at min, the tail tries
+    // run from there — JDK lazy order, linearly. The min must reach the structural hash.
+    DeterministicChainInfo info = detect("a+?x");
+    assertNotNull(info);
+    ChainSeq seq = info.branches.get(0).seq;
+    assertEquals(ElemKind.LAZY_LOOP, seq.elems.get(0).kind);
+    assertEquals(1, seq.elems.get(0).min);
+    assertEquals(2, info.branches.get(0).minWidth); // loop min 1 + literal x
+
+    // capture-wrapped shape (the GO_PATTERN site): Capture(LAZY_LOOP(min=1))
+    DeterministicChainInfo cap = detect("^(.+?)\\.([^/]+)");
+    assertNotNull(cap);
+    ChainSeq capSeq = cap.branches.get(0).seq;
+    assertEquals(ElemKind.CAPTURE, capSeq.elems.get(0).kind);
+    assertEquals(ElemKind.LAZY_LOOP, capSeq.elems.get(0).nested.elems.get(0).kind);
+    assertEquals(1, capSeq.elems.get(0).nested.elems.get(0).min);
+    // min=1 vs min=0 must not collide in the structural cache
+    assertNotEquals(detect("a+?x").structuralHashCode(), detect("a*?x").structuralHashCode());
+  }
+
+  @Test
+  void multipleLazyScanLoopsDeclined() throws Exception {
+    // The one-lazy-loop-per-branch invariant is enforced: a second LAZY_LOOP in a lazy loop's
+    // tail continuation re-runs the inner scan to the end on every outer tail try — O(n^2) per
+    // matches()/match() try, and those entry points carry no work budget (lazy loops never set
+    // hasGiveBack). Such patterns stay on the linear BitState/PikeVM route.
+    // Sequential pair (the reviewer's quadratic case).
+    assertNull(detect("a+?a+?b"), "two sequential lazy loops must decline");
+    // min = 0 pair.
+    assertNull(detect("a*?b*?c"), "two skippable lazy loops must decline");
+    // Second loop in the first loop's tail (capture-wrapped lazy loop, then another lazy loop).
+    assertNull(detect("^(a+?)b+?c"), "a lazy loop inside another lazy loop's tail must decline");
+  }
+
+  @Test
+  void singleLazyLoopPerBranchStillAdmitted() throws Exception {
+    // The invariant is per branch tree, not per pattern: one lazy loop per branch keeps every
+    // branch try linear (sequential branch tries, find-family work budget always present).
+    DeterministicChainInfo info = detect("a+?x|b+?y");
+    assertNotNull(info, "one lazy loop per branch must stay admitted");
+    assertEquals(2, info.branches.size());
+    for (ChainBranch b : info.branches) {
+      assertEquals(ElemKind.LAZY_LOOP, b.seq.elems.get(0).kind);
+      assertEquals(1, countLazyLoops(b.seq), "each branch tree must hold exactly one lazy loop");
+    }
+  }
+
+  private static int countLazyLoops(ChainSeq seq) {
+    int count = 0;
+    for (ChainElem e : seq.elems) {
+      if (e.kind == ElemKind.LAZY_LOOP) {
+        count++;
+      }
+      if (e.nested != null) {
+        count += countLazyLoops(e.nested);
+      }
+      if (e.alts != null) {
+        for (ChainSeq alt : e.alts) {
+          count += countLazyLoops(alt);
+        }
+      }
+    }
+    return count;
+  }
+
+  @Test
+  void lazyMinAdmissionBoundary() throws Exception {
+    // The admission edge (q.min <= MAX_CHAIN_LOOP_BOUND = 1024) is exact: min == 1024 is admitted
+    // with the min preserved, min == 1025 declines — an off-by-one in the '<=' comparison must
+    // fail here. min == 0 stays admitted.
+    DeterministicChainInfo atBound = detect("a{1024,}?x");
+    assertNotNull(atBound, "min == MAX_CHAIN_LOOP_BOUND must be admitted");
+    ChainSeq boundSeq = atBound.branches.get(0).seq;
+    assertEquals(ElemKind.LAZY_LOOP, boundSeq.elems.get(0).kind);
+    assertEquals(1024, boundSeq.elems.get(0).min, "boundary min must be preserved");
+    assertEquals(1025, atBound.branches.get(0).minWidth, "boundary min contributes to minWidth");
+    assertNull(detect("a{1025,}?x"), "min == MAX_CHAIN_LOOP_BOUND + 1 must decline");
+
+    DeterministicChainInfo minZero = detect("a*?x");
+    assertNotNull(minZero, "min == 0 must still be admitted");
+    assertEquals(0, minZero.branches.get(0).seq.elems.get(0).min);
+
+    // The boundary min must not collide with min-1 in the structural cache.
+    assertNotEquals(atBound.structuralHashCode(), detect("a{1023,}?x").structuralHashCode());
+  }
+
+  @Test
+  void lazyLoopFirstSetAndMinWidthPins() throws Exception {
+    // computeChainFirst's mandatory-consume contract: a min >= 1 lazy loop's tail must NOT join
+    // the branch first set (the loop must consume before the rest can start), while a min == 0
+    // loop unions the tail in. chainSeqMinWidth adds e.min (not a flat 1).
+    ChainBranch plus = detect("a+?b").branches.get(0);
+    assertTrue(plus.firstSetAscii['a'], "a+?b first set must contain the loop-class char");
+    assertFalse(
+        plus.firstSetAscii['b'],
+        "a+?b first set must NOT contain the tail char (mandatory loop consumes first)");
+    assertEquals(2, plus.minWidth); // loop min 1 + literal b
+
+    ChainBranch star = detect("a*?b").branches.get(0);
+    assertTrue(star.firstSetAscii['a'], "a*?b first set must contain the loop-class char");
+    assertTrue(
+        star.firstSetAscii['b'], "a*?b first set must contain the tail char (skippable loop)");
+    assertEquals(1, star.minWidth);
+
+    // min = 2: the width contribution is e.min (2 loop + 1 literal = 3).
+    ChainBranch two = detect("a{2,}?x").branches.get(0);
+    assertEquals(ElemKind.LAZY_LOOP, two.seq.elems.get(0).kind);
+    assertEquals(2, two.seq.elems.get(0).min);
+    assertEquals(3, two.minWidth);
+  }
+
+  @Test
   void optionalSingleClassParsesAsOpt() throws Exception {
     DeterministicChainInfo info = detect("[-+]?[0-9]+");
     assertNotNull(info);
@@ -279,8 +392,10 @@ class DeterministicChainDetectorTest {
         // here — see the V2Beta journal tests.)
         // (v2-alpha also declined non-terminal compound alternations and retryable bodies
         // here; v2-beta's slot pre-initialization lifted both — see the V2Alpha parity tests.)
-        // Lazy min >= 1 (x+?) — not admitted.
-        "a+?x",
+        // (v2-gamma... no: the lazy-min change admitted x+? — "a+?x" moved to the dedicated
+        // lazyMinAdmitted test below.)
+        // Lazy bounded {2,4}? — still outside the family (unbounded lazy only).
+        "a{2,4}?x",
         // Possessive/atomic — hard decline.
         "(?>a+)x",
         "a++x",

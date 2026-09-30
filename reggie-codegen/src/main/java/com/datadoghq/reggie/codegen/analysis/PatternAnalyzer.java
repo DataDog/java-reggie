@@ -8146,12 +8146,29 @@ public class PatternAnalyzer {
         this.groupNumber = 0;
       }
 
-      ChainElem(CharSet charSet) { // LAZY_LOOP
+      ChainElem(CharSet charSet) { // LAZY_LOOP (min == 0)
         this.kind = ElemKind.LAZY_LOOP;
         this.literal = null;
         this.charSet = charSet;
         this.min = 0;
         this.max = -1;
+        this.literals = null;
+        this.nested = null;
+        this.alts = null;
+        this.groupNumber = 0;
+      }
+
+      /** LAZY_LOOP with mandatory iterations ({@code x+?}, {@code x{2,}?}): k starts at min. */
+      static ChainElem lazyLoop(CharSet charSet, int min) {
+        return new ChainElem(ElemKind.LAZY_LOOP, charSet, min, -1);
+      }
+
+      private ChainElem(ElemKind kind, CharSet charSet, int min, int max) {
+        this.kind = kind;
+        this.literal = null;
+        this.charSet = charSet;
+        this.min = min;
+        this.max = max;
         this.literals = null;
         this.nested = null;
         this.alts = null;
@@ -10433,9 +10450,16 @@ public class PatternAnalyzer {
    * <p>Not yet wired into strategy routing — the code generator is built in later stages of the
    * design doc's implementation plan. Exposed for unit tests of the detector itself.
    *
+   * <p>The one-lazy-loop-per-branch invariant is enforced: a second lazy loop anywhere in a
+   * branch's tree (nested tail, OPT/CAPTURE content, ALT_CHAIN alternative) declines the pattern —
+   * a nested scan inside a lazy loop's tail continuation re-runs to the end on every outer tail try
+   * (O(n²) per try), and the generated matches/match entry points carry no work budget (lazy loops
+   * never set {@code hasGiveBack}). One loop per branch stays linear: the loop's scan is the only
+   * unbounded walk and each of its tail tries is a bounded, first-set-gated reject.
+   *
    * @return the parsed family description, or null when the pattern declines (any construct outside
    *     the grammar, a greedy loop that would need give-back, an unanchored branch that can match
-   *     empty, or a bound exceeded).
+   *     empty, a second lazy scan loop in a branch's tree, or a bound exceeded).
    */
   public DeterministicChainInfo detectDeterministicChain(RegexNode ast) {
     List<RegexNode> alts;
@@ -10479,7 +10503,42 @@ public class PatternAnalyzer {
         return null;
       }
     }
+    // One lazy scan loop per branch tree (grammar invariant, now enforced): a second LAZY_LOOP
+    // in a lazy loop's tail continuation makes every outer tail try re-run the inner scan to
+    // the end — O(n^2) per matches()/match() try, and those entry points carry no work budget
+    // (lazy loops never set hasGiveBack). Declining keeps such patterns on the linear
+    // BitState/PikeVM route; one loop per branch stays linear (the loop's scan is the only
+    // unbounded walk and each tail try is a bounded gated reject).
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (countChainLazyLoops(b.seq) > 1) {
+        return null;
+      }
+    }
     return new DeterministicChainInfo(branches);
+  }
+
+  /**
+   * Counts LAZY_LOOP elements in a seq tree: nested OPT/CAPTURE seqs, ALT_CHAIN alternative seqs,
+   * and LOOP_ALT body seqs (flat single-consume by loopAltBodyOk today, counted anyway so a future
+   * grammar change cannot silently break the one-lazy-loop invariant enforced by {@link
+   * #detectDeterministicChain}).
+   */
+  private static int countChainLazyLoops(DeterministicChainInfo.ChainSeq seq) {
+    int count = 0;
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      if (e.kind == DeterministicChainInfo.ElemKind.LAZY_LOOP) {
+        count++;
+      }
+      if (e.nested != null) {
+        count += countChainLazyLoops(e.nested);
+      }
+      if (e.alts != null) {
+        for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+          count += countChainLazyLoops(alt);
+        }
+      }
+    }
+    return count;
   }
 
   /**
@@ -10819,8 +10878,11 @@ public class PatternAnalyzer {
       // EXCLUDED — it keeps the OPT modeling below (the OPT retry machinery, not a loop).
       return new DeterministicChainInfo.ChainElem(cs, q.min, q.max);
     }
-    if (!q.greedy && q.max == -1 && q.min == 0) {
-      return new DeterministicChainInfo.ChainElem(cs);
+    if (!q.greedy && q.max == -1 && q.min >= 0 && q.min <= MAX_CHAIN_LOOP_BOUND) {
+      // Lazy scan loop, min 0 (x*?) or mandatory iterations (x+?): the scan tries the tail at
+      // k = min, min+1, ... — JDK's lazy order, linearly. min > 0 only shifts the first tail try;
+      // the scan-gate machinery is identical.
+      return DeterministicChainInfo.ChainElem.lazyLoop(cs, q.min);
     }
     // Optional single consume ([-+]?): modeled as OPT over a one-element nested seq so the
     // generator has exactly one optional construct to emit.
@@ -11050,9 +11112,12 @@ public class PatternAnalyzer {
             break;
           }
         case LAZY_LOOP:
-          // Lazy scan loop: the loop class itself can start a match, or the loop can be skipped.
+          // Lazy scan loop: the loop class itself can start a match; with min == 0 the loop can
+          // also be skipped, so the remainder's first-set unions in.
           addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
-          orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+          if (e.min == 0) {
+            orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+          }
           break;
         case LIT_ALT:
           for (String alt : e.literals) {
@@ -11123,7 +11188,15 @@ public class PatternAnalyzer {
           break;
         case LAZY_LOOP:
           addChainFirstSet(firstOut, e.charSet, nonAsciiOut);
-          break; // min == 0: can be skipped
+          if (e.min == 0) {
+            break; // min == 0: can be skipped, so the tail's first chars union in below
+          }
+          // min > 0: mandatory-consume contract — the break (NOT a fall-through) stops first-char
+          // accumulation here: elements after a mandatory lazy loop can never start a match (the
+          // loop must consume first), so their first chars must NOT fold into firstOut. Mirrors
+          // the mandatory-consume semantics at the checkChainDisjoint LAZY_LOOP site above.
+          emptyPrefix = false;
+          break;
         case LIT_ALT:
           for (String alt : e.literals) {
             addChainFirstChar(firstOut, alt.charAt(0), nonAsciiOut);
@@ -11249,7 +11322,8 @@ public class PatternAnalyzer {
           w += e.min;
           break;
         case LAZY_LOOP:
-          break; // min == 0
+          w += e.min; // mandatory iterations (x+? -> 1)
+          break;
         case LIT_ALT:
           int minAlt = Integer.MAX_VALUE;
           for (String alt : e.literals) {

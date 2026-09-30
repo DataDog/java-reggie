@@ -70,3 +70,6 @@ reggie-benchmark/com.datadoghq.reggie.benchmark*/
 .cachebro/
 .worktrees/
 reggie-benchmark/rust-regex-engine/target/
+
+# Transient cairn session wrap-ups (never committed)
+notes/

@@ -166,5 +166,1400 @@
     "root_cause": "The overflow guard was written before the per-config path was ungated; once perConfigEligible() enables the path unconditionally, any pattern that generates more than PER_CONFIG_CAP branches can trigger the silent drop on inputs that require a branch beyond the cap.",
     "confidence": "high",
     "source": "teach"
+  },
+  {
+    "theme": "regex-flag-consumption-claim-without-normalization-trace",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Engines commonly normalize flags into rewritten syntax before use, so flag handling never appears under the flag's own name. In this repo both probes of this shape were refuted: UNICODE_CHARACTER_CLASS is consumed via normalizePatternFlags -> (?U) -> CharSet.UNICODE_CLASSES_*, and LITERAL_CACHE receives the normalized (not raw) pattern; the compile-time annotation path has no flags parameter, so no two-path divergence exists either.",
+    "fix_example": "No code fix \u2014 claim class refuted in this repo. Before reporting, trace the full flag path: normalization/rewriting -> what the parser actually consumes -> which value the downstream consumers receive; confirm whether the NORMALIZED input (not the raw source text) reaches each suspected consumer, and whether alternate entry points (annotation/compile-time vs runtime) even carry flags at all.",
+    "anti_pattern": "A finding claims a regex construct flag or compile option is accepted but never consumed by the engine \u2014 or that its state fails to reach a cache, factory, or codegen path \u2014 based on grepping the raw pattern text or the flag/enum name for consumers, without tracing normalization passes that rewrite flags into other syntax (e.g. inline group embeds) before parsing or compilation."
+  },
+  {
+    "theme": "case-insensitive-assumes-unicode-case-folding",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Empirically verified on the JDK before refuting: Pattern.compile(\"(?i)k\").matcher(\"\\u212a\").find() is FALSE. A prior finding against this repo's plain-(?i) predicates was refuted because JDK parity (not full folding) is the contract.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, verify the fold semantics against the reference oracle with a reproducer: java.util.regex performs only simple case mapping under (?i); full folding requires UNICODE_CASE. An engine that deliberately mirrors that behavior is correct.",
+    "anti_pattern": "A finding asserts that case-insensitive matching enabled by a simple ignore-case flag is wrong because it does not perform full Unicode case folding (e.g. 'k' vs KELVIN SIGN U+212A, 's' vs LATIN SMALL LETTER LONG S U+017F), without checking whether the reference implementation the engine promises parity with performs folding under that flag."
+  },
+  {
+    "theme": "matcher-find-from-anchor-offset-semantics",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Empirically verified on the JDK before refuting; this repo's findFrom fast path matches that semantics. The prior claim assumed anchor-at-origin behavior that no reference engine implements.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, run the reproducer against the reference oracle: Pattern.compile(\"^b\").matcher(\"ab\").find(1) returns FALSE \u2014 anchors stay input-position-anchored in offset-start search.",
+    "anti_pattern": "A finding claims an offset-start search implementation (find-from / fast scan path) mishandles a leading start anchor ('^') at offsets > 0, on the assumption that the reference implementation ignores the anchor or re-anchors at the new origin."
+  },
+  {
+    "theme": "graph-invariant-claimed-against-pre-rewrite-graph",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "In this repo the join-state invariant holds because inDeg is computed AFTER retargeting in SubsetConstructor, so every reachable cycle acquires a join member by construction; the prior claim traced only the construction order up to the wrong point.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, locate the computation in the construction order relative to rewrites; an invariant that looks broken on the pre-rewrite graph may hold by construction on the post-rewrite one.",
+    "anti_pattern": "A finding claims a graph invariant (e.g. every reachable cycle gets a join/marker node) is violated because a graph statistic (in-degree, reachability, ancestor sets) 'does not see' certain edges, without establishing whether the statistic is computed before or after edge retargeting/rewriting."
+  },
+  {
+    "theme": "bytecode-slot-stride-claim-ignores-nested-recursion",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "In this repo the iterEnd stride of 6 was claimed to need 7; both allocation sites show iterEnd occupies top-level slots only while nested recursion consistently uses slotBase+6 (the 7th slot is the nested frame's own base). Refuted by reading both sites.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, trace the local-variable allocator at every allocation site, including recursive/nested emission frames whose slots are relative to a frame base; a stride that looks short at top level may be exactly the per-frame layout plus the nested base.",
+    "anti_pattern": "A finding claims generated-bytecode local-variable slot overlap (a computed stride where 'more slots are required') without reading BOTH frame contexts \u2014 the top-level emission path and the nested/recursive path that allocates its slots relative to a base offset."
+  },
+  {
+    "theme": "shared-mutable-array-aliasing-claim-without-consumer-trace",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "In this repo every consumer of the capture-array producer copies via a build-result step before returning; the prior aliasing claim examined only the producer, not the consumers.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, enumerate all call sites of the producer and check each for a copy/snapshot step before the array escapes; only an unguarded escape is a finding.",
+    "anti_pattern": "A finding claims a returned mutable array (int[]/Object[]) aliases internal engine state and is unsafe for callers to retain, without enumerating EVERY consumer of the producing method for a defensive copy step."
+  },
+  {
+    "theme": "orphaned-dead-code-claim-without-control-flow-trace",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "In this repo the 'orphaned' ThompsonBuilder body IS the counted-loop body for min==0, with its exit chained to the quantifier marker state; visual placement does not reflect NFA graph connectivity.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, follow the constructed edges rather than source adjacency: in graph-builder code a block constructed 'away from' its users is typically wired to them elsewhere (a body exits via a marker/loop-exit state built in a different branch).",
+    "anti_pattern": "A finding labels a code block 'orphaned', 'unreachable', or 'dead' based on visual placement in the source, without tracing the actual control-flow or graph wiring that enters/exits it (jump/label wiring, marker states, loop exit chaining)."
+  },
+  {
+    "theme": "native-null-sentinel-claim-without-error-path-check",
+    "source": "review-refutation",
+    "languages": [
+      "java",
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "The prior null-handle claim against this repo's native bridge was refuted: the sentinel check exists immediately after the call and throws a typed unsupported-pattern exception.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, read the error handling directly after the native call; a sentinel converted to a typed exception on the next lines is a handled case.",
+    "anti_pattern": "A finding claims a native/FFI return value (null pointer or 0 handle sentinel) is dereferenced or used unchecked, without reading the lines immediately following the call for an existing sentinel check or error path."
+  },
+  {
+    "theme": "perf-risk-claim-ignoring-existing-runtime-gate",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "In this repo the prior JIT-bucket-estimate claim was refuted: RuntimeCompiler's JIT gate (largestMethodBytecodes over threshold -> JDK fallback) already bounds huge-method risk at match time, and the JIT HugeMethodLimit blindspot is documented in the jit-hugemethodlimit-blindspot memory. Estimate-based claims must check for pre-existing gates.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting an estimate-based perf risk, search for the covering gate: a runtime check that measures the actual quantity (e.g. largest generated method size) and falls back or refuses when over threshold. Also check institutional knowledge (kb memories) for prior measurements of the same mechanism.",
+    "anti_pattern": "A finding projects a performance risk (size estimate, JIT/bucket projection, worst-case path) as unmitigated, without searching the codebase for existing runtime gates, size checks, or fallback paths that bound the risk before it manifests."
+  },
+  {
+    "theme": "split-helper-vs-inline-divergence-claim",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "In this repo the split helpers are faithful copies of inline code that carries no extra gating either, and the String vs CharSequence accept helpers deliberately encode different call-site invariants (accept-as-target vs end-of-input). Four prior claims in this class were all refuted.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting: diff helper vs inline emission side by side; where two variants of a helper document different invariants, resolve them as call-site contracts (e.g. one site accepts as a transition TARGET where guards have not run, another checks at end-of-input where transition-time guards already ran) rather than a contradiction.",
+    "anti_pattern": "A finding claims a factored-out helper (bytecode emission, guard logic) diverges from the inline code it replaces \u2014 missing gating, guards, or 'contradictory' documented invariants \u2014 without (a) diffing the helper body against EVERY inline call site it replaces, and (b) checking whether different call sites intentionally encode different contracts."
+  },
+  {
+    "theme": "hybrid-flag-claim-when-degenerate-config",
+    "source": "review-refutation",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "In this repo the pruned flag with a null dfa-half was claimed stale; HybridMatcher dereferences the dfa-half only on the non-lazy branch, with lazyFind routing all boolean work to the NFA half \u2014 the flag cannot cause a null dereference or wrong routing in the degenerate case.",
+    "fix_example": "No code fix \u2014 claim class refuted. Before reporting, enumerate every read of the flag and of the possibly-absent component; if all accesses to the component sit behind the flag's branch, the combination is inert, not stale.",
+    "anti_pattern": "A finding claims a flag or mode passed into a composite/delegating component is stale or misleading in a degenerate case (a backing component absent after a size/limit drop), without checking whether every read of the flagged field is guarded by the same condition that routes around the missing component."
+  },
+  {
+    "theme": "deliberate-safety-removal",
+    "source": "plugin",
+    "confidence": "high",
+    "root_cause": "Reviewers accept confident comments without re-tracing concurrent paths. Safety mechanisms removed for performance commonly have hidden edge cases: TOCTOU windows (thread passes outer check before guard is established, misses the drain, then accesses freed memory); function-internal ordering gaps (free runs before zero, leaving dangling pointers visible to a concurrent reader); platform-specific memory-return behaviour (e.g. musl returns pages to OS on free, glibc caches them \u2014 the same bug crashes on one and silently corrupts on the other).",
+    "fix_example": "Verify by tracing all concurrent execution orderings AND function-internal sequencing. Document the specific protocol or ordering that guarantees safety. If the invariant depends on a preceding operation completing first (e.g. memset before free, drain before clear), verify no concurrent caller can slip in between them. If unsure, restore the mechanism.",
+    "anti_pattern": "A comment claims a guard, check, barrier, drain, lock, or safety mechanism is 'unnecessary', 'no longer needed', 'not needed', 'safe to remove', or was 'removed as an optimisation' or 'removed from the hot path' \u2014 without the comment itself tracing the concurrent execution path that proves the invariant holds unconditionally for every caller and every execution ordering."
+  },
+  {
+    "theme": "akka-actor-thread-confinement",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "akka"
+    ],
+    "root_cause": "Akka actors are single-threaded by design; CompletableFuture callbacks run on a pool thread, breaking confinement and creating unsynchronised concurrent access.",
+    "fix_example": "Send a self-message from the callback so the access happens on the actor thread, or use a thread-safe wrapper.",
+    "anti_pattern": "A field or injected object is accessed both inside onReceive/actor-handler methods AND inside CompletableFuture.then*/handle callbacks wired up in the same class or constructor."
+  },
+  {
+    "theme": "completablefuture-callback-shared-state",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "thenRun callbacks execute on the completing thread or common pool, not the initiating thread; unsynchronised shared state between them is a data race.",
+    "fix_example": "Use AtomicReference/AtomicInteger, or chain all mutations within the CompletableFuture pipeline so they run on a single thread.",
+    "anti_pattern": "A thenRun/thenApply/handle callback mutates or reads a field that is also accessed from the calling thread or another callback chain without synchronisation."
+  },
+  {
+    "theme": "reactor-sink-wrong-thread",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "reactor"
+    ],
+    "root_cause": "Reactor unicast sinks are not thread-safe; concurrent tryEmitNext from different threads causes dropped emissions or illegal state.",
+    "fix_example": "Ensure all tryEmitNext calls happen on the scheduler that owns the sink, or use Sinks.Many with MPSC/MPMC semantics.",
+    "anti_pattern": "Sinks.Many.tryEmitNext is called from a thread other than the scheduler that owns the sink."
+  },
+  {
+    "theme": "reactor-block-in-chain",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "reactor"
+    ],
+    "root_cause": "block() on the same scheduler the chain executes on causes a deadlock because the thread is held waiting for itself.",
+    "fix_example": "Remove block() and use flatMap or another reactive operator to compose asynchronously instead.",
+    "anti_pattern": "block() is called inside a reactive chain (e.g. inside a flatMap or map operator)."
+  },
+  {
+    "theme": "reactor-flatmap-error-swallow",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "reactor"
+    ],
+    "root_cause": "In Reactor, errors inside a flatMap inner publisher terminate that inner publisher but do not propagate to the outer chain without explicit handling.",
+    "fix_example": "Add .onErrorResume(e -> Mono.empty()) or .doOnError(log::error) inside the flatMap to handle errors explicitly.",
+    "anti_pattern": "flatMap used without onErrorResume or doOnError \u2014 errors inside the flat-mapped publisher are silently discarded."
+  },
+  {
+    "theme": "atomic-toctou",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Between get() and set() another thread can change the value; compareAndSet atomically enforces that the precondition is still true at update time.",
+    "fix_example": "Replace get()+set() with a single compareAndSet(expected, newValue) call.",
+    "anti_pattern": "AtomicReference.get() followed by a conditional AtomicReference.set() without compareAndSet \u2014 check-then-act race."
+  },
+  {
+    "theme": "concurrent-map-put-race",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "get()+put() is not atomic; computeIfAbsent holds the segment lock across the check-then-insert.",
+    "fix_example": "Use map.computeIfAbsent(key, k -> createValue()) to guarantee at-most-once insertion.",
+    "anti_pattern": "ConcurrentHashMap.get(key) followed by put(key, value) instead of computeIfAbsent \u2014 two threads can both see a missing key and both insert."
+  },
+  {
+    "theme": "thread-local-pool-leak",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Thread pool threads are reused; without remove() the value persists into the next task on that thread, causing stale data or class-loader leaks.",
+    "fix_example": "Wrap the set() in try-finally and call threadLocal.remove() in the finally block.",
+    "anti_pattern": "ThreadLocal.set() called inside a pool-managed thread without a corresponding remove() in a finally block."
+  },
+  {
+    "theme": "teardown-schedule-ordering",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "A periodic flush runs on a scheduler thread independent of the caller; if teardown does not cancel-then-drain in the correct order, the final flush races the cancellation (concurrent or lost writes) or buffered data is silently discarded.",
+    "fix_example": "In stop(), cancel the scheduled task and await/await-terminate the scheduler FIRST so no new flush is scheduled and any in-flight one finishes, THEN do a single final flush; ensure every handle scheduled at start has a matching cancel/shutdown in teardown.",
+    "anti_pattern": "A teardown method (stop/close/shutdown/dispose) winds down scheduled/periodic work in the wrong order relative to a final flush/drain: it flushes before cancelling the scheduled task or shutting down the executor (so an in-flight scheduled flush can still run concurrently with shutdown), or it cancels without a final flush (so buffered data is dropped). Also fires when a scheduled/executor handle created on the start/schedule path has no matching cancel/shutdown on the teardown path."
+  },
+  {
+    "theme": "executor-not-shutdown",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Non-daemon pool threads prevent JVM shutdown and leak OS threads until the process is killed.",
+    "fix_example": "Register a shutdown hook or wrap the executor in a try-finally that calls shutdown() and awaitTermination().",
+    "anti_pattern": "ExecutorService created via Executors.newFixedThreadPool etc. without a corresponding shutdown()/awaitTermination() on any exit path."
+  },
+  {
+    "theme": "java-unbounded-block",
+    "source": "plugin",
+    "languages": [
+      "java",
+      "kotlin"
+    ],
+    "confidence": "high",
+    "root_cause": "An indefinitely blocked thread holds a thread-pool worker or OS thread hostage with no diagnostic output. Under dependency failure or high load, callers accumulate until the pool is exhausted or the caller hangs forever.",
+    "fix_example": "Use the timeout overload and handle the timeout case: if (!latch.await(30, TimeUnit.SECONDS)) { /* handle */ }. Prefer tryXxx/poll variants over indefinite blocking.",
+    "anti_pattern": "A thread-blocking call is made using the no-timeout overload when a timeout-bearing overload exists: Process.waitFor(), Thread.join(), Future.get() / CompletableFuture.get(), CountDownLatch.await(), Semaphore.acquire(), BlockingQueue.take(), Object.wait(), Lock.lock(), Condition.await() \u2014 in any context where the callee may never complete (external process, remote call, slow CI, thread starvation)."
+  },
+  {
+    "theme": "spring-transactional-self-invocation",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "spring"
+    ],
+    "root_cause": "Spring @Transactional works through a proxy; a direct this. call bypasses the proxy so no transaction is started or propagated.",
+    "fix_example": "Inject the bean into itself via ApplicationContext or refactor the transactional logic to a separate @Service.",
+    "anti_pattern": "@Transactional method called via this.method() from another method in the same Spring bean."
+  },
+  {
+    "theme": "spring-async-context-loss",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "spring"
+    ],
+    "root_cause": "Spring @Async submits work to a pool thread; MDC and SecurityContext are thread-local and are not automatically propagated.",
+    "fix_example": "Capture MDC.getCopyOfContextMap() before the call and restore it inside the async method, or configure a TaskDecorator on the executor.",
+    "anti_pattern": "@Async method reads MDC or SecurityContextHolder without explicit context propagation."
+  },
+  {
+    "theme": "spring-prototype-in-singleton",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "spring"
+    ],
+    "root_cause": "Injection happens once at singleton creation time; the prototype is never refreshed, defeating its intended per-use scope.",
+    "fix_example": "Use ApplicationContext.getBean() per request, or annotate the singleton field with @Lookup.",
+    "anti_pattern": "A prototype-scoped bean is injected as a field into a singleton-scoped bean."
+  },
+  {
+    "theme": "hibernate-lazy-outside-tx",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "hibernate"
+    ],
+    "root_cause": "Hibernate proxy objects require an open session to load lazy collections; outside a transaction the session is closed and throws LazyInitializationException.",
+    "fix_example": "Annotate the calling method with @Transactional, use JOIN FETCH in the query, or switch to FetchType.EAGER.",
+    "anti_pattern": "A @OneToMany or @ManyToMany collection is accessed outside a transaction or after the session is closed."
+  },
+  {
+    "theme": "hibernate-n-plus-one",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "hibernate"
+    ],
+    "root_cause": "Each access to a lazy collection triggers a separate SELECT; N entities cause N+1 total queries.",
+    "fix_example": "Add JOIN FETCH in the JPQL query, or annotate the field with @BatchSize(size=50).",
+    "anti_pattern": "A loop iterates over entities and accesses a lazy @OneToMany/@ManyToMany field on each, with no JOIN FETCH or batch fetching."
+  },
+  {
+    "theme": "lombok-data-jpa-entity",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "hibernate"
+    ],
+    "root_cause": "An entity in a Set before persist has id=null; after persist the id changes, breaking the Set invariant and losing the entity.",
+    "fix_example": "Use @Getter @Setter and manually implement equals/hashCode based on a natural business key.",
+    "anti_pattern": "@Data applied to a @Entity class \u2014 Lombok generates equals() and hashCode() based on all fields including the mutable database-generated id."
+  },
+  {
+    "theme": "kafka-consumer-thread-safety",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "kafka"
+    ],
+    "root_cause": "KafkaConsumer is explicitly documented as not thread-safe; concurrent access corrupts internal state.",
+    "fix_example": "Access KafkaConsumer only from the single thread that owns it; use consumer.wakeup() from other threads to signal shutdown.",
+    "anti_pattern": "KafkaConsumer instance shared across or accessed from multiple threads."
+  },
+  {
+    "theme": "kafka-offset-premature-commit",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "kafka"
+    ],
+    "root_cause": "If the process crashes between commit and downstream processing, the record is considered consumed and will not be redelivered, causing data loss.",
+    "fix_example": "Commit offsets only after the downstream call completes successfully.",
+    "anti_pattern": "Kafka offset committed before downstream processing of the record has been acknowledged."
+  },
+  {
+    "theme": "grpc-stream-observer-concurrent",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "grpc"
+    ],
+    "root_cause": "gRPC's StreamObserver contract requires that onNext, onError, and onCompleted are never called concurrently; violation corrupts the stream.",
+    "fix_example": "Serialise calls to onNext with a lock, or use a gRPC-provided thread-safe wrapper.",
+    "anti_pattern": "StreamObserver.onNext() called from multiple threads concurrently without external synchronisation."
+  },
+  {
+    "theme": "grpc-blocking-stub-async-context",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "grpc"
+    ],
+    "root_cause": "Blocking stubs block the calling thread; if the handler thread pool is bounded (Netty event loop, Reactor scheduler) this causes thread starvation.",
+    "fix_example": "Use the async stub with StreamObserver, or offload the blocking call with a cached thread pool.",
+    "anti_pattern": "A gRPC blocking stub used inside an async/non-blocking server handler or reactive pipeline."
+  },
+  {
+    "theme": "netty-bytebuf-release",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "netty"
+    ],
+    "root_cause": "Netty uses reference counting; release() returns the buffer to the pool for reuse. Subsequent access reads or corrupts recycled memory.",
+    "fix_example": "Ensure release() is called exactly once at end-of-lifetime; use ReferenceCountUtil.safeRelease() in finally blocks.",
+    "anti_pattern": "ByteBuf accessed after release() has been called on it."
+  },
+  {
+    "theme": "netty-unsharable-handler",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "netty"
+    ],
+    "root_cause": "Non-@Sharable handlers hold per-connection state; sharing them across channels causes state corruption between connections.",
+    "fix_example": "Annotate @Sharable after verifying the handler is truly stateless, or create a new instance per channel.",
+    "anti_pattern": "A ChannelHandler not annotated @Sharable is added to more than one ChannelPipeline."
+  },
+  {
+    "theme": "guava-cache-loader-reentrant",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "guava"
+    ],
+    "root_cause": "Guava Cache acquires a segment lock before calling the loader; re-entering the cache from the loader can deadlock if both keys hash to the same segment.",
+    "fix_example": "Avoid calling cache.get() from inside a loader; preload dependencies separately.",
+    "anti_pattern": "A Guava Cache loader calls cache.get() for another key or performs blocking I/O while holding the segment lock."
+  },
+  {
+    "theme": "c-unbounded-copy",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "These functions write until the source is exhausted regardless of destination capacity, overflowing adjacent memory.",
+    "fix_example": "Replace with strlcpy/snprintf and validate the destination buffer size.",
+    "anti_pattern": "strcpy, sprintf, or gets used without a length bound on the destination buffer."
+  },
+  {
+    "theme": "c-strncpy-no-null",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "strncpy copies exactly n bytes; if src is at least n bytes long no null terminator is written.",
+    "fix_example": "After strncpy, explicitly set dst[n-1] = '\\0', or use strlcpy which always null-terminates.",
+    "anti_pattern": "strncpy(dst, src, n) where strlen(src) >= n \u2014 the destination is not null-terminated."
+  },
+  {
+    "theme": "c-malloc-unchecked",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "On allocation failure malloc returns NULL; dereferencing NULL is undefined behaviour and typically a segfault.",
+    "fix_example": "Check immediately: if (!ptr) { handle_oom(); return; }",
+    "anti_pattern": "malloc/calloc/realloc return value used without a NULL check."
+  },
+  {
+    "theme": "c-malloc-size-overflow",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "If count * size overflows size_t, a tiny buffer is allocated but the caller writes a large amount of data into it.",
+    "fix_example": "Check for overflow before allocating: if (count > SIZE_MAX / size) { return NULL; }",
+    "anti_pattern": "malloc(count * size) where count and size are user-controlled \u2014 integer overflow wraps to a small allocation."
+  },
+  {
+    "theme": "c-use-after-free",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "free() returns memory to the allocator which may reallocate it; accessing freed memory is undefined behaviour.",
+    "fix_example": "Set the pointer to NULL immediately after free(): free(ptr); ptr = NULL;",
+    "anti_pattern": "A pointer is used after free() has been called on it."
+  },
+  {
+    "theme": "c-double-free",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "Freeing memory twice corrupts allocator metadata and can lead to arbitrary code execution.",
+    "fix_example": "Set pointer to NULL after free(); free(NULL) is a no-op so double-free becomes safe.",
+    "anti_pattern": "free() called on the same pointer twice \u2014 e.g. once on the error path and once on the success path."
+  },
+  {
+    "theme": "c-dangling-stack-pointer",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "Stack frames are destroyed on return; the pointer immediately becomes dangling.",
+    "fix_example": "Allocate on the heap with malloc/calloc and document ownership, or use an out-parameter pattern.",
+    "anti_pattern": "A pointer to a stack-allocated variable is returned from a function or stored beyond the function's scope."
+  },
+  {
+    "theme": "c-format-string-injection",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "Attacker-controlled format strings can read stack memory (%x) or write to arbitrary addresses (%n).",
+    "fix_example": "Always use a literal format string: printf(\"%s\", user_input).",
+    "anti_pattern": "printf/fprintf/syslog called with a user-controlled string as the format argument: printf(user_input)."
+  },
+  {
+    "theme": "c-signed-unsigned-compare",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "When an int is promoted to size_t, negative values wrap to large positive numbers, reversing the comparison result.",
+    "fix_example": "Cast to the appropriate type or use a consistent signed/unsigned type throughout the comparison.",
+    "anti_pattern": "Signed int compared with size_t or other unsigned type without an explicit cast."
+  },
+  {
+    "theme": "c-strtol-no-errno",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "On overflow strtol returns LONG_MAX/LONG_MIN and sets errno; without checking, the caller uses the sentinel value as valid input.",
+    "fix_example": "Set errno = 0; call strtol; check if endptr == str (no digits) or errno == ERANGE (overflow).",
+    "anti_pattern": "strtol/strtoul/strtod called without setting errno=0 before the call and checking errno and endptr afterward."
+  },
+  {
+    "theme": "c-pthread-mutex-wrong-thread",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "POSIX mutexes are owned by the locking thread; unlocking from another thread is undefined on non-errorcheck mutexes.",
+    "fix_example": "Ensure lock/unlock are always paired within the same thread; use condition variables for cross-thread signalling.",
+    "anti_pattern": "pthread_mutex_unlock called from a different thread than the one that called pthread_mutex_lock."
+  },
+  {
+    "theme": "c-integer-overflow-signed",
+    "source": "plugin",
+    "languages": [
+      "c"
+    ],
+    "confidence": "high",
+    "root_cause": "Signed integer overflow is undefined behaviour in C; compilers may optimise away overflow checks, and wrapped values corrupt downstream calculations.",
+    "fix_example": "Use __builtin_add_overflow/__builtin_mul_overflow (GCC/Clang) or explicitly check bounds before arithmetic.",
+    "anti_pattern": "Signed integer arithmetic used to compute buffer sizes or array indices in security-sensitive code without overflow guards."
+  },
+  {
+    "theme": "cpp-shared-ptr-cycle",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "Each shared_ptr keeps the reference count above zero; a cycle means the count never reaches zero and both objects leak.",
+    "fix_example": "Make the back-pointer a weak_ptr<T>; lock it when needed.",
+    "anti_pattern": "Two objects hold shared_ptr to each other with no weak_ptr break."
+  },
+  {
+    "theme": "cpp-missing-virtual-dtor",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "Deleting a derived object through a base pointer without a virtual destructor only calls the base destructor, leaking derived resources.",
+    "fix_example": "Add virtual ~Base() = default; to the base class.",
+    "anti_pattern": "A class intended for polymorphic use has virtual methods but no virtual destructor."
+  },
+  {
+    "theme": "cpp-string-cstr-invalidation",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "Any modifying operation on std::string may reallocate the internal buffer, invalidating all pointers into the string.",
+    "fix_example": "Do not store c_str() across string mutations; call c_str() again after each modification.",
+    "anti_pattern": "The pointer returned by std::string::c_str() is stored and used after any modification to the string."
+  },
+  {
+    "theme": "cpp-vector-iterator-invalidation",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "push_back triggers reallocation when capacity is exceeded, invalidating all existing iterators and pointers.",
+    "fix_example": "Store the index instead of an iterator, or reserve() the vector to the needed capacity before acquiring iterators.",
+    "anti_pattern": "An iterator or pointer into a std::vector is held across push_back, emplace_back, insert, or resize."
+  },
+  {
+    "theme": "cpp-move-after-use",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "std::move casts to rvalue reference; the moved-from state is valid but unspecified.",
+    "fix_example": "Treat moved-from objects as destroyed; do not read or write them after a move.",
+    "anti_pattern": "An object is accessed after std::move() has been applied to it."
+  },
+  {
+    "theme": "cpp-async-future-dropped",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "The destructor of a future from std::async with launch::async blocks until the task finishes, turning async into sync.",
+    "fix_example": "Store the returned future: auto f = std::async(std::launch::async, task); and call f.get() or store f.",
+    "anti_pattern": "std::async(std::launch::async, ...) result is not stored \u2014 the future is immediately destroyed."
+  },
+  {
+    "theme": "cpp-shared-ptr-race",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "shared_ptr's reference count is thread-safe, but the pointee itself is not; concurrent reads-and-writes are a data race.",
+    "fix_example": "Protect the pointed-to object with a mutex, or use atomic operations if the object supports them.",
+    "anti_pattern": "The object pointed to by a shared_ptr is accessed from multiple threads concurrently without external synchronisation."
+  },
+  {
+    "theme": "cpp-reinterpret-cast-aliasing",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "Accessing an object through an unrelated type's pointer violates strict aliasing rules; the compiler may generate incorrect code.",
+    "fix_example": "Use memcpy into a properly typed variable to perform type-safe bit-level conversion.",
+    "anti_pattern": "reinterpret_cast used to read an object's bytes as a different type (type punning)."
+  },
+  {
+    "theme": "cpp-exception-resource-leak",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "If the second new throws, the first allocation has already run but its result has not been stored anywhere.",
+    "fix_example": "Wrap each allocation immediately: auto a = std::make_unique<A>(); auto b = std::make_unique<B>();",
+    "anti_pattern": "Two or more raw new expressions appear before the acquired pointers are wrapped in RAII holders."
+  },
+  {
+    "theme": "cpp-thread-detach-local-capture",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "After detach() the spawning function may return before the thread finishes, leaving the thread with dangling references.",
+    "fix_example": "Capture by value, or join() the thread before the captured variables go out of scope.",
+    "anti_pattern": "std::thread::detach() used with a lambda that captures local variables by reference."
+  },
+  {
+    "theme": "cpp-const-cast-modify",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "Writing through a const_cast pointer to an originally-const object is undefined behaviour.",
+    "fix_example": "Remove const from the original declaration if mutation is needed, rather than casting it away.",
+    "anti_pattern": "const_cast<T*> removes const from a pointer and the resulting pointer is used to write to the object."
+  },
+  {
+    "theme": "cpp-narrowing-conversion",
+    "source": "plugin",
+    "languages": [
+      "cpp"
+    ],
+    "confidence": "high",
+    "root_cause": "Narrowing truncates the high bits silently; in security-sensitive code this produces negative or zero values from large inputs.",
+    "fix_example": "Add an explicit cast and a bounds check, or use a type wide enough to hold all values.",
+    "anti_pattern": "Implicit narrowing conversion in aggregate initialisation or arithmetic \u2014 e.g. assigning size_t to int."
+  },
+  {
+    "theme": "go-map-concurrent-rw",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "Go's runtime detects concurrent map access and throws a fatal error; even a read+write race is fatal.",
+    "fix_example": "Protect with sync.RWMutex (RLock for reads, Lock for writes), or replace with sync.Map.",
+    "anti_pattern": "A plain map is read from one goroutine and written from another concurrently without a sync.RWMutex or sync.Map."
+  },
+  {
+    "theme": "go-waitgroup-add-after-start",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "wg.Wait() may return before Add is called if the goroutine hasn't scheduled yet.",
+    "fix_example": "Call wg.Add(1) before the go statement: wg.Add(1); go func() { defer wg.Done(); ... }()",
+    "anti_pattern": "wg.Add(1) called after the goroutine is already launched \u2014 e.g. go func() { wg.Add(1); ... }()."
+  },
+  {
+    "theme": "go-goroutine-leak-channel",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "Blocked goroutines are never garbage-collected; goroutine leaks accumulate until memory is exhausted.",
+    "fix_example": "Use a context with cancel/timeout and select on ctx.Done(), or ensure the channel is always closed or drained.",
+    "anti_pattern": "A goroutine is blocked on a channel send or receive and no other goroutine will ever unblock it."
+  },
+  {
+    "theme": "go-slice-shared-backing",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "Slices share backing arrays; append writes into the original array until capacity is exceeded, silently corrupting the caller's data.",
+    "fix_example": "Use the three-index slice expression s[lo:hi:hi] to cap the slice and force append to allocate a new array.",
+    "anti_pattern": "A sub-slice or function parameter slice is appended to, assuming it will not affect the original slice's backing array."
+  },
+  {
+    "theme": "go-defer-in-loop",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "defer is scoped to the function, not the block; in a loop this delays cleanup until function return.",
+    "fix_example": "Wrap the loop body in an anonymous function: func() { defer f(); ... }()",
+    "anti_pattern": "defer f() used inside a for loop \u2014 deferred calls accumulate and are all run when the enclosing function returns."
+  },
+  {
+    "theme": "go-mutex-copied",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "A copied mutex starts with the state of the original at copy time; if the original was locked the copy appears locked with no owner.",
+    "fix_example": "Always pass mutexes and WaitGroups by pointer, and embed them as pointer fields.",
+    "anti_pattern": "sync.Mutex, sync.RWMutex, or sync.WaitGroup copied by value."
+  },
+  {
+    "theme": "go-context-ignored",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "Without context propagation, cancellation and deadlines have no effect; the operation continues after the requester has moved on.",
+    "fix_example": "Pass ctx to the HTTP/DB call, or use select { case <-ctx.Done(): return ctx.Err() } instead of time.Sleep.",
+    "anti_pattern": "A long-running operation does not select on ctx.Done() or pass the context to the underlying API."
+  },
+  {
+    "theme": "go-http-default-no-timeout",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "http.DefaultClient has no timeout; a slow server causes the goroutine to hang indefinitely, exhausting connection pools.",
+    "fix_example": "Create a client with a timeout: client := &http.Client{Timeout: 30 * time.Second}",
+    "anti_pattern": "http.DefaultClient, http.Get, http.Post, or http.Head used without setting a timeout."
+  },
+  {
+    "theme": "go-nil-interface-typed",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "An interface value is nil only when both its type and value are nil; a typed nil has a non-nil type component.",
+    "fix_example": "Return nil (untyped) when there is no error: return nil instead of return (*MyError)(nil).",
+    "anti_pattern": "A function returns a typed nil (e.g. (*MyError)(nil)) as the error interface \u2014 the caller's err != nil check is unexpectedly true."
+  },
+  {
+    "theme": "go-sql-sprintf-injection",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "String interpolation allows attackers to inject arbitrary SQL.",
+    "fix_example": "Use parameterised queries: db.QueryContext(ctx, \"SELECT ... WHERE id = ?\", userID)",
+    "anti_pattern": "SQL query string built with fmt.Sprintf or string concatenation using user-controlled input."
+  },
+  {
+    "theme": "go-goroutine-closure-loop-var",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "Go closures capture variables, not values; all goroutines share the same loop variable after the loop completes.",
+    "fix_example": "Shadow the variable inside the loop: v := v; go func() { use(v) }() or pass as parameter: go func(v T) { use(v) }(v)",
+    "anti_pattern": "A goroutine's closure captures a loop variable by reference \u2014 all goroutines see the variable's final value."
+  },
+  {
+    "theme": "go-recover-in-goroutine",
+    "source": "plugin",
+    "languages": [
+      "go"
+    ],
+    "confidence": "high",
+    "root_cause": "An unrecovered panic in any goroutine terminates the entire process; recover() only works when deferred in the panicking goroutine.",
+    "fix_example": "Add defer func() { if r := recover(); r != nil { log.Printf(\"recovered: %v\", r) } }() at the goroutine start.",
+    "anti_pattern": "A goroutine can panic and there is no recover() inside that same goroutine."
+  },
+  {
+    "theme": "js-unhandled-promise",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "Unhandled promise rejections terminate the process in modern Node.js; in older versions they are silently swallowed.",
+    "fix_example": "Either await the call, or chain .catch(err => handleError(err)) on the returned promise.",
+    "anti_pattern": "An async function or Promise-returning expression is called without await and without a .catch() handler."
+  },
+  {
+    "theme": "js-promise-all-fail-fast",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "Promise.all rejects as soon as any promise rejects, discarding all other results.",
+    "fix_example": "Use Promise.allSettled and inspect each result's status: results.filter(r => r.status === 'fulfilled').map(r => r.value)",
+    "anti_pattern": "Promise.all used where individual failures are acceptable and remaining results are still useful."
+  },
+  {
+    "theme": "js-blocking-io-event-loop",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "Node.js has a single-threaded event loop; synchronous I/O or heavy CPU work blocks all other requests.",
+    "fix_example": "Use the async variants (fs.readFile, exec, worker_threads for CPU work).",
+    "anti_pattern": "fs.readFileSync, execSync, or a CPU-intensive synchronous loop used inside an async event handler or middleware."
+  },
+  {
+    "theme": "js-prototype-pollution",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "Setting __proto__ replaces the prototype of all objects, injecting attacker-controlled properties into every object in the process.",
+    "fix_example": "Validate userInput against an allowlist, or use a Map instead of a plain object for user-keyed data.",
+    "anti_pattern": "obj[userInput] = value where userInput is not validated \u2014 attacker can set __proto__, constructor, or toString."
+  },
+  {
+    "theme": "js-eval-injection",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "eval executes arbitrary JavaScript in the current scope; any user-controlled input enables arbitrary code execution.",
+    "fix_example": "Remove eval entirely; replace dynamic code generation with data-driven logic.",
+    "anti_pattern": "eval(), new Function(str), or setTimeout(str, ...) called with any argument that is not a string literal."
+  },
+  {
+    "theme": "js-exec-injection",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "exec() passes the string to /bin/sh; metacharacters in user input execute arbitrary shell commands.",
+    "fix_example": "Use execFile() or spawn() with an argument array: spawn('cmd', [userArg]) \u2014 arguments are not shell-interpolated.",
+    "anti_pattern": "child_process.exec() or execSync() called with a command string assembled from user input."
+  },
+  {
+    "theme": "js-event-listener-leak",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "DOM event listeners hold a reference to the handler closure, preventing garbage collection of the component.",
+    "fix_example": "Store the handler reference and call removeEventListener(event, handler) in the cleanup/unmount function.",
+    "anti_pattern": "addEventListener called in a component init function without a corresponding removeEventListener on teardown."
+  },
+  {
+    "theme": "js-interval-leak",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "Active intervals hold a reference to the callback, preventing GC; repeated setup accumulates intervals.",
+    "fix_example": "Store the return value: const id = setInterval(fn, ms); and call clearInterval(id) in cleanup.",
+    "anti_pattern": "setInterval called without storing the handle, so clearInterval can never be called."
+  },
+  {
+    "theme": "js-loose-equality",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "== applies type coercion rules that are non-obvious ('' == 0, null == undefined); these cause silent logic bugs.",
+    "fix_example": "Use === for all comparisons.",
+    "anti_pattern": "== used where the types are not known to be identical \u2014 especially comparisons involving null, undefined, 0, or ''."
+  },
+  {
+    "theme": "js-json-parse-unchecked",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "JSON.parse throws SyntaxError on malformed input; an uncaught exception crashes the request handler.",
+    "fix_example": "Wrap in try/catch: try { const obj = JSON.parse(input); } catch { /* handle */ }",
+    "anti_pattern": "JSON.parse(input) called on untrusted or network-sourced input without a try/catch."
+  },
+  {
+    "theme": "js-float-equality",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "IEEE 754 binary floating-point cannot represent most decimal fractions exactly; 0.1 + 0.2 !== 0.3.",
+    "fix_example": "Use an epsilon comparison: Math.abs(total - 0.3) < Number.EPSILON, or perform arithmetic in integer cents.",
+    "anti_pattern": "Floating-point value compared with === to a literal (e.g. total === 0.3) in financial or threshold logic."
+  },
+  {
+    "theme": "js-react-state-mutation",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "react"
+    ],
+    "root_cause": "React uses reference equality to detect state changes; in-place mutation keeps the same reference so the component does not re-render.",
+    "fix_example": "Create a new reference: setState(prev => ({ ...prev, items: [...prev.items, x] }))",
+    "anti_pattern": "React state array or object mutated directly: state.items.push(x) or state.count++ in-place."
+  },
+  {
+    "theme": "js-async-foreach",
+    "source": "plugin",
+    "languages": [
+      "javascript",
+      "typescript"
+    ],
+    "confidence": "high",
+    "root_cause": "Array.forEach does not await the returned promises; all async callbacks fire immediately and forEach returns before any complete.",
+    "fix_example": "For parallel: await Promise.all(array.map(fn)). For sequential: for (const item of array) { await fn(item); }",
+    "anti_pattern": "array.forEach(async fn) used expecting sequential or fully-awaited async iteration."
+  },
+  {
+    "theme": "rust-unwrap-in-production",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "unwrap() panics on Err/None; in a server context this typically crashes the request handler or the entire process.",
+    "fix_example": "Propagate errors with the ? operator or handle them explicitly with match/if let.",
+    "anti_pattern": "unwrap() or expect() called on a Result or Option in non-test code."
+  },
+  {
+    "theme": "rust-unsafe-no-safety-comment",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "Without a safety comment, future maintainers cannot verify the block is correct or know which invariants must be preserved.",
+    "fix_example": "Add // SAFETY: <invariant rationale> immediately above the unsafe block.",
+    "anti_pattern": "unsafe block without a // SAFETY: comment explaining which invariants the author has manually verified."
+  },
+  {
+    "theme": "rust-mutex-poison-unwrap",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "A Mutex becomes poisoned if a thread panics while holding it; lock().unwrap() then panics in every subsequent caller.",
+    "fix_example": "Use .unwrap_or_else(|e| e.into_inner()) to recover the guard from a poisoned mutex, or propagate the error.",
+    "anti_pattern": "mutex.lock().unwrap() without handling the PoisonError case."
+  },
+  {
+    "theme": "rust-double-lock-deadlock",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "std::sync::Mutex is non-reentrant; a thread that already holds the lock blocks indefinitely on a second lock() call.",
+    "fix_example": "Drop the first guard explicitly with drop(guard) before acquiring the second lock.",
+    "anti_pattern": "The same Mutex or RwLock is locked twice in the same call chain without an intervening drop of the guard."
+  },
+  {
+    "theme": "rust-refcell-borrow-panic",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "RefCell enforces Rust's borrowing rules at runtime; violating them panics rather than failing at compile time.",
+    "fix_example": "Ensure borrows are dropped before calling borrow_mut(); limit lifetime with explicit scopes.",
+    "anti_pattern": "RefCell::borrow_mut() called while a borrow() or another borrow_mut() is still active in the same scope."
+  },
+  {
+    "theme": "rust-integer-overflow-release",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "In --release mode Rust wraps on integer overflow; a wrapped value silently corrupts downstream calculations.",
+    "fix_example": "Use checked_add/checked_mul, saturating_add, or wrapping_add depending on intended semantics.",
+    "anti_pattern": "Integer arithmetic that can overflow used in security-sensitive size or index calculations, relying only on debug-mode panic detection."
+  },
+  {
+    "theme": "rust-blocking-in-async",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "async runtimes run tasks on a fixed thread pool; a blocking call holds a worker thread hostage and starves other tasks.",
+    "fix_example": "Wrap with tokio::task::spawn_blocking(|| { blocking_work() }).await or use async equivalents.",
+    "anti_pattern": "A blocking operation (std::fs, std::net, thread::sleep, heavy CPU loop) used directly inside an async fn."
+  },
+  {
+    "theme": "rust-send-across-await",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "The compiler requires Future to be Send to spawn on a multi-threaded runtime; holding a non-Send type across .await prevents this.",
+    "fix_example": "Drop the non-Send value before the .await, use Arc instead of Rc, or switch to tokio::sync::Mutex.",
+    "anti_pattern": "A non-Send type (Rc, RefCell, raw pointer, MutexGuard held across .await) in a multi-threaded Tokio runtime."
+  },
+  {
+    "theme": "rust-arc-clone-in-loop",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "medium",
+    "root_cause": "Each Arc::clone increments an atomic reference count; in a tight loop this generates unnecessary atomic operations.",
+    "fix_example": "Clone the Arc once before the loop: let arc = Arc::clone(&original); loop { use(&arc); }",
+    "anti_pattern": "Arc::clone() called inside a hot loop where a single clone before the loop and a shared reference would suffice."
+  },
+  {
+    "theme": "rust-mem-forget-handle",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "mem::forget prevents Drop from running; OS handles are leaked until the process exits.",
+    "fix_example": "Use ManuallyDrop<T> with explicit cleanup, or restructure to avoid bypassing Drop.",
+    "anti_pattern": "std::mem::forget() applied to a type that holds an OS resource that implements Drop for cleanup."
+  },
+  {
+    "theme": "rust-str-index-panic",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "Rust panics at runtime if a str slice boundary splits a multi-byte UTF-8 sequence.",
+    "fix_example": "Use s.chars().nth(n) for character indexing, or s.get(start..end) which returns Option and does not panic.",
+    "anti_pattern": "A &str is indexed with a byte range where start or end may not fall on a UTF-8 character boundary."
+  },
+  {
+    "theme": "rust-tokio-spawn-not-awaited",
+    "source": "plugin",
+    "languages": [
+      "rust"
+    ],
+    "confidence": "high",
+    "root_cause": "Dropping a JoinHandle detaches the task but silently discards any panic or returned error from the task.",
+    "fix_example": "Either store the handle and .await it, or explicitly call handle.abort() if fire-and-forget with cancellation on drop.",
+    "anti_pattern": "tokio::spawn returns a JoinHandle that is immediately dropped without .await or .abort()."
+  },
+  {
+    "theme": "jni-resource-lifetime-mismatch",
+    "source": "plugin",
+    "languages": [
+      "c",
+      "cpp",
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "jni"
+    ],
+    "root_cause": "JNI resources are not ordinary C pointers or Java GC-managed values. Local references are valid only for the current native call and current thread, attached native threads do not automatically free locals until detach, global references keep Java objects alive until explicitly deleted, and GetString*/GetArrayElements may pin movable heap objects or allocate native copies that are not released automatically. Critical Get* calls can block or delay GC, and Java exceptions do not unwind native cleanup paths, so every return/error path must release explicitly.",
+    "fix_example": "Pair every JNI acquisition with the exact matching cleanup using RAII/scope guards/goto cleanup paths: ReleaseStringUTFChars/ReleaseStringChars, Release<Primitive>ArrayElements with mode 0 or JNI_ABORT as appropriate, ReleasePrimitiveArrayCritical/ReleaseStringCritical quickly before any blocking call or unrelated JNI call, DeleteGlobalRef/DeleteWeakGlobalRef for cached references, and DeleteLocalRef or PushLocalFrame/PopLocalFrame in loops. Cache long-lived jclass/jobject values only as global references, never as locals; prefer Get/SetArrayRegion or GetStringRegion when only copying data.",
+    "anti_pattern": "JNI code obtains a VM-managed resource or reference \u2014 e.g. GetStringUTFChars/GetStringChars, Get<Primitive>ArrayElements, GetPrimitiveArrayCritical/GetStringCritical, NewGlobalRef/NewWeakGlobalRef, or repeated local references from FindClass/GetObjectArrayElement/NewObject inside a loop \u2014 and either omits the matching Release*/Delete*/PopLocalFrame on every exit path, stores a local reference or raw Get* pointer beyond its valid native-call/thread lifetime, or keeps a critical array/string region across blocking work or arbitrary JNI calls."
+  },
+  {
+    "theme": "jni-thread-env-affinity-violation",
+    "source": "plugin",
+    "languages": [
+      "c",
+      "cpp",
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "jni"
+    ],
+    "root_cause": "JNIEnv is thread-local and only valid on the thread that obtained it. Local references are valid only in the creating thread and current native-call frame. Native-created threads are invisible to JNI until attached, and attached native threads do not get automatic local-reference cleanup until detach.",
+    "fix_example": "Cache JavaVM*, not JNIEnv*. On each native thread, call GetEnv and AttachCurrentThread/AttachCurrentThreadAsDaemon only when needed, use the returned thread-local JNIEnv*, convert cross-thread jobject/jclass values to NewGlobalRef, and detach native-created threads with RAII or pthread TLS destructors. Delete local references created by long-lived attached threads explicitly.",
+    "anti_pattern": "JNI code caches or passes JNIEnv* to another thread, uses a local jobject/jclass from one thread on another thread, calls JNI from a pthread/std::thread before AttachCurrentThread, or attaches a native thread without a guaranteed DetachCurrentThread path."
+  },
+  {
+    "theme": "jni-findclass-wrong-classloader",
+    "source": "plugin",
+    "languages": [
+      "c",
+      "cpp",
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "jni"
+    ],
+    "root_cause": "FindClass chooses the class loader from the current Java call stack. On native-created threads there may be no app Java frame, so the VM falls back to the system/bootstrap class loader, which cannot see application classes.",
+    "fix_example": "Resolve application classes in JNI_OnLoad or a Java-called nativeInit method and store jclass as a NewGlobalRef; alternatively pass a Class or ClassLoader object from Java and call ClassLoader.loadClass through JNI. Use slash-separated JNI names and keep shrinker/obfuscation rules for JNI-referenced classes and methods.",
+    "anti_pattern": "Native code calls FindClass for application classes from a native-created/attached thread, callback thread, or generic helper with no Java frame on the stack, assuming it will use the app class loader."
+  },
+  {
+    "theme": "jni-pending-exception-unsafe-call",
+    "source": "plugin",
+    "languages": [
+      "c",
+      "cpp",
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "jni"
+    ],
+    "root_cause": "Java exceptions do not unwind native stack frames. A pending JNI exception is just thread state; most JNI functions are illegal while it is pending, and many Call*Method return values are invalid if Java code threw.",
+    "fix_example": "After exception-capable JNI calls, check the return value and/or ExceptionCheck. If an exception is pending, perform only safe cleanup operations such as Release*, Delete*Ref, MonitorExit, PopLocalFrame, then return to Java; otherwise explicitly ExceptionClear only when the native code fully handles the error.",
+    "anti_pattern": "After Call*Method, NewObject/NewString/NewArray, FindClass/GetMethodID/GetFieldID, Get*ArrayRegion, or ThrowNew can fail or throw, native code continues making arbitrary JNI calls, dereferences returned values, or performs cleanup that is not on the pending-exception-safe JNI whitelist."
+  },
+  {
+    "theme": "jni-monitor-native-lock-deadlock",
+    "source": "plugin",
+    "languages": [
+      "c",
+      "cpp",
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "jni"
+    ],
+    "root_cause": "JNI monitor operations have their own pairing rules, pending exceptions do not automatically release native-held monitors, and callbacks across the Java/native boundary can invert lock order. Mixed Java monitors and native mutexes create deadlock cycles that are hard to see in either language alone.",
+    "fix_example": "Use scoped RAII wrappers for MonitorEnter/MonitorExit and native mutexes. Keep lock ordering explicit and consistent across Java and native code. Release native locks before Call*Method whenever the Java call can block, invoke user code, or re-enter JNI. Do not use MonitorExit to release a monitor entered by Java synchronized code or vice versa.",
+    "anti_pattern": "JNI code enters a Java monitor with MonitorEnter without a guaranteed MonitorExit on every path, mixes MonitorEnter/MonitorExit with Java synchronized entry/exit for the same critical section, or holds a native mutex while calling back into Java code that can re-enter native code or acquire Java locks."
+  },
+  {
+    "theme": "jni-gc-cooperation-blocked",
+    "source": "plugin",
+    "languages": [
+      "c",
+      "cpp",
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "jni"
+    ],
+    "root_cause": "JNI can pin movable heap objects or delay VM/GC coordination. Critical array/string APIs and Android @FastNative/@CriticalNative reduce transition overhead by limiting suspension points, so long or blocking native sections can delay GC, debugger suspension, and safepoint progress.",
+    "fix_example": "Keep critical JNI regions extremely short and limited to copying/accessing memory; release before blocking or making unrelated JNI calls. Avoid @FastNative/@CriticalNative on unbounded operations. Split fast native probes from slow paths, periodically return to Java or make safe JNI checks in long native loops, and move blocking work outside GC-sensitive regions.",
+    "anti_pattern": "A native method, @FastNative/@CriticalNative method, or GetPrimitiveArrayCritical/GetStringCritical region performs long-running CPU work, blocking I/O, waits on native locks, allocation-heavy code, or callbacks into arbitrary code before returning/releasing/cooperating with the VM."
+  },
+  {
+    "theme": "missing-javadoc-new-public-method",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Undocumented public APIs force callers to read the implementation to understand failure modes, and non-obvious semantics (e.g. partial writes on false return) are silently inherited by wrappers that omit matching documentation.",
+    "fix_example": "Add /** ... */ immediately before the method declaration describing parameters, return value, and any partial-write or rejection conditions.",
+    "anti_pattern": "A newly added or modified public Java method lacks a Javadoc block, leaving callers without contract documentation for return semantics, error conditions, and non-obvious behavior."
+  },
+  {
+    "theme": "missing-control-flow-braces",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Braceless single-statement bodies are syntactically valid but risky; a developer adding a second statement without noticing the missing braces will silently break control flow.",
+    "fix_example": "Wrap every control-flow body in braces: if (condition) { return value; }",
+    "anti_pattern": "A single-statement if, for, or while body is written without braces, making it easy to accidentally introduce bugs when adding a second statement."
+  },
+  {
+    "theme": "jni-direct-bytebuffer-lifetime-mismatch",
+    "source": "plugin",
+    "languages": [
+      "c",
+      "cpp",
+      "java"
+    ],
+    "confidence": "high",
+    "frameworks": [
+      "jni"
+    ],
+    "root_cause": "A direct ByteBuffer is a Java object pointing at native memory outside the managed heap. The GC tracks the ByteBuffer object, not arbitrary native allocation lifetime, so Java can hold a live pointer after native code has invalidated the backing storage.",
+    "fix_example": "Make direct-buffer ownership explicit: pair the Java ByteBuffer with a closeable native handle, reference-counted owner, or Cleaner that frees memory only after Java access ends. Never expose stack or temporary memory. Check GetDirectBufferAddress and GetDirectBufferCapacity results before use, and validate capacity/offset/length on both Java and native sides.",
+    "anti_pattern": "JNI code returns NewDirectByteBuffer over native memory whose owner may be freed, reallocated, stack-allocated, resized, or unmapped while Java can still access the ByteBuffer; or native code uses GetDirectBufferAddress without checking for null/unsupported/non-direct buffers."
+  },
+  {
+    "theme": "unbounded-aggregator-keyed-by-high-cardinality-input",
+    "source": "plugin",
+    "confidence": "high",
+    "root_cause": "Each distinct key value permanently retains an entry; under adversarial or simply diverse real-world input the key space is unbounded, so the structure grows without limit until the process is OOM-killed. This is not the same failure as omitting a cache for open-cardinality data \u2014 the bug is bounding the aggregator, not adding a cache.",
+    "fix_example": "Bound the structure with a size- or time-based eviction policy (e.g. an LRU/LFU cache with a max entries cap), or key it by a normalised/low-cardinality dimension instead of the raw high-cardinality value.",
+    "anti_pattern": "A cache, map, counter, or metrics aggregator is keyed directly by externally-derived, high-cardinality data (raw request/query strings, per-user IDs concatenated with other fields, full SQL text, arbitrary tag values) with no eviction policy, TTL, or bounded size."
+  },
+  {
+    "theme": "backtracking-regex-on-external-input",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Backtracking regex engines can take exponential time on certain crafted inputs matched against ambiguous patterns; an attacker who controls the input can drive CPU usage to 100% on a single request, a denial-of-service that a static read cannot rule out just because the pattern looks simple.",
+    "fix_example": "Rewrite the pattern to remove nested/overlapping quantifiers, cap the input length before matching, apply a match timeout, or switch to a linear-time (non-backtracking) regex engine for untrusted input.",
+    "anti_pattern": "A regex with nested quantifiers or overlapping alternation (e.g. (a+)+, (.*)+, (a|a)*) is compiled with a backtracking engine (java.util.regex.Pattern or equivalent) and matched against attacker- or user-controlled input (request bodies, headers, query params, uploaded content) without a bound on input length or match timeout."
+  },
+  {
+    "theme": "weakref-get-strengthens-in-poll-loop",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "get() returns a strong reference; holding onto that strong reference for the loop's lifetime keeps the referent reachable and defeats the entire purpose of using a WeakReference, silently preventing collection of an object the code believes it is only weakly observing.",
+    "fix_example": "Re-call get() at the point of use and let the local variable go out of scope immediately after; do not cache the dereferenced value in a field or a loop variable that outlives a single check.",
+    "anti_pattern": "WeakReference.get() (or a WeakHashMap key iterated similarly) is called inside a polling/probe loop and its result is assigned to a local variable that is held live across the remainder of the loop body or across multiple iterations, instead of being re-fetched and released each pass."
+  },
+  {
+    "theme": "pattern-compile-in-hot-loop",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Compiling a regex or building a date-format object is comparatively expensive and independent of the per-call input; recompiling it on every invocation repeats the exact same work and allocation for no benefit.",
+    "fix_example": "Hoist the compiled Pattern/DateTimeFormatter to a static final field (or a field initialised once in the constructor) and reuse the instance; keep only the actual matcher/format call on the hot path.",
+    "anti_pattern": "Pattern.compile(), a DateTimeFormatter/SimpleDateFormat construction, or an equivalent parse/format-object build is executed inside a method reachable per-request, per-call, or per-loop-iteration instead of being hoisted to a static final field or built once outside the loop."
+  },
+  {
+    "theme": "virtual-thread-pinning-native-or-sync",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "medium",
+    "root_cause": "A virtual thread that blocks inside a synchronized block or a native call cannot unmount from its carrier platform thread; the carrier thread is pinned for the duration of the block, which can starve the (small, fixed-size) carrier pool under load even though the virtual-thread model assumes cheap, unmounting blocking.",
+    "fix_example": "Replace synchronized with a java.util.concurrent.locks.ReentrantLock around the blocking call, or move the native/blocking call outside the synchronized section so the carrier thread can be released back to the scheduler.",
+    "anti_pattern": "Code that runs on a virtual thread (via Thread.ofVirtual()/Executors.newVirtualThreadPerTaskExecutor()) enters a synchronized block/method or calls into native code while performing a blocking operation inside it."
+  },
+  {
+    "theme": "scan-loop-break-on-non-target-sibling",
+    "source": "plugin",
+    "languages": [
+      "java"
+    ],
+    "confidence": "high",
+    "root_cause": "Confusing 'this element is not the target' with 'the target cannot exist later in the sequence' causes the scan to terminate prematurely, missing elements that follow unrelated intermediate nodes.",
+    "fix_example": "Replace `break` with `continue` (or remove it) so the loop advances past intermediate non-target elements and tests every element in the sequence before concluding the target is absent.",
+    "anti_pattern": "A loop that searches a sequence for a target element uses `break` (or `return`) on the first element that is not an explicit skip condition, exiting before reaching the actual target and producing a false 'not found' result."
+  },
+  {
+    "theme": "Out-of-context anchor evaluation and unverified literal pre-filters in regex search fast paths",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Zero-width anchors and required-literal facts are only valid within the surrounding input context; evaluating them on extracted spans or jumping to literal occurrences assumes context the search does not have, producing missed or false matches.",
+    "fix_example": "The fix searches the NFA half from the DFA's leftmost start over the full input so anchors evaluate in context (span re-match kept only as fallback) and gates the findFrom literal jump on a verified match prefix while keeping the sound indexOf == -1 rejection.",
+    "anti_pattern": "The hybrid matcher re-matched an extracted DFA span as a standalone string (so END anchors fired at the span boundary) and the generated-NFA findFrom candidate scan jumped to the first occurrence of a required literal without verifying that the literal is a match prefix.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Incorrect restart and early-exit semantics in find()/span DFA search loops",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A restart position derived from where the previous attempt died is not the leftmost next viable start and an early return on an anchor condition aborts before the true span is known, so find() misses matches or returns wrong spans versus the reference engine.",
+    "fix_example": "The fix made plain-closure findFrom restart at matchStart+1 and self-anchoring closures use findFromUnion re-walking, deleted the DFA_UNROLLED early return, and routed the diverging shapes (word-boundary find, backref end-anchor, nullable-tail spans, parse-refusal bypass) away via targeted declines.",
+    "anti_pattern": "LazyDFA findFrom restarted at death+1 without re-walking (so a viable start inside a dead attempt's span was skipped) and DFA_UNROLLED early-returned on greedy \\Z, truncating spans, while backref suffix/end-anchor handling and parse-refusal fallback bypass diverged from the JDK.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Sentinel-value overloading for epsilon in the regex AST",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "Overloading a legal data value (the NUL character) as a type-level sentinel makes real input indistinguishable from the empty case, so legitimate patterns silently take the wrong code path.",
+    "fix_example": "The fix introduced a distinct EpsilonNode and replaced all `ch == 0` epsilon checks across CaptureProjection, FallbackPatternDetector, and LinearPatternAnalyzer (alongside JDK-parity corrections for bare '}', groupCount inside char classes, optional-group span leaks, and bounded-quantifier compile limits).",
+    "anti_pattern": "Analyzer and projection code used LiteralNode with ch == 0 as the representation of an epsilon/empty match, so a genuine NUL literal silently collided with the sentinel and was treated as an empty match, and every nullability/length check depended on the overloaded value.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Admission-analyzer vs executor semantic contract drift in fail-closed fast-path routing",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A fail-closed admission gate protects the fast path only while its checks mirror executor semantics; silent drift admits patterns the executor mishandles, yielding wrong matches for inputs the gate was supposed to exclude.",
+    "fix_example": "The fix realigned admission with executor semantics, moved capture-boundary analysis into a shared CaptureBoundaryAnalysis in reggie-codegen used by both full-capture and named-only routes, and replaced the compiled-pattern cache's single global lock with a lock-striped segment design.",
+    "anti_pattern": "The linear-token-sequence admission checks (whitespace tolerance, decimal strictness, HTTP-version literal, SKIP_ANY_EXCEPT_NEWLINE flag profile, leading (?s) handling) drifted from what the executor actually implements, and capture-boundary analysis existed only on one admission path.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Custom fast-path matcher character/flag semantics diverging from the reference engine",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A custom fast-path matcher must reimplement reference semantics exactly; collapsing distinct character classes, missing one character from a built-in class, or ignoring compile flags silently changes which inputs match.",
+    "fix_example": "The fix split ANY_STAR vs ANY_STAR_EXCEPT_NEWLINE ops with a strict isDotAllAnyStar check, added \\u000B to isJdkWhitespace and the CharSet whitespace ranges, and gated linear-token-sequence admission by the pattern's flag profile (LinearTokenSequenceAdmission.forFlags/forSource).",
+    "anti_pattern": "The categorizer collapsed dot-all and [^\\n]-style any-star into one SKIP_ANY op (dot-star crossing newlines without DOTALL) and the hand-rolled isJdkWhitespace omitted \\u000B, and admission never checked the pattern's flag profile.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Manual executor lifecycle in concurrency tests",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A leaked fixed thread pool of non-daemon threads keeps the JVM alive and can hang the test suite whenever an await or assertion fails before the manual shutdown line is reached.",
+    "fix_example": "The fix wrapped the executor in try-with-resources so the thread pool is shut down on every exit path of the test.",
+    "anti_pattern": "Concurrency tests created an ExecutorService outside try-with-resources and relied on a shutdownNow() call placed after the assertion sequence, so any exception thrown before that point leaked the pool's non-daemon threads.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "helper-fix-must-audit-sibling-emitters-with-inline-reimplementations",
+    "anti_pattern": "A missing-shared-helper fix in a generated-code dispatcher is validated against the one code path that crashed (here findMatchFrom/findAll), while a sibling generator in the same strategy family (DFAUnrolledBytecodeGenerator.generateFindBoundsFromMethod) keeps its own inline implementation of the same operation with an independent bug (assertion-blind scan that aborts on the first failed lookahead), so replaceAll/split silently return wrong results after the crash is fixed.",
+    "fix_example": "After repairing the dispatcher emission, enumerate every emitter in the affected strategy arms that either calls the helper or reimplements its operation inline, route each assertion-bearing one through the shared assertion-correct primitive (generateFindBoundsFromLongestEnd delegating to findLongestMatchEnd), and pin each with a differential JDK-parity test case (a+(?=b) on aab) in RichApiDifferentialTest.",
+    "root_cause": "Generated-code strategy dispatchers multiply each semantic operation across several independent emitters; the crash surfaced only the missing-emission instance, and the wrong-result instance lived in a sibling class the crash trace never mentions.",
+    "confidence": "high",
+    "source": "user",
+    "languages": [
+      "java"
+    ]
   }
 ]

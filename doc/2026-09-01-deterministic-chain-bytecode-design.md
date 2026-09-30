@@ -49,7 +49,8 @@ Elem     := Lit | Class1 | GreedyLoop | LazyLoop | OptChain | LitAlternation | C
 Lit      := string literal (1+ chars)
 Class1   := single char-class consume (exactly one char)
 GreedyLoop:= CharClass (min>=1 | min>=0), max=-1, greedy
-LazyLoop := CharClass (min=0, max=-1), lazy
+LazyLoop := CharClass (min>=0, max=-1), lazy — min > 0 ({@code x+?}) pre-rolls min mandatory
+            chars before the first tail try; k = min, min+1, … (JDK lazy order)
 OptChain := non-capturing sub-chain with quantifier {0,1}     -- two-attempt, all-or-nothing
 LitAlternation := alternation of Lits                          -- sequential tries, priority order
 Capture  := capturing group around a contiguous sub-chain (start/end recorded)
@@ -72,7 +73,11 @@ Admission rules (each is a linearity or correctness requirement, checked at dete
    tail's first chars), else advance. Tail tries fail in O(1) on the gate; each scan position is
    visited once → O(n) per try-start. `.*?` (ANY-class) is admitted; captures in the tail are
    rewritten by each try (last write wins — correct because the winning try rewrites start and
-   end before returning).
+   end before returning). **Every failed try restores the capture snapshot taken at loop entry**
+   (the lazy-predicate rejection — POS_EQ_LEN / END_ANCHOR failing after a structurally
+   successful tail — bypasses the tail's own OPT retry/restore hygiene, so `emitLazyLoop`
+   snapshots at entry and restores on `tailFail`; without it `^(\S+?)(?::(\d+))?$` on
+   `relative:12x` leaks g2=`12` from the predicate-rejected try into the winning skip path).
 4. **Chain min-width ≥ 1 for unanchored branches** (v1): empty-matching branches
    (`(a*b*c*d*e*)`) decline — BitState keeps them (already fast-pathed 2.3x).
 5. **No backreferences, no lookaround, no `\b`** — hard declines (RecursiveDescent /

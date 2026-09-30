@@ -216,9 +216,10 @@ class StrategySelectionTest {
         "a*?b routes to the deterministic-chain generator (lazy scan semantics are generated, "
             + "see DeterministicChainV3BytecodeTest)");
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
         analyze("a+?b").strategy,
-        "a+?b should route to BITSTATE_CAPTURE");
+        "a+?b routes to the deterministic-chain generator (lazy scan loop with min = 1 — the"
+            + " first tail try happens after one mandatory loop char, same scan machinery)");
     assertEquals(
         PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
         analyze("a??b").strategy,
