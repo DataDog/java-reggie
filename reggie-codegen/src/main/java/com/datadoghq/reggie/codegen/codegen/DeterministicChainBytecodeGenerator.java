@@ -2376,6 +2376,45 @@ public class DeterministicChainBytecodeGenerator {
     Label scanTop = new Label();
     Label tailFail = new Label();
     Label loopDone = new Label();
+    // Backtrack-capture hygiene for the scan loop: every failed tail try must return the capture
+    // slots to their pre-try state, or a rejected try leaks its writes into the next iteration
+    // (e.g. ^(\S+?)(?::(\d+))?$ on "relative:12x": the k where the optional group matched ":12"
+    // is rejected by the lazy predicate, but the next iteration's winning skip path restores the
+    // group to THIS try's stale write instead of unsetting it — JDK reports null). Structural
+    // tail failures already unwind through the tail's own retry/restore chains (OPT skip path);
+    // the lazy-predicate rejection (POS_EQ_LEN / END_ANCHOR) fires after the tail succeeded and
+    // bypasses them, so the snapshot/restore here is the single point that covers every failure
+    // mode of a try.
+    int snapBase = emitSaveCaptures(ctx);
+    if (e.min > 0) {
+      // Mandatory iterations (x+?): consume exactly min loop-class chars before the first tail
+      // try, so lazy k starts at min. The scan loop below then behaves exactly like the min == 0
+      // case. Pre-roll failures fail the chain outright — the loop cannot give back below min.
+      // No emitRestoreCaptures is needed on those failLabel jumps: the pre-roll writes no
+      // capture slots (the loop-entry snapshot above is still intact), and failLabel only ever
+      // unwinds to a branch failure — every branch try is preceded by emitResetCaptures (the
+      // matches/match branch loop and the find() per-position branch loop), so stale slots are
+      // never observable after a chain failure.
+      int preStartVar = ctx.alloc.allocate();
+      Label preTop = new Label();
+      Label preDone = new Label();
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ISTORE, preStartVar);
+      mv.visitLabel(preTop);
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, preStartVar);
+      mv.visitInsn(ISUB);
+      pushInt(mv, e.min);
+      mv.visitJumpInsn(IF_ICMPGE, preDone);
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitJumpInsn(IF_ICMPGE, failLabel);
+      emitCharAt(ctx, ctx.posVar, ctx.cVar);
+      emitCharSetCheck(ctx, e.charSet, ctx.cVar, failLabel);
+      mv.visitIincInsn(ctx.posVar, 1);
+      mv.visitJumpInsn(GOTO, preTop);
+      mv.visitLabel(preDone);
+    }
     mv.visitLabel(scanTop);
     if (loopIsSeqEnd) {
       for (int g : closingAtEnd) {
@@ -2405,7 +2444,14 @@ public class DeterministicChainBytecodeGenerator {
     }
     mv.visitJumpInsn(GOTO, loopDone);
     mv.visitLabel(tailFail);
-    // Restore, then advance one loop-class char or fail the chain.
+    // Undo this try's capture writes (see the snapshot above), then advance one loop-class char
+    // or fail the chain. Cost note: the restore is O(g) register-local loads/stores per failed
+    // try (g = the pattern's group count — small, no allocation), dwarfed by the tail re-walk
+    // every failed try already performs (charAt + gates + nested retries). Restoring only the
+    // tail-writable slots would need emit-time group-set analysis across the tail walk's
+    // capture/OPT crossings for negligible gain — declined; LazyScanLoopBenchmark measures the
+    // capture-heavy shapes (^(.+?)\\.) to confirm no regression.
+    emitRestoreCaptures(ctx, snapBase);
     mv.visitVarInsn(ILOAD, backupVar);
     mv.visitVarInsn(ISTORE, ctx.posVar);
     mv.visitVarInsn(ILOAD, ctx.posVar);

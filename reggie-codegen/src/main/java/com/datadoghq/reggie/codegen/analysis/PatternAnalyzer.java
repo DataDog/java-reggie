@@ -8146,12 +8146,29 @@ public class PatternAnalyzer {
         this.groupNumber = 0;
       }
 
-      ChainElem(CharSet charSet) { // LAZY_LOOP
+      ChainElem(CharSet charSet) { // LAZY_LOOP (min == 0)
         this.kind = ElemKind.LAZY_LOOP;
         this.literal = null;
         this.charSet = charSet;
         this.min = 0;
         this.max = -1;
+        this.literals = null;
+        this.nested = null;
+        this.alts = null;
+        this.groupNumber = 0;
+      }
+
+      /** LAZY_LOOP with mandatory iterations ({@code x+?}, {@code x{2,}?}): k starts at min. */
+      static ChainElem lazyLoop(CharSet charSet, int min) {
+        return new ChainElem(ElemKind.LAZY_LOOP, charSet, min, -1);
+      }
+
+      private ChainElem(ElemKind kind, CharSet charSet, int min, int max) {
+        this.kind = kind;
+        this.literal = null;
+        this.charSet = charSet;
+        this.min = min;
+        this.max = max;
         this.literals = null;
         this.nested = null;
         this.alts = null;
@@ -10819,8 +10836,11 @@ public class PatternAnalyzer {
       // EXCLUDED — it keeps the OPT modeling below (the OPT retry machinery, not a loop).
       return new DeterministicChainInfo.ChainElem(cs, q.min, q.max);
     }
-    if (!q.greedy && q.max == -1 && q.min == 0) {
-      return new DeterministicChainInfo.ChainElem(cs);
+    if (!q.greedy && q.max == -1 && q.min >= 0 && q.min <= MAX_CHAIN_LOOP_BOUND) {
+      // Lazy scan loop, min 0 (x*?) or mandatory iterations (x+?): the scan tries the tail at
+      // k = min, min+1, ... — JDK's lazy order, linearly. min > 0 only shifts the first tail try;
+      // the scan-gate machinery is identical.
+      return DeterministicChainInfo.ChainElem.lazyLoop(cs, q.min);
     }
     // Optional single consume ([-+]?): modeled as OPT over a one-element nested seq so the
     // generator has exactly one optional construct to emit.
@@ -11050,9 +11070,12 @@ public class PatternAnalyzer {
             break;
           }
         case LAZY_LOOP:
-          // Lazy scan loop: the loop class itself can start a match, or the loop can be skipped.
+          // Lazy scan loop: the loop class itself can start a match; with min == 0 the loop can
+          // also be skipped, so the remainder's first-set unions in.
           addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
-          orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+          if (e.min == 0) {
+            orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+          }
           break;
         case LIT_ALT:
           for (String alt : e.literals) {
@@ -11123,7 +11146,15 @@ public class PatternAnalyzer {
           break;
         case LAZY_LOOP:
           addChainFirstSet(firstOut, e.charSet, nonAsciiOut);
-          break; // min == 0: can be skipped
+          if (e.min == 0) {
+            break; // min == 0: can be skipped, so the tail's first chars union in below
+          }
+          // min > 0: mandatory-consume contract — the break (NOT a fall-through) stops first-char
+          // accumulation here: elements after a mandatory lazy loop can never start a match (the
+          // loop must consume first), so their first chars must NOT fold into firstOut. Mirrors
+          // the mandatory-consume semantics at the checkChainDisjoint LAZY_LOOP site above.
+          emptyPrefix = false;
+          break;
         case LIT_ALT:
           for (String alt : e.literals) {
             addChainFirstChar(firstOut, alt.charAt(0), nonAsciiOut);
@@ -11249,7 +11280,8 @@ public class PatternAnalyzer {
           w += e.min;
           break;
         case LAZY_LOOP:
-          break; // min == 0
+          w += e.min; // mandatory iterations (x+? -> 1)
+          break;
         case LIT_ALT:
           int minAlt = Integer.MAX_VALUE;
           for (String alt : e.literals) {

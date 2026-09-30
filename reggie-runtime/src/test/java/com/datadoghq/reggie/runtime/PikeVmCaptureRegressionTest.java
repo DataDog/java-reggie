@@ -24,6 +24,7 @@ import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
 import com.datadoghq.reggie.UnsupportedPatternException;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -171,7 +172,9 @@ public class PikeVmCaptureRegressionTest {
   @Test
   void lazyShortestMatch_plus() throws Exception {
     // <.+?> must stop at the first '>'
-    assertRoute("<.+?>", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    // Chain-admitted since the lazy min >= 1 extension (mandatory-iteration scan loop, the
+    // GO_PATTERN shape); the behavioral assert below guards the chain's lazy priority there.
+    assertRoute("<.+?>", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
     String pattern = "<.+?>";
     String input = "<a><b>";
     Pattern jdk = Pattern.compile(pattern);
@@ -184,6 +187,26 @@ public class PikeVmCaptureRegressionTest {
         List.of(jm.start(), jm.end()),
         List.of(r.start(), r.end()),
         "lazy <.+?> on \"" + input + "\" must stop at first >");
+  }
+
+  @Test
+  void lazyShortestMatch_alternationBody() throws Exception {
+    // (?:x|y)+?z — a lazy quantifier over an ALTERNATION body still routes to the
+    // BITSTATE_CAPTURE/PIKEVM block (the chain's LOOP_ALT admission is greedy-only), so the
+    // #137 PikeVM lazy-group priority fix stays exercised by this route.
+    assertRoute("(?:x|y)+?z", PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE);
+    String pattern = "(?:x|y)+?z";
+    String input = "xxxyz";
+    Pattern jdk = Pattern.compile(pattern);
+    Matcher jm = jdk.matcher(input);
+    assertTrue(jm.find(), "JDK must find a match");
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    MatchResult r = reggie.findMatch(input);
+    assertNotEquals(null, r, "Reggie must find a match in \"" + input + "\"");
+    assertEquals(
+        List.of(jm.start(), jm.end()),
+        List.of(r.start(), r.end()),
+        "lazy (?:x|y)+?z on \"" + input + "\" must stop at the first z (shortest body run)");
   }
 
   @Test
@@ -347,5 +370,103 @@ public class PikeVmCaptureRegressionTest {
     MatchResult r = reggie.findMatch(input);
     assertNotEquals(null, r, "Reggie must find match in \"" + input + "\"");
     assertEquals("jsmith", r.group("LITERAL"), "Reggie LITERAL group must equal JDK");
+  }
+
+  // ---- Lazy min >= 1 (x+?) chain-route behavioral parity (review coverage) ----
+
+  @Test
+  void lazyMinOne_emptyTail_digitsBehavioralParity() throws Exception {
+    // \d+? — the empty-tail lazy scan (min = 1) re-routed from BITSTATE_CAPTURE; the behavior
+    // must still equal the JDK's successive single-digit lazy matches.
+    assertRoute("\\d+?", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
+    Pattern jdk = Pattern.compile("\\d+?");
+    ReggieMatcher reggie = Reggie.compile("\\d+?");
+
+    // Full successive-match sequence: JDK Matcher.find() advances; ReggieMatcher.find(String)
+    // is stateless (re-scans from the start), so Reggie spans come from findAll (findFrom-driven).
+    String input = "123abc456";
+    List<String> jdkSpans = new ArrayList<>();
+    Matcher jm = jdk.matcher(input);
+    while (jm.find()) {
+      jdkSpans.add(jm.start() + ":" + jm.end());
+    }
+    List<String> reggieSpans = new ArrayList<>();
+    for (MatchResult m : reggie.findAll(input)) {
+      reggieSpans.add(m.start() + ":" + m.end());
+    }
+    assertEquals(
+        List.of("0:1", "1:2", "2:3", "6:7", "7:8", "8:9"),
+        jdkSpans,
+        "JDK baseline: six successive single-digit lazy matches");
+    assertEquals(jdkSpans, reggieSpans, "Reggie \\d+? successive-find spans must equal the JDK");
+
+    // No digit → no match for either engine (boolean paths and findMatch).
+    assertAgrees("\\d+?", "abc");
+    assertTrue(reggie.findAll("abc").isEmpty(), "findAll must be empty without digits");
+  }
+
+  @Test
+  void lazyMinOne_captureWrappedEmptyTailParity() throws Exception {
+    // ^(.+?)\.([^/]+) — the GO_PATTERN shape: capture-wrapped lazy loop with a literal tail;
+    // group spans must agree with the JDK on both the matches() and the find() path.
+    assertRoute("^(.+?)\\.([^/]+)", PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
+    String pattern = "^(.+?)\\.([^/]+)";
+    Pattern jdk = Pattern.compile(pattern);
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    for (String input :
+        new String[] {"foo.bar/baz", "a.b", ".x", "abc", "a.b.c", "a..b", "x.y.z/end", "a."}) {
+      assertGroupsAgree(pattern, input); // matches() path, group spans
+      Matcher jm = jdk.matcher(input);
+      if (jm.find()) {
+        MatchResult r = reggie.findMatch(input);
+        assertNotEquals(null, r, "findMatch for \"" + input + "\"");
+        assertEquals(
+            List.of(jm.start(), jm.end()),
+            List.of(r.start(), r.end()),
+            "find() span for \"" + input + "\"");
+        for (int g = 0; g <= jm.groupCount(); g++) {
+          assertEquals(
+              List.of(jm.start(g), jm.end(g)),
+              List.of(r.start(g), r.end(g)),
+              "find() group " + g + " for \"" + input + "\"");
+        }
+      } else {
+        assertEquals(null, reggie.findMatch(input), "findMatch must be null for \"" + input + "\"");
+      }
+    }
+  }
+
+  @Test
+  void lazyLoopCaptureHygiene_predicateRejectionParity() throws Exception {
+    // ^([^\s]+?)(?::([0-9]+))?$ — the capture-hygiene motivating shape: a predicate-rejected
+    // tail try (POS_EQ_LEN fires after the tail structurally succeeded) must not leak its
+    // ":12" group write into the winning skip path — JDK reports g2 = null on "relative:12x".
+    assertRoute(
+        "^([^\\s]+?)(?::([0-9]+))?$",
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE);
+    String pattern = "^([^\\s]+?)(?::([0-9]+))?$";
+    for (String input :
+        new String[] {
+          "relative:12x",
+          "relative:12",
+          "relative:",
+          "a:1b",
+          "abc",
+          "",
+          "12:34:56",
+          "host:8080/",
+          ":",
+          ":12",
+          "a b",
+          "relative:12:"
+        }) {
+      assertGroupsAgree(pattern, input);
+    }
+    // Explicit pin of the documented leak: the predicate-rejected try's g2 write must be
+    // rolled back — g2 stays unset (JDK: null) on the winning skip path.
+    MatchResult r = Reggie.compile(pattern).match("relative:12x");
+    assertNotEquals(null, r, "must match (skip path, whole input in g1)");
+    assertEquals(-1, r.start(2), "g2 start must be unset (JDK: null)");
+    assertEquals(-1, r.end(2), "g2 end must be unset (JDK: null)");
   }
 }

@@ -387,4 +387,56 @@ class DeterministicChainV3BytecodeTest {
     assertFalse(m2.find(z));
     assertTrue(m2.find(z + "@"));
   }
+
+  // =====================================================================================
+  // Lazy min >= 1 (x+?) — pre-roll + capture hygiene (review coverage).
+  // =====================================================================================
+
+  @Test
+  void captureHygieneLazyOptionalTailParity() throws Exception {
+    // The capture-hygiene motivating shape: a POS_EQ_LEN-rejected tail try (the optional group
+    // matched ":12" but the whole-input check fails) must not leak its capture writes into the
+    // winning skip path — JDK reports g2 = null on "relative:12x". Also covers pre-roll
+    // failures unwinding through failLabel (an outer retry later succeeds) with groups live.
+    ReggieMatcher m = compileChain("^([^\\s]+?)(?::([0-9]+))?$");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("^([^\\s]+?)(?::([0-9]+))?$");
+    for (String input :
+        new String[] {
+          "", "relative:12x", "relative:12", "relative:", "a:1b", "abc", "abc:123",
+          "12:34:56", "host:8080/", ":", ":12", "a b", "relative:12:", "x"
+        }) {
+      assertFullParity(m, jdk, input);
+    }
+    MatchResult r = m.match("relative:12x");
+    assertNotNull(r, "skip path must match (whole input in g1)");
+    assertEquals(-1, r.start(2), "predicate-rejected try must not leak g2 (JDK: null)");
+    assertEquals(-1, r.end(2), "predicate-rejected try must not leak g2 (JDK: null)");
+  }
+
+  @Test
+  void lazyMinOnePreRollParity() throws Exception {
+    // a+?b — the pre-roll consumes exactly min (= 1) loop-class chars before the first tail try.
+    // Inputs pin tail-try-at-min in both directions: "ab" (length exactly min+tail, first try
+    // at k=min succeeds), "aab" (min+1+tail), and "xaab" (first tail try at k=min from pos 1
+    // fails at 'a', wins at k=min+1). An IF_ICMPGE→IF_ICMPGT pre-roll mutation shifts every
+    // span here.
+    ReggieMatcher m = compileChain("a+?b");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("a+?b");
+    for (String input :
+        new String[] {"", "ab", "aab", "xaab", "aaab", "b", "abab", "aabb", "ab", "baob"}) {
+      assertFullParity(m, jdk, input);
+    }
+  }
+
+  @Test
+  void lazyMinTwoPreRollParity() throws Exception {
+    // a{2,}?x — min = 2: the pre-roll consumes exactly 2 loop-class chars; runtime parity where
+    // the min=2 width matters ("ax" must NOT match).
+    ReggieMatcher m = compileChain("a{2,}?x");
+    java.util.regex.Pattern jdk = java.util.regex.Pattern.compile("a{2,}?x");
+    for (String input :
+        new String[] {"", "aax", "aaax", "aaxx", "xaax", "aa", "ax", "aaaxx", "xaaxaax"}) {
+      assertFullParity(m, jdk, input);
+    }
+  }
 }

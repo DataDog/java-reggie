@@ -299,10 +299,27 @@ class StrategySelectionExtendedTest {
   // ── RECURSIVE_DESCENT ───────────────────────────────────────────────────
 
   @Test
+  void testLazyMinAdmissionBoundaryRoutesToChain() throws Exception {
+    // The upper admission edge is exact: min == MAX_CHAIN_LOOP_BOUND (1024) is the last admitted
+    // min (chain route); 1025 falls to the lazy-NFA block. Detector-level admit/decline pair:
+    // DeterministicChainDetectorTest.lazyMinAdmissionBoundary.
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE,
+        analyze("a{1024,}?x").strategy,
+        "a{1024,}?x (min == MAX_CHAIN_LOOP_BOUND) routes to the chain generator");
+    assertEquals(
+        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        analyze("a{1025,}?x").strategy,
+        "a{1025,}?x (min == MAX_CHAIN_LOOP_BOUND + 1) declines to the lazy-NFA block");
+  }
+
+  @Test
   void testRecursiveDescentNonGreedy() throws Exception {
-    // \d+? has no backrefs/lookaround/possessives — routes to BITSTATE_CAPTURE for lazy NFA
+    // \d+? has no backrefs/lookaround/possessives — the lazy scan loop (min = 1) is admitted by
+    // the deterministic-chain family; the empty tail + POS_EQ_LEN lazy predicate make the scan
+    // walk to the input end (JDK lazy order, linearly).
     PatternAnalyzer.MatchingStrategyResult result = analyze("\\d+?");
-    assertEquals(PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE, result.strategy);
+    assertEquals(PatternAnalyzer.MatchingStrategy.DETERMINISTIC_CHAIN_BYTECODE, result.strategy);
   }
 
   @Test
