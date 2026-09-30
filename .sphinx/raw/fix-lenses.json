@@ -105,7 +105,7 @@
   },
   {
     "theme": "SWAR-range-check-wrong-bit-operator",
-    "anti_pattern": "The findFirstNotInRange SWAR formula used bitwise AND to combine the below-range and above-range masks, which requires a byte to be simultaneously below the lower bound AND above the upper bound — a condition that is never true — producing all-zeros and always reporting the character as in-range.",
+    "anti_pattern": "The findFirstNotInRange SWAR formula used bitwise AND to combine the below-range and above-range masks, which requires a byte to be simultaneously below the lower bound AND above the upper bound \u2014 a condition that is never true \u2014 producing all-zeros and always reporting the character as in-range.",
     "fix_example": "Changed the combining operator from AND to OR so the mask is set when a byte is either below the lower bound or above the upper bound.",
     "root_cause": "Logical inversion of set membership: a value is outside a range when it fails either boundary test, so the two out-of-range conditions must be OR'd, not AND'd.",
     "confidence": "high",
@@ -158,5 +158,239 @@
     "root_cause": "Early-exit optimizations that bypass validation logic produce incorrect results for edge-case inputs; every accept path must run all required guards, including those on the entry state.",
     "confidence": "medium",
     "source": "fix-mining"
+  },
+  {
+    "theme": "fallback matcher missing state propagation",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "Fallback/secondary engines are easy to treat as pure performance escape hatches and are forgotten when new per-matcher configuration (like name maps) is added to the primary path.",
+    "fix_example": "Both BitStateMatcher.fallback() and RuntimeCompiler's Laurikari wiring were updated to call setNameToIndex on the newly constructed fallback/laurikari matcher.",
+    "anti_pattern": "fallback()/RuntimeCompiler constructed a new PikeVMMatcher/Laurikari matcher without copying setNameToIndex from the primary matcher, so named-group lookups worked on the primary path but not the fallback path.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "missing negated-anchor case in escape dispatch",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Adding a positive-form escape/anchor without also adding its negated counterpart lets the negated form silently degrade to a different, wrong semantic (literal char) instead of failing loudly.",
+    "fix_example": "Added an explicit NON_WORD_BOUNDARY case alongside WORD_BOUNDARY in the pattern analyzers, and excluded \\b/\\B from DFA-native strategies that can't evaluate them, routing those patterns to PIKEVM_CAPTURE instead.",
+    "anti_pattern": "The regex parser's escape-sequence handling had a case for \\b (word boundary) but no corresponding case for its negation \\B, so \\B silently fell through to being parsed as the literal character 'B'.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "cache-gate checks only source state, not destination",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "A boolean gate meant to protect against replaying a position-dependent computation is unsound if it only inspects one side of a transition; the other endpoint can carry the same live, position-specific dependency.",
+    "fix_example": "The gate was extended to also check anchorSensitive[id] (the destination) before allowing cacheEntry(state, c, id), so any transition into a newly anchor-touching state skips caching too.",
+    "anti_pattern": "The Laurikari DFA transition cache's memoization gate checked only the source state's anchorSensitive flag before caching a transition, ignoring that the destination state's subset could newly become anchor-sensitive.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "blanket cache-bypass from a new state flag over-applies",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A gating flag added for correctness can have far larger reach than assumed under a driving loop (like find()'s per-position reinjection) that wasn't modeled when the flag's blast radius was estimated.",
+    "fix_example": "Added a separate lookahead-class fan-out cache keyed on (consumed char, lookahead class) so anchor-sensitive states are cached again except within a couple of characters of regionEnd.",
+    "anti_pattern": "A newly introduced anchorSensitive flag was used to unconditionally skip the fast ASCII-table cache for every state it touched, and in find()'s per-position self-anchoring reinjection nearly all interned states ended up flagged, defeating caching for most of the automaton instead of the small anchor-adjacent slice assumed.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "post-rebase duplicate declarations",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "Rebasing or merging branches that both modify the same file without a full rebuild/compile check afterward can leave silently duplicated symbols that a diff review may not catch, especially across a squash or interactive rebase.",
+    "fix_example": "The duplicate declarations introduced by the bad rebase merge were removed in a dedicated follow-up commit.",
+    "anti_pattern": "A rebase/merge between two diverging branches left duplicate field/method declarations in the merged tree, which only surfaced as a build break rather than being caught during the merge review.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "structural hash/cache key omits a codegen-affecting flag",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "A cache/dedup key must include every AST feature that changes code generation output; omitting one causes correctness-affecting collisions that are invisible until an adversarial or fuzz input exercises both variants.",
+    "fix_example": "Added a hasAtomicGroups field (computed via an AST visitor) to the MatchingStrategyResult so it participates in the structural hash and atomic-group patterns get distinct cache entries.",
+    "anti_pattern": "The pattern's structural hash used for the bytecode cache did not account for atomic-group/possessive-quantifier markers, so two patterns differing only in those markers could collide in the cache and share generated bytecode that was correct for only one of them.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "bounded-worklist overflow silently drops configuration after gate removed",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "Loosening or removing a gating precondition (making a previously-conditional code path unconditional) invalidates the safety assumptions baked into that path's error/overflow handling, which must be re-audited whenever the gate changes.",
+    "fix_example": "On overflow, emit a JDK-delegation path instead of jumping to the full-match label, so an overflowed configuration is never silently discarded.",
+    "anti_pattern": "The per-config backref NFA's overflow guard jumped to the full-match label and silently dropped the overflowed configuration; this was safe while the per-config path was conditionally gated, but once perConfigEligible() enabled the path unconditionally, any pattern generating more branches than the cap could drop the only successful configuration and return a false negative.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "inconsistent unbounded-quantifier sentinel",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "When the same semantic value (\"no upper bound\") has two different sentinel representations used in different parts of the codebase, any single-representation check silently mishandles the other representation's inputs.",
+    "fix_example": "isUnbounded() was changed to check `max == Integer.MAX_VALUE || max == -1` so both sentinel representations are recognized as unbounded.",
+    "anti_pattern": "isUnbounded() checked only `max == Integer.MAX_VALUE`, but the codebase also represents an unbounded quantifier with `max == -1`, so patterns using the -1 sentinel were treated as bounded and their loops exited after a single iteration.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "one parameter reused for two distinct semantic roles",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "Reusing one variable for two conceptually different quantities (a moving cursor and a fixed reference point) is a classic source of anchor/offset bugs once the two concepts need to diverge in an evolving loop.",
+    "fix_example": "The fix split the parameter into a moving `tryPos` and a separate fixed `regionStart`, threading both explicitly through initClist and stepChar so anchors are always evaluated against the true search-region origin.",
+    "anti_pattern": "tryFindAt/tryFindMatchAt used the single parameter `tryPos` both as the current per-attempt trial start and as the fixed search-region origin passed into initClist/stepChar, so as find() advanced the trial start across the string, start-anchor (^, \\A) checks were evaluated against the moving position instead of the true region start.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "inconsistent NFA construction among semantically similar quantifier operators",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Near-duplicate quantifier constructs implemented via separate code branches can drift out of sync on an invariant (pure-epsilon vs. mixed state) that a shared downstream consumer silently depends on.",
+    "fix_example": "The fix wraps {0,n} quantifiers the same way as `?` and `*`, in a dedicated epsilon-only skip-entry state, so PikeVM correctly considers the character-consuming path instead of always taking the empty-match branch.",
+    "anti_pattern": "ThompsonBuilder wrapped the `?` and `*` (min=0) operators in a fresh epsilon-only skip-entry state, but the {0,n} counted-quantifier path placed the consuming entry state directly into the exits set, producing a mixed char+epsilon state that the PikeVM thread-stepper does not expect.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "guard ordering silently decides which of two overlapping routing rules wins",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "When multiple guards can match the same pattern class, their relative order determines the outcome; inserting a new guard without checking its position relative to existing ones can silently narrow the coverage of the newer, more capable path.",
+    "fix_example": "The fix moved the conservative check to run after the newer, more capable routing block, so the capable path claims every pattern it can handle and only the residual cases fall through to the conservative guard.",
+    "anti_pattern": "A conservative fallback check (isAnchorConditionDiluted) was placed ahead of a later-added, more capable routing block (PIKEVM_CAPTURE alternation+anchor handling), so patterns that PIKEVM could actually handle correctly were claimed by the more conservative guard first.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "stale not-supported-yet exclusion outlives the limitation it guarded",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "Comments and guards justified by 'not implemented yet' become silent coverage gaps once the referenced limitation is resolved in a different file, unless routing decisions are re-audited whenever underlying capability changes.",
+    "fix_example": "The fix removed the stale exclusion, unified the previously-excluded sub-cases onto the native path, and fixed a related cache fast-path bug uncovered in the process.",
+    "anti_pattern": "A routing guard excluded named-group and anchor-bearing capture-ambiguous patterns from the native path with a comment stating the engine 'doesn't handle these yet,' and nothing forced revisiting that exclusion once the underlying capability was added elsewhere in the codebase.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "removing or narrowing a fallback guard without enumerating everything it protected",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "A broad guard can incidentally cover several unrelated failure modes at once; replacing or narrowing it to unlock one case silently reopens any other case it was also suppressing unless each is independently re-verified.",
+    "fix_example": "Each time, the fix re-added a narrowly-scoped guard for the specific rediscovered failure mode (e.g. hasEndAnchorLeadingInAlternationBranch, a restored general hasAnchorInQuantifier, hasNullableAlternationBranch) so the missing case falls back again while the newly-unlocked cases keep routing natively.",
+    "anti_pattern": "Multiple routing-guard refactors narrowed or removed a broad fallback exclusion (e.g. dropping hasAnchorInNfa, replacing hasAnchorInQuantifier with a capturing-group-specific sub-case, or dropping a blanket quantifier check) to unlock a native fast path, without first enumerating every AST shape the original broad guard had been protecting against.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "sentinel encoding not recognized by a general-purpose classification function",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Sentinel or special-case values used internally by one part of the codebase (the parser's epsilon representation) are easy to miss when a separately-written classification predicate assumes only 'normal' node shapes.",
+    "fix_example": "The fix added an explicit check for `alt instanceof LiteralNode && l.ch == 0` alongside isNullable(alt) so empty-branch sentinels are also treated as nullable.",
+    "anti_pattern": "hasNullableAlternationBranch relied on isNullable(alt) to detect empty alternation branches, but the parser represents a syntactically empty branch (e.g. the trailing arm of 'a|') as a LiteralNode with ch==0, an epsilon sentinel that isNullable does not recognize.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "AST-walk predicate missing a node-type case or using shallow instanceof instead of recursive walk",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "AST-walking helpers that pattern-match on node type must enumerate every composite node kind they can be nested under; a missing case or a shallow instanceof check silently narrows detection instead of failing loudly.",
+    "fix_example": "The fixes added the missing recursive case (recursing into QuantifierNode children) or replaced the shallow instanceof check with a full recursive containsAlternation-style walk.",
+    "anti_pattern": "AST-walking guard helpers either omitted a recursive case for one composite node type (e.g. containsAnchor not recursing into QuantifierNode children) or used a direct 'instanceof AlternationNode' check instead of a full recursive contains-walk, so the target construct nested one level deeper or wrapped in an intervening node was invisible to the guard.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "single-group backtracking assumed for multi-group construct",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Specialized bytecode generators built around a narrow structural shape (\"exactly one optional group\") silently produce wrong matches once a pattern has more than one independently-backtrackable component, because the retry loop has no notion of the other components.",
+    "fix_example": "Backtracking bookkeeping was extended to retry across group boundaries (prefix/middle groups) and to re-evaluate end-anchors correctly after a retry, instead of only handling the single-group case.",
+    "anti_pattern": "The OPTIONAL_GROUP_BACKREF bytecode path assumed backtracking only ever needs to retry one optional group, so it lacked inter-group backtracking when multiple optional groups in the same pattern each needed independent retry.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "zero-length capture unguarded across multiple backref strategies",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Length-based or position-based loop invariants (e.g. 'the loop advances because groupLen > 0') silently break when a captured group is empty, producing wrong results instead of crashing, so any control flow keyed on group length must explicitly handle the zero-length case.",
+    "fix_example": "Added nullable-backref detectors (hasNullableBackrefGroup / hasNullableBackrefInsideCapturingGroup / hasOptionalPrefixBeforeCapturingGroup) that route zero-length-capture and optional-prefix patterns to JDK fallback instead of computing wrong group-start positions.",
+    "anti_pattern": "Several backref/tagged-DFA feature commits (FIXED_REPETITION_BACKREF, RECURSIVE_DESCENT, group-span handling) implicitly assumed captured spans are always non-zero-length, without checking whether the referenced or preceding group can capture the empty string.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "AST nesting-order confusion for quantifier-vs-group wrapping",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Two syntactically similar AST shapes with the same characters but different nesting order have very different capture semantics on the last iteration; a detector that doesn't distinguish nesting order silently mishandles one of them.",
+    "fix_example": "Added hasOuterQuantifierOnBackrefGroup, which specifically detects a QuantifierNode directly wrapping a capturing GroupNode referenced by a backref, and routes that shape to JDK fallback.",
+    "anti_pattern": "Promoting VARIABLE_CAPTURE_BACKREF to a native strategy did not distinguish GroupNode(QuantifierNode(...)) (quantifier inside the group) from QuantifierNode(GroupNode(...)) (quantifier wrapping the whole group), so (c)+\\1 was treated the same as the supported (c+)\\1.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "nullability has two independent sources; guard covered only one",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "'Nullable' can arise from an optional outer wrapper or from an inner-content quantifier that matches empty independently; a guard testing only one cause leaves a silent gap for the other.",
+    "fix_example": "Added isGroupContentNullable(capturingGroup.child) alongside the existing groupQuantifier.min == 0 check, declining the strategy for either nullability source.",
+    "anti_pattern": "A refactor removed the hasNullableBackrefGroup fallback guard for VARIABLE_CAPTURE_BACKREF, relying on detectVariableCaptureBackref's groupQuantifier.min == 0 check to already exclude nullable groups \u2014 but that check only covered the group's outer quantifier, not the case where the group's own content is nullable (e.g. ([-]*)).",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "cyclic tag priority in all-optional quantifier bodies",
+    "source": "fix-mining",
+    "confidence": "low",
+    "root_cause": "Eligibility/whitelist checks for a specialized automaton construction need to reason about structural cycles in the automaton, not just surface syntax of the pattern; nullable-everywhere loop bodies are a known source of such cycles.",
+    "fix_example": "LaurikariEligibility was extended with an SCC-based exclusion so all-optional loop bodies that would create cyclic tag priority are rejected before reaching the tagged-DFA capture path.",
+    "anti_pattern": "The Laurikari eligibility check that decides which patterns may route to the tagged-DFA capture engine did not detect strongly-connected/cyclic tag-priority dependencies created by quantifier loop bodies where every alternative is nullable.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Out-of-context anchor evaluation and unverified literal pre-filters in regex search fast paths",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "Zero-width anchors and required-literal facts are only valid within the surrounding input context; evaluating them on extracted spans or jumping to literal occurrences assumes context the search does not have, producing missed or false matches.",
+    "fix_example": "The fix searches the NFA half from the DFA's leftmost start over the full input so anchors evaluate in context (span re-match kept only as fallback) and gates the findFrom literal jump on a verified match prefix while keeping the sound indexOf == -1 rejection.",
+    "anti_pattern": "The hybrid matcher re-matched an extracted DFA span as a standalone string (so END anchors fired at the span boundary) and the generated-NFA findFrom candidate scan jumped to the first occurrence of a required literal without verifying that the literal is a match prefix.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Incorrect restart and early-exit semantics in find()/span DFA search loops",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A restart position derived from where the previous attempt died is not the leftmost next viable start and an early return on an anchor condition aborts before the true span is known, so find() misses matches or returns wrong spans versus the reference engine.",
+    "fix_example": "The fix made plain-closure findFrom restart at matchStart+1 and self-anchoring closures use findFromUnion re-walking, deleted the DFA_UNROLLED early return, and routed the diverging shapes (word-boundary find, backref end-anchor, nullable-tail spans, parse-refusal bypass) away via targeted declines.",
+    "anti_pattern": "LazyDFA findFrom restarted at death+1 without re-walking (so a viable start inside a dead attempt's span was skipped) and DFA_UNROLLED early-returned on greedy \\Z, truncating spans, while backref suffix/end-anchor handling and parse-refusal fallback bypass diverged from the JDK.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Sentinel-value overloading for epsilon in the regex AST",
+    "source": "fix-mining",
+    "confidence": "high",
+    "root_cause": "Overloading a legal data value (the NUL character) as a type-level sentinel makes real input indistinguishable from the empty case, so legitimate patterns silently take the wrong code path.",
+    "fix_example": "The fix introduced a distinct EpsilonNode and replaced all `ch == 0` epsilon checks across CaptureProjection, FallbackPatternDetector, and LinearPatternAnalyzer (alongside JDK-parity corrections for bare '}', groupCount inside char classes, optional-group span leaks, and bounded-quantifier compile limits).",
+    "anti_pattern": "Analyzer and projection code used LiteralNode with ch == 0 as the representation of an epsilon/empty match, so a genuine NUL literal silently collided with the sentinel and was treated as an empty match, and every nullability/length check depended on the overloaded value.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Admission-analyzer vs executor semantic contract drift in fail-closed fast-path routing",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A fail-closed admission gate protects the fast path only while its checks mirror executor semantics; silent drift admits patterns the executor mishandles, yielding wrong matches for inputs the gate was supposed to exclude.",
+    "fix_example": "The fix realigned admission with executor semantics, moved capture-boundary analysis into a shared CaptureBoundaryAnalysis in reggie-codegen used by both full-capture and named-only routes, and replaced the compiled-pattern cache's single global lock with a lock-striped segment design.",
+    "anti_pattern": "The linear-token-sequence admission checks (whitespace tolerance, decimal strictness, HTTP-version literal, SKIP_ANY_EXCEPT_NEWLINE flag profile, leading (?s) handling) drifted from what the executor actually implements, and capture-boundary analysis existed only on one admission path.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Custom fast-path matcher character/flag semantics diverging from the reference engine",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A custom fast-path matcher must reimplement reference semantics exactly; collapsing distinct character classes, missing one character from a built-in class, or ignoring compile flags silently changes which inputs match.",
+    "fix_example": "The fix split ANY_STAR vs ANY_STAR_EXCEPT_NEWLINE ops with a strict isDotAllAnyStar check, added \\u000B to isJdkWhitespace and the CharSet whitespace ranges, and gated linear-token-sequence admission by the pattern's flag profile (LinearTokenSequenceAdmission.forFlags/forSource).",
+    "anti_pattern": "The categorizer collapsed dot-all and [^\\n]-style any-star into one SKIP_ANY op (dot-star crossing newlines without DOTALL) and the hand-rolled isJdkWhitespace omitted \\u000B, and admission never checked the pattern's flag profile.",
+    "defect_class": "logic-bug"
+  },
+  {
+    "theme": "Manual executor lifecycle in concurrency tests",
+    "source": "fix-mining",
+    "confidence": "medium",
+    "root_cause": "A leaked fixed thread pool of non-daemon threads keeps the JVM alive and can hang the test suite whenever an await or assertion fails before the manual shutdown line is reached.",
+    "fix_example": "The fix wrapped the executor in try-with-resources so the thread pool is shut down on every exit path of the test.",
+    "anti_pattern": "Concurrency tests created an ExecutorService outside try-with-resources and relied on a shutdownNow() call placed after the assertion sequence, so any exception thrown before that point leaked the pool's non-daemon threads.",
+    "defect_class": "logic-bug"
   }
 ]

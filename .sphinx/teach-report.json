@@ -1,41 +1,37 @@
 {
-  "generated_at": "2026-06-28T00:00",
-  "source": "pr:89",
+  "source": "DataDog/java-reggie#136 review feedback (chatgpt-codex-connector[bot] P1 inline comment; datadog-datadog-prod-us1[bot] Bits P2 inline comment)",
+  "generated_at": "2026-09-29T15:20:00Z",
   "improvements": [
     {
-      "id": "3487413781",
-      "source_comment": "**P1** Avoid silently dropping per-config backref branches\n\nFor assertion-free backref NFAs this path is now enabled unconditionally by `perConfigEligible()`, but overflow still jumps to `full` and drops the configuration. Patterns with more than 256 live branches, such as a large alternation backref like `(a|aa|...|a{300})\\1` on an input requiring the long branch, can therefore miss the only successful configuration and return a silent false negative instead of falling back or growing the worklist.",
-      "source_file": "reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/NFABytecodeGenerator.java",
-      "source_line": 419,
+      "status": "accepted",
       "classification": "project_lens",
-      "rationale": "The pattern requires knowledge of this project's per-config worklist cap (256), `perConfigEligible()` predicate, and the JDK fallback delegation contract — none of which are expressible without project-specific types.",
+      "source_file": "reggie-processor/src/main/java/com/datadoghq/reggie/processor/ReggieMatcherBytecodeGenerator.java",
+      "source_line": 469,
+      "source_comment": "For DFA_UNROLLED_WITH_ASSERTIONS, emitting this helper only repairs findMatchFrom/findAll; DFAUnrolledBytecodeGenerator.generateFindBoundsFromMethod implements a separate inline scan and never calls the helper. Consequently literal replaceAll and split still silently return incorrect results (a+(?=b) on aab -> aab instead of _b).",
+      "rationale": "The original fix audited only the emitter whose missing-helper call crashed; a sibling emitter in the same strategy family had its own inline reimplementation of the same operation and kept the wrong-result bug. Generated-code dispatchers have many parallel emitters per strategy arm; a helper fix is complete only when every emitter that references the helper directly OR reimplements its operation inline is covered, and pinned by a differential rich-API test.",
       "proposed": {
-        "theme": "perconfig-worklist-overflow-silent-drop",
-        "anti_pattern": "When the per-config worklist overflows its bounded capacity, execution jumps to the full-match label and silently drops the overflowed configuration, returning a false negative instead of delegating to the JDK fallback.",
-        "fix_example": "On overflow, emit a JDK-delegation bytecode path (or throw a controlled signal) rather than jumping to `full`, so no matching configuration is silently discarded.",
-        "root_cause": "The overflow guard was written before the per-config path was ungated; once `perConfigEligible()` enables the path unconditionally, any pattern that generates more than PER_CONFIG_CAP branches can trigger the silent drop on inputs that require a branch beyond the cap.",
+        "theme": "helper-fix-must-audit-sibling-emitters-with-inline-reimplementations",
+        "anti_pattern": "A missing-shared-helper fix in a generated-code dispatcher is validated against the one code path that crashed (here findMatchFrom/findAll), while a sibling generator in the same strategy family (DFAUnrolledBytecodeGenerator.generateFindBoundsFromMethod) keeps its own inline implementation of the same operation with an independent bug (assertion-blind scan that aborts on the first failed lookahead), so replaceAll/split silently return wrong results after the crash is fixed.",
+        "fix_example": "After repairing the dispatcher emission, enumerate every emitter in the affected strategy arms that either calls the helper or reimplements its operation inline, route each assertion-bearing one through the shared assertion-correct primitive (generateFindBoundsFromLongestEnd delegating to findLongestMatchEnd), and pin each with a differential JDK-parity test case (a+(?=b) on aab) in RichApiDifferentialTest.",
+        "root_cause": "Generated-code strategy dispatchers multiply each semantic operation across several independent emitters; the crash surfaced only the missing-emission instance, and the wrong-result instance lived in a sibling class the crash trace never mentions.",
         "confidence": "high",
-        "source": "teach"
-      },
-      "status": "accepted"
+        "languages": [
+          "java"
+        ]
+      }
     },
     {
-      "id": "3487413783",
-      "source_comment": "**P1** Continue scanning nullable prefixes for overlap\n\nThis `break` only checks the immediate next non-anchor sibling, so an overlapping greedy prefix is missed when another nullable prefix sits before the capture. For example `a*b*(a+)\\1` now routes to `VARIABLE_CAPTURE_BACKREF` with no fallback; the generated prefix matcher greedily consumes all `a`s in `a*` and never backtracks across `b*`, so `matches(\"aaaa\")` fails even though JDK can leave `aa` for the capture/backref. Keep scanning through nullable/disjoint prefix nodes, or compute the first charset of the whole suffix before allowing this strategy.",
-      "source_file": "reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/analysis/FallbackPatternDetector.java",
-      "source_line": 1186,
-      "classification": "generic_lens",
-      "rationale": "A break that exits a scan loop on the first non-target sibling instead of continuing until the target is found is a language-agnostic algorithmic error expressible without any project-specific types.",
+      "status": "accepted",
+      "classification": "consul_pass",
+      "source_file": "reggie-codegen/src/main/java/com/datadoghq/reggie/codegen/codegen/NFABytecodeGenerator.java",
+      "source_line": 9940,
+      "source_comment": "For assertion-bearing NFAs with competing valid match lengths, delegating bounds to findMatchFrom selects the longest end instead of Java's leftmost-first alternative ((a|aa)(?=a)) on aaa therefore replaces to _a rather than __a.",
+      "rationale": "The fix delegated bounds extraction to an existing shared primitive (findMatchFrom) whose candidate-end scan picks the longest end; the delegated primitive cannot express Java's leftmost-first priority for competing match lengths, so the fix traded one divergence (no-match) for another (longest-first). A reviewer pass is needed: any fix that delegates to a shared search/matching primitive must differentially verify the primitive's tie-breaking semantics, and a primitive that structurally cannot express the required priority must lead to refusal-plus-documentation rather than silent divergence.",
       "proposed": {
-        "theme": "scan-loop-break-on-non-target-sibling",
-        "anti_pattern": "A loop that searches a sequence for a target element uses `break` (or `return`) on the first element that is not an explicit skip condition, exiting before reaching the actual target and producing a false 'not found' result.",
-        "fix_example": "Replace `break` with `continue` (or remove it) so the loop advances past intermediate non-target elements and tests every element in the sequence before concluding the target is absent.",
-        "root_cause": "Confusing 'this element is not the target' with 'the target cannot exist later in the sequence' causes the scan to terminate prematurely, missing elements that follow unrelated intermediate nodes.",
-        "confidence": "high",
-        "languages": ["java"],
-        "frameworks": []
-      },
-      "status": "accepted"
+        "pass_name": "verify-delegation-tie-breaking-semantics",
+        "pass_text": "When a fix delegates to a shared search/matching primitive, differentially verify the primitive's tie-breaking semantics (leftmost-first vs leftmost-longest, shortest vs longest group split) against the reference implementation with adversarial inputs that have competing valid matches. If the primitive structurally cannot express the required priority, do not accept the delegation: prefer an analyzer-level refusal (documented divergence) or a priority-aware engine, and record the limitation in-code at the delegation site.",
+        "source": "user"
+      }
     }
   ]
 }
