@@ -10450,9 +10450,16 @@ public class PatternAnalyzer {
    * <p>Not yet wired into strategy routing — the code generator is built in later stages of the
    * design doc's implementation plan. Exposed for unit tests of the detector itself.
    *
+   * <p>The one-lazy-loop-per-branch invariant is enforced: a second lazy loop anywhere in a
+   * branch's tree (nested tail, OPT/CAPTURE content, ALT_CHAIN alternative) declines the pattern —
+   * a nested scan inside a lazy loop's tail continuation re-runs to the end on every outer tail try
+   * (O(n²) per try), and the generated matches/match entry points carry no work budget (lazy loops
+   * never set {@code hasGiveBack}). One loop per branch stays linear: the loop's scan is the only
+   * unbounded walk and each of its tail tries is a bounded, first-set-gated reject.
+   *
    * @return the parsed family description, or null when the pattern declines (any construct outside
    *     the grammar, a greedy loop that would need give-back, an unanchored branch that can match
-   *     empty, or a bound exceeded).
+   *     empty, a second lazy scan loop in a branch's tree, or a bound exceeded).
    */
   public DeterministicChainInfo detectDeterministicChain(RegexNode ast) {
     List<RegexNode> alts;
@@ -10496,7 +10503,42 @@ public class PatternAnalyzer {
         return null;
       }
     }
+    // One lazy scan loop per branch tree (grammar invariant, now enforced): a second LAZY_LOOP
+    // in a lazy loop's tail continuation makes every outer tail try re-run the inner scan to
+    // the end — O(n^2) per matches()/match() try, and those entry points carry no work budget
+    // (lazy loops never set hasGiveBack). Declining keeps such patterns on the linear
+    // BitState/PikeVM route; one loop per branch stays linear (the loop's scan is the only
+    // unbounded walk and each tail try is a bounded gated reject).
+    for (DeterministicChainInfo.ChainBranch b : branches) {
+      if (countChainLazyLoops(b.seq) > 1) {
+        return null;
+      }
+    }
     return new DeterministicChainInfo(branches);
+  }
+
+  /**
+   * Counts LAZY_LOOP elements in a seq tree: nested OPT/CAPTURE seqs, ALT_CHAIN alternative seqs,
+   * and LOOP_ALT body seqs (flat single-consume by loopAltBodyOk today, counted anyway so a future
+   * grammar change cannot silently break the one-lazy-loop invariant enforced by {@link
+   * #detectDeterministicChain}).
+   */
+  private static int countChainLazyLoops(DeterministicChainInfo.ChainSeq seq) {
+    int count = 0;
+    for (DeterministicChainInfo.ChainElem e : seq.elems) {
+      if (e.kind == DeterministicChainInfo.ElemKind.LAZY_LOOP) {
+        count++;
+      }
+      if (e.nested != null) {
+        count += countChainLazyLoops(e.nested);
+      }
+      if (e.alts != null) {
+        for (DeterministicChainInfo.ChainSeq alt : e.alts) {
+          count += countChainLazyLoops(alt);
+        }
+      }
+    }
+    return count;
   }
 
   /**

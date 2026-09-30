@@ -48,9 +48,8 @@ public class LazyScanLoopBenchmark {
   /** ~200 tags — the empty-tail lazy scan walks tag starts. */
   private static final String TAGS_TEXT = "<t>".repeat(200);
 
-  /** Long dot-separated token — the capture-heavy shape (per-try capture restore cost). */
-  private static final String DOTTED_TEXT =
-      "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z".repeat(8);
+  /** Long token ending in a dot — forces repeated capture restores before the tail matches. */
+  private static final String DOTTED_TEXT = "abcdefghijklmnopqrstuvwxyz".repeat(8) + ".";
 
   private ReggieMatcher reggieDigits;
   private Pattern jdkDigits;
