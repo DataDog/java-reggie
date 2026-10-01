@@ -154,6 +154,9 @@ public class RuntimeCompiler {
   private static final class PikeVMEntry {
     final NFA nfa;
     final Map<String, Integer> nameMap;
+    // NFA-derived DFA setup shared across every matcher this entry produces. Built once on first
+    // use; the build is deterministic, so a concurrent first-use race yields equivalent bundles.
+    private volatile PikeVMMatcher.DfaBundle dfaBundle;
 
     PikeVMEntry(NFA nfa, Map<String, Integer> nameMap) {
       this.nfa = nfa;
@@ -161,7 +164,12 @@ public class RuntimeCompiler {
     }
 
     ReggieMatcher newMatcher(String pattern) {
-      ReggieMatcher m = new PikeVMMatcher(nfa, pattern);
+      PikeVMMatcher.DfaBundle bundle = dfaBundle;
+      if (bundle == null) {
+        bundle = new PikeVMMatcher.DfaBundle(nfa);
+        dfaBundle = bundle;
+      }
+      ReggieMatcher m = new PikeVMMatcher(nfa, pattern, bundle);
       if (!nameMap.isEmpty()) {
         m.setNameToIndex(nameMap);
         if (!m.embedsNameMap()) {
@@ -275,11 +283,23 @@ public class RuntimeCompiler {
     final NFA nfa;
     final Map<String, Integer> nameMap;
     final boolean usePosixLastMatch;
+    // NFA-derived reject-DFA bundle shared across every matcher this entry produces. Built once
+    // on first use; the build is deterministic, so a concurrent first-use race is benign.
+    private volatile RejectDfaFactory.Bundle rejectBundle;
 
     BitStateEntry(NFA nfa, Map<String, Integer> nameMap, boolean usePosixLastMatch) {
       this.nfa = nfa;
       this.nameMap = nameMap;
       this.usePosixLastMatch = usePosixLastMatch;
+    }
+
+    RejectDfaFactory.Bundle rejectBundle() {
+      RejectDfaFactory.Bundle bundle = rejectBundle;
+      if (bundle == null) {
+        bundle = RejectDfaFactory.build(nfa);
+        rejectBundle = bundle;
+      }
+      return bundle;
     }
 
     ReggieMatcher newMatcher(String pattern) {
@@ -288,7 +308,7 @@ public class RuntimeCompiler {
       // way through to PikeVMMatcher. null when LaurikariEligibility rejects this pattern.
       ReggieMatcher laurikari =
           LaurikariDfaSupport.tryCreate(nfa, pattern, nfa.getGroupCount(), usePosixLastMatch);
-      ReggieMatcher m = new BitStateMatcher(nfa, pattern, laurikari);
+      ReggieMatcher m = new BitStateMatcher(nfa, pattern, laurikari, rejectBundle());
       if (!nameMap.isEmpty()) {
         if (laurikari != null) {
           laurikari.setNameToIndex(nameMap);
