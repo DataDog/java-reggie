@@ -15,15 +15,20 @@
  */
 package com.datadoghq.reggie.runtime;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import java.lang.ref.SoftReference;
 import java.lang.reflect.Field;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,6 +42,10 @@ import org.junit.jupiter.api.Test;
  * one set of lazily-materialized DFA caches (the per-op matcher construction otherwise recomputes
  * the warm DFA on every compile — the dominant cost when a service compiles per operation), and
  * concurrent use of a shared cache must stay correct.
+ *
+ * <p>The shared bundles are held through {@link SoftReference} (bounded retention under heap
+ * pressure — see RuntimeCompiler's cache entries); the eviction tests at the bottom pin the
+ * rebuild-on-clear path that makes that sound.
  */
 class SharedDfaBundleTest {
 
@@ -98,8 +107,36 @@ class SharedDfaBundleTest {
     PikeVMMatcher m2 = new PikeVMMatcher(nfa, pattern, bundle);
     assertSame(bundle.findDfa, findDfa(m1));
     assertSame(bundle.findDfa, findDfa(m2));
+    // Review #140 r4165029351: matchers must retain the bundle itself, so the entry's
+    // SoftReference cannot be GC-cleared while live matchers still pin the bundle's caches.
+    assertSame(bundle, sourceBundle(m1));
+    assertSame(bundle, sourceBundle(m2));
     assertTrue(m1.matches("host:abc"));
     assertTrue(m2.matches(",host:9"));
+  }
+
+  /** The matcher-held bundle reachability anchor (PikeVMMatcher.sourceBundle). */
+  private static PikeVMMatcher.DfaBundle sourceBundle(PikeVMMatcher m) throws Exception {
+    Field f = PikeVMMatcher.class.getDeclaredField("sourceBundle");
+    f.setAccessible(true);
+    return (PikeVMMatcher.DfaBundle) f.get(m);
+  }
+
+  /**
+   * {@link RejectDfaFactory#NONE} marks a known-ineligible NFA: BitStateMatcher must skip its
+   * matcher-private build retry (review #140 r4165029362) and run without a reject DFA.
+   */
+  @Test
+  void noneSentinelSkipsPrivateRejectBuild() throws Exception {
+    String pattern = "\\bhost:[0-9]+";
+    NFA nfa = nfa(pattern);
+    BitStateMatcher m = new BitStateMatcher(nfa, pattern, null, RejectDfaFactory.NONE);
+    Field f = BitStateMatcher.class.getDeclaredField("rejectDfa");
+    f.setAccessible(true);
+    assertNull(f.get(m), "NONE must resolve to no reject DFA, not a private rebuild");
+    assertTrue(m.matches("host:123"));
+    assertFalse(m.matches("host:abc"));
+    assertFalse(m.matches("noservicehere"));
   }
 
   @Test
@@ -173,5 +210,74 @@ class SharedDfaBundleTest {
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  // ── Eviction: a GC-cleared SoftReference in a cache entry must yield a correct rebuilt bundle.
+  // \b(a?)+x routes to PIKEVM_CAPTURE and \b(a)+x to BITSTATE_CAPTURE (word boundary skips the
+  // hybrid; bitstate eligibility splits the two — verified via RuntimeCompiler.describeRouting).
+  private static Object cacheEntry(String cacheField, String pattern) throws Exception {
+    Field f = RuntimeCompiler.class.getDeclaredField(cacheField);
+    f.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Map<Object, Object> cache = (Map<Object, Object>) f.get(null);
+    Object entry = cache.get(pattern);
+    assertNotNull(entry, "compile must register the pattern in " + cacheField);
+    return entry;
+  }
+
+  private static void evictBundle(Object entry, String fieldName) throws Exception {
+    Field f = entry.getClass().getDeclaredField(fieldName);
+    f.setAccessible(true);
+    f.set(entry, new SoftReference<>(null));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <T> T referencedBundle(Object entry, String fieldName) throws Exception {
+    Field f = entry.getClass().getDeclaredField(fieldName);
+    f.setAccessible(true);
+    return ((SoftReference<T>) f.get(entry)).get();
+  }
+
+  @Test
+  void evictedPikeVmBundleIsRebuiltCorrectly() throws Exception {
+    String pattern = "\\b(a?)+x";
+    assertTrue(Reggie.compile(pattern).matches("ax")); // builds the entry + bundle
+    Object entry = cacheEntry("PIKEVM_NFA_CACHE", pattern);
+    PikeVMMatcher.DfaBundle original = referencedBundle(entry, "dfaBundle");
+    assertNotNull(original, "first compile must have built the bundle strongly");
+
+    evictBundle(entry, "dfaBundle"); // simulate GC having cleared the SoftReference
+
+    ReggieMatcher rebuilt = Reggie.compile(pattern);
+    PikeVMMatcher.DfaBundle second = referencedBundle(entry, "dfaBundle");
+    assertNotNull(second, "evicted entry must rebuild the bundle, not stay null");
+    assertTrue(second != original, "rebuilt bundle must not be the evicted instance");
+    assertTrue(rebuilt.matches("ax"));
+    assertTrue(rebuilt.matches("x")); // (a?)+ can iterate on the empty string
+    assertTrue(rebuilt.find(" ax")); // space->a is a word boundary
+    assertFalse(rebuilt.find("yax")); // no word boundary before 'a' mid-word
+    assertFalse(rebuilt.matches("a"));
+  }
+
+  @Test
+  void evictedBitStateRejectBundleIsRebuiltCorrectly() throws Exception {
+    String pattern = "\\b(a)+x";
+    assertTrue(Reggie.compile(pattern).matches("ax")); // builds the entry + reject bundle
+    Object entry = cacheEntry("BITSTATE_NFA_CACHE", pattern);
+    RejectDfaFactory.Bundle original = referencedBundle(entry, "rejectBundle");
+    assertNotNull(original, "first compile must have built the reject bundle strongly");
+
+    evictBundle(entry, "rejectBundle"); // simulate GC having cleared the SoftReference
+
+    ReggieMatcher rebuilt = Reggie.compile(pattern);
+    RejectDfaFactory.Bundle second = referencedBundle(entry, "rejectBundle");
+    assertNotNull(second, "evicted entry must rebuild the reject bundle, not stay null");
+    assertTrue(second != original, "rebuilt bundle must not be the evicted instance");
+    assertTrue(rebuilt.matches("ax"));
+    assertTrue(rebuilt.matches("aaax"));
+    assertTrue(rebuilt.find(" aax")); // space->a is a word boundary
+    assertFalse(rebuilt.find("yaax")); // no word boundary before 'a' mid-word
+    assertFalse(rebuilt.matches("x"));
+    assertFalse(rebuilt.matches("a"));
   }
 }

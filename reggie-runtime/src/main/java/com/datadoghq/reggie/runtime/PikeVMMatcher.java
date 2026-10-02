@@ -138,6 +138,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private final LazyDFACache findDfa;
   private final NfaStep findStep;
   private final boolean findCanMatchEmpty;
+
+  // Reachability anchor for the bundle this matcher's caches came from (null when the caches
+  // were built matcher-privately). RuntimeCompiler soft-holds the shared bundle in its cache
+  // entry; holding it here too means the SoftReference cannot be cleared while any matcher
+  // built from that bundle is alive, so a later compile() reuses the same warmed caches
+  // instead of allocating a duplicate bundle over caches the live matchers already pin.
+  // Never read — kept purely for GC reachability.
+  @SuppressWarnings("unused")
+  private final DfaBundle sourceBundle;
+
   private int[] startClosureIds; // pos-0 closure (START/\A/^ml anchors crossed); set in ctor
   private int[] reinjectClosureIds; // mid-line pos>0 closure (START/\A/^ml blocked); set in ctor
   // After-newline reinject closure: START/\A blocked, but START_MULTILINE crossed (^ fires after
@@ -203,6 +213,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     this.nfa = nfa;
+    this.sourceBundle = bundle;
     this.groupCount = nfa.getGroupCount();
     this.stateCount = nfa.getStates().size();
 
