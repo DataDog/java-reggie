@@ -17,6 +17,7 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -106,8 +107,36 @@ class SharedDfaBundleTest {
     PikeVMMatcher m2 = new PikeVMMatcher(nfa, pattern, bundle);
     assertSame(bundle.findDfa, findDfa(m1));
     assertSame(bundle.findDfa, findDfa(m2));
+    // Review #140 r4165029351: matchers must retain the bundle itself, so the entry's
+    // SoftReference cannot be GC-cleared while live matchers still pin the bundle's caches.
+    assertSame(bundle, sourceBundle(m1));
+    assertSame(bundle, sourceBundle(m2));
     assertTrue(m1.matches("host:abc"));
     assertTrue(m2.matches(",host:9"));
+  }
+
+  /** The matcher-held bundle reachability anchor (PikeVMMatcher.sourceBundle). */
+  private static PikeVMMatcher.DfaBundle sourceBundle(PikeVMMatcher m) throws Exception {
+    Field f = PikeVMMatcher.class.getDeclaredField("sourceBundle");
+    f.setAccessible(true);
+    return (PikeVMMatcher.DfaBundle) f.get(m);
+  }
+
+  /**
+   * {@link RejectDfaFactory#NONE} marks a known-ineligible NFA: BitStateMatcher must skip its
+   * matcher-private build retry (review #140 r4165029362) and run without a reject DFA.
+   */
+  @Test
+  void noneSentinelSkipsPrivateRejectBuild() throws Exception {
+    String pattern = "\\bhost:[0-9]+";
+    NFA nfa = nfa(pattern);
+    BitStateMatcher m = new BitStateMatcher(nfa, pattern, null, RejectDfaFactory.NONE);
+    Field f = BitStateMatcher.class.getDeclaredField("rejectDfa");
+    f.setAccessible(true);
+    assertNull(f.get(m), "NONE must resolve to no reject DFA, not a private rebuild");
+    assertTrue(m.matches("host:123"));
+    assertFalse(m.matches("host:abc"));
+    assertFalse(m.matches("noservicehere"));
   }
 
   @Test

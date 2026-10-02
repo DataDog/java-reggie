@@ -141,6 +141,15 @@ final class BitStateMatcher extends ReggieMatcher {
   private final LazyDFACache rejectDfa;
   private final NfaStep rejectStep;
 
+  // Reachability anchor for the bundle this matcher's reject cache came from (null when the
+  // bundle was built matcher-privately). RuntimeCompiler soft-holds the shared bundle in its
+  // cache entry; holding it here too means the SoftReference cannot be cleared while any
+  // matcher built from that bundle is alive, so a later compile() reuses the same warmed
+  // reject cache instead of allocating a duplicate over a cache live matchers already pin.
+  // Never read — kept purely for GC reachability.
+  @SuppressWarnings("unused")
+  private final RejectDfaFactory.Bundle sourceBundle;
+
   // Scratch output for localizeForFind(), reused across calls to avoid a two-int allocation per
   // find()/findFrom()/findMatchFrom() call — safe because a single matcher instance is never
   // shared across threads or concurrent calls (see class-level thread-safety contract).
@@ -170,7 +179,8 @@ final class BitStateMatcher extends ReggieMatcher {
   /**
    * @param sharedRejectBundle NFA-derived reject-DFA bundle shared across matchers of the same NFA
    *     ({@link RejectDfaFactory.Bundle} is immutable and its {@link LazyDFACache} is safe for
-   *     concurrent population); {@code null} builds a matcher-private bundle.
+   *     concurrent population); {@code null} builds a matcher-private bundle; {@link
+   *     RejectDfaFactory#NONE} records a known-ineligible NFA and skips construction entirely.
    */
   BitStateMatcher(
       NFA nfa,
@@ -272,6 +282,7 @@ final class BitStateMatcher extends ReggieMatcher {
 
     RejectDfaFactory.Bundle rejectBundle =
         sharedRejectBundle == null ? RejectDfaFactory.build(nfa) : sharedRejectBundle;
+    this.sourceBundle = sharedRejectBundle;
     this.rejectDfa = rejectBundle == null ? null : rejectBundle.dfa;
     this.rejectStep = rejectBundle == null ? null : rejectBundle.step;
 

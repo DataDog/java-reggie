@@ -248,9 +248,6 @@ public class RuntimeCompiler {
     // pattern allocates a private bundle for its PikeVM/BitState half.
     private volatile SoftReference<PikeVMMatcher.DfaBundle> pikeVmBundle;
     private volatile SoftReference<RejectDfaFactory.Bundle> bitStateBundle;
-    // Set once RejectDfaFactory.build returns null for captureNfa (ineligible: assertions,
-    // backrefs, or the over-approximation matches empty) — skips the re-scan on later compiles.
-    private volatile boolean bitStateIneligible;
 
     HybridEntry(
         ReggieMatcher dfaMatcher,
@@ -295,17 +292,17 @@ public class RuntimeCompiler {
       return bundle;
     }
 
+    /**
+     * The shared reject bundle for the capture NFA, or {@link RejectDfaFactory#NONE} when it is
+     * ineligible (so {@link BitStateMatcher} skips its matcher-private build retry). Never null.
+     */
     RejectDfaFactory.Bundle bitStateBundle() {
-      if (bitStateIneligible) {
-        return null;
-      }
       SoftReference<RejectDfaFactory.Bundle> ref = bitStateBundle;
       RejectDfaFactory.Bundle bundle = ref != null ? ref.get() : null;
       if (bundle == null) {
         bundle = RejectDfaFactory.build(captureNfa);
         if (bundle == null) {
-          bitStateIneligible = true;
-          return null;
+          bundle = RejectDfaFactory.NONE;
         }
         bitStateBundle = new SoftReference<>(bundle);
       }
@@ -343,12 +340,10 @@ public class RuntimeCompiler {
     // NFA-derived reject-DFA bundle shared across every matcher this entry produces. Soft-held for
     // the same reason PikeVMEntry soft-holds its DfaBundle (fixed-capacity LazyDFACache arrays);
     // the build is deterministic, so a rebuilt or concurrently duplicated bundle is equivalent.
-    // rejectIneligible pins the negative result: for NFAs where the over-approximating reject DFA
-    // is unsound (assertions/backrefs) or useless (matches empty), RejectDfaFactory.build returns
-    // null every time, and re-running its O(states) scan per matcher is pure waste.
+    // When the NFA is ineligible (see RejectDfaFactory.NONE), the sentinel is stored instead of a
+    // real bundle: it is strongly held, so the SoftReference never clears and the O(states)
+    // ineligibility scan runs exactly once per entry instead of once per matcher.
     private volatile SoftReference<RejectDfaFactory.Bundle> rejectBundle;
-    // Set once RejectDfaFactory.build returns null for nfa (see field doc above).
-    private volatile boolean rejectIneligible;
 
     BitStateEntry(NFA nfa, Map<String, Integer> nameMap, boolean usePosixLastMatch) {
       this.nfa = nfa;
@@ -356,17 +351,17 @@ public class RuntimeCompiler {
       this.usePosixLastMatch = usePosixLastMatch;
     }
 
+    /**
+     * The shared reject bundle, or {@link RejectDfaFactory#NONE} when the NFA is ineligible (so
+     * {@link BitStateMatcher} skips its matcher-private build retry). Never null.
+     */
     RejectDfaFactory.Bundle rejectBundle() {
-      if (rejectIneligible) {
-        return null;
-      }
       SoftReference<RejectDfaFactory.Bundle> ref = rejectBundle;
       RejectDfaFactory.Bundle bundle = ref != null ? ref.get() : null;
       if (bundle == null) {
         bundle = RejectDfaFactory.build(nfa);
         if (bundle == null) {
-          rejectIneligible = true;
-          return null;
+          bundle = RejectDfaFactory.NONE;
         }
         rejectBundle = new SoftReference<>(bundle);
       }

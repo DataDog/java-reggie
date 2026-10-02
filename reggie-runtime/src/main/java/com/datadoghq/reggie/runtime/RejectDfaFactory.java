@@ -46,6 +46,15 @@ final class RejectDfaFactory {
     }
   }
 
+  /**
+   * Sentinel for NFAs already determined to be reject-DFA ineligible ({@link #build} returned null:
+   * assertions/backrefs, or the over-approximation matches empty). Passing this instead of {@code
+   * null} to {@code BitStateMatcher} skips the matcher-private {@code build(nfa)} retry — a
+   * non-null bundle with null fields resolves to {@code rejectDfa == null}, exactly as a null
+   * result does. Strongly held, so a SoftReference carrying it is never cleared.
+   */
+  static final Bundle NONE = new Bundle(null, null);
+
   static Bundle build(NFA nfa) {
     for (NFA.NFAState s : nfa.getStates()) {
       if (s.assertionType != null || s.backrefCheck != null) return null;
