@@ -78,6 +78,7 @@ import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenera
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandles;
+import java.lang.ref.SoftReference;
 import java.lang.reflect.Constructor;
 import java.util.Collections;
 import java.util.List;
@@ -154,9 +155,17 @@ public class RuntimeCompiler {
   private static final class PikeVMEntry {
     final NFA nfa;
     final Map<String, Integer> nameMap;
-    // NFA-derived DFA setup shared across every matcher this entry produces. Built once on first
-    // use; the build is deterministic, so a concurrent first-use race yields equivalent bundles.
-    private volatile PikeVMMatcher.DfaBundle dfaBundle;
+    // NFA-derived DFA setup shared across every matcher this entry produces. Held through a
+    // SoftReference: each DfaBundle eagerly allocates fixed-capacity LazyDFACache backing arrays
+    // (~36 KiB per cache on compressed-oops heaps, ~70 KiB without; several MiB once populated), so
+    // keeping one strongly per cached pattern
+    // would let a high-cardinality pattern workload exhaust the heap through the otherwise
+    // long-lived PIKEVM_NFA_CACHE. Soft retention keeps the sharing benefit while memory is
+    // plentiful and lets the GC evict under pressure; the build is deterministic (a pure function
+    // of the NFA), so a rebuilt or concurrently duplicated bundle is equivalent. Matchers copy the
+    // bundle's fields into their own final state (see PikeVMMatcher's constructor), so eviction
+    // never affects live matcher instances.
+    private volatile SoftReference<PikeVMMatcher.DfaBundle> dfaBundle;
 
     PikeVMEntry(NFA nfa, Map<String, Integer> nameMap) {
       this.nfa = nfa;
@@ -164,10 +173,11 @@ public class RuntimeCompiler {
     }
 
     ReggieMatcher newMatcher(String pattern) {
-      PikeVMMatcher.DfaBundle bundle = dfaBundle;
+      SoftReference<PikeVMMatcher.DfaBundle> ref = dfaBundle;
+      PikeVMMatcher.DfaBundle bundle = ref != null ? ref.get() : null;
       if (bundle == null) {
         bundle = new PikeVMMatcher.DfaBundle(nfa);
-        dfaBundle = bundle;
+        dfaBundle = new SoftReference<>(bundle);
       }
       ReggieMatcher m = new PikeVMMatcher(nfa, pattern, bundle);
       if (!nameMap.isEmpty()) {
@@ -232,6 +242,15 @@ public class RuntimeCompiler {
         nfaHalfClass; // OPTIMIZED_NFA half; null for PikeVM/BitState
     final boolean pruned; // dfa-half carries leftmost-first pruning
     final Map<String, Integer> nameMap;
+    // NFA-half bundles, soft-held and shared across matchers this entry produces — the same
+    // bounded-retention contract as PikeVMEntry/BitStateEntry (fixed-capacity LazyDFACache
+    // arrays; deterministic rebuild after eviction). Without this, every compile() of a hybrid
+    // pattern allocates a private bundle for its PikeVM/BitState half.
+    private volatile SoftReference<PikeVMMatcher.DfaBundle> pikeVmBundle;
+    private volatile SoftReference<RejectDfaFactory.Bundle> bitStateBundle;
+    // Set once RejectDfaFactory.build returns null for captureNfa (ineligible: assertions,
+    // backrefs, or the over-approximation matches empty) — skips the re-scan on later compiles.
+    private volatile boolean bitStateIneligible;
 
     HybridEntry(
         ReggieMatcher dfaMatcher,
@@ -252,7 +271,7 @@ public class RuntimeCompiler {
       ReggieMatcher nfaMatcher =
           nfaHalfClass != null
               ? nfaHalfClass.getDeclaredConstructor(String.class).newInstance(pattern)
-              : newHybridNfaHalf(captureNfa, originalResult, pattern);
+              : newHybridNfaHalf(pattern);
       ReggieMatcher m =
           dfaMatcher == null
               ? nfaMatcher
@@ -264,6 +283,44 @@ public class RuntimeCompiler {
         }
       }
       return m;
+    }
+
+    PikeVMMatcher.DfaBundle pikeVmBundle() {
+      SoftReference<PikeVMMatcher.DfaBundle> ref = pikeVmBundle;
+      PikeVMMatcher.DfaBundle bundle = ref != null ? ref.get() : null;
+      if (bundle == null) {
+        bundle = new PikeVMMatcher.DfaBundle(captureNfa);
+        pikeVmBundle = new SoftReference<>(bundle);
+      }
+      return bundle;
+    }
+
+    RejectDfaFactory.Bundle bitStateBundle() {
+      if (bitStateIneligible) {
+        return null;
+      }
+      SoftReference<RejectDfaFactory.Bundle> ref = bitStateBundle;
+      RejectDfaFactory.Bundle bundle = ref != null ? ref.get() : null;
+      if (bundle == null) {
+        bundle = RejectDfaFactory.build(captureNfa);
+        if (bundle == null) {
+          bitStateIneligible = true;
+          return null;
+        }
+        bitStateBundle = new SoftReference<>(bundle);
+      }
+      return bundle;
+    }
+
+    /** Mirrors the standalone engine choice for the NFA half (BitState for BITSTATE originals). */
+    private ReggieMatcher newHybridNfaHalf(String pattern) throws Exception {
+      if (originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
+        ReggieMatcher laurikari =
+            LaurikariDfaSupport.tryCreate(
+                captureNfa, pattern, captureNfa.getGroupCount(), originalResult.usePosixLastMatch);
+        return new BitStateMatcher(captureNfa, pattern, laurikari, bitStateBundle());
+      }
+      return new PikeVMMatcher(captureNfa, pattern, pikeVmBundle());
     }
   }
 
@@ -283,9 +340,15 @@ public class RuntimeCompiler {
     final NFA nfa;
     final Map<String, Integer> nameMap;
     final boolean usePosixLastMatch;
-    // NFA-derived reject-DFA bundle shared across every matcher this entry produces. Built once
-    // on first use; the build is deterministic, so a concurrent first-use race is benign.
-    private volatile RejectDfaFactory.Bundle rejectBundle;
+    // NFA-derived reject-DFA bundle shared across every matcher this entry produces. Soft-held for
+    // the same reason PikeVMEntry soft-holds its DfaBundle (fixed-capacity LazyDFACache arrays);
+    // the build is deterministic, so a rebuilt or concurrently duplicated bundle is equivalent.
+    // rejectIneligible pins the negative result: for NFAs where the over-approximating reject DFA
+    // is unsound (assertions/backrefs) or useless (matches empty), RejectDfaFactory.build returns
+    // null every time, and re-running its O(states) scan per matcher is pure waste.
+    private volatile SoftReference<RejectDfaFactory.Bundle> rejectBundle;
+    // Set once RejectDfaFactory.build returns null for nfa (see field doc above).
+    private volatile boolean rejectIneligible;
 
     BitStateEntry(NFA nfa, Map<String, Integer> nameMap, boolean usePosixLastMatch) {
       this.nfa = nfa;
@@ -294,10 +357,18 @@ public class RuntimeCompiler {
     }
 
     RejectDfaFactory.Bundle rejectBundle() {
-      RejectDfaFactory.Bundle bundle = rejectBundle;
+      if (rejectIneligible) {
+        return null;
+      }
+      SoftReference<RejectDfaFactory.Bundle> ref = rejectBundle;
+      RejectDfaFactory.Bundle bundle = ref != null ? ref.get() : null;
       if (bundle == null) {
         bundle = RejectDfaFactory.build(nfa);
-        rejectBundle = bundle;
+        if (bundle == null) {
+          rejectIneligible = true;
+          return null;
+        }
+        rejectBundle = new SoftReference<>(bundle);
       }
       return bundle;
     }
@@ -2074,17 +2145,6 @@ public class RuntimeCompiler {
       }
     }
     return null;
-  }
-
-  private static ReggieMatcher newHybridNfaHalf(
-      NFA nfa, PatternAnalyzer.MatchingStrategyResult originalResult, String pattern) {
-    if (originalResult.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
-      ReggieMatcher laurikari =
-          LaurikariDfaSupport.tryCreate(
-              nfa, pattern, nfa.getGroupCount(), originalResult.usePosixLastMatch);
-      return new BitStateMatcher(nfa, pattern, laurikari);
-    }
-    return new PikeVMMatcher(nfa, pattern);
   }
 
   /** Instantiate a matcher from bytecode. The pattern string is passed to the constructor. */
