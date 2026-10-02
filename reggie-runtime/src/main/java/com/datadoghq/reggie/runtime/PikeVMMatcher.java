@@ -182,6 +182,18 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   /** Construct a PikeVMMatcher over the given NFA and pattern string. */
   public PikeVMMatcher(NFA nfa, String pattern) {
+    this(nfa, pattern, new DfaBundle(nfa));
+  }
+
+  /**
+   * Construct a PikeVMMatcher over the given NFA, reusing an NFA-derived {@link DfaBundle}: the
+   * lazily-materialized DFA caches and anchor closures are computed once per NFA and shared across
+   * every matcher built for it. {@link LazyDFACache} is designed for concurrent population
+   * (state-set interning through a ConcurrentHashMap, atomic id allocation, release/acquire
+   * publication of the per-state transition tables), so a shared cache is sound across threads;
+   * matcher instances keep all mutable per-call state.
+   */
+  public PikeVMMatcher(NFA nfa, String pattern, DfaBundle bundle) {
     super(pattern);
     if (nfa.hasCountedLoops()) {
       // Counted-loop markers carry no outgoing epsilons; this engine would misread the loops
@@ -255,39 +267,20 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
     singleFirstCharAscii = sfc;
 
-    // T1.4: build the self-anchoring boolean find() DFA when the pattern is anchor/assertion/
-    // backref-free (those need position context the position-independent step can't supply).
-    // START_MULTILINE ((?m)^) is handled by splitting re-injection: mid-line blocks it; after-\n
-    // crosses it, so line-start matches work without fracturing the DFA state space.
-    if (findDfaEligible(nfa)) {
-      int[] start = {nfa.getStartState().id};
-      boolean hasMultiline = nfaHasMultilineAnchor(nfa);
-      // Initial state (pos 0): all start anchors satisfied → cross everything.
-      startClosureIds = sortedEpsilonClosure(start, false, false);
-      if (hasMultiline) {
-        // Mid-line reinject (pos > 0, prev char ≠ \n): block START, STRING_START, and
-        // START_MULTILINE — none of the start-of-line anchors fire in mid-line positions.
-        reinjectClosureIds = sortedEpsilonClosure(start, true, true);
-        // After-newline reinject (prev char == \n): block START/STRING_START but cross
-        // START_MULTILINE — (?m)^ fires at the start of every line, i.e. after \n.
-        reinjectAfterNlClosureIds = sortedEpsilonClosure(start, true, false);
-      } else {
-        reinjectClosureIds = sortedEpsilonClosure(start, true, false);
-        reinjectAfterNlClosureIds = null;
-      }
-      boolean empty = false;
-      for (int id : startClosureIds) {
-        if (isAccept[id]) {
-          empty = true;
-          break;
-        }
-      }
-      findCanMatchEmpty = empty;
-      int[] acceptArr = new int[nfa.getAcceptStates().size()];
-      int ai = 0;
-      for (NFA.NFAState s : nfa.getAcceptStates()) acceptArr[ai++] = s.id;
-      findDfa = new LazyDFACache(startClosureIds, acceptArr);
-      if (hasMultiline) {
+    // T1.4/T1.6/reject DFA setup: NFA-derived and shared via DfaBundle (computed once per NFA;
+    // see DfaBundle for the thread-safety argument). The step functions stay per-instance: their
+    // closures route through transitionTargets/sortedEpsilonClosure over the per-matcher
+    // mergeScratch buffer.
+    findDfa = bundle.findDfa;
+    findCanMatchEmpty = bundle.findCanMatchEmpty;
+    startClosureIds = bundle.startClosureIds;
+    reinjectClosureIds = bundle.reinjectClosureIds;
+    reinjectAfterNlClosureIds = bundle.reinjectAfterNlClosureIds;
+    matchesDfa = bundle.matchesDfa;
+    rejectDfa = bundle.rejectDfa;
+    rejectStartClosureIds = bundle.rejectStartClosureIds;
+    if (findDfa != null) {
+      if (reinjectAfterNlClosureIds != null) {
         // After consuming '\n', inject the after-newline closure (crosses START_MULTILINE).
         findStep = (cur, c) -> findStepClosureMultiline(transitionTargets(cur, (char) c), c);
         // matches(): after '\n', START_MULTILINE can fire; at all other positions block it.
@@ -300,42 +293,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
         matchesStep =
             (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c), true, false);
       }
-      matchesDfa = new LazyDFACache(startClosureIds, acceptArr);
     } else {
-      findDfa = null;
       findStep = null;
-      findCanMatchEmpty = false;
-      matchesDfa = null;
       matchesStep = null;
-      reinjectAfterNlClosureIds = null;
     }
-
-    // Build the over-approximating reject DFA for anchored (but assertion/backref-free) patterns
-    // the exact findDfa rejected. It crosses every anchor as epsilon → accepts a superset → a
-    // sound fast-reject (see field doc). Skipped when the over-approximation can match empty (it
-    // would then accept at every position, making it useless as a reject filter).
-    if (findDfa == null && noAssertionsOrBackrefs(nfa)) {
-      int[] startAll = sortedEpsilonClosure(new int[] {nfa.getStartState().id}, false, false);
-      boolean approxEmpty = false;
-      for (int id : startAll) {
-        if (isAccept[id]) {
-          approxEmpty = true;
-          break;
-        }
-      }
-      if (approxEmpty) {
-        rejectDfa = null;
-        rejectStep = null;
-      } else {
-        rejectStartClosureIds = startAll;
-        int[] acceptArr = new int[nfa.getAcceptStates().size()];
-        int ai = 0;
-        for (NFA.NFAState s : nfa.getAcceptStates()) acceptArr[ai++] = s.id;
-        rejectDfa = new LazyDFACache(startAll, acceptArr);
-        rejectStep = (cur, c) -> rejectStepClosure(transitionTargets(cur, (char) c));
-      }
+    if (rejectDfa != null) {
+      rejectStep = (cur, c) -> rejectStepClosure(transitionTargets(cur, (char) c));
     } else {
-      rejectDfa = null;
       rejectStep = null;
     }
 
@@ -356,6 +320,154 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * '\n' the DFA re-injects a closure that crosses START_MULTILINE anchors; at all other positions
    * a closure that blocks them is used. Both closures block START/STRING_START (pos-0-only).
    */
+  /**
+   * NFA-derived, immutable matcher setup shared across every {@link PikeVMMatcher} built for the
+   * same NFA: the lazily-materialized DFA caches ({@link LazyDFACache} is safe for concurrent
+   * population &mdash; state-set interning through a ConcurrentHashMap, atomic id allocation, and
+   * release/acquire publication of the per-state transition tables) plus the anchor closures the
+   * per-matcher step functions branch on. Everything here is a deterministic function of the NFA,
+   * so concurrently built bundles for one NFA are equivalent.
+   */
+  static final class DfaBundle {
+    final LazyDFACache findDfa;
+    final LazyDFACache matchesDfa;
+    final LazyDFACache rejectDfa;
+    final int[] startClosureIds;
+    final int[] reinjectClosureIds;
+    final int[] reinjectAfterNlClosureIds;
+    final int[] rejectStartClosureIds;
+    final boolean findCanMatchEmpty;
+
+    DfaBundle(NFA nfa) {
+      if (findDfaEligible(nfa)) {
+        int stateCount = nfa.getStates().size();
+        NFA.NFAState[] statesById = new NFA.NFAState[stateCount];
+        for (NFA.NFAState s : nfa.getStates()) {
+          statesById[s.id] = s;
+        }
+        boolean[] isAccept = new boolean[stateCount];
+        for (NFA.NFAState s : nfa.getAcceptStates()) {
+          isAccept[s.id] = true;
+        }
+        int[] start = {nfa.getStartState().id};
+        boolean hasMultiline = nfaHasMultilineAnchor(nfa);
+        // Initial state (pos 0): all start anchors satisfied -> cross everything.
+        startClosureIds = sortedEpsilonClosure(statesById, stateCount, start, false, false);
+        if (hasMultiline) {
+          // Mid-line reinject (pos > 0, prev char != \n): block START, STRING_START, and
+          // START_MULTILINE - none of the start-of-line anchors fire in mid-line positions.
+          reinjectClosureIds = sortedEpsilonClosure(statesById, stateCount, start, true, true);
+          // After-newline reinject (prev char == \n): block START/STRING_START but cross
+          // START_MULTILINE - (?m)^ fires at the start of every line, i.e. after \n.
+          reinjectAfterNlClosureIds =
+              sortedEpsilonClosure(statesById, stateCount, start, true, false);
+        } else {
+          reinjectClosureIds = sortedEpsilonClosure(statesById, stateCount, start, true, false);
+          reinjectAfterNlClosureIds = null;
+        }
+        boolean empty = false;
+        for (int id : startClosureIds) {
+          if (isAccept[id]) {
+            empty = true;
+            break;
+          }
+        }
+        findCanMatchEmpty = empty;
+        int[] acceptArr = new int[nfa.getAcceptStates().size()];
+        int ai = 0;
+        for (NFA.NFAState s : nfa.getAcceptStates()) acceptArr[ai++] = s.id;
+        findDfa = new LazyDFACache(startClosureIds, acceptArr);
+        matchesDfa = new LazyDFACache(startClosureIds, acceptArr);
+        rejectDfa = null;
+        rejectStartClosureIds = null;
+      } else {
+        findDfa = null;
+        matchesDfa = null;
+        findCanMatchEmpty = false;
+        startClosureIds = null;
+        reinjectClosureIds = null;
+        reinjectAfterNlClosureIds = null;
+        // Build the over-approximating reject DFA for anchored (but assertion/backref-free)
+        // patterns the exact findDfa rejected. It crosses every anchor as epsilon -> accepts a
+        // superset -> a sound fast-reject (see rejectDfa field doc). Skipped when the
+        // over-approximation can match empty (it would then accept at every position, making it
+        // useless as a reject filter).
+        if (noAssertionsOrBackrefs(nfa)) {
+          int stateCount = nfa.getStates().size();
+          NFA.NFAState[] statesById = new NFA.NFAState[stateCount];
+          for (NFA.NFAState s : nfa.getStates()) {
+            statesById[s.id] = s;
+          }
+          boolean[] isAccept = new boolean[stateCount];
+          for (NFA.NFAState s : nfa.getAcceptStates()) {
+            isAccept[s.id] = true;
+          }
+          int[] startAll =
+              sortedEpsilonClosure(
+                  statesById, stateCount, new int[] {nfa.getStartState().id}, false, false);
+          boolean approxEmpty = false;
+          for (int id : startAll) {
+            if (isAccept[id]) {
+              approxEmpty = true;
+              break;
+            }
+          }
+          if (approxEmpty) {
+            rejectDfa = null;
+            rejectStartClosureIds = null;
+          } else {
+            rejectStartClosureIds = startAll;
+            int[] acceptArr = new int[nfa.getAcceptStates().size()];
+            int ai = 0;
+            for (NFA.NFAState s : nfa.getAcceptStates()) acceptArr[ai++] = s.id;
+            rejectDfa = new LazyDFACache(startAll, acceptArr);
+          }
+        } else {
+          rejectDfa = null;
+          rejectStartClosureIds = null;
+        }
+      }
+    }
+
+    private static int[] sortedEpsilonClosure(
+        NFA.NFAState[] statesById,
+        int stateCount,
+        int[] seed,
+        boolean blockStartAnchor,
+        boolean blockMultilineAnchor) {
+      boolean[] inSet = new boolean[stateCount];
+      int[] stack = new int[stateCount];
+      int sp = 0;
+      for (int id : seed) {
+        if (!inSet[id]) {
+          inSet[id] = true;
+          stack[sp++] = id;
+        }
+      }
+      int count = sp;
+      while (sp > 0) {
+        int id = stack[--sp];
+        NFA.AnchorType a = statesById[id].anchor;
+        if (a != null) {
+          if (blockStartAnchor && (a == NFA.AnchorType.START || a == NFA.AnchorType.STRING_START))
+            continue;
+          if (blockMultilineAnchor && a == NFA.AnchorType.START_MULTILINE) continue;
+        }
+        for (NFA.NFAState e : statesById[id].getEpsilonTransitions()) {
+          if (!inSet[e.id]) {
+            inSet[e.id] = true;
+            stack[sp++] = e.id;
+            count++;
+          }
+        }
+      }
+      int[] out = new int[count];
+      int oi = 0;
+      for (int id = 0; id < stateCount; id++) if (inSet[id]) out[oi++] = id;
+      return out; // ascending
+    }
+  }
+
   private static boolean findDfaEligible(NFA nfa) {
     boolean hasStartAnchor = false;
     for (NFA.NFAState s : nfa.getStates()) {

@@ -164,6 +164,19 @@ final class BitStateMatcher extends ReggieMatcher {
   }
 
   BitStateMatcher(NFA nfa, String pattern, ReggieMatcher laurikari) {
+    this(nfa, pattern, laurikari, null);
+  }
+
+  /**
+   * @param sharedRejectBundle NFA-derived reject-DFA bundle shared across matchers of the same NFA
+   *     ({@link RejectDfaFactory.Bundle} is immutable and its {@link LazyDFACache} is safe for
+   *     concurrent population); {@code null} builds a matcher-private bundle.
+   */
+  BitStateMatcher(
+      NFA nfa,
+      String pattern,
+      ReggieMatcher laurikari,
+      RejectDfaFactory.Bundle sharedRejectBundle) {
     super(pattern);
     if (nfa.hasCountedLoops()) {
       // Bit-parallel simulation cannot carry per-thread iteration counters; the loops would
@@ -257,7 +270,8 @@ final class BitStateMatcher extends ReggieMatcher {
     }
     this.singleFirstCharAscii = singleChar;
 
-    RejectDfaFactory.Bundle rejectBundle = RejectDfaFactory.build(nfa);
+    RejectDfaFactory.Bundle rejectBundle =
+        sharedRejectBundle == null ? RejectDfaFactory.build(nfa) : sharedRejectBundle;
     this.rejectDfa = rejectBundle == null ? null : rejectBundle.dfa;
     this.rejectStep = rejectBundle == null ? null : rejectBundle.step;
 
