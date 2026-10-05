@@ -245,9 +245,12 @@ public class RuntimeCompiler {
     // NFA-half bundles, soft-held and shared across matchers this entry produces — the same
     // bounded-retention contract as PikeVMEntry/BitStateEntry (fixed-capacity LazyDFACache
     // arrays; deterministic rebuild after eviction). Without this, every compile() of a hybrid
-    // pattern allocates a private bundle for its PikeVM/BitState half.
+    // pattern allocates a private bundle for its PikeVM/BitState half. The BitState bundle is
+    // the full NFA-derived setup (tables, greedy-loop shapes, prefilter, reject bundle with its
+    // LazyDFACache/NfaStep); the build is a deterministic function of the NFA, and live matchers
+    // pin their bundle via BitStateMatcher.sourceBundle, so eviction never affects them.
     private volatile SoftReference<PikeVMMatcher.DfaBundle> pikeVmBundle;
-    private volatile SoftReference<RejectDfaFactory.Bundle> bitStateBundle;
+    private volatile SoftReference<BitStateMatcher.Bundle> bitStateBundle;
 
     HybridEntry(
         ReggieMatcher dfaMatcher,
@@ -293,17 +296,15 @@ public class RuntimeCompiler {
     }
 
     /**
-     * The shared reject bundle for the capture NFA, or {@link RejectDfaFactory#NONE} when it is
-     * ineligible (so {@link BitStateMatcher} skips its matcher-private build retry). Never null.
+     * The full shared BitState setup bundle for the capture NFA, rebuilding it after eviction.
+     * The build is a deterministic function of the NFA, so a concurrently duplicated bundle is
+     * equivalent (see {@link BitStateMatcher.Bundle}).
      */
-    RejectDfaFactory.Bundle bitStateBundle() {
-      SoftReference<RejectDfaFactory.Bundle> ref = bitStateBundle;
-      RejectDfaFactory.Bundle bundle = ref != null ? ref.get() : null;
+    BitStateMatcher.Bundle bitStateBundle() {
+      SoftReference<BitStateMatcher.Bundle> ref = bitStateBundle;
+      BitStateMatcher.Bundle bundle = ref != null ? ref.get() : null;
       if (bundle == null) {
-        bundle = RejectDfaFactory.build(captureNfa);
-        if (bundle == null) {
-          bundle = RejectDfaFactory.NONE;
-        }
+        bundle = new BitStateMatcher.Bundle(captureNfa);
         bitStateBundle = new SoftReference<>(bundle);
       }
       return bundle;
@@ -337,13 +338,15 @@ public class RuntimeCompiler {
     final NFA nfa;
     final Map<String, Integer> nameMap;
     final boolean usePosixLastMatch;
-    // NFA-derived reject-DFA bundle shared across every matcher this entry produces. Soft-held for
-    // the same reason PikeVMEntry soft-holds its DfaBundle (fixed-capacity LazyDFACache arrays);
-    // the build is deterministic, so a rebuilt or concurrently duplicated bundle is equivalent.
-    // When the NFA is ineligible (see RejectDfaFactory.NONE), the sentinel is stored instead of a
-    // real bundle: it is strongly held, so the SoftReference never clears and the O(states)
-    // ineligibility scan runs exactly once per entry instead of once per matcher.
-    private volatile SoftReference<RejectDfaFactory.Bundle> rejectBundle;
+    // NFA-derived BitState setup shared by every matcher this entry produces (tables, greedy-loop
+    // shapes, single-first-ASCII prefilter, and the reject-DFA bundle with its LazyDFACache and
+    // NfaStep). Soft-held for the same bounded-retention reason PikeVMEntry soft-holds its
+    // DfaBundle (fixed-capacity LazyDFACache arrays): the build is a deterministic function of the
+    // NFA, so a rebuilt or concurrently duplicated bundle is equivalent, and live matchers pin
+    // their bundle via BitStateMatcher.sourceBundle, so eviction never affects them.
+    // Matcher-written state (buffers, stacks, visited, counters, Laurikari/fallback instances)
+    // stays per matcher.
+    private volatile SoftReference<BitStateMatcher.Bundle> bundle;
 
     BitStateEntry(NFA nfa, Map<String, Integer> nameMap, boolean usePosixLastMatch) {
       this.nfa = nfa;
@@ -352,20 +355,18 @@ public class RuntimeCompiler {
     }
 
     /**
-     * The shared reject bundle, or {@link RejectDfaFactory#NONE} when the NFA is ineligible (so
-     * {@link BitStateMatcher} skips its matcher-private build retry). Never null.
+     * The full shared BitState setup bundle, rebuilding it after eviction. The build is a
+     * deterministic function of the NFA, so a concurrently duplicated bundle is equivalent (see
+     * {@link BitStateMatcher.Bundle}).
      */
-    RejectDfaFactory.Bundle rejectBundle() {
-      SoftReference<RejectDfaFactory.Bundle> ref = rejectBundle;
-      RejectDfaFactory.Bundle bundle = ref != null ? ref.get() : null;
-      if (bundle == null) {
-        bundle = RejectDfaFactory.build(nfa);
-        if (bundle == null) {
-          bundle = RejectDfaFactory.NONE;
-        }
-        rejectBundle = new SoftReference<>(bundle);
+    BitStateMatcher.Bundle bundle() {
+      SoftReference<BitStateMatcher.Bundle> ref = bundle;
+      BitStateMatcher.Bundle b = ref != null ? ref.get() : null;
+      if (b == null) {
+        b = new BitStateMatcher.Bundle(nfa);
+        bundle = new SoftReference<>(b);
       }
-      return bundle;
+      return b;
     }
 
     ReggieMatcher newMatcher(String pattern) {
@@ -374,7 +375,7 @@ public class RuntimeCompiler {
       // way through to PikeVMMatcher. null when LaurikariEligibility rejects this pattern.
       ReggieMatcher laurikari =
           LaurikariDfaSupport.tryCreate(nfa, pattern, nfa.getGroupCount(), usePosixLastMatch);
-      ReggieMatcher m = new BitStateMatcher(nfa, pattern, laurikari, rejectBundle());
+      ReggieMatcher m = new BitStateMatcher(nfa, pattern, laurikari, bundle());
       if (!nameMap.isEmpty()) {
         if (laurikari != null) {
           laurikari.setNameToIndex(nameMap);

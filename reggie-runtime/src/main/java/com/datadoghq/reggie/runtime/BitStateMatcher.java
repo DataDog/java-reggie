@@ -141,14 +141,13 @@ final class BitStateMatcher extends ReggieMatcher {
   private final LazyDFACache rejectDfa;
   private final NfaStep rejectStep;
 
-  // Reachability anchor for the bundle this matcher's reject cache came from (null when the
-  // bundle was built matcher-privately). RuntimeCompiler soft-holds the shared bundle in its
-  // cache entry; holding it here too means the SoftReference cannot be cleared while any
-  // matcher built from that bundle is alive, so a later compile() reuses the same warmed
-  // reject cache instead of allocating a duplicate over a cache live matchers already pin.
-  // Never read — kept purely for GC reachability.
+  // Reachability anchor for the shared NFA-derived setup bundle (see {@link Bundle}).
+  // RuntimeCompiler soft-holds the shared bundle in its cache entry; holding it here too means
+  // the SoftReference cannot be cleared while any matcher built from that bundle is alive, so a
+  // later compile() reuses the same warmed setup instead of allocating a duplicate over tables
+  // live matchers already pin. Never read — kept purely for GC reachability.
   @SuppressWarnings("unused")
-  private final RejectDfaFactory.Bundle sourceBundle;
+  private final BitStateMatcher.Bundle sourceBundle;
 
   // Scratch output for localizeForFind(), reused across calls to avoid a two-int allocation per
   // find()/findFrom()/findMatchFrom() call — safe because a single matcher instance is never
@@ -173,22 +172,34 @@ final class BitStateMatcher extends ReggieMatcher {
   }
 
   BitStateMatcher(NFA nfa, String pattern, ReggieMatcher laurikari) {
-    this(nfa, pattern, laurikari, null);
+    this(nfa, pattern, laurikari, new Bundle(nfa));
   }
 
   /**
    * @param sharedRejectBundle NFA-derived reject-DFA bundle shared across matchers of the same NFA
    *     ({@link RejectDfaFactory.Bundle} is immutable and its {@link LazyDFACache} is safe for
    *     concurrent population); {@code null} builds a matcher-private bundle; {@link
-   *     RejectDfaFactory#NONE} records a known-ineligible NFA and skips construction entirely.
+   *     RejectDfaFactory#NONE} records a known-ineligible NFA and skips construction entirely. The
+   *     rest of the NFA-derived setup is always matcher-private here — use the {@link Bundle}
+   *     constructor for full setup sharing.
    */
   BitStateMatcher(
       NFA nfa,
       String pattern,
       ReggieMatcher laurikari,
       RejectDfaFactory.Bundle sharedRejectBundle) {
+    this(nfa, pattern, laurikari, new Bundle(nfa, sharedRejectBundle));
+  }
+
+  /**
+   * @param bundle fully-initialized NFA-derived setup shared across matchers of one cache entry
+   *     (see {@link Bundle}); this constructor only aliases its read-only final fields.
+   */
+  BitStateMatcher(NFA nfa, String pattern, ReggieMatcher laurikari, Bundle bundle) {
     super(pattern);
     if (nfa.hasCountedLoops()) {
+      // Retained even though Bundle's constructor already rejects counted-loop NFAs, so direct
+      // construction keeps the contract no matter where a bundle came from.
       // Bit-parallel simulation cannot carry per-thread iteration counters; the loops would
       // behave as unbounded. RuntimeCompiler routes such NFAs to BackrefBacktrackMatcher.
       throw new IllegalStateException(
@@ -197,51 +208,34 @@ final class BitStateMatcher extends ReggieMatcher {
     this.laurikari = laurikari;
     this.nfa = nfa;
     this.patternText = pattern;
-    this.groupCount = nfa.getGroupCount();
-    this.stateCount = nfa.getStates().size();
-    this.startStateId = nfa.getStartState().id;
+    // Reachability anchor for the shared bundle (never read — kept purely for GC reachability):
+    // RuntimeCompiler soft-holds the bundle in its cache entry; holding it here too means the
+    // SoftReference cannot be cleared while any matcher built from that bundle is alive, so a
+    // later compile() reuses the same warmed setup instead of allocating a duplicate over tables
+    // live matchers already pin.
+    this.sourceBundle = bundle;
 
-    statesById = new NFA.NFAState[stateCount];
-    for (NFA.NFAState s : nfa.getStates()) {
-      statesById[s.id] = s;
-    }
-    isAccept = new boolean[stateCount];
-    for (NFA.NFAState s : nfa.getAcceptStates()) {
-      isAccept[s.id] = true;
-    }
+    // Read-only aliasing of the shared bundle's NFA-derived tables (same identities as every
+    // other matcher built from the same entry; kept as final fields on the matcher so the hot
+    // DFS path sees the same code shape as before — no extra indirection through the bundle).
+    this.groupCount = bundle.groupCount;
+    this.stateCount = bundle.stateCount;
+    this.startStateId = bundle.startStateId;
+    this.statesById = bundle.statesById;
+    this.isAccept = bundle.isAccept;
+    this.epsilonTargets = bundle.epsilonTargets;
+    this.transitionCharSets = bundle.transitionCharSets;
+    this.transitionTargets = bundle.transitionTargets;
+    this.anchorBySid = bundle.anchorBySid;
+    this.enterGroupBySid = bundle.enterGroupBySid;
+    this.exitGroupBySid = bundle.exitGroupBySid;
+    this.greedyLoopMid = bundle.greedyLoopMid;
+    this.greedyLoopExit = bundle.greedyLoopExit;
+    this.singleFirstCharAscii = bundle.singleFirstCharAscii;
+    this.rejectDfa = bundle.rejectBundle == null ? null : bundle.rejectBundle.dfa;
+    this.rejectStep = bundle.rejectBundle == null ? null : bundle.rejectBundle.step;
 
-    epsilonTargets = new int[stateCount][];
-    transitionCharSets = new CharSet[stateCount][];
-    transitionTargets = new int[stateCount][];
-    anchorBySid = new NFA.AnchorType[stateCount];
-    enterGroupBySid = new int[stateCount];
-    exitGroupBySid = new int[stateCount];
-    for (int i = 0; i < stateCount; i++) {
-      NFA.NFAState s = statesById[i];
-
-      anchorBySid[i] = s.anchor;
-      enterGroupBySid[i] = s.enterGroup == null ? -1 : s.enterGroup;
-      exitGroupBySid[i] = s.exitGroup == null ? -1 : s.exitGroup;
-
-      List<NFA.NFAState> eps = s.getEpsilonTransitions();
-      int[] epsIds = new int[eps.size()];
-      for (int j = 0; j < epsIds.length; j++) {
-        epsIds[j] = eps.get(j).id;
-      }
-      epsilonTargets[i] = epsIds;
-
-      List<NFA.Transition> trans = s.getTransitions();
-      CharSet[] charSets = new CharSet[trans.size()];
-      int[] targets = new int[trans.size()];
-      for (int j = 0; j < charSets.length; j++) {
-        NFA.Transition t = trans.get(j);
-        charSets[j] = t.chars;
-        targets[j] = t.target.id;
-      }
-      transitionCharSets[i] = charSets;
-      transitionTargets[i] = targets;
-    }
-
+    // Matcher-written state below is always fresh per matcher — never taken from the bundle.
     int slotCount = 2 * (groupCount + 1);
     caps = new int[slotCount];
     winCaptures = new int[slotCount];
@@ -251,83 +245,178 @@ final class BitStateMatcher extends ReggieMatcher {
     stackB = new int[initialStackCap];
     stackC = new int[initialStackCap];
 
-    greedyLoopMid = new int[stateCount];
-    greedyLoopExit = new int[stateCount];
-    java.util.Arrays.fill(greedyLoopMid, -1);
-    java.util.Arrays.fill(greedyLoopExit, -1);
-    for (int sid = 0; sid < stateCount; sid++) {
-      int mid = greedyLoopShapeAt(sid);
-      if (mid >= 0) {
-        greedyLoopMid[sid] = mid;
-        greedyLoopExit[sid] = epsilonTargets[mid][1];
-      }
-    }
-
-    boolean[] firstByteAscii = new boolean[128];
-    boolean prefilterUsable = PikeVMMatcher.computeFirstByteFilter(nfa, firstByteAscii);
-    int singleChar = -1;
-    if (prefilterUsable) {
-      int count = 0;
-      for (int c = 0; c < firstByteAscii.length; c++) {
-        if (firstByteAscii[c]) {
-          count++;
-          singleChar = c;
-        }
-      }
-      if (count != 1) {
-        singleChar = -1;
-      }
-    }
-    this.singleFirstCharAscii = singleChar;
-
-    RejectDfaFactory.Bundle rejectBundle =
-        sharedRejectBundle == null ? RejectDfaFactory.build(nfa) : sharedRejectBundle;
-    this.sourceBundle = sharedRejectBundle;
-    this.rejectDfa = rejectBundle == null ? null : rejectBundle.dfa;
-    this.rejectStep = rejectBundle == null ? null : rejectBundle.step;
-
     markNativeRichApi();
   }
 
   /**
-   * Returns the post-consume state id when {@code sid} is a consuming leaf forming a greedy
-   * single-char-class loop — i.e. every precondition the fast-consume block in {@link #search}
-   * relies on for equivalence — or -1 otherwise:
+   * Immutable, fully-initialized NFA-derived setup shared by every {@link BitStateMatcher} built
+   * from one cache entry ({@code RuntimeCompiler}'s {@code BitStateEntry} for standalone
+   * BITSTATE_CAPTURE compiles and the BitState-backed {@code HybridEntry} for hybrids): all
+   * flattened per-state tables, the greedy-loop shapes, the single-first-ASCII prefilter result,
+   * and one {@link RejectDfaFactory.Bundle} — so its {@link LazyDFACache} and {@link NfaStep} are
+   * shared too, mirroring {@link PikeVMMatcher.DfaBundle}. The owning cache entry soft-holds the
+   * bundle ({@code SoftReference}, bounded retention like PikeVMMatcher's {@code DfaBundle}); the
+   * build is a deterministic function of the NFA, so a rebuilt or concurrently duplicated bundle
+   * is equivalent, and live matchers pin their bundle via {@code sourceBundle} so eviction never
+   * affects them. Matcher construction only aliases these fields.
    *
-   * <ul>
-   *   <li>{@code sid}: no anchor, no group enter/exit, not accepting, no epsilon children, exactly
-   *       one consuming transition (the char class), targeting {@code mid != sid};
-   *   <li>{@code mid}: no anchor, no group enter/exit, not accepting, no consuming transitions
-   *       (pure epsilon fan-out), and its epsilon children are exactly {@code [sid, exit]} in that
-   *       order — loop-back first, so greedy continue-before-exit priority, and {@code exit}
-   *       distinct from both. Lazy loops ({@code ThompsonBuilder(lazyAware=true)}) reverse the
-   *       order, so they (and every multi-branch loop like {@code (a|b)+}) fall out here and stay
-   *       on the generic per-char path.
-   * </ul>
+   * <p>Never holds matcher-written state: {@code caps}/{@code winCaptures}, the job stacks, the
+   * visited bitmap and its generation, {@code localizeScratch}, the counters, the lazily-built
+   * Laurikari matcher, and the PikeVM fallback all stay per-matcher (see the {@link
+   * BitStateMatcher#BitStateMatcher(NFA, String, ReggieMatcher, Bundle)} constructor).
    */
-  private int greedyLoopShapeAt(int sid) {
-    if (anchorBySid[sid] != null
-        || enterGroupBySid[sid] >= 0
-        || exitGroupBySid[sid] >= 0
-        || isAccept[sid]
-        || epsilonTargets[sid].length != 0
-        || transitionCharSets[sid].length != 1) {
-      return -1;
+  static final class Bundle {
+    final int groupCount;
+    final int stateCount;
+    final int startStateId;
+    final NFA.NFAState[] statesById;
+    final boolean[] isAccept;
+    final int[][] epsilonTargets;
+    final CharSet[][] transitionCharSets;
+    final int[][] transitionTargets;
+    final NFA.AnchorType[] anchorBySid;
+    final int[] enterGroupBySid;
+    final int[] exitGroupBySid;
+    final int[] greedyLoopMid;
+    final int[] greedyLoopExit;
+    final int singleFirstCharAscii;
+    final RejectDfaFactory.Bundle rejectBundle; // null when the NFA is reject-DFA-ineligible
+
+    /** Builds a bundle with its own (private) reject-DFA bundle. */
+    Bundle(NFA nfa) {
+      this(nfa, null);
     }
-    int mid = transitionTargets[sid][0];
-    if (mid == sid
-        || anchorBySid[mid] != null
-        || enterGroupBySid[mid] >= 0
-        || exitGroupBySid[mid] >= 0
-        || isAccept[mid]
-        || transitionCharSets[mid].length != 0) {
-      return -1;
+
+    /**
+     * @param sharedRejectBundle reject-DFA bundle supplied by the caller (shared); {@code null}
+     *     builds a private one here, exactly like the matcher-private construction did before
+     *     bundles existed.
+     */
+    Bundle(NFA nfa, RejectDfaFactory.Bundle sharedRejectBundle) {
+      if (nfa.hasCountedLoops()) {
+        // Same rejection the matcher constructor has always applied, kept here so shared-bundle
+        // entries (built without a matcher) fail identically.
+        throw new IllegalStateException(
+            "BitStateMatcher cannot execute counted-loop NFAs (see NFA#hasCountedLoops)");
+      }
+      this.groupCount = nfa.getGroupCount();
+      this.stateCount = nfa.getStates().size();
+      this.startStateId = nfa.getStartState().id;
+
+      statesById = new NFA.NFAState[stateCount];
+      for (NFA.NFAState s : nfa.getStates()) {
+        statesById[s.id] = s;
+      }
+      isAccept = new boolean[stateCount];
+      for (NFA.NFAState s : nfa.getAcceptStates()) {
+        isAccept[s.id] = true;
+      }
+
+      epsilonTargets = new int[stateCount][];
+      transitionCharSets = new CharSet[stateCount][];
+      transitionTargets = new int[stateCount][];
+      anchorBySid = new NFA.AnchorType[stateCount];
+      enterGroupBySid = new int[stateCount];
+      exitGroupBySid = new int[stateCount];
+      for (int i = 0; i < stateCount; i++) {
+        NFA.NFAState s = statesById[i];
+
+        anchorBySid[i] = s.anchor;
+        enterGroupBySid[i] = s.enterGroup == null ? -1 : s.enterGroup;
+        exitGroupBySid[i] = s.exitGroup == null ? -1 : s.exitGroup;
+
+        List<NFA.NFAState> eps = s.getEpsilonTransitions();
+        int[] epsIds = new int[eps.size()];
+        for (int j = 0; j < epsIds.length; j++) {
+          epsIds[j] = eps.get(j).id;
+        }
+        epsilonTargets[i] = epsIds;
+
+        List<NFA.Transition> trans = s.getTransitions();
+        CharSet[] charSets = new CharSet[trans.size()];
+        int[] targets = new int[trans.size()];
+        for (int j = 0; j < charSets.length; j++) {
+          NFA.Transition t = trans.get(j);
+          charSets[j] = t.chars;
+          targets[j] = t.target.id;
+        }
+        transitionCharSets[i] = charSets;
+        transitionTargets[i] = targets;
+      }
+
+      greedyLoopMid = new int[stateCount];
+      greedyLoopExit = new int[stateCount];
+      Arrays.fill(greedyLoopMid, -1);
+      Arrays.fill(greedyLoopExit, -1);
+      for (int sid = 0; sid < stateCount; sid++) {
+        int mid = greedyLoopShapeAt(sid);
+        if (mid >= 0) {
+          greedyLoopMid[sid] = mid;
+          greedyLoopExit[sid] = epsilonTargets[mid][1];
+        }
+      }
+
+      boolean[] firstByteAscii = new boolean[128];
+      boolean prefilterUsable = PikeVMMatcher.computeFirstByteFilter(nfa, firstByteAscii);
+      int singleChar = -1;
+      if (prefilterUsable) {
+        int count = 0;
+        for (int c = 0; c < firstByteAscii.length; c++) {
+          if (firstByteAscii[c]) {
+            count++;
+            singleChar = c;
+          }
+        }
+        if (count != 1) {
+          singleChar = -1;
+        }
+      }
+      this.singleFirstCharAscii = singleChar;
+
+      this.rejectBundle =
+          sharedRejectBundle == null ? RejectDfaFactory.build(nfa) : sharedRejectBundle;
     }
-    int[] eps = epsilonTargets[mid];
-    if (eps.length != 2 || eps[0] != sid || eps[1] == sid || eps[1] == mid) {
-      return -1;
+
+    /**
+     * Returns the post-consume state id when {@code sid} is a consuming leaf forming a greedy
+     * single-char-class loop — i.e. every precondition the fast-consume block in {@link
+     * BitStateMatcher#search} relies on for equivalence — or -1 otherwise:
+     *
+     * <ul>
+     *   <li>{@code sid}: no anchor, no group enter/exit, not accepting, no epsilon children,
+     *       exactly one consuming transition (the char class), targeting {@code mid != sid};
+     *   <li>{@code mid}: no anchor, no group enter/exit, not accepting, no consuming transitions
+     *       (pure epsilon fan-out), and its epsilon children are exactly {@code [sid, exit]} in
+     *       that order — loop-back first, so greedy continue-before-exit priority, and {@code exit}
+     *       distinct from both. Lazy loops ({@code ThompsonBuilder(lazyAware=true)}) reverse the
+     *       order, so they (and every multi-branch loop like {@code (a|b)+}) fall out here and stay
+     *       on the generic per-char path.
+     * </ul>
+     */
+    private int greedyLoopShapeAt(int sid) {
+      if (anchorBySid[sid] != null
+          || enterGroupBySid[sid] >= 0
+          || exitGroupBySid[sid] >= 0
+          || isAccept[sid]
+          || epsilonTargets[sid].length != 0
+          || transitionCharSets[sid].length != 1) {
+        return -1;
+      }
+      int mid = transitionTargets[sid][0];
+      if (mid == sid
+          || anchorBySid[mid] != null
+          || enterGroupBySid[mid] >= 0
+          || exitGroupBySid[mid] >= 0
+          || isAccept[mid]
+          || transitionCharSets[mid].length != 0) {
+        return -1;
+      }
+      int[] eps = epsilonTargets[mid];
+      if (eps.length != 2 || eps[0] != sid || eps[1] == sid || eps[1] == mid) {
+        return -1;
+      }
+      return mid;
     }
-    return mid;
   }
 
   /**

@@ -260,18 +260,18 @@ class SharedDfaBundleTest {
   }
 
   @Test
-  void evictedBitStateRejectBundleIsRebuiltCorrectly() throws Exception {
+  void evictedBitStateBundleIsRebuiltCorrectly() throws Exception {
     String pattern = "\\b(a)+x";
-    assertTrue(Reggie.compile(pattern).matches("ax")); // builds the entry + reject bundle
+    assertTrue(Reggie.compile(pattern).matches("ax")); // builds the entry + setup bundle
     Object entry = cacheEntry("BITSTATE_NFA_CACHE", pattern);
-    RejectDfaFactory.Bundle original = referencedBundle(entry, "rejectBundle");
-    assertNotNull(original, "first compile must have built the reject bundle strongly");
+    BitStateMatcher.Bundle original = referencedBundle(entry, "bundle");
+    assertNotNull(original, "first compile must have built the setup bundle strongly");
 
-    evictBundle(entry, "rejectBundle"); // simulate GC having cleared the SoftReference
+    evictBundle(entry, "bundle"); // simulate GC having cleared the SoftReference
 
     ReggieMatcher rebuilt = Reggie.compile(pattern);
-    RejectDfaFactory.Bundle second = referencedBundle(entry, "rejectBundle");
-    assertNotNull(second, "evicted entry must rebuild the reject bundle, not stay null");
+    BitStateMatcher.Bundle second = referencedBundle(entry, "bundle");
+    assertNotNull(second, "evicted entry must rebuild the setup bundle, not stay null");
     assertTrue(second != original, "rebuilt bundle must not be the evicted instance");
     assertTrue(rebuilt.matches("ax"));
     assertTrue(rebuilt.matches("aaax"));
