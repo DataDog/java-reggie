@@ -3082,8 +3082,8 @@ public class DFAUnrolledBytecodeGenerator {
    *
    *     // Unrolled DFA states
    *     STATE_N:
-   *         // Record position if accepting (with skip optimization)
-   *         if (state.isAccepting() && !skippableStates.contains(state)) {
+   *         // Record position if accepting (unconditional; see below)
+   *         if (state.isAccepting()) {
    *             lastAcceptingPos = pos;
    *         }
    *
@@ -3099,11 +3099,16 @@ public class DFAUnrolledBytecodeGenerator {
    * }
    * }</pre>
    *
-   * <h3>Skippable State Optimization</h3>
+   * <h3>No record-skipping on accepting states</h3>
    *
-   * For patterns like {@code a{30,}}, accepting states after the minimum (30) can skip the
-   * lastAcceptingPos update if all their transitions lead to other accepting states. This
-   * eliminates redundant ISTORE operations in monotonic acceptance regions.
+   * Every accepting state records {@code lastAcceptingPos} unconditionally. An earlier optimization
+   * let accepting states whose in/out transitions all lead to accepting states skip the record
+   * ("monotonic acceptance regions"), but it was unsound: any accepting state can be the terminal
+   * state of the scan (input exhausted, or no transition for the next character jumps to
+   * scanComplete), and a terminal skippable state never records — so the reported end was an
+   * earlier, shorter accepting position (e.g. {@code cbb|b{0,2}b} on "bb" reported [0,1) instead of
+   * [0,2); {@code split}/{@code replaceAll} results were corrupted accordingly). Skipping is not
+   * statically sound: whether a later accepting state is reached depends on the input.
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
     this.ownerInternalName = className;
@@ -3115,9 +3120,13 @@ public class DFAUnrolledBytecodeGenerator {
     // findLongestMatchEnd instead — its greedy state code gates only the lastAcceptingPos
     // record on the lookahead (skipRecord) and keeps scanning, and also gates records on
     // acceptance anchor conditions, which the inline scan ignores entirely.
-    boolean hasAssertions =
-        dfa.getAllStates().stream().anyMatch(state -> !state.assertionChecks.isEmpty());
-    if (hasAssertions) {
+    boolean hasAnchorGatedAcceptance =
+        dfa.getAllStates().stream()
+            .anyMatch(
+                state ->
+                    !state.assertionChecks.isEmpty()
+                        || !state.acceptanceAnchorConditions.isEmpty());
+    if (hasAnchorGatedAcceptance) {
       generateFindBoundsFromLongestEnd(cw, className);
       return;
     }
@@ -3157,17 +3166,13 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, 7); // len
 
-    // Scratch locals past the fixed layout (0=this, 1=input, 2=start, 3=bounds, 4=matchStart,
-    // 5=pos, 6=lastAccepting, 7=len): transition ch, lookbehind checkPos/ch, lookahead ch and
-    // the gate-DFA scratch - all allocated here and threaded through the emitters, so future
-    // layout changes cannot silently alias live locals.
+    // Scratch local past the fixed layout (0=this, 1=input, 2=start, 3=bounds, 4=matchStart,
+    // 5=pos, 6=lastAccepting, 7=len): the transition character. The scan carries no assertion
+    // state: assertion- and anchor-bearing DFAs are delegated to findLongestMatchEnd above, so
+    // no lookbehind/lookahead/gate scratch is needed here. Allocated through the allocator so
+    // future layout changes cannot silently alias live locals.
     LocalVarAllocator greedyScratch = new LocalVarAllocator(8);
     int greedyChSlot = greedyScratch.allocate(); // 8
-    int greedyLbCheckPosSlot = greedyScratch.allocate(); // 9
-    int greedyLbChSlot = greedyScratch.allocate(); // 10
-    int greedyLaChSlot = greedyScratch.allocate(); // 11
-    int greedyGatePosSlot = greedyScratch.allocate(); // 12
-    int greedyGateChSlot = greedyScratch.allocate(); // 13
 
     // Create labels for all states
     Map<DFA.DFAState, Label> stateLabels = new HashMap<>();
@@ -3175,48 +3180,18 @@ public class DFAUnrolledBytecodeGenerator {
       stateLabels.put(state, new Label());
     }
 
-    // Compute which accepting states can skip lastAcceptingPos updates (Phase 4 optimization)
-    Set<DFA.DFAState> skippableStates = computeSkippableAcceptingStates();
-
     Label scanComplete = new Label();
 
     // Generate code for start state
     mv.visitLabel(stateLabels.get(dfa.getStartState()));
     generateGreedyStateCode(
-        mv,
-        dfa.getStartState(),
-        stateLabels,
-        5,
-        7,
-        6,
-        scanComplete,
-        skippableStates,
-        greedyChSlot,
-        greedyLbCheckPosSlot,
-        greedyLbChSlot,
-        greedyLaChSlot,
-        greedyGatePosSlot,
-        greedyGateChSlot);
+        mv, dfa.getStartState(), stateLabels, 5, 7, 6, scanComplete, greedyChSlot);
 
     // Generate code for all other states
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state == dfa.getStartState()) continue;
       mv.visitLabel(stateLabels.get(state));
-      generateGreedyStateCode(
-          mv,
-          state,
-          stateLabels,
-          5,
-          7,
-          6,
-          scanComplete,
-          skippableStates,
-          greedyChSlot,
-          greedyLbCheckPosSlot,
-          greedyLbChSlot,
-          greedyLaChSlot,
-          greedyGatePosSlot,
-          greedyGateChSlot);
+      generateGreedyStateCode(mv, state, stateLabels, 5, 7, 6, scanComplete, greedyChSlot);
     }
 
     mv.visitLabel(scanComplete);
@@ -3324,81 +3299,6 @@ public class DFAUnrolledBytecodeGenerator {
   }
 
   /**
-   * Compute which accepting states can skip the lastAcceptingPos update optimization.
-   *
-   * <p>An accepting state can skip the update if: 1. ALL its outgoing transitions lead to other
-   * accepting states, AND 2. ALL incoming transitions come from other accepting states (not first
-   * accepting state)
-   *
-   * <p>This ensures the first accepting state reached always updates lastAcceptingPos, but
-   * subsequent states in a monotonic acceptance region can skip redundant updates.
-   *
-   * <p>Example: In a{30,}, states 31+ can skip, but state 30 (first accepting) must update.
-   */
-  private Set<DFA.DFAState> computeSkippableAcceptingStates() {
-    Set<DFA.DFAState> skippable = new HashSet<>();
-
-    // When the start state is accepting the DFA can match zero-width strings. In that case,
-    // every accepting state (including loop states) must update lastAcceptingPos so that
-    // progress past the initial position is recorded correctly.
-    if (dfa.getStartState().accepting) {
-      return skippable;
-    }
-
-    // First, compute incoming edges for all states
-    Map<DFA.DFAState, Set<DFA.DFAState>> incomingEdges = new HashMap<>();
-    for (DFA.DFAState state : dfa.getAllStates()) {
-      incomingEdges.putIfAbsent(state, new HashSet<>());
-      for (DFA.DFATransition transition : state.transitions.values()) {
-        incomingEdges.putIfAbsent(transition.target, new HashSet<>());
-        incomingEdges.get(transition.target).add(state);
-      }
-    }
-
-    for (DFA.DFAState state : dfa.getAllStates()) {
-      if (!state.accepting) {
-        continue; // Only consider accepting states
-      }
-
-      if (state.transitions.isEmpty()) {
-        continue; // Terminal state - must update (last accepting position)
-      }
-
-      // Check if ALL outgoing transitions lead to accepting states
-      boolean allOutgoingAccepting = true;
-      for (DFA.DFATransition transition : state.transitions.values()) {
-        if (!transition.target.accepting) {
-          allOutgoingAccepting = false;
-          break;
-        }
-      }
-
-      if (!allOutgoingAccepting) {
-        continue; // Has transitions to non-accepting states
-      }
-
-      // Check if ALL incoming transitions come from accepting states
-      boolean allIncomingAccepting = true;
-      Set<DFA.DFAState> incoming = incomingEdges.get(state);
-      if (incoming != null) {
-        for (DFA.DFAState source : incoming) {
-          if (!source.accepting) {
-            allIncomingAccepting = false;
-            break;
-          }
-        }
-      }
-
-      // Only skip if both conditions met (not the first accepting state)
-      if (allOutgoingAccepting && allIncomingAccepting) {
-        skippable.add(state);
-      }
-    }
-
-    return skippable;
-  }
-
-  /**
    * Generate code for a single DFA state in greedy scan mode. Updates lastAcceptingPos when in an
    * accepting state. Stops scanning when no transition matches or input ends.
    *
@@ -3409,7 +3309,6 @@ public class DFAUnrolledBytecodeGenerator {
    * @param lenVar Local variable holding input length
    * @param lastAcceptingVar Local variable tracking last accepting position
    * @param scanComplete Label to jump to when scan is done
-   * @param skippableStates Set of accepting states that can skip lastAcceptingPos update
    */
   private void generateGreedyStateCode(
       MethodVisitor mv,
@@ -3419,39 +3318,21 @@ public class DFAUnrolledBytecodeGenerator {
       int lenVar,
       int lastAcceptingVar,
       Label scanComplete,
-      Set<DFA.DFAState> skippableStates,
-      int chSlot,
-      int lbCheckPosSlot,
-      int lbChSlot,
-      int laChSlot,
-      int gatePosSlot,
-      int gateChSlot) {
-    // Handle assertions if present (before recording accepting position)
-    Label assertionFailed = new Label();
-    if (!state.assertionChecks.isEmpty()) {
-      for (AssertionCheck assertion : state.assertionChecks) {
-        generateGreedyAssertionCheck(
-            mv,
-            assertion,
-            posVar,
-            lenVar,
-            lbCheckPosSlot,
-            lbChSlot,
-            laChSlot,
-            gatePosSlot,
-            gateChSlot,
-            assertionFailed);
-      }
-    }
+      int chSlot) {
+    // No assertion handling here by construction: generateFindBoundsFromMethod delegates every
+    // assertion- or anchor-bearing DFA to findLongestMatchEnd, so states reaching this scan have
+    // empty assertionChecks and empty acceptanceAnchorConditions.
 
-    // If this is an accepting state, update lastAcceptingPos = pos (unless skippable).
-    // Priority-cut states always record (override skippability) and stop scanning immediately.
+    // If this is an accepting state, update lastAcceptingPos = pos. Unconditional: this state can
+    // be the terminal state of the scan (end of input or no matching transition below jumps to
+    // scanComplete), so its record is the last chance to report the longest accepting end.
+    // Priority-cut states record and stop scanning immediately.
     if (state.accepting) {
       if (state.acceptIsPriorityCut) {
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ISTORE, lastAcceptingVar);
         mv.visitJumpInsn(GOTO, scanComplete);
-      } else if (!skippableStates.contains(state)) {
+      } else {
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ISTORE, lastAcceptingVar);
       }
@@ -3476,198 +3357,6 @@ public class DFAUnrolledBytecodeGenerator {
 
     // No transition matched - stop scanning
     mv.visitJumpInsn(GOTO, scanComplete);
-
-    // Assertion failed label (if assertions were present)
-    if (!state.assertionChecks.isEmpty()) {
-      mv.visitLabel(assertionFailed);
-      mv.visitJumpInsn(GOTO, scanComplete);
-    }
-  }
-
-  /**
-   * Generate assertion check for greedy scan mode. Similar to generateBoundedAssertionCheck but
-   * jumps to assertionFailed instead of returning false.
-   */
-  private void generateGreedyAssertionCheck(
-      MethodVisitor mv,
-      AssertionCheck assertion,
-      int posVar,
-      int lenVar,
-      int lbCheckPosSlot,
-      int lbChSlot,
-      int laChSlot,
-      int gatePosSlot,
-      int gateChSlot,
-      Label assertionFailed) {
-    if (assertion.isGateDfa()) {
-      // Gate scratch threaded from generateFindBoundsFromMethod's LocalVarAllocator. Scan bound
-      // is len, matching the literal checks.
-      generateGateDfaCheckInto(
-          mv, assertion, posVar, lenVar, false, gatePosSlot, gateChSlot, assertionFailed);
-      return;
-    }
-    if (assertion.isLookahead()) {
-      if (assertion.isLiteral) {
-        String literal = assertion.literal;
-        boolean positive = assertion.isPositive();
-
-        Label assertionPassed = new Label();
-
-        // Check bounds for entire literal
-        for (int i = 0; i < literal.length(); i++) {
-          int peekOffset = i;
-
-          // Check if pos + peekOffset < len
-          mv.visitVarInsn(ILOAD, posVar);
-          if (peekOffset > 0) {
-            pushInt(mv, peekOffset);
-            mv.visitInsn(IADD);
-          }
-          mv.visitVarInsn(ILOAD, lenVar);
-          if (positive) {
-            mv.visitJumpInsn(IF_ICMPGE, assertionFailed);
-          } else {
-            mv.visitJumpInsn(IF_ICMPGE, assertionPassed);
-          }
-
-          // char ch = input.charAt(pos + peekOffset)
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, posVar);
-          if (peekOffset > 0) {
-            pushInt(mv, peekOffset);
-            mv.visitInsn(IADD);
-          }
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-
-          // if (ch != literal.charAt(i)) goto assertionPassed/Failed
-          pushInt(mv, (int) literal.charAt(i));
-          if (positive) {
-            mv.visitJumpInsn(IF_ICMPNE, assertionFailed);
-          } else {
-            mv.visitJumpInsn(IF_ICMPNE, assertionPassed);
-          }
-        }
-
-        if (!positive) {
-          // All chars matched - negative assertion fails
-          mv.visitJumpInsn(GOTO, assertionFailed);
-        }
-        mv.visitLabel(assertionPassed);
-      } else {
-        // charSets lookahead: ch on the threaded lookahead scratch slot
-        boolean positive = assertion.isPositive();
-        int chVar = laChSlot;
-        Label mismatch = new Label();
-        Label assertionPassed = new Label();
-
-        for (int i = 0; i < assertion.charSets.size(); i++) {
-          // Bounds check: if (pos + i >= len) goto assertionFailed/Passed
-          mv.visitVarInsn(ILOAD, posVar);
-          if (i > 0) {
-            pushInt(mv, i);
-            mv.visitInsn(IADD);
-          }
-          mv.visitVarInsn(ILOAD, lenVar);
-          if (positive) {
-            mv.visitJumpInsn(IF_ICMPGE, assertionFailed);
-          } else {
-            mv.visitJumpInsn(IF_ICMPGE, assertionPassed);
-          }
-
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, posVar);
-          if (i > 0) {
-            pushInt(mv, i);
-            mv.visitInsn(IADD);
-          }
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          mv.visitVarInsn(ISTORE, chVar);
-
-          generateCharSetCheck(mv, assertion.charSets.get(i), chVar, mismatch);
-        }
-
-        if (positive) {
-          mv.visitJumpInsn(GOTO, assertionPassed);
-        } else {
-          mv.visitJumpInsn(GOTO, assertionFailed);
-        }
-
-        mv.visitLabel(mismatch);
-        if (positive) {
-          mv.visitJumpInsn(GOTO, assertionFailed);
-        }
-        mv.visitLabel(assertionPassed);
-      }
-    } else if (assertion.isLookbehind()) {
-      int width = assertion.width;
-      // checkPos = pos - width (scratch slots threaded from generateFindBoundsFromMethod)
-      int checkPosVar = lbCheckPosSlot;
-
-      mv.visitVarInsn(ILOAD, posVar);
-      pushInt(mv, width);
-      mv.visitInsn(ISUB);
-      mv.visitVarInsn(ISTORE, checkPosVar);
-
-      // Bounds check: if (checkPos < 0)
-      mv.visitVarInsn(ILOAD, checkPosVar);
-      Label boundsOk = new Label();
-      Label assertionPassed = new Label();
-      mv.visitJumpInsn(IFGE, boundsOk);
-
-      if (assertion.isPositive()) {
-        mv.visitJumpInsn(GOTO, assertionFailed);
-      } else {
-        mv.visitJumpInsn(GOTO, assertionPassed);
-      }
-
-      mv.visitLabel(boundsOk);
-
-      if (assertion.isLiteral) {
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, checkPosVar);
-        mv.visitLdcInsn(assertion.literal);
-        mv.visitInsn(ICONST_0);
-        pushInt(mv, assertion.literal.length());
-        mv.visitMethodInsn(
-            INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-
-        if (assertion.isPositive()) {
-          mv.visitJumpInsn(IFEQ, assertionFailed);
-        } else {
-          mv.visitJumpInsn(IFEQ, assertionPassed);
-          mv.visitJumpInsn(GOTO, assertionFailed);
-          mv.visitLabel(assertionPassed);
-        }
-      } else {
-        int chVar = lbChSlot;
-        Label mismatch = new Label();
-
-        for (int i = 0; i < assertion.charSets.size(); i++) {
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, checkPosVar);
-          if (i > 0) {
-            pushInt(mv, i);
-            mv.visitInsn(IADD);
-          }
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          mv.visitVarInsn(ISTORE, chVar);
-
-          generateCharSetCheck(mv, assertion.charSets.get(i), chVar, mismatch);
-        }
-
-        if (assertion.isPositive()) {
-          mv.visitJumpInsn(GOTO, assertionPassed);
-        } else {
-          mv.visitJumpInsn(GOTO, assertionFailed);
-        }
-
-        mv.visitLabel(mismatch);
-        if (assertion.isPositive()) {
-          mv.visitJumpInsn(GOTO, assertionFailed);
-        }
-        mv.visitLabel(assertionPassed);
-      }
-    }
   }
 
   /**
