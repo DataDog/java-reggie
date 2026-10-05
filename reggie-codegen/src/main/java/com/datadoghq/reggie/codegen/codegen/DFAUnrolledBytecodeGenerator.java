@@ -1718,9 +1718,13 @@ public class DFAUnrolledBytecodeGenerator {
    * Generates a private {@code findMatchFromForMatch} variant that uses the tagged DFA WITHOUT
    * priority-cut. Used by {@link #generateMatchMethod} for full-input (match()) semantics: the
    * caller must verify that the returned match spans the entire input, but the TDFA must not commit
-   * early to a shorter high-priority prefix match.
+   * early to a shorter high-priority prefix match. No-op unless the tagged DFA is used with groups
+   * (the only case where {@link #generateMatchMethod} calls it).
    */
   public void generateFindMatchFromMethodTaggedNoCut(ClassWriter cw, String className) {
+    if (!(useTaggedDFA && groupCount > 0)) {
+      return;
+    }
     this.ownerInternalName = className;
     generateFindMatchFromMethodTaggedImpl(
         cw, className, "findMatchFromForMatch", ACC_PRIVATE, false);

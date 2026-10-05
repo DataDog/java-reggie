@@ -17,6 +17,7 @@ package com.datadoghq.reggie.processor;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import java.lang.reflect.Method;
 import org.junit.jupiter.api.Test;
@@ -593,6 +594,36 @@ class ReggieMatcherBytecodeGeneratorTest {
         (Boolean) matchesB.invoke(matcherB, "abc"), "ProviderB_ValueMatcher must match letters");
     assertFalse(
         (Boolean) matchesB.invoke(matcherB, "123"), "ProviderB_ValueMatcher must not match digits");
+  }
+
+  /**
+   * Tagged DFA_UNROLLED match() calls the private {@code findMatchFromForMatch} helper; the APT
+   * path must emit it (as RuntimeCompiler does) or match() throws NoSuchMethodError.
+   */
+  @Test
+  void taggedDfaUnrolledMatchHelperIsGenerated() throws Exception {
+    Object matcher = compile("(?i)^https?://", "TaggedUnrolledMatchMatcher");
+    Method match = matcher.getClass().getMethod("match", String.class);
+
+    Object result = match.invoke(matcher, "https://");
+    assertNotNull(result);
+    assertEquals(8, ((MatchResult) result).end());
+    assertNotNull(match.invoke(matcher, "http://"));
+    assertNull(match.invoke(matcher, "https://example.com"));
+    assertNull(match.invoke(matcher, "ftp://"));
+  }
+
+  /**
+   * DFA_UNROLLED matches range-heavy charsets through static {@code $cs_N} lookup tables; the APT
+   * path must emit them (as RuntimeCompiler does) or matching throws NoSuchFieldError.
+   */
+  @Test
+  void dfaUnrolledLookupTablesAreGenerated() throws Exception {
+    Object matcher = compile(".*[\\p{IsAlphabetic}].*", "HugeCharsetMatcher");
+    Method matches = matcher.getClass().getMethod("matches", String.class);
+    assertTrue((Boolean) matches.invoke(matcher, "a1"));
+    assertTrue((Boolean) matches.invoke(matcher, "1\u00e9"));
+    assertFalse((Boolean) matches.invoke(matcher, "123"));
   }
 
   // --- Tests for Fix 1: resolveRealization() must honour needsFallback() for PIKEVM_CAPTURE ---
