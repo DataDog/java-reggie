@@ -459,6 +459,9 @@ public class ReggieMatcherBytecodeGenerator {
         unrolledGen.generateFindFromMethod(cw, getJavaClassName());
         unrolledGen.generateMatchesAtStartMethod(cw);
         unrolledGen.generateMatchMethod(cw, getJavaClassName());
+        // Private findMatchFromForMatch helper called by tagged match() (same as RuntimeCompiler);
+        // no-op for non-tagged DFAs
+        unrolledGen.generateFindMatchFromMethodTaggedNoCut(cw, getJavaClassName());
         unrolledGen.generateMatchesBoundedMethod(cw, getJavaClassName());
         unrolledGen.generateMatchBoundedMethod(cw, getJavaClassName());
         unrolledGen.generateFindMatchMethod(cw, getJavaClassName());
@@ -468,6 +471,9 @@ public class ReggieMatcherBytecodeGenerator {
         // findAll/replaceAll/split use throws NoSuchMethodError
         unrolledGen.generateFindLongestMatchEndMethod(cw, getJavaClassName());
         unrolledGen.generateFindBoundsFromMethod(cw, getJavaClassName());
+        // Static lookup tables for range-heavy charsets referenced by the methods above (same as
+        // RuntimeCompiler); must follow every generate*Method. No-op when none were needed.
+        unrolledGen.generateLookupTables(cw);
         break;
 
       case DFA_SWITCH:
