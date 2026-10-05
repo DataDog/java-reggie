@@ -58,8 +58,8 @@ import org.junit.jupiter.api.Test;
  * pinned here as well.
  *
  * <p>The shared bundles are held through {@link SoftReference} (bounded retention under heap
- * pressure — see RuntimeCompiler's cache entries); the eviction tests pin the rebuild-on-clear
- * path that makes that sound.
+ * pressure — see RuntimeCompiler's cache entries); the eviction tests pin the rebuild-on-clear path
+ * that makes that sound.
  */
 class SharedDfaBundleTest {
 

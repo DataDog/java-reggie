@@ -296,8 +296,8 @@ public class RuntimeCompiler {
     }
 
     /**
-     * The full shared BitState setup bundle for the capture NFA, rebuilding it after eviction.
-     * The build is a deterministic function of the NFA, so a concurrently duplicated bundle is
+     * The full shared BitState setup bundle for the capture NFA, rebuilding it after eviction. The
+     * build is a deterministic function of the NFA, so a concurrently duplicated bundle is
      * equivalent (see {@link BitStateMatcher.Bundle}).
      */
     BitStateMatcher.Bundle bitStateBundle() {

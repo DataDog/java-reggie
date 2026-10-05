@@ -256,8 +256,8 @@ final class BitStateMatcher extends ReggieMatcher {
    * and one {@link RejectDfaFactory.Bundle} — so its {@link LazyDFACache} and {@link NfaStep} are
    * shared too, mirroring {@link PikeVMMatcher.DfaBundle}. The owning cache entry soft-holds the
    * bundle ({@code SoftReference}, bounded retention like PikeVMMatcher's {@code DfaBundle}); the
-   * build is a deterministic function of the NFA, so a rebuilt or concurrently duplicated bundle
-   * is equivalent, and live matchers pin their bundle via {@code sourceBundle} so eviction never
+   * build is a deterministic function of the NFA, so a rebuilt or concurrently duplicated bundle is
+   * equivalent, and live matchers pin their bundle via {@code sourceBundle} so eviction never
    * affects them. Matcher construction only aliases these fields.
    *
    * <p>Never holds matcher-written state: {@code caps}/{@code winCaptures}, the job stacks, the
