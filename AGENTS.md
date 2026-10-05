@@ -91,6 +91,8 @@ the repo carries only the distilled knowledge. Use it instead of re-deriving:
 
 
 
+
+
 > Single source of truth for AI agents working in this repo. `CLAUDE.md` is a redirect stub —
 > all edits go here, never there.
 
