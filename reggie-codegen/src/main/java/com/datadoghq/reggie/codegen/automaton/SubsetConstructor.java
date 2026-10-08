@@ -254,6 +254,7 @@ public class SubsetConstructor {
               startClosureSet, startClosure, startOrdering, nfa.getAcceptStates());
     }
 
+    Map<DFA.DFAState, List<OrderingEdge>> orderingEdges = new HashMap<>();
     Queue<DFA.DFAState> worklist = new ArrayDeque<>();
     worklist.add(start);
     // Per-DFA-state anchor conditions, mirroring DFAState.nfaStates set membership.
@@ -306,6 +307,7 @@ public class SubsetConstructor {
         if (transitionGuard.isEmpty() && anyNonEmptySrcCond) anchorConditionDiluted = true;
 
         Set<NFA.NFAState> targets = targetsWithCond.keySet();
+        Map<NFA.NFAState, EnumSet<NFA.AnchorType>> unprunedTargetsWithCond = targetsWithCond;
 
         // Leftmost-first thread pruning: kill every state ranked below the first accept that
         // can fire at this position. Applied BEFORE the state-cache lookup so the pruned set is
@@ -367,6 +369,9 @@ public class SubsetConstructor {
         // Narrow charset for END/STRING_END-guarded consuming transitions to line terminators.
         CharSet narrowedChars = narrowEndGuardedCharset(transitionGuard, chars);
         if (narrowedChars == null) continue;
+        orderingEdges
+            .computeIfAbsent(current, k -> new ArrayList<>())
+            .add(new OrderingEdge(target, chars, unprunedTargetsWithCond));
 
         // Compute tag operations if requested (Tagged DFA)
         if (computeTags && nfa.getGroupCount() > 0) {
@@ -389,6 +394,9 @@ public class SubsetConstructor {
         throw new StateExplosionException("DFA has >10K states, use NFA instead");
       }
     }
+
+    propagatePriorityOrderings(
+        start, startOrdering, orderingEdges, allStates, nfa.getAcceptStates(), pruningActive, true);
 
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
@@ -600,6 +608,108 @@ public class SubsetConstructor {
       }
     }
     return acceptRank <= continueRank;
+  }
+
+  /**
+   * A DFA transition as recorded for {@link #propagatePriorityOrderings}: the partition charset and
+   * the target's conditions map before leftmost-first pruning.
+   */
+  private static final class OrderingEdge {
+    final DFA.DFAState target;
+    final CharSet chars;
+    final Map<NFA.NFAState, EnumSet<NFA.AnchorType>> conds;
+
+    OrderingEdge(
+        DFA.DFAState target, CharSet chars, Map<NFA.NFAState, EnumSet<NFA.AnchorType>> conds) {
+      this.target = target;
+      this.chars = chars;
+      this.conds = conds;
+    }
+  }
+
+  /** Upper bound on (DFA state, ordering) pairs explored by {@link #propagatePriorityOrderings}. */
+  private static final int MAX_ORDERING_PAIRS = 20_000;
+
+  /**
+   * Re-derives the priority flags of accepting states over every thread ordering that reaches them.
+   * A DFA state is identified by its NFA-state set, but different paths can reach the same set with
+   * different thread priorities: in (?:[^a]|[ab]*)[ab] the set reached by 'a' from the start ranks
+   * the [ab]* loop first, while the same set reached by 'ba' ranks the accept first. The flags
+   * computed from the first-arriving ordering alone miss the second path's conflict. This pass
+   * walks (state, ordering) pairs from the start and, at every accepting arrival, ORs in {@code
+   * hasPriorityConflictTransition}; when {@code withCut} is set and two orderings disagree on
+   * {@code acceptIsPriorityCut}, the state gets {@code hasPriorityConflictTransition = true} and
+   * {@code acceptIsPriorityCut = false}, since one executor cannot both commit and continue there.
+   *
+   * <p>With {@code pruning}, the pruned target set itself depends on the ordering. If an ordering
+   * prunes to a set other than the recorded target, or more than {@link #MAX_ORDERING_PAIRS} pairs
+   * exist, every accepting state is marked as an unresolved conflict so callers decline the DFA.
+   */
+  private void propagatePriorityOrderings(
+      DFA.DFAState start,
+      List<NFA.NFAState> startOrdering,
+      Map<DFA.DFAState, List<OrderingEdge>> edges,
+      List<DFA.DFAState> states,
+      Set<NFA.NFAState> acceptStates,
+      boolean pruning,
+      boolean withCut)
+      throws StateExplosionException {
+    Map<DFA.DFAState, Set<List<NFA.NFAState>>> seen = new HashMap<>();
+    ArrayDeque<DFA.DFAState> stateQueue = new ArrayDeque<>();
+    ArrayDeque<List<NFA.NFAState>> orderingQueue = new ArrayDeque<>();
+    seen.computeIfAbsent(start, k -> new HashSet<>()).add(startOrdering);
+    stateQueue.add(start);
+    orderingQueue.add(startOrdering);
+    int pairs = 1;
+    boolean unsound = false;
+    while (!stateQueue.isEmpty() && !unsound) {
+      DFA.DFAState state = stateQueue.poll();
+      List<NFA.NFAState> ordering = orderingQueue.poll();
+      for (OrderingEdge edge : edges.getOrDefault(state, Collections.emptyList())) {
+        chargeWork(ordering.size() + 1);
+        List<NFA.NFAState> next;
+        Map<NFA.NFAState, EnumSet<NFA.AnchorType>> conds = edge.conds;
+        if (pruning) {
+          List<NFA.NFAState> full = computeTransitionOrdering(ordering, conds.keySet(), edge.chars);
+          next = pruneLeftmostFirstOrdering(conds, full, acceptStates);
+          if (next != full) conds = filterConditions(conds, next);
+          if (!conds.keySet().equals(edge.target.nfaStates)) {
+            unsound = true;
+            break;
+          }
+        } else {
+          next = computeTransitionOrdering(ordering, edge.target.nfaStates, edge.chars);
+        }
+        DFA.DFAState t = edge.target;
+        if (t.accepting) {
+          if (computeHasPriorityConflictTransition(t.nfaStates, conds, next, acceptStates)) {
+            t.hasPriorityConflictTransition = true;
+          }
+          if (withCut
+              && computeAcceptIsPriorityCut(t.nfaStates, conds, next, acceptStates)
+                  != t.acceptIsPriorityCut) {
+            t.hasPriorityConflictTransition = true;
+            t.acceptIsPriorityCut = false;
+          }
+        }
+        if (seen.computeIfAbsent(t, k -> new HashSet<>()).add(next)) {
+          if (++pairs > MAX_ORDERING_PAIRS) {
+            unsound = true;
+            break;
+          }
+          stateQueue.add(t);
+          orderingQueue.add(next);
+        }
+      }
+    }
+    if (unsound) {
+      for (DFA.DFAState s : states) {
+        if (s.accepting) {
+          s.hasPriorityConflictTransition = true;
+          s.acceptIsPriorityCut = false;
+        }
+      }
+    }
   }
 
   /** Returns a map from NFA state to its priority rank (index) in the given ordered list. */
@@ -1507,18 +1617,8 @@ public class SubsetConstructor {
    * @throws UnsupportedOperationException if assertions are not fixed-width
    */
   public DFA buildDFAWithAssertions(NFA nfa) throws StateExplosionException {
-    return buildDFAWithAssertions(nfa, false);
-  }
-
-  /**
-   * @param literalTierCandidate true when the caller (PatternAnalyzer) determined the pattern has
-   *     >=2 literal-extractable lookaheads and SPECIALIZED_LITERAL_LOOKAHEADS would take it if this
-   *     build threw. The sub-DFA gate admission declines for such patterns (the gate's
-   *     per-candidate scan loses to the intrinsified indexOf), reproducing the pre-gate routing.
-   */
-  public DFA buildDFAWithAssertions(NFA nfa, boolean literalTierCandidate)
-      throws StateExplosionException {
-    this.literalTierCandidate = literalTierCandidate;
+    this.assertionPlacementUnsound = false;
+    this.trailingLookaheadAdmitted = false;
     this.stateCache = new LinkedHashMap<>();
     this.allStates = new ArrayList<>();
     this.nextStateId = 0;
@@ -1549,7 +1649,20 @@ public class SubsetConstructor {
             computeAcceptanceConditions(startClosure, nfa.getAcceptStates()));
     stateCache.put(startClosureSet, start);
     allStates.add(start);
+    List<NFA.NFAState> startOrdering = computeInitialOrdering(nfa.getStartState(), startClosureSet);
+    if (start.accepting) {
+      start.hasPriorityConflictTransition =
+          computeHasPriorityConflictTransition(
+              startClosureSet, startClosure, startOrdering, nfa.getAcceptStates());
+    }
+    checkAssertionPlacement(
+        start,
+        Collections.singletonList(nfa.getStartState()),
+        assertionMap,
+        nfa.getAcceptStates(),
+        start);
 
+    Map<DFA.DFAState, List<OrderingEdge>> orderingEdges = new HashMap<>();
     Queue<DFA.DFAState> worklist = new ArrayDeque<>();
     worklist.add(start);
     Map<DFA.DFAState, Map<NFA.NFAState, EnumSet<NFA.AnchorType>>> dfaStateConditions =
@@ -1571,6 +1684,7 @@ public class SubsetConstructor {
 
       for (CharSet chars : partition) {
         Map<NFA.NFAState, EnumSet<NFA.AnchorType>> targetsWithCond = new HashMap<>();
+        List<NFA.NFAState> kernel = new ArrayList<>();
         EnumSet<NFA.AnchorType> transitionGuard = null;
         boolean hasContributor = false;
         boolean anyNonEmptySrcCond = false;
@@ -1582,6 +1696,7 @@ public class SubsetConstructor {
             chargeWork(1);
             if (trans.chars.intersects(chars)) {
               hasContributor = true;
+              kernel.add(trans.target);
               if (!srcCond.isEmpty()) anyNonEmptySrcCond = true;
               transitionGuard = mergeWeakest(transitionGuard, srcCond);
               for (Map.Entry<NFA.NFAState, EnumSet<NFA.AnchorType>> e :
@@ -1612,18 +1727,184 @@ public class SubsetConstructor {
           dfaStateConditions.put(targetState, targetsWithCond);
           worklist.add(targetState);
         }
+        // Every incoming transition is checked: a cached state reached from a different kernel
+        // can carry a different assertion bypass. Thread priority is re-derived per path by
+        // propagatePriorityOrderings below.
+        checkAssertionPlacement(targetState, kernel, assertionMap, nfa.getAcceptStates(), start);
         CharSet narrowedChars2 = narrowEndGuardedCharset(transitionGuard, chars);
         if (narrowedChars2 == null) continue;
+        orderingEdges
+            .computeIfAbsent(current, k -> new ArrayList<>())
+            .add(new OrderingEdge(targetState, chars, targetsWithCond));
         current.addTransition(
             narrowedChars2, targetState, Collections.emptyList(), transitionGuard);
       }
     }
+
+    propagatePriorityOrderings(
+        start, startOrdering, orderingEdges, allStates, nfa.getAcceptStates(), false, false);
 
     // Collect accept states
     Set<DFA.DFAState> acceptStates =
         allStates.stream().filter(s -> s.accepting).collect(java.util.stream.Collectors.toSet());
 
     return new DFA(start, acceptStates, allStates, anchorConditionDiluted);
+  }
+
+  /**
+   * Set by {@link #buildDFAWithAssertions} when some DFA state carries an assertion check that the
+   * generated executors cannot evaluate exactly (see {@link #checkAssertionPlacement}).
+   */
+  private boolean assertionPlacementUnsound;
+
+  /**
+   * True when the last {@link #buildDFAWithAssertions} run produced a DFA state whose assertion
+   * checks the generated executors would evaluate wrongly; the caller must not use that DFA.
+   */
+  public boolean hasUnsoundAssertionPlacement() {
+    return assertionPlacementUnsound;
+  }
+
+  /**
+   * Set by {@link #buildDFAWithAssertions} when {@link #checkAssertionPlacement} admitted a state
+   * only through the trailing-lookahead exemption ({@link #isTrailingLookahead}).
+   */
+  private boolean trailingLookaheadAdmitted;
+
+  /**
+   * True when the last {@link #buildDFAWithAssertions} run admitted a trailing lookahead whose
+   * state has a thread that bypasses the assertion. Only the unrolled executor evaluates every such
+   * check as an acceptance predicate on all its paths; the caller must not hand that DFA to another
+   * executor.
+   */
+  public boolean hasTrailingLookaheadAdmission() {
+    return trailingLookaheadAdmitted;
+  }
+
+  /**
+   * The generated executors evaluate a DFA state's assertion checks against the whole state. A
+   * failed check either rejects the state (transition guard) or, for a non-gate lookahead on an
+   * accepting state, only its acceptance (deferred predicate), and which of the two applies differs
+   * between executors. Both readings are exact only when every thread entering {@code state} from
+   * {@code kernel} passes the assertion at this position, and they coincide only when the state is
+   * non-accepting, has no consuming thread, or is the start state and every check is a gate or a
+   * lookbehind (which every executor treats as a guard there). Any other placement - a thread that
+   * bypasses the assertion (the a+ loop in a+(?=b)), or a consuming thread behind a deferred
+   * lookahead (the [a-c]* loop in a(?=b)[a-c]*) - sets {@link #assertionPlacementUnsound}. The
+   * exception is a non-start state whose only assertion is a trailing lookahead ({@link
+   * #isTrailingLookahead}) and no bypassing thread accepts: consuming bypass threads are admitted
+   * and recorded in {@link #trailingLookaheadAdmitted}.
+   */
+  private void checkAssertionPlacement(
+      DFA.DFAState state,
+      List<NFA.NFAState> kernel,
+      Map<NFA.NFAState, List<AssertionCheck>> assertionMap,
+      Set<NFA.NFAState> acceptStates,
+      DFA.DFAState start) {
+    if (assertionPlacementUnsound || state.assertionChecks.isEmpty()) return;
+    boolean consumes = false;
+    for (NFA.NFAState s : state.nfaStates) {
+      if (!s.getTransitions().isEmpty()) {
+        consumes = true;
+        break;
+      }
+    }
+    int assertionStates = 0;
+    for (NFA.NFAState s : state.nfaStates) {
+      if (assertionMap.containsKey(s)) assertionStates++;
+    }
+    for (NFA.NFAState assertion : state.nfaStates) {
+      List<AssertionCheck> checks = assertionMap.get(assertion);
+      if (checks == null) continue;
+      boolean trailing =
+          assertionStates == 1
+              && state != start
+              && isTrailingLookahead(assertion, checks, acceptStates);
+      if (state.accepting && consumes && !trailing) {
+        if (state != start) {
+          assertionPlacementUnsound = true;
+          return;
+        }
+        for (AssertionCheck check : checks) {
+          if (!check.isGateDfa() && !check.isLookbehind()) {
+            assertionPlacementUnsound = true;
+            return;
+          }
+        }
+      }
+      for (NFA.NFAState s : epsilonClosureAvoiding(kernel, assertion)) {
+        if (acceptStates.contains(s)) {
+          assertionPlacementUnsound = true;
+          return;
+        }
+        if (!s.getTransitions().isEmpty()) {
+          if (!trailing) {
+            assertionPlacementUnsound = true;
+            return;
+          }
+          trailingLookaheadAdmitted = true;
+        }
+      }
+    }
+  }
+
+  /**
+   * True when {@code assertion} is a fixed-width lookahead followed only by acceptance: every state
+   * epsilon-reachable from it (itself included) is plain - no consuming transition, anchor, group,
+   * atomic, conditional, assertion or counted loop - and one of them accepts. A failed check can
+   * then only drop the state's acceptance, which is the deferred reading the unrolled executor
+   * applies to such checks on accepting states, so threads that bypass the assertion may keep
+   * consuming.
+   */
+  private static boolean isTrailingLookahead(
+      NFA.NFAState assertion, List<AssertionCheck> checks, Set<NFA.NFAState> acceptStates) {
+    for (AssertionCheck check : checks) {
+      if (!check.isLookahead() || check.isGateDfa()) return false;
+    }
+    Set<NFA.NFAState> seen = new HashSet<>();
+    Deque<NFA.NFAState> work = new ArrayDeque<>();
+    seen.add(assertion);
+    work.add(assertion);
+    boolean accepts = false;
+    while (!work.isEmpty()) {
+      NFA.NFAState s = work.poll();
+      if (!s.getTransitions().isEmpty()
+          || s.anchor != null
+          || (s != assertion && s.assertionType != null)
+          || s.enterGroup != null
+          || s.exitGroup != null
+          || s.backrefCheck != null
+          || s.countedLoopId != null
+          || s.atomicEntry >= 0
+          || s.atomicExit >= 0
+          || s.conditionalGroup != null) {
+        return false;
+      }
+      accepts |= acceptStates.contains(s);
+      for (NFA.NFAState next : s.getEpsilonTransitions()) {
+        if (seen.add(next)) work.add(next);
+      }
+    }
+    return accepts;
+  }
+
+  /**
+   * Epsilon closure of {@code seeds} that never enters {@code avoid}. Anchors are treated as
+   * passable, so the result over-approximates the states live without passing {@code avoid}.
+   */
+  private static Set<NFA.NFAState> epsilonClosureAvoiding(
+      List<NFA.NFAState> seeds, NFA.NFAState avoid) {
+    Set<NFA.NFAState> seen = new HashSet<>();
+    Deque<NFA.NFAState> work = new ArrayDeque<>();
+    for (NFA.NFAState s : seeds) {
+      if (s != avoid && seen.add(s)) work.add(s);
+    }
+    while (!work.isEmpty()) {
+      for (NFA.NFAState next : work.poll().getEpsilonTransitions()) {
+        if (next != avoid && seen.add(next)) work.add(next);
+      }
+    }
+    return seen;
   }
 
   /** Helper class to hold assertion extraction results. */
@@ -1691,11 +1972,6 @@ public class SubsetConstructor {
           // ladder, whose tagged-capture machinery does not track body groups correctly behind a
           // variable-width assertion (e.g. (?=.*b)(a+)b mis-spans group 1 on the ladder). Grouped
           // patterns keep their pre-gate routing (hybrid/NFA), which handles captures.
-          if (literalTierCandidate) {
-            throw new UnsupportedOperationException(
-                "Literal-indexOf tier candidate: the sub-DFA gate declines so"
-                    + " SPECIALIZED_LITERAL_LOOKAHEADS keeps the pattern");
-          }
           if (nfa.getGroupCount() == 0
               && (state.assertionType == NFA.AssertionType.POSITIVE_LOOKAHEAD
                   || state.assertionType == NFA.AssertionType.NEGATIVE_LOOKAHEAD)) {
@@ -1726,11 +2002,6 @@ public class SubsetConstructor {
    * (state explosion) stay out and keep the old routing.
    */
   private static final int MAX_GATE_DFA_STATES = 1000;
-
-  /**
-   * Set by buildDFAWithAssertions(nfa, true): decline gates for literal-indexOf-tier candidates.
-   */
-  private boolean literalTierCandidate = false;
 
   /**
    * Builds the gate DFA for a variable-width lookahead assertion: the assertion body's NFA

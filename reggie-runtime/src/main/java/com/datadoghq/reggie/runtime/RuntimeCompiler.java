@@ -28,10 +28,9 @@ import com.datadoghq.reggie.codegen.analysis.ConcatGreedyGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.ConcatQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.FallbackPatternDetector;
 import com.datadoghq.reggie.codegen.analysis.FixedRepetitionBackrefInfo;
-import com.datadoghq.reggie.codegen.analysis.GreedyBacktrackInfo;
+import com.datadoghq.reggie.codegen.analysis.GreedySuffixInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearPatternInfo;
 import com.datadoghq.reggie.codegen.analysis.LinearTokenSequencePlan;
-import com.datadoghq.reggie.codegen.analysis.NestedQuantifiedGroupsInfo;
 import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
@@ -43,6 +42,7 @@ import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.StructuralHash;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
+import com.datadoghq.reggie.codegen.automaton.BacktrackSupport;
 import com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
@@ -59,14 +59,13 @@ import com.datadoghq.reggie.codegen.codegen.DFAUnrolledBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.DeterministicChainBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedRepetitionBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.FixedSequenceBytecodeGenerator;
-import com.datadoghq.reggie.codegen.codegen.GreedyBacktrackBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.GreedyCharClassBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.GreedySuffixBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.LazyDFABytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.LinearPatternBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.LiteralAlternationTrieGenerator;
 import com.datadoghq.reggie.codegen.codegen.MultiGroupGreedyBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.NFABytecodeGenerator;
-import com.datadoghq.reggie.codegen.codegen.NestedQuantifiedGroupsBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
@@ -75,9 +74,12 @@ import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGene
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.SuffixSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
+import com.datadoghq.reggie.codegen.parsing.GroupCounter;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
+import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Constructor;
 import java.util.Collections;
@@ -103,7 +105,7 @@ public class RuntimeCompiler {
   private static final Logger LOG = Logger.getLogger(RuntimeCompiler.class.getName());
 
   // Level 1: Pattern string → matcher instance (fast path for exact matches).
-  // NFA-backed patterns are NOT stored here; they use NFA_CLASS_CACHE instead.
+  // Patterns with mutable match state are NOT stored here; they use NFA_CLASS_CACHE instead.
   private static final ConcurrentHashMap<Object, ReggieMatcher> PATTERN_CACHE =
       new ConcurrentHashMap<>();
 
@@ -140,9 +142,10 @@ public class RuntimeCompiler {
     }
   }
 
-  // Level 1b: Pattern string → NFA matcher factory for NFA-backed strategies.
-  // NFA matchers mutate shared instance fields (currentStates, nextStates, epsilonProcessed,
-  // configGroupStarts) during matching, so a single shared instance cannot be used concurrently.
+  // Level 1b: Pattern string → matcher factory for strategies with mutable match state
+  // (MatchingStrategy#hasMutableMatchState). Their matchers mutate instance fields
+  // (currentStates, nextStates, epsilonProcessed, configGroupStarts, lazyFindMode) during
+  // matching, so a single shared instance cannot be used concurrently.
   // We cache a factory here that produces a fresh enriched instance on every compile() call.
   private static final ConcurrentHashMap<Object, NfaMatcherFactory> NFA_CLASS_CACHE =
       new ConcurrentHashMap<>();
@@ -197,16 +200,17 @@ public class RuntimeCompiler {
       new ConcurrentHashMap<>();
 
   /**
-   * Cached entry for counted-loop-lowered patterns: immutable NFA + name map.
-   * BackrefBacktrackMatcher is stateless per call (all instance state is final; the DFS allocates
-   * its own stack/memo), but we keep the PikeVM cache shape — fresh matcher per compile, shared NFA
-   * — for consistency and to leave room for per-call buffers later.
+   * Cached entry for patterns run on {@link BackrefBacktrackMatcher} (counted-loop-lowered, generic
+   * backreference and lookaround patterns): immutable NFA + name map. BackrefBacktrackMatcher is
+   * stateless per call (all instance state is final; per-call search structures live in a
+   * per-thread workspace), but we keep the PikeVM cache shape — fresh matcher per compile, shared
+   * NFA — for consistency and to leave room for per-call buffers later.
    */
-  private static final class CountedLoopEntry {
+  private static final class BacktrackEntry {
     final NFA nfa;
     final Map<String, Integer> nameMap;
 
-    CountedLoopEntry(NFA nfa, Map<String, Integer> nameMap) {
+    BacktrackEntry(NFA nfa, Map<String, Integer> nameMap) {
       this.nfa = nfa;
       this.nameMap = nameMap;
     }
@@ -223,8 +227,8 @@ public class RuntimeCompiler {
     }
   }
 
-  // Level 1d: Pattern string → CountedLoopEntry for counted-loop-lowered patterns.
-  private static final ConcurrentHashMap<Object, CountedLoopEntry> COUNTED_LOOP_NFA_CACHE =
+  // Level 1d: Pattern string → BacktrackEntry for BackrefBacktrackMatcher patterns.
+  private static final ConcurrentHashMap<Object, BacktrackEntry> BACKTRACK_NFA_CACHE =
       new ConcurrentHashMap<>();
 
   /**
@@ -720,13 +724,16 @@ public class RuntimeCompiler {
    * Constructs the PikeVM fallback matcher used by DETERMINISTIC_CHAIN_BYTECODE generated classes
    * on find-budget overflow (doc/2026-09-01-deterministic-chain-bytecode-design.md §4). Public and
    * static because the generated classes live in any package (the annotation-processor path emits
-   * them into the user's package) while {@link PikeVMMatcher} is package-private. The construction
-   * happens lazily at first overflow — parse-at-overflow keeps the generated class constructor
-   * signature pattern-only, so the runtime and annotation-processor generators emit byte-identical
-   * classes.
+   * them into the user's package). The construction happens lazily at first overflow —
+   * parse-at-overflow keeps the generated class constructor signature pattern-only, so the runtime
+   * and annotation-processor generators emit byte-identical classes.
    *
    * <p>The lazy-aware NFA builder is required: chain-family patterns with lazy quantifiers keep
    * their priority semantics only through {@code ThompsonBuilder(true)}.
+   *
+   * <p>The generated chain matcher is shared across threads, but a {@link PikeVMMatcher} writes
+   * per-call buffers, so the result is a {@link PooledMatcher} over PikeVM instances that share one
+   * NFA and {@link PikeVMMatcher.DfaBundle}.
    *
    * @param pattern the pattern this matcher was generated for
    * @param nameToIndex the named-group map of the generated instance (for group(name) on fallback
@@ -737,13 +744,45 @@ public class RuntimeCompiler {
     try {
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);
-      NFA nfa = new ThompsonBuilder(true).build(ast, countGroups(pattern));
-      PikeVMMatcher m = new PikeVMMatcher(nfa, pattern);
-      m.setNameToIndex(nameToIndex == null ? Collections.emptyMap() : nameToIndex);
-      return m;
+      NFA nfa = new ThompsonBuilder(true).build(ast, GroupCounter.count(pattern));
+      return new PooledMatcher(
+          MethodHandles.insertArguments(
+              CHAIN_FALLBACK_INSTANCE,
+              0,
+              nfa,
+              pattern,
+              new PikeVMMatcher.DfaBundle(nfa),
+              nameToIndex == null ? Collections.emptyMap() : nameToIndex));
     } catch (RegexParser.ParseException e) {
       throw new java.util.regex.PatternSyntaxException(e.getMessage(), pattern, -1);
     }
+  }
+
+  private static final MethodHandle CHAIN_FALLBACK_INSTANCE;
+
+  static {
+    try {
+      CHAIN_FALLBACK_INSTANCE =
+          MethodHandles.lookup()
+              .findStatic(
+                  RuntimeCompiler.class,
+                  "chainFallbackInstance",
+                  MethodType.methodType(
+                      ReggieMatcher.class,
+                      NFA.class,
+                      String.class,
+                      PikeVMMatcher.DfaBundle.class,
+                      Map.class));
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  private static ReggieMatcher chainFallbackInstance(
+      NFA nfa, String pattern, PikeVMMatcher.DfaBundle bundle, Map<String, Integer> nameToIndex) {
+    PikeVMMatcher m = new PikeVMMatcher(nfa, pattern, bundle);
+    m.setNameToIndex(nameToIndex);
+    return m;
   }
 
   public static ReggieMatcher compilePikeVm(String pattern, String encodedNames) {
@@ -762,7 +801,7 @@ public class RuntimeCompiler {
             "PIKEVM_CAPTURE pattern is unsafe: " + pikeVmFallbackReason + " in /" + pattern + "/");
       }
       Map<String, Integer> nameMap = decodeNameMap(encodedNames);
-      int groupCount = countGroups(pattern);
+      int groupCount = GroupCounter.count(pattern);
       // lazyAware: lazy quantifiers must compile with lazy (shortest-first) priority, or the
       // extracted capture spans take the greedy split and diverge from the JDK (group spans of
       // both match() and findMatch*()). Every other PikeVM compile site builds lazy-aware.
@@ -771,6 +810,33 @@ public class RuntimeCompiler {
       return PIKEVM_NFA_CACHE.get(pattern).newMatcher(pattern);
     } catch (RegexParser.ParseException e) {
       throw new java.util.regex.PatternSyntaxException(e.getMessage(), pattern, -1);
+    }
+  }
+
+  /**
+   * Entry point of annotation-processor stubs for patterns that run on {@link
+   * BackrefBacktrackMatcher}. The processor admits only patterns {@link
+   * BacktrackSupport#unsupportedFeature} accepts; the check is repeated here for stubs compiled
+   * against a different codegen version.
+   */
+  public static ReggieMatcher compileBackrefBacktrack(String pattern, String encodedNames) {
+    BacktrackEntry entry = BACKTRACK_NFA_CACHE.get(pattern);
+    if (entry != null) {
+      return entry.newMatcher(pattern);
+    }
+    try {
+      RegexNode ast = new RegexParser().parse(pattern);
+      NFA nfa = new ThompsonBuilder(true).build(ast, GroupCounter.count(pattern));
+      String unsupported = BacktrackSupport.unsupportedFeature(nfa);
+      if (unsupported != null) {
+        throw new UnsupportedPatternException(
+            "backtracking engine does not execute " + unsupported + " in /" + pattern + "/");
+      }
+      BACKTRACK_NFA_CACHE.putIfAbsent(
+          pattern, new BacktrackEntry(nfa, decodeNameMap(encodedNames)));
+      return BACKTRACK_NFA_CACHE.get(pattern).newMatcher(pattern);
+    } catch (RegexParser.ParseException e) {
+      throw new PatternSyntaxException(e.getMessage(), pattern, -1);
     }
   }
 
@@ -823,7 +889,7 @@ public class RuntimeCompiler {
     PIKEVM_NFA_CACHE.clear();
     BITSTATE_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
-    COUNTED_LOOP_NFA_CACHE.clear();
+    BACKTRACK_NFA_CACHE.clear();
     HYBRID_CACHE.clear();
     LITERAL_CACHE.clear();
   }
@@ -1308,7 +1374,7 @@ public class RuntimeCompiler {
 
       // 2. Check if pattern requires recursive descent (context-free features)
       // Do this early to avoid unnecessary NFA building
-      int groupCount = countGroups(pattern);
+      int groupCount = GroupCounter.count(pattern);
       boolean caseInsensitive = isCaseInsensitive(pattern);
       NFA nfa;
       if (PatternAnalyzer.requiresRecursiveDescent(ast)) {
@@ -1346,9 +1412,9 @@ public class RuntimeCompiler {
               options);
         }
         NFA countedNfa = new ThompsonBuilder(true).build(ast, groupCount);
-        COUNTED_LOOP_NFA_CACHE.putIfAbsent(cacheKey, new CountedLoopEntry(countedNfa, nameMap));
+        BACKTRACK_NFA_CACHE.putIfAbsent(cacheKey, new BacktrackEntry(countedNfa, nameMap));
         noteRouting("COUNTED_LOOP_BACKTRACK (lowered bounded quantifiers)");
-        return COUNTED_LOOP_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+        return BACKTRACK_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
       // 3. Analyze and select strategy
@@ -1418,9 +1484,36 @@ public class RuntimeCompiler {
       // produce incorrect results for these shapes. This runs BEFORE the hybrid check and
       // BEFORE the PIKEVM/BITSTATE early returns, so it also catches DFA_*_WITH_GROUPS
       // patterns that usePosixLastMatch routes into hybrid.
-      String fallbackReason = FallbackPatternDetector.needsFallback(ast, result.strategy);
+      // A lookaround pattern step 4.5 runs on the backtracker is checked as such.
+      NFA backtrackNfa = null;
+      if (nfa != null && BacktrackSupport.routesToBacktracker(result.strategy, nfa)) {
+        backtrackNfa = new ThompsonBuilder(true).build(ast, groupCount);
+        if (BacktrackSupport.unsupportedFeature(backtrackNfa) != null) {
+          backtrackNfa = null;
+        }
+      }
+      String fallbackReason =
+          FallbackPatternDetector.needsFallback(ast, result.strategy, backtrackNfa != null);
       if (fallbackReason != null) {
         return fallbackOrThrow(pattern, fallbackReason, nameMap, options);
+      }
+
+      // 4.5. Generic backreference patterns and lookaround patterns run on the priority-ordered
+      // backtracker: the generated OPTIMIZED_NFA_WITH_BACKREFS find family keeps the longest
+      // candidate end, not Java's leftmost-first match (\d*(\d+)x\1 on "11x11": JDK 0..4,
+      // longest 0..5), and OPTIMIZED_NFA_WITH_LOOKAROUND loses alternation priority in group spans
+      // ((?=a)(a|ab)(b*) on "ab": JDK g1=0..1, generated 0..2) and in the match end
+      // ((?:a|ab)(?=b) on "abb": JDK 0..1, generated 0..2). HYBRID_DFA_LOOKAHEAD likewise
+      // mis-spans groups (([^a]*)[^a](?=[ab]*) on "b": JDK g1=0..0, hybrid 0..1) and keeps the
+      // longest match end ((?<=a|a).(?:(?:[ab]|[ab][^a])|[ab][ab](?=c+)) on "aaab": JDK 1..3,
+      // hybrid 1..4). SPECIALIZED_MULTIPLE_LOOKAHEADS and SPECIALIZED_LITERAL_LOOKAHEADS share the
+      // generated NFA and its longest end ((?=.*a)(?=.*b)(?:x|xy) on "xy ab": JDK 0..1, generated
+      // 0..2). The RECURSIVE_DESCENT generator does not evaluate assertions at all ((a)(?=b)\1?
+      // never matches).
+      if (backtrackNfa != null) {
+        BACKTRACK_NFA_CACHE.putIfAbsent(cacheKey, new BacktrackEntry(backtrackNfa, nameMap));
+        noteRouting("BACKREF_BACKTRACK (backreference or lookaround pattern)");
+        return BACKTRACK_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
       // 5. Check if we should use hybrid mode (DFA + NFA for groups).
@@ -1624,15 +1717,16 @@ public class RuntimeCompiler {
         }
       }
 
-      // 8b. For NFA-backed strategies: register a factory in NFA_CLASS_CACHE so that compile()
-      // can skip L1 and always return a fresh per-call instance. NFA matchers mutate shared
-      // fields (currentStates, nextStates, …) during matching and are not safe to share across
-      // threads or calls. The factory also captures the name map so that each fresh instance is
-      // fully enriched without re-parsing the pattern.
+      // 8b. For strategies with mutable match state (NFA-backed, recursive descent): register a
+      // factory in NFA_CLASS_CACHE so that compile() can skip L1 and always return a fresh
+      // per-call instance. These matchers mutate instance fields (currentStates, nextStates,
+      // lazyFindMode, …) during matching and are not safe to share across threads or calls. The
+      // factory also captures the name map so that each fresh instance is fully enriched without
+      // re-parsing the pattern.
       boolean nativeRichApi =
           StrategyJdkClassifier.classifyJdkDependency(result.strategy)
               == StrategyJdkClassifier.StrategyJdkClass.NATIVE;
-      if (isNfaBacked(result.strategy)) {
+      if (result.strategy.hasMutableMatchState()) {
         NFA_CLASS_CACHE.putIfAbsent(
             cacheKey, new NfaMatcherFactory(matcherClass, nameMap, nativeRichApi));
         // Return an enriched instance for this (first) call.
@@ -1856,7 +1950,7 @@ public class RuntimeCompiler {
       return Compilation.<NamedOnlyLtsRejection>rejected(NamedOnlyLtsRejection.PROFILE_INELIGIBLE);
     }
     return Compilation.<NamedOnlyLtsRejection>admitted(
-        new LinearTokenSequenceMatcher(pattern, plan, countGroups(pattern), nameMap));
+        new LinearTokenSequenceMatcher(pattern, plan, GroupCounter.count(pattern), nameMap));
   }
 
   private static boolean isRuntimeExecutableLinearTokenSequence(
@@ -2309,6 +2403,11 @@ public class RuntimeCompiler {
         literalAltGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
+      case GREEDY_SUFFIX:
+        new GreedySuffixBytecodeGenerator((GreedySuffixInfo) result.patternInfo)
+            .generateAll(cw, "com/datadoghq/reggie/runtime/" + className);
+        break;
+
       case SPECIALIZED_GREEDY_CHARCLASS:
         PatternAnalyzer.GreedyCharClassInfo greedyInfo =
             (PatternAnalyzer.GreedyCharClassInfo) result.patternInfo;
@@ -2617,15 +2716,6 @@ public class RuntimeCompiler {
         optGroupGen.generate(cw);
         break;
 
-      case NESTED_QUANTIFIED_GROUPS:
-        NestedQuantifiedGroupsInfo nestedGroupsInfo =
-            (NestedQuantifiedGroupsInfo) result.patternInfo;
-        NestedQuantifiedGroupsBytecodeGenerator nestedGen =
-            new NestedQuantifiedGroupsBytecodeGenerator(
-                nestedGroupsInfo, "com/datadoghq/reggie/runtime/" + className);
-        nestedGen.generate(cw);
-        break;
-
       case LINEAR_BACKREFERENCE:
         LinearPatternInfo linearInfo = (LinearPatternInfo) result.patternInfo;
         LinearPatternBytecodeGenerator linearGen =
@@ -2824,15 +2914,6 @@ public class RuntimeCompiler {
         recursiveGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         break;
 
-      case GREEDY_BACKTRACK:
-        // Greedy patterns needing backtracking: (.*)bar, (.*)(\d+)
-        GreedyBacktrackInfo greedyBacktrackInfo = (GreedyBacktrackInfo) result.patternInfo;
-        GreedyBacktrackBytecodeGenerator greedyBacktrackGen =
-            new GreedyBacktrackBytecodeGenerator(
-                greedyBacktrackInfo, "com.datadoghq.reggie.runtime." + className);
-        greedyBacktrackGen.generate(cw);
-        break;
-
       default:
         throw new IllegalStateException("Unknown strategy: " + result.strategy);
     }
@@ -2918,7 +2999,8 @@ public class RuntimeCompiler {
 
     if (needsRecursiveDescent) {
       mv.visitVarInsn(ALOAD, 0); // this
-      mv.visitLdcInsn(nfa != null ? nfa.getGroupCount() : countGroups(pattern)); // groupCount
+      mv.visitLdcInsn(
+          nfa != null ? nfa.getGroupCount() : GroupCounter.count(pattern)); // groupCount
       mv.visitMethodInsn(
           INVOKEVIRTUAL,
           "com/datadoghq/reggie/runtime/ReggieMatcher",
@@ -2957,88 +3039,5 @@ public class RuntimeCompiler {
       return true;
     }
     return false;
-  }
-
-  private static int countGroups(String pattern) {
-    int count = 0;
-    boolean escaped = false;
-    boolean inClass = false; // inside a [...] character class: '(' is a literal, never a group
-    for (int i = 0; i < pattern.length(); i++) {
-      char c = pattern.charAt(i);
-      if (c == '\\' && i + 1 < pattern.length() && pattern.charAt(i + 1) == 'Q') {
-        i += 2;
-        while (i + 1 < pattern.length()
-            && !(pattern.charAt(i) == '\\' && pattern.charAt(i + 1) == 'E')) {
-          i++;
-        }
-        if (i + 1 < pattern.length()) {
-          i++;
-        }
-        continue;
-      }
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (c == '\\') {
-        escaped = true;
-      } else if (inClass) {
-        // A ']' closes the class (a ']' as the very first class character is a literal
-        // per java.util.regex; for group counting that distinction cannot change the count,
-        // so treating any unescaped ']' as the closer is safe).
-        if (c == ']') {
-          inClass = false;
-        }
-      } else if (c == '[') {
-        inClass = true;
-      } else if (c == '(' && i + 1 < pattern.length()) {
-        // Check if it's a capturing group
-        // Named groups like (?<name>...) and (?'name'...) ARE capturing groups
-        if (i + 1 < pattern.length() && pattern.charAt(i + 1) == '?') {
-          // Check what follows the '?'
-          if (i + 2 < pattern.length()) {
-            char next = pattern.charAt(i + 2);
-            if (next == ':') {
-              continue; // Non-capturing (?:...)
-            }
-            if (next == '=' || next == '!') {
-              continue; // Lookahead (?=...) or (?!...)
-            }
-            if (next == '<' && i + 3 < pattern.length()) {
-              char afterLt = pattern.charAt(i + 3);
-              if (afterLt == '=' || afterLt == '!') {
-                continue; // Lookbehind (?<=...) or (?<!...)
-              }
-              // (?<name>...) is a named capturing group, count it
-            }
-            if (next == '>') {
-              continue; // Atomic group (?>...)
-            }
-            if (next == '#') {
-              continue; // Comment (?#...)
-            }
-            if (next == '|') {
-              continue; // Branch reset (?|...)
-            }
-            if (next == '(') {
-              continue; // Conditional (?(...)...)
-            }
-            // Check for inline modifiers like (?i), (?m), (?s), (?x), (?-i), etc.
-            if (next == '-'
-                || next == 'i'
-                || next == 'm'
-                || next == 's'
-                || next == 'x'
-                || next == 'u'
-                || next == 'U'
-                || next == 'd') {
-              continue; // Inline modifier (?i...) etc.
-            }
-          }
-        }
-        count++;
-      }
-    }
-    return count;
   }
 }

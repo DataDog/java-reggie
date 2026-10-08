@@ -446,38 +446,8 @@ public class QuantifiedGroupBytecodeGenerator {
         mv.visitLabel(done);
       }
     } else {
-      // Multiple ranges
-      Label matched = new Label();
-
-      for (CharSet.Range range : charset.getRanges()) {
-        char min = range.start;
-        char max = range.end;
-
-        Label nextRange = new Label();
-        mv.visitVarInsn(ILOAD, charVar); // S: [] -> [I]
-        pushInt(mv, (int) min); // S: [I] -> [I, I]
-        mv.visitJumpInsn(IF_ICMPLT, nextRange); // S: [I, I] -> []
-
-        mv.visitVarInsn(ILOAD, charVar); // S: [] -> [I]
-        pushInt(mv, (int) max); // S: [I] -> [I, I]
-        mv.visitJumpInsn(IF_ICMPLE, matched); // S: [I, I] -> []
-
-        mv.visitLabel(nextRange);
-      }
-
-      // No range matched
-      if (!negated) {
-        mv.visitJumpInsn(GOTO, exitLabel);
-      } else {
-        Label continueLabel = new Label();
-        mv.visitJumpInsn(GOTO, continueLabel);
-        mv.visitLabel(matched);
-        mv.visitJumpInsn(GOTO, exitLabel);
-        mv.visitLabel(continueLabel);
-        return;
-      }
-
-      mv.visitLabel(matched);
+      BytecodeUtil.emitCharSetCheck(
+          mv, negated ? charset.complement() : charset, charVar, exitLabel);
     }
   }
 
@@ -885,31 +855,8 @@ public class QuantifiedGroupBytecodeGenerator {
         mv.visitLabel(notInRange);
       }
     } else {
-      // Multiple ranges
-      Label matched = new Label();
-      for (CharSet.Range range : charset.getRanges()) {
-        Label nextRange = new Label();
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, matched);
-        mv.visitLabel(nextRange);
-      }
-      // No range matched
-      if (!negated) {
-        // Normal: no match means exit
-        mv.visitJumpInsn(GOTO, exitLabel);
-        mv.visitLabel(matched);
-      } else {
-        // Negated: no match means continue, match means exit
-        Label continueLabel = new Label();
-        mv.visitJumpInsn(GOTO, continueLabel);
-        mv.visitLabel(matched);
-        mv.visitJumpInsn(GOTO, exitLabel);
-        mv.visitLabel(continueLabel);
-      }
+      BytecodeUtil.emitCharSetCheck(
+          mv, negated ? charset.complement() : charset, charVar, exitLabel);
     }
   }
 
@@ -994,6 +941,12 @@ public class QuantifiedGroupBytecodeGenerator {
     Label outerLoop = new Label();
     Label notFound = new Label();
 
+    // ^ / \A: only position 0 can match.
+    if (info.startAnchored) {
+      mv.visitVarInsn(ILOAD, startPosVar);
+      mv.visitJumpInsn(IFNE, notFound);
+    }
+
     mv.visitLabel(outerLoop);
 
     // if (startPos > len) return null;
@@ -1053,7 +1006,8 @@ public class QuantifiedGroupBytecodeGenerator {
     mv.visitIincInsn(countVar, 1);
 
     // lastIterStart = iterStart; lastIterEnd = pos;
-    mv.visitVarInsn(ILOAD, iterStartVar);
+    // A nested run ((\d+)+) is one outer iteration spanning the whole run: start = matchStart.
+    mv.visitVarInsn(ILOAD, info.hasNestedQuantifier() ? matchStartVar : iterStartVar);
     mv.visitVarInsn(ISTORE, lastIterStartVar);
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ISTORE, lastIterEndVar);
@@ -1114,8 +1068,12 @@ public class QuantifiedGroupBytecodeGenerator {
 
     // Try next position
     mv.visitLabel(tryNextPos);
-    mv.visitIincInsn(startPosVar, 1); // startPos++
-    mv.visitJumpInsn(GOTO, outerLoop);
+    if (info.startAnchored) {
+      mv.visitJumpInsn(GOTO, notFound);
+    } else {
+      mv.visitIincInsn(startPosVar, 1); // startPos++
+      mv.visitJumpInsn(GOTO, outerLoop);
+    }
 
     // Not found
     mv.visitLabel(notFound);

@@ -155,8 +155,11 @@ public class LinearPatternInfo implements PatternInfo {
     /** Start of input (^) - non-multiline */
     START,
 
-    /** End of input ($) - non-multiline */
+    /** End of input, or before a final line terminator ($ non-multiline, \Z) */
     END,
+
+    /** Absolute end of input (\z) */
+    END_ABSOLUTE,
 
     /** Start of line (^ in multiline mode) - matches at start or after \n */
     START_MULTILINE,

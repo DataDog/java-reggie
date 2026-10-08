@@ -79,9 +79,9 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
   private final int reinjectDfaState;
 
   /**
-   * {@link #reinjectDfaState}'s "previous character was '\n'" variant (crosses {@code (?m)^}), or
-   * {@code -1} if the pattern has no {@code START_MULTILINE} anchor (then {@link #reinjectDfaState}
-   * covers every case).
+   * {@link #reinjectDfaState}'s "previous character was a line terminator" variant (crosses {@code
+   * (?m)^}), or {@code -1} if the pattern has no {@code START_MULTILINE} anchor (then {@link
+   * #reinjectDfaState} covers every case).
    */
   private final int reinjectAfterNlDfaState;
 
@@ -257,7 +257,8 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     if (clamped > len) return null;
     int dfaState = startDfaStateFor(input, clamped, len);
     if (dfaState == LaurikariDFACache.DEAD) {
-      // reinjectDfaState (or its after-'\n' variant) collapsed to DEAD when the anchor-blocked
+      // reinjectDfaState (or its after-terminator variant) collapsed to DEAD when the
+      // anchor-blocked
       // closure has no live states (e.g. a wholly start-anchored pattern reinjected at clamped >
       // 0) -- no candidate can ever reach an accept, so indexing accepting[]/interning further is
       // both unnecessary and unsafe (DEAD is a negative sentinel, not a real array index).
@@ -309,15 +310,15 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
   /**
    * @return the {@code findCache} state to begin a {@code findFrom(input, clamped)} scan from:
    *     state 0 (anchor-satisfied) only when {@code clamped == 0}; otherwise the anchor-blocked
-   *     {@link #reinjectDfaState}, or its after-{@code '\n'} variant when the character immediately
-   *     before {@code clamped} is {@code '\n'} — see {@link #reinjectDfaState}'s javadoc.
+   *     {@link #reinjectDfaState}, or its after-terminator variant when the character immediately
+   *     before {@code clamped} is a line terminator — see {@link #reinjectDfaState}'s javadoc.
    */
   private int startDfaStateFor(String input, int clamped, int len) {
     if (hasNewAnchor) {
       LaurikariStepResult liveSeed;
       if (clamped == 0) {
         liveSeed = step.truncatedInitialClosure(input, len);
-      } else if (input.charAt(clamped - 1) == '\n') {
+      } else if (LineTerminators.isLineTerminator(input.charAt(clamped - 1))) {
         LaurikariStepResult afterNl = step.reinjectAfterNlClosure(input, clamped, len);
         liveSeed = afterNl != null ? afterNl : step.reinjectClosure(input, clamped, len);
       } else {
@@ -326,7 +327,8 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
       return findCache.intern(liveSeed.states, liveSeed.regs);
     }
     if (clamped == 0) return 0;
-    if (reinjectAfterNlDfaState >= 0 && input.charAt(clamped - 1) == '\n') {
+    if (reinjectAfterNlDfaState >= 0
+        && LineTerminators.isLineTerminator(input.charAt(clamped - 1))) {
       return reinjectAfterNlDfaState;
     }
     return reinjectDfaState;

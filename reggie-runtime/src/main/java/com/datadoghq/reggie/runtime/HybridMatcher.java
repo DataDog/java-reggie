@@ -112,8 +112,9 @@ public class HybridMatcher extends ReggieMatcher {
 
   @Override
   public MatchResult findMatchFrom(String input, int start) {
-    MatchResult dfaResult = dfaMatcher.findMatchFrom(input, start);
-    if (dfaResult == null) {
+    // Only the DFA's leftmost start is needed here; findFrom gives it without building a result.
+    int dfaStart = dfaMatcher.findFrom(input, Math.max(0, start));
+    if (dfaStart < 0) {
       return null;
     }
 
@@ -128,9 +129,14 @@ public class HybridMatcher extends ReggieMatcher {
     // half since its findFrom literal-scan jump is gated on verified match prefixes
     // (NfaFindFromRegressionTest guards the give-back family). If a search still misses, the
     // span re-match below extracts captures from the DFA span as a fallback.
-    MatchResult nfaResult = nfaMatcher.findMatchFrom(input, dfaResult.start());
+    MatchResult nfaResult = nfaMatcher.findMatchFrom(input, dfaStart);
     if (nfaResult != null) {
       return enrich(nfaResult);
+    }
+
+    MatchResult dfaResult = dfaMatcher.findMatchFrom(input, dfaStart);
+    if (dfaResult == null) {
+      return null;
     }
 
     String matched = input.substring(dfaResult.start(), dfaResult.end());
@@ -158,7 +164,7 @@ public class HybridMatcher extends ReggieMatcher {
     private final MatchResult delegate;
     private final int offset;
 
-    OffsetMatchResult(String input, MatchResult delegate, int offset) {
+    public OffsetMatchResult(String input, MatchResult delegate, int offset) {
       this.input = input;
       this.delegate = delegate;
       this.offset = offset;

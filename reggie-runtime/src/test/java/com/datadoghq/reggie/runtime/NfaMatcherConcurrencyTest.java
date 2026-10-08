@@ -36,22 +36,23 @@ import org.junit.jupiter.api.Test;
  * OPTIMIZED_NFA_WITH_LOOKAROUND, HYBRID_DFA_LOOKAHEAD, SPECIALIZED_MULTIPLE_LOOKAHEADS,
  * SPECIALIZED_LITERAL_LOOKAHEADS, LAZY_DFA) with more than 128 NFA states use pre-allocated
  * instance fields (currentStates, nextStates, epsilonProcessed, configGroupStarts) during matching.
- * Sharing a single instance across threads or calls corrupts these fields.
+ * Sharing a single instance across threads or calls corrupts these fields. RECURSIVE_DESCENT
+ * matchers have the same problem: {@code matchInto} uses the {@code recursiveGroups} scratch array.
  *
- * <p>The fix: for NFA-backed strategies, Reggie.compile() returns a fresh instance per call (backed
- * by a cached compiled class) rather than a shared L1-cached instance. Each caller receives its own
+ * <p>The fix: for these strategies, Reggie.compile() returns a fresh instance per call (backed by a
+ * cached compiled class) rather than a shared L1-cached instance. Each caller receives its own
  * instance and can use it safely in single-threaded fashion.
  */
 public class NfaMatcherConcurrencyTest {
 
-  // Backreference pattern — routes to OPTIMIZED_NFA_WITH_BACKREFS, a genuinely NFA-backed generated
-  // strategy that uses the shared StateSet instance fields during matching. (Lookahead strategies
-  // delegate to java.util.regex, which is immutable and safe to share, so they cannot exercise the
-  // shared-mutable-state race this test guards against.)
-  private static final String NFA_PATTERN = "(a|b)c\\1";
+  // Multiline anchor in an alternation — routes to the generated OPTIMIZED_NFA class.
+  // (Backreference
+  // and lookaround patterns run on the stateless BackrefBacktrackMatcher, which is safe to share,
+  // so they cannot exercise the shared-mutable-state race this test guards against.)
+  private static final String NFA_PATTERN = "(?m)^abcdefghijklmnopqrstuvwxyz|b";
 
-  // Input that matches: group 1 captures "a", then "c", then the backreference matches "a".
-  private static final String MATCHING_INPUT = "aca";
+  // Input that matches through the second alternative.
+  private static final String MATCHING_INPUT = "b";
 
   // Input that must NOT match
   private static final String NON_MATCHING_INPUT = "x";
@@ -118,7 +119,8 @@ public class NfaMatcherConcurrencyTest {
    * rather than a shared mutable object.
    */
   @Test
-  public void testEachCompileCallReturnsDistinctNfaInstance() {
+  public void testEachCompileCallReturnsDistinctNfaInstance() throws Exception {
+    assertEquals("OPTIMIZED_NFA", StrategyCorrectnessMetaTest.routeOf(NFA_PATTERN).name());
     int numInstances = 16;
     List<ReggieMatcher> instances = new ArrayList<>(numInstances);
     for (int i = 0; i < numInstances; i++) {
@@ -140,5 +142,53 @@ public class NfaMatcherConcurrencyTest {
             "NFA-backed matchers must not be shared across compile() calls");
       }
     }
+  }
+
+  /**
+   * RECURSIVE_DESCENT: each thread compiles its own matcher and runs matchInto, whose group spans
+   * live in the instance's {@code recursiveGroups} array until copied out.
+   */
+  @Test
+  public void testConcurrentCompileAndMatchIntoRecursiveDescentPattern() throws Exception {
+    // Not prefiltered (no required literal), so matchInto reaches the generated method.
+    String pattern = "(a|bb)\\1+";
+    String[] inputs = {"aa", "bbbbbb", "aaaaaaaa", "bbbb"};
+    int[] groupEnds = {1, 2, 1, 2};
+    assertNotSame(Reggie.compile(pattern), Reggie.compile(pattern));
+
+    int numThreads = 8;
+    AtomicInteger failures = new AtomicInteger(0);
+    CountDownLatch startLatch = new CountDownLatch(numThreads);
+    CountDownLatch doneLatch = new CountDownLatch(numThreads);
+    ExecutorService pool = Executors.newFixedThreadPool(numThreads);
+    for (int t = 0; t < numThreads; t++) {
+      int offset = t;
+      pool.submit(
+          () -> {
+            try {
+              startLatch.countDown();
+              startLatch.await();
+              ReggieMatcher matcher = Reggie.compile(pattern);
+              int[] starts = new int[2];
+              int[] ends = new int[2];
+              for (int i = 0; i < 20_000; i++) {
+                int k = (i + offset) % inputs.length;
+                if (!matcher.matchInto(inputs[k], starts, ends)
+                    || starts[1] != 0
+                    || ends[1] != groupEnds[k]) {
+                  failures.incrementAndGet();
+                }
+              }
+            } catch (Exception e) {
+              failures.incrementAndGet();
+            } finally {
+              doneLatch.countDown();
+            }
+          });
+    }
+
+    assertTrue(doneLatch.await(30, TimeUnit.SECONDS), "Threads timed out");
+    pool.shutdown();
+    assertEquals(0, failures.get(), "Each thread must get a fresh recursive-descent matcher");
   }
 }

@@ -40,6 +40,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private final NFA nfa;
   private final int groupCount;
+
+  /**
+   * First slot of the group pins ({@link NFA.NFAState#pinGroup}): group g's pinned span lives at
+   * {@code pinBase + 2g}; -1 when the NFA has no pins.
+   */
+  private final int pinBase;
+
   private final int stateCount;
 
   // Thread-list storage: two rings of (stateId, captures[]) indexed by list-position.
@@ -219,7 +226,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
     clistIds = new int[stateCount];
     nlistIds = new int[stateCount];
-    int slotCount = 2 * (groupCount + 1);
+    pinBase = nfa.hasPinnedGroups() ? 2 * (groupCount + 1) : -1;
+    int slotCount = (nfa.hasPinnedGroups() ? 4 : 2) * (groupCount + 1);
     clistCaptures = new int[stateCount][slotCount];
     nlistCaptures = new int[stateCount][slotCount];
     inClist = new boolean[stateCount];
@@ -292,11 +300,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
     rejectStartClosureIds = bundle.rejectStartClosureIds;
     if (findDfa != null) {
       if (reinjectAfterNlClosureIds != null) {
-        // After consuming '\n', inject the after-newline closure (crosses START_MULTILINE).
+        // After consuming a line terminator, inject the after-newline closure (crosses
+        // START_MULTILINE).
         findStep = (cur, c) -> findStepClosureMultiline(transitionTargets(cur, (char) c), c);
-        // matches(): after '\n', START_MULTILINE can fire; at all other positions block it.
+        // matches(): after a line terminator, START_MULTILINE can fire; elsewhere block it.
         matchesStep =
-            (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c), true, c != '\n');
+            (cur, c) ->
+                sortedEpsilonClosure(
+                    transitionTargets(cur, (char) c),
+                    true,
+                    !LineTerminators.isLineTerminator((char) c));
       } else {
         // Self-anchoring find step: closureNoStart(targets) UNION reinjectClosure.
         findStep = (cur, c) -> findStepClosure(transitionTargets(cur, (char) c));
@@ -327,9 +340,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * Eligible for the boolean find() fast path: no anchors other than START/STRING_START/
    * START_MULTILINE, no assertions, backreferences, or atomic groups.
    *
-   * <p>START_MULTILINE ((?m)^) is handled by splitting the re-injection closure: after consuming
-   * '\n' the DFA re-injects a closure that crosses START_MULTILINE anchors; at all other positions
-   * a closure that blocks them is used. Both closures block START/STRING_START (pos-0-only).
+   * <p>START_MULTILINE ((?m)^) is handled by splitting the re-injection closure: after consuming a
+   * line terminator the DFA re-injects a closure that crosses START_MULTILINE anchors; at all other
+   * positions a closure that blocks them is used. Both closures block START/STRING_START
+   * (pos-0-only).
    */
   /**
    * NFA-derived, immutable matcher setup shared across every {@link PikeVMMatcher} built for the
@@ -365,11 +379,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
         // Initial state (pos 0): all start anchors satisfied -> cross everything.
         startClosureIds = sortedEpsilonClosure(statesById, stateCount, start, false, false);
         if (hasMultiline) {
-          // Mid-line reinject (pos > 0, prev char != \n): block START, STRING_START, and
+          // Mid-line reinject (pos > 0, prev char not a terminator): block START, STRING_START, and
           // START_MULTILINE - none of the start-of-line anchors fire in mid-line positions.
           reinjectClosureIds = sortedEpsilonClosure(statesById, stateCount, start, true, true);
-          // After-newline reinject (prev char == \n): block START/STRING_START but cross
-          // START_MULTILINE - (?m)^ fires at the start of every line, i.e. after \n.
+          // After-newline reinject (prev char is a terminator): block START/STRING_START but
+          // cross START_MULTILINE - (?m)^ fires at the start of every line.
           reinjectAfterNlClosureIds =
               sortedEpsilonClosure(statesById, stateCount, start, true, false);
         } else {
@@ -517,6 +531,33 @@ public final class PikeVMMatcher extends ReggieMatcher {
         if (reached.add(e.id)) q.add(e);
       }
     }
+    return multilineReinjectExact(nfa);
+  }
+
+  /**
+   * (?m)^ is modelled by re-injecting the ^-crossing start closure after each line terminator. That
+   * cannot express two java.util.regex rules: ^ never matches at the end, and never between {@code
+   * \r} and {@code \n}. Both only matter if a state reachable from the start solely through a
+   * START_MULTILINE anchor accepts or consumes {@code '\n'}; this returns false in that case. Other
+   * anchors are crossed, so the check can only decline more patterns, never fewer.
+   */
+  static boolean multilineReinjectExact(NFA nfa) {
+    if (!nfaHasMultilineAnchor(nfa)) return true;
+    int stateCount = nfa.getStates().size();
+    NFA.NFAState[] statesById = new NFA.NFAState[stateCount];
+    for (NFA.NFAState s : nfa.getStates()) statesById[s.id] = s;
+    int[] start = {nfa.getStartState().id};
+    boolean[] midLine = new boolean[stateCount];
+    for (int id : DfaBundle.sortedEpsilonClosure(statesById, stateCount, start, true, true)) {
+      midLine[id] = true;
+    }
+    for (int id : DfaBundle.sortedEpsilonClosure(statesById, stateCount, start, true, false)) {
+      if (midLine[id]) continue;
+      if (nfa.getAcceptStates().contains(statesById[id])) return false;
+      for (NFA.Transition t : statesById[id].getTransitions()) {
+        if (t.chars.contains('\n')) return false;
+      }
+    }
     return true;
   }
 
@@ -544,7 +585,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    *   <li>{@code blockStartAnchor=true}: do not traverse through START/STRING_START anchor states
    *       (their anchor is unsatisfied at pos &gt; 0).
    *   <li>{@code blockMultilineAnchor=true}: also do not traverse through START_MULTILINE states
-   *       ((?m)^ unsatisfied when the previous char was not '\n').
+   *       ((?m)^ unsatisfied when the previous char was not a line terminator).
    * </ul>
    *
    * With both false (pos 0 / all-anchors-open) the closure crosses every anchor state.
@@ -623,13 +664,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /**
-   * The self-anchoring find() step for patterns with START_MULTILINE ((?m)^): after consuming
-   * {@code '\n'} the after-newline reinject closure is used (crosses START_MULTILINE); at all other
-   * positions the mid-line reinject closure is used (blocks START_MULTILINE).
+   * The self-anchoring find() step for patterns with START_MULTILINE ((?m)^): after consuming a
+   * line terminator the after-newline reinject closure is used (crosses START_MULTILINE); at all
+   * other positions the mid-line reinject closure is used (blocks START_MULTILINE).
    */
   private int[] findStepClosureMultiline(int[] targets, int c) {
     int[] tc = sortedEpsilonClosure(targets, true, true);
-    int[] reinject = (c == '\n') ? reinjectAfterNlClosureIds : reinjectClosureIds;
+    int[] reinject =
+        LineTerminators.isLineTerminator((char) c) ? reinjectAfterNlClosureIds : reinjectClosureIds;
     return sortedUnion(tc, reinject);
   }
 
@@ -646,28 +688,19 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /**
-   * Returns true if any line-start position (pos 0 or the char immediately after a {@code '\n'})
+   * Returns true if any line-start position (pos 0 or the char immediately after a line terminator)
    * holds an ASCII char that can begin a match per {@link #firstByteAscii}. Used as a fast-reject
-   * guard for {@code (?m)^} patterns: if no such position exists, no match is possible.
-   *
-   * <p>Uses SIMD-accelerated {@code String.indexOf('\n')} to hop between line starts in O(L/line)
-   * rather than scanning every character.
+   * guard for {@code (?m)^} patterns: if no such position exists, no match is possible. The
+   * position after the {@code \r} of a {@code \r\n} is also checked; it holds {@code \n}, which
+   * only makes the guard more permissive.
    */
   private boolean hasMultilineFirstCharCandidate(String input) {
     int len = input.length();
-    if (len == 0) return false;
-    // Check pos 0.
-    char c0 = input.charAt(0);
-    if (c0 < 128 && firstByteAscii[c0]) return true;
-    // Check each position immediately after a '\n'.
-    int nl = input.indexOf('\n');
-    while (nl >= 0) {
-      int next = nl + 1;
-      if (next < len) {
-        char c = input.charAt(next);
+    for (int i = 0; i < len; i++) {
+      if (i == 0 || LineTerminators.isLineTerminator(input.charAt(i - 1))) {
+        char c = input.charAt(i);
         if (c < 128 && firstByteAscii[c]) return true;
       }
-      nl = input.indexOf('\n', next);
     }
     return false;
   }
@@ -757,8 +790,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
     if (findDfa != null) {
       // Empty-matchable patterns match (the empty string) at every position, including "".
       if (findCanMatchEmpty) return true;
-      // T1.4a: START_MULTILINE fast-reject. (?m)^ patterns can only match at pos 0 or after '\n'.
-      // Scan line-start positions using SIMD indexOf('\n') and check the first-char bitmap. If no
+      // T1.4a: START_MULTILINE fast-reject. (?m)^ patterns can only match at pos 0 or after a line
+      // terminator. Scan line-start positions and check the first-char bitmap. If no
       // line start has a valid first char, no match is possible — avoids all acquire-fenced DFA
       // reads on ARM for pure no-match inputs (e.g. all-digits input for (?m)^[a-z]+).
       if (reinjectAfterNlClosureIds != null
@@ -1397,6 +1430,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * markers the original array is returned unchanged; otherwise a scratch copy is used.
    */
   private int[] updateCaptures(NFA.NFAState state, int[] captures, int pos, int depth) {
+    if (state.pinGroup != null) {
+      int g = state.pinGroup;
+      if (captures[pinBase + 2 * g] != -1) return captures; // the first pin wins
+      int[] copy = scratchCaptures[Math.min(depth + 1, scratchCaptures.length - 1)];
+      System.arraycopy(captures, 0, copy, 0, captures.length);
+      copy[pinBase + 2 * g] = captures[2 * g];
+      copy[pinBase + 2 * g + 1] = captures[2 * g + 1];
+      return copy;
+    }
     if (state.enterGroup == null && state.exitGroup == null) {
       return captures;
     }
@@ -1484,9 +1526,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
         // \z matches only at the absolute end of input.
         return pos == regionEnd;
       case START_MULTILINE:
-        return pos == regionStart || (pos > 0 && input.charAt(pos - 1) == '\n');
+        return LineTerminators.isMultilineStart(input, pos, regionStart, regionEnd);
       case END_MULTILINE:
-        return pos == regionEnd || (pos < regionEnd && input.charAt(pos) == '\n');
+        return LineTerminators.isMultilineEnd(input, pos, regionEnd);
       case WORD_BOUNDARY:
         {
           boolean beforeWord = pos > 0 && isWordChar(input.charAt(pos - 1));
@@ -1717,6 +1759,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   private MatchResult buildResult(String input, int[] caps) {
+    if (pinBase >= 0) {
+      for (int g = 1; g <= groupCount; g++) {
+        if (caps[pinBase + 2 * g] != -1) {
+          caps[2 * g] = caps[pinBase + 2 * g];
+          caps[2 * g + 1] = caps[pinBase + 2 * g + 1];
+        }
+      }
+    }
     return buildCaptureResult(input, caps, groupCount);
   }
 
@@ -1817,9 +1867,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   /** True only for a full dotall set: the entire Unicode range including {@code '\n'}. */
   private static boolean isDotAllCharSet(CharSet cs) {
-    // isAnyChar() is also true for any-except-newline; require '\n' membership to exclude it, since
-    // a non-dotall '.' would not consume a newline and could end the greedy match early.
-    return cs.isAnyChar() && cs.contains('\n');
+    return cs.isAnyChar();
   }
 
   /**

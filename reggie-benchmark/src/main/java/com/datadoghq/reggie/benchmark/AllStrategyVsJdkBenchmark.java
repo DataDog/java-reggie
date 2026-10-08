@@ -71,6 +71,7 @@ import org.openjdk.jmh.annotations.Warmup;
  *   <li>SPECIALIZED_GREEDY_CHARCLASS: {@code (\d+)}
  *   <li>SPECIALIZED_MULTI_GROUP_GREEDY: {@code ([a-z]+)@([a-z]+)\.com}
  *   <li>SPECIALIZED_CONCAT_GREEDY_GROUP: {@code a(b*)}
+ *   <li>GREEDY_SUFFIX: {@code (.*)bar}
  *   <li>SPECIALIZED_FIXED_SEQUENCE: {@code \d{3}-\d{3}-\d{4}}
  *   <li>SPECIALIZED_BOUNDED_QUANTIFIERS: {@code \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}}
  *   <li>DFA_UNROLLED: {@code [ab]c}
@@ -149,6 +150,14 @@ public class AllStrategyVsJdkBenchmark {
   private String concatGreedyIn;
   private ReggieMatcher reggieConcatGreedy;
   private Pattern jdkConcatGreedy;
+
+  // ── GREEDY_SUFFIX ─────────────────────────────────────────────────────────────
+  // Pattern: (.*)bar   Matched-region growth.
+  private static final String GREEDY_SUFFIX_PAT = "(.*)bar";
+
+  private String greedySuffixIn;
+  private ReggieMatcher reggieGreedySuffix;
+  private Pattern jdkGreedySuffix;
 
   // ── SPECIALIZED_FIXED_SEQUENCE ────────────────────────────────────────────────
   // Pattern: \d{3}-\d{3}-\d{4}   Scan-prefix growth (fixed-width match).
@@ -269,6 +278,11 @@ public class AllStrategyVsJdkBenchmark {
         pick(scale, "xabbby", "xa" + "b".repeat(50) + "y", "xa" + "b".repeat(2000) + "y");
     reggieConcatGreedy = Reggie.compile(CONCAT_GREEDY_PAT);
     jdkConcatGreedy = Pattern.compile(CONCAT_GREEDY_PAT);
+
+    greedySuffixIn =
+        pick(scale, "xbary", "x" + "a".repeat(50) + "bary", "x" + "a".repeat(2000) + "bary");
+    reggieGreedySuffix = Reggie.compile(GREEDY_SUFFIX_PAT);
+    jdkGreedySuffix = Pattern.compile(GREEDY_SUFFIX_PAT);
 
     fixedSeqIn =
         pick(
@@ -396,6 +410,18 @@ public class AllStrategyVsJdkBenchmark {
   @Benchmark
   public boolean specializedConcatGreedyGroup_jdk() {
     return jdkConcatGreedy.matcher(concatGreedyIn).find();
+  }
+
+  // ── GREEDY_SUFFIX benchmarks ─────────────────────────────────────────────────
+
+  @Benchmark
+  public boolean greedySuffix_reggie() {
+    return reggieGreedySuffix.find(greedySuffixIn);
+  }
+
+  @Benchmark
+  public boolean greedySuffix_jdk() {
+    return jdkGreedySuffix.matcher(greedySuffixIn).find();
   }
 
   // ── SPECIALIZED_FIXED_SEQUENCE benchmarks ────────────────────────────────────

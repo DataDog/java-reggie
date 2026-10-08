@@ -110,8 +110,9 @@ public class LinearPatternDetector implements RegexVisitor<Boolean> {
 
   @Override
   public Boolean visitAnchor(AnchorNode node) {
-    // Anchors are linear (just position checks)
-    return false;
+    // Anchors are linear (just position checks); \K moves the match start, which the linear
+    // generator does not model
+    return node.type == AnchorNode.Type.RESET_MATCH;
   }
 
   @Override

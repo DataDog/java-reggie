@@ -15,6 +15,8 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
 import static org.objectweb.asm.Opcodes.*;
 
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
@@ -1155,41 +1157,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitJumpInsn(IF_ICMPGT, notInSetLabel);
       // S: []
     } else {
-      // Multiple ranges: check each range, if any matches, continue; else goto notInSet
-      // Logic: if (c in range1 || c in range2 || ... || c in rangeN) continue; else goto notInSet
-
-      Label inSet = new Label(); // If we find a match, jump here to continue
-
-      for (CharSet.Range range : charSet.getRanges()) {
-        // For each range, check: if (c >= start && c <= end) goto inSet
-        Label nextRange = new Label();
-
-        // Check c < start: if true, try next range
-        // S: []
-        mv.visitVarInsn(ILOAD, charVarSlot); // c
-        // S: [C]
-        BytecodeUtil.pushInt(mv, range.start);
-        // S: [C, C]
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-        // S: []
-
-        // Check c <= end: if true, we're in this range, goto inSet
-        mv.visitVarInsn(ILOAD, charVarSlot); // c
-        // S: [C]
-        BytecodeUtil.pushInt(mv, range.end);
-        // S: [C, C]
-        mv.visitJumpInsn(IF_ICMPLE, inSet); // c is in range!
-        // S: []
-
-        // Not in this range, try next
-        mv.visitLabel(nextRange);
-      }
-
-      // Checked all ranges, none matched: goto notInSet
-      mv.visitJumpInsn(GOTO, notInSetLabel);
-
-      // Character is in one of the ranges: continue
-      mv.visitLabel(inSet);
+      BytecodeUtil.emitCharSetCheck(mv, charSet, charVarSlot, notInSetLabel);
     }
   }
 
@@ -2066,60 +2034,18 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
       mv.visitVarInsn(ISTORE, 5); // c in slot 5
 
-      // Check if character matches
-      Label inRange = new Label();
-      Label notInRange = new Label();
+      // Check if character matches, applying negation: on success return pos + 1, else -1
+      Label notInSet = new Label();
+      BytecodeUtil.emitCharSetCheck(
+          mv, node.negated ? node.chars.complement() : node.chars, 5, notInSet);
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      mv.visitInsn(IRETURN);
 
-      // Check if character is in any range
-      CharSet charSet = node.chars;
-      for (CharSet.Range range : charSet.getRanges()) {
-        char start = range.start;
-        char end = range.end;
-
-        // if (c >= start && c <= end) goto inRange
-        mv.visitVarInsn(ILOAD, 5); // c
-        com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt(mv, start);
-        Label checkEnd = new Label();
-        mv.visitJumpInsn(IF_ICMPLT, checkEnd); // if c < start, skip this range
-
-        mv.visitVarInsn(ILOAD, 5); // c
-        com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt(mv, end);
-        mv.visitJumpInsn(IF_ICMPLE, inRange); // if c <= end, character is in range
-
-        mv.visitLabel(checkEnd);
-      }
-
-      // Character not in any range
-      mv.visitJumpInsn(GOTO, notInRange);
-
-      // Now apply negation logic
-      mv.visitLabel(inRange);
-      // Character IS in range
-      if (node.negated) {
-        // Negated: [^...] - fail if in range
-        mv.visitInsn(ICONST_M1);
-        mv.visitInsn(IRETURN);
-      } else {
-        // Not negated: [...] - succeed if in range
-        mv.visitVarInsn(ILOAD, 2);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IADD);
-        mv.visitInsn(IRETURN);
-      }
-
-      mv.visitLabel(notInRange);
-      // Character is NOT in range
-      if (node.negated) {
-        // Negated: [^...] - succeed if not in range
-        mv.visitVarInsn(ILOAD, 2);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IADD);
-        mv.visitInsn(IRETURN);
-      } else {
-        // Not negated: [...] - fail if not in range
-        mv.visitInsn(ICONST_M1);
-        mv.visitInsn(IRETURN);
-      }
+      mv.visitLabel(notInSet);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
 
       return null;
     }
@@ -4047,28 +3973,20 @@ public class RecursiveDescentBytecodeGenerator {
     public Void visitAnchor(AnchorNode node) {
       // Anchors: check position constraints
       if (node.type == AnchorNode.Type.START && node.multiline) {
-        // ^  in multiline mode: must be at start of input or after '\n'
-        // if (pos == 0 || input.charAt(pos-1) == '\n') pass; else return -1;
-        // S: []
+        // ^ in multiline mode (JDK rules; the end bound is the real input end)
+        // if (LineTerminators.isMultilineStart(input, pos, 0, input.length())) return pos;
+        // return -1;
         Label atLineStart = new Label();
-        mv.visitVarInsn(ILOAD, 2); // pos
-        // S: [I]
-        mv.visitJumpInsn(IFEQ, atLineStart); // if pos == 0 goto pass
-        // S: []
         mv.visitVarInsn(ALOAD, 1); // input
         mv.visitVarInsn(ILOAD, 2); // pos
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(ISUB);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        // S: [C]
-        mv.visitIntInsn(BIPUSH, '\n');
-        // S: [C, I]
-        mv.visitJumpInsn(IF_ICMPEQ, atLineStart); // if charAt(pos-1) == '\n' goto pass
-        // S: []
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        invokeMultilineStart(mv);
+        mv.visitJumpInsn(IFNE, atLineStart);
         mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
         mv.visitLabel(atLineStart);
-        // S: []
         mv.visitVarInsn(ILOAD, 2);
         mv.visitInsn(IRETURN);
       } else if (node.type == AnchorNode.Type.START || node.type == AnchorNode.Type.STRING_START) {
@@ -4090,16 +4008,14 @@ public class RecursiveDescentBytecodeGenerator {
         // S: [I]
         mv.visitInsn(IRETURN);
       } else if (node.type == AnchorNode.Type.END && node.multiline) {
-        // $ in multiline mode: must be at end of input or before a '\n'
+        // $ in multiline mode (JDK rules)
+        // if (LineTerminators.isMultilineEnd(input, pos, end)) return pos; return -1;
         Label atLineEnd = new Label();
-        mv.visitVarInsn(ILOAD, 2); // pos
-        mv.visitVarInsn(ILOAD, 3); // end
-        mv.visitJumpInsn(IF_ICMPEQ, atLineEnd); // if pos == end goto pass
         mv.visitVarInsn(ALOAD, 1); // input
         mv.visitVarInsn(ILOAD, 2); // pos
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        mv.visitIntInsn(BIPUSH, '\n');
-        mv.visitJumpInsn(IF_ICMPEQ, atLineEnd); // if charAt(pos) == '\n' goto pass
+        mv.visitVarInsn(ILOAD, 3); // end
+        invokeMultilineEnd(mv);
+        mv.visitJumpInsn(IFNE, atLineEnd);
         mv.visitInsn(ICONST_M1);
         mv.visitInsn(IRETURN);
         mv.visitLabel(atLineEnd);

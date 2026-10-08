@@ -139,26 +139,6 @@ class StrategySelectionExtendedTest {
     if (result.patternInfo != null) assertNotNull(result.patternInfo.toString());
   }
 
-  // ── GREEDY_BACKTRACK ─────────────────────────────────────────────────────
-
-  @Test
-  void testGreedyBacktrackDotStarLiteral() throws Exception {
-    PatternAnalyzer.MatchingStrategyResult result = analyze("(.*)end");
-    assertEquals(PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK, result.strategy);
-  }
-
-  @Test
-  void testGreedyBacktrackDotStarDigit() throws Exception {
-    PatternAnalyzer.MatchingStrategyResult result = analyze("(.*)([0-9]+)");
-    assertEquals(PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK, result.strategy);
-  }
-
-  @Test
-  void testGreedyBacktrackPlusGroup() throws Exception {
-    PatternAnalyzer.MatchingStrategyResult result = analyze("(.+)(\\d+)");
-    assertEquals(PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK, result.strategy);
-  }
-
   // ── SPECIALIZED_MULTI_GROUP_GREEDY ───────────────────────────────────────
 
   @Test
@@ -456,11 +436,10 @@ class StrategySelectionExtendedTest {
     assertNotNull(result.strategy);
   }
 
-  // ── NESTED_QUANTIFIED_GROUPS ─────────────────────────────────────────────
+  // ── Nested quantified groups ─────────────────────────────────────────────
 
   @Test
   void testNestedQuantifiedGroupsDouble() throws Exception {
-    // Outer and inner quantifiers trigger NestedQuantifiedGroupsInfo
     PatternAnalyzer.MatchingStrategyResult result = analyze("((a+)+)");
     assertNotNull(result.strategy);
     if (result.patternInfo != null) assertNotNull(result.patternInfo.toString());

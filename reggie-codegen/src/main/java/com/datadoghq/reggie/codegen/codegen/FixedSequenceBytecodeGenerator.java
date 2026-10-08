@@ -532,42 +532,8 @@ public class FixedSequenceBytecodeGenerator {
         mv.visitJumpInsn(IF_ICMPGT, exitLabel);
       }
     } else {
-      // Multiple ranges - unroll into OR checks
-      if (negated) {
-        // Negated: if ANY range matches, exit
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          // if (c < range.start) goto tryNext;
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          // if (c <= range.end) goto exitLabel;
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, exitLabel);
-          mv.visitLabel(tryNext);
-        }
-        // No range matched - continue (char is outside all ranges, which is what we want for
-        // negated)
-      } else {
-        // Normal: if NO range matches, exit
-        Label matches = new Label();
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          // if (c < range.start) goto tryNext;
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          // if (c <= range.end) goto matches;
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, matches);
-          mv.visitLabel(tryNext);
-        }
-        // No range matched - exit
-        mv.visitJumpInsn(GOTO, exitLabel);
-        mv.visitLabel(matches);
-      }
+      BytecodeUtil.emitCharSetCheck(
+          mv, negated ? charset.complement() : charset, charVar, exitLabel);
     }
   }
 

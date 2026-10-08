@@ -57,7 +57,7 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | Nullable child in an unbounded prefix quantifier before the backref group (e.g. `(?:a*)*`) | `VARIABLE_CAPTURE_BACKREF` | `variable-capture backref: nullable child in unbounded prefix quantifier causes infinite loop` |
 | Outer quantifier wraps the entire capturing group (e.g. `(X)+\1`) | `VARIABLE_CAPTURE_BACKREF` | `quantified capturing group with backref: outer quantifier on group not supported by backref engine` |
 | Nullable or alternation-body group wrapped in outer quantifier | `OPTIONAL_GROUP_BACKREF` | `optional-group backref to unsupported capturing group: nullable or alternation-body group not handled by optional-group backref engine` |
-| Capturing group with nullable content under a nullable outer quantifier (e.g. `(0*-?){0,}`) | `DFA_UNROLLED_WITH_GROUPS`, `DFA_SWITCH_WITH_GROUPS`, `PIKEVM_CAPTURE` | `capturing group with nullable content and nullable outer quantifier: PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect` |
+| Capturing group with nullable content under a nullable outer quantifier (e.g. `(0*-?){0,}`) | `DFA_UNROLLED_WITH_GROUPS`, `DFA_SWITCH_WITH_GROUPS`, `BITSTATE_CAPTURE` | `capturing group with nullable content and nullable outer quantifier: BITSTATE_CAPTURE and TDFA POSIX last-match spans incorrect` |
 | STRING_END (`\Z`/`$`) anchor inside an alternation combined with capturing group, nullable/empty branch, or broad char-class branch | `OPTIMIZED_NFA` | `string-end anchor in alternation with capturing group or nullable/empty branch: OPTIMIZED_NFA find() span or group-span tracking incorrect` |
 | Start-class anchor (`\A`/`^`) inside an alternation branch alongside a capturing group | `OPTIMIZED_NFA` | `start anchor in alternation with capturing group: OPTIMIZED_NFA group span tracking for unmatched branches incorrect` |
 | Any alternation branch is nullable (can match the empty string) | `OPTIMIZED_NFA` | `nullable alternation branch: find() first-alternative semantics incorrect for empty/nullable branch` |
@@ -77,7 +77,7 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 `StrategyJdkClassifier.classifyJdkDependency()` is a single `switch` with no explicit cases — every
 `MatchingStrategy` falls through to `default: NATIVE`. Its javadoc states that currently no strategy
 is classified `RICH_API_HYBRID` or `FULL_FALLBACK`. `VARIABLE_CAPTURE_BACKREF`,
-`NESTED_QUANTIFIED_GROUPS`, `SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`,
+`SPECIALIZED_LITERAL_ALTERNATION`, `FIXED_REPETITION_BACKREF`,
 `SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`, and `HYBRID_DFA_LOOKAHEAD` were
 previously `FULL_FALLBACK` or `RICH_API_HYBRID`; all are now fixed to generate the full native rich
 API (`match`/`findMatch`/`findMatchFrom`) themselves (see the "no longer exist" list below).
@@ -120,12 +120,11 @@ with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for thos
 - `alternation inside lookbehind` — removed; this case is no longer a known bug
 - `SPECIALIZED_MULTIPLE_LOOKAHEADS`, `SPECIALIZED_LITERAL_LOOKAHEADS`, `HYBRID_DFA_LOOKAHEAD` boolean-engine defects — fixed (Wave 3); all three strategies now generate correct `find()`/`findFrom()` native code
 - `VARIABLE_CAPTURE_BACKREF` MatchResult API not implemented — fixed (Wave 2); full native `match()`/`findMatch()` generated
-- `NESTED_QUANTIFIED_GROUPS` MatchResult API not implemented — fixed (Wave 2); full native group-extraction generated
+- `NESTED_QUANTIFIED_GROUPS` — strategy removed; a repeated capturing group with a second quantifier on its path routes to `PIKEVM_CAPTURE`
 - `SPECIALIZED_LITERAL_ALTERNATION` and `FIXED_REPETITION_BACKREF` hybrid group-extraction — fixed (Wave 1); both strategies now emit complete native rich API
 - `DFA with capturing group inside quantifier: DFA cannot track per-iteration spans` (`DFA_UNROLLED`, `DFA_UNROLLED_WITH_ASSERTIONS`) — eliminated (Wave 2); `PatternAnalyzer` now routes these patterns to `PIKEVM_CAPTURE` before the DFA ladder
 - `nullable alternation branch in anchor context`, `end-anchor in leading-nullable alternation`, `optional-branch alternation` (`DFA_*` strategies) — eliminated (Wave 1); `PatternAnalyzer` routes these to `PIKEVM_CAPTURE`
 - `variable-capture backref to nullable group: empty-capture path handled incorrectly` (`VARIABLE_CAPTURE_BACKREF`) — removed; the bounded-quantifier cap fix in Wave 2 made this condition obsolete
-- `nested quantified groups with alternation in inner content` (`NESTED_QUANTIFIED_GROUPS`) — removed; the NESTED_QUANTIFIED_GROUPS generator was extended to handle alternation content natively
 - `variable-capture backref with bounded inner quantifier` (`VARIABLE_CAPTURE_BACKREF`) — removed (Wave 2); generator caps initial `groupEnd` to `groupMaxCount` for bounded quantifiers
 - `alternation with prefix-overlap: leftmost-first ordering diverges from JDK longest-match` (FallbackPatternDetector, `OPTIMIZED_NFA`) — removed from `FallbackPatternDetector`; the check is now handled at the `RuntimeCompiler` level via `alternationPriorityConflict`
 - `non-capturing GroupNode prefix before backref group` (subset of `VARIABLE_CAPTURE_BACKREF`) — fixed (Wave 3/B12); `emitPrefixMatch` now recurses into handleable non-capturing group content

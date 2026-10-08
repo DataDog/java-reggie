@@ -22,9 +22,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Extended tests for GREEDY_BACKTRACK strategy: covers QUANTIFIED_CHAR_CLASS,
- * WORD_BOUNDARY_QUANTIFIED_CHAR_CLASS, CHAR_CLASS, ANCHORED suffix types and various greedyMinCount
- * / charset combinations.
+ * Greedy {@code .*}/{@code .+} capturing group that must give characters back to a quantified char
+ * class, word-boundary, single char class, or anchored suffix.
  */
 class GreedyBacktrackExtendedTest {
 

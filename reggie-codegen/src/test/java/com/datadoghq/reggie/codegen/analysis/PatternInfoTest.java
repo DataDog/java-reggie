@@ -17,16 +17,12 @@ package com.datadoghq.reggie.codegen.analysis;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.datadoghq.reggie.codegen.ast.CharClassNode;
-import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
-import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Direct unit tests for PatternInfo data classes: QuantifiedGroupInfo and
- * NestedQuantifiedGroupsInfo. Covers branches in toString(), structuralHashCode(), and helper
- * methods.
+ * Direct unit tests for the QuantifiedGroupInfo PatternInfo data class. Covers branches in
+ * toString(), structuralHashCode(), and helper methods.
  */
 class PatternInfoTest {
 
@@ -244,97 +240,6 @@ class PatternInfoTest {
   void quantifiedGroupInfoStructuralHashNullSets() {
     // No charSet, no alternation, no nested
     QuantifiedGroupInfo info = new QuantifiedGroupInfo(1, null, 1, 3, null, null, false, null);
-    int h = info.structuralHashCode();
-    assertNotEquals(0, h);
-  }
-
-  // ── NestedQuantifiedGroupsInfo ───────────────────────────────────────────────
-
-  private static NestedQuantifiedGroupsInfo.QuantifierLevel level(
-      int min, int max, int group, CharSet cs, String lit) {
-    return new NestedQuantifiedGroupsInfo.QuantifierLevel(min, max, group, null, cs, lit);
-  }
-
-  @Test
-  void nestedQuantifiedGroupsInfoIsUnbounded() {
-    var lvl = level(1, Integer.MAX_VALUE, 1, null, null);
-    assertTrue(lvl.isUnbounded());
-    var lvl2 = level(1, 3, 1, null, null);
-    assertFalse(lvl2.isUnbounded());
-  }
-
-  @Test
-  void nestedQuantifiedGroupsInfoGetOuterAndInnerEmpty() {
-    NestedQuantifiedGroupsInfo info =
-        new NestedQuantifiedGroupsInfo(List.of(), List.of(), List.of(), false, false, 0);
-    assertNull(info.getOuterLevel());
-    assertNull(info.getInnerLevel());
-    assertEquals(0, info.getNestingDepth());
-  }
-
-  @Test
-  void nestedQuantifiedGroupsInfoGetOuterAndInnerNonEmpty() {
-    var lvl1 = level(0, Integer.MAX_VALUE, 1, CharSet.DIGIT, null);
-    var lvl2 = level(1, Integer.MAX_VALUE, -1, CharSet.LOWER, null);
-    NestedQuantifiedGroupsInfo info =
-        new NestedQuantifiedGroupsInfo(List.of(lvl1, lvl2), List.of(), List.of(), false, false, 1);
-    assertSame(lvl1, info.getOuterLevel());
-    assertSame(lvl2, info.getInnerLevel());
-    assertEquals(2, info.getNestingDepth());
-  }
-
-  @Test
-  void nestedQuantifiedGroupsInfoToStringAllBranches() {
-    var lvl1 = level(0, Integer.MAX_VALUE, 1, CharSet.DIGIT, null);
-    var lvl2 = level(1, 5, -1, null, "abc");
-    RegexNode dummyNode = new CharClassNode(CharSet.DIGIT, false);
-    // prefix non-empty, suffix non-empty, anchors set
-    NestedQuantifiedGroupsInfo info =
-        new NestedQuantifiedGroupsInfo(
-            List.of(lvl1, lvl2), List.of(dummyNode), List.of(dummyNode), true, true, 2);
-    String s = info.toString();
-    assertTrue(s.contains("depth=2"));
-    assertTrue(s.contains("^"));
-    assertTrue(s.contains("$"));
-    assertTrue(s.contains("prefix=1"));
-    assertTrue(s.contains("suffix=1"));
-    // First level has group >= 0 → "group1"
-    assertTrue(s.contains("group1"));
-    // Separator ", " between two levels
-    assertTrue(s.contains(", "));
-  }
-
-  @Test
-  void nestedQuantifiedGroupsInfoToStringNoBranchesNoAnchors() {
-    var lvl = level(1, Integer.MAX_VALUE, -1, CharSet.LOWER, null);
-    NestedQuantifiedGroupsInfo info =
-        new NestedQuantifiedGroupsInfo(List.of(lvl), List.of(), List.of(), false, false, 0);
-    String s = info.toString();
-    assertFalse(s.contains("^"));
-    assertFalse(s.contains("$"));
-    assertFalse(s.contains("prefix="));
-    assertFalse(s.contains("suffix="));
-    // group -1 → no "group" appended
-    assertFalse(s.contains("group"));
-  }
-
-  @Test
-  void nestedQuantifiedGroupsInfoStructuralHashAllPaths() {
-    var lvl1 = level(1, Integer.MAX_VALUE, 1, CharSet.DIGIT, null);
-    var lvl2 = level(0, 3, -1, null, "x");
-    RegexNode dummyNode = new CharClassNode(CharSet.DIGIT, false);
-    NestedQuantifiedGroupsInfo info =
-        new NestedQuantifiedGroupsInfo(
-            List.of(lvl1, lvl2), List.of(dummyNode), List.of(dummyNode), true, true, 2);
-    int h = info.structuralHashCode();
-    assertNotEquals(0, h);
-  }
-
-  @Test
-  void nestedQuantifiedGroupsInfoStructuralHashBoundedNoCharSetNoLiteral() {
-    var lvl = level(0, 5, -1, null, null);
-    NestedQuantifiedGroupsInfo info =
-        new NestedQuantifiedGroupsInfo(List.of(lvl), List.of(), List.of(), false, false, 0);
     int h = info.structuralHashCode();
     assertNotEquals(0, h);
   }

@@ -77,10 +77,11 @@ public class LinearPatternAnalyzer implements RegexVisitor<Void> {
 
   @Override
   public Void visitCharClass(CharClassNode node) {
-    // Match a character class
+    // Match a character class; the operation carries the negation-resolved set.
     operations.add(
         new LinearPatternInfo.LinearOperation(
-            LinearPatternInfo.LinearOperation.Type.MATCH_CHARCLASS, node.chars));
+            LinearPatternInfo.LinearOperation.Type.MATCH_CHARCLASS,
+            node.negated ? node.chars.complement() : node.chars));
     return null;
   }
 
@@ -178,6 +179,15 @@ public class LinearPatternAnalyzer implements RegexVisitor<Void> {
             node.multiline
                 ? LinearPatternInfo.AnchorType.END_MULTILINE
                 : LinearPatternInfo.AnchorType.END;
+        break;
+      case STRING_START:
+        anchorType = LinearPatternInfo.AnchorType.START;
+        break;
+      case STRING_END:
+        anchorType = LinearPatternInfo.AnchorType.END;
+        break;
+      case STRING_END_ABSOLUTE:
+        anchorType = LinearPatternInfo.AnchorType.END_ABSOLUTE;
         break;
       default:
         throw new IllegalArgumentException("Unknown anchor type: " + node.type);

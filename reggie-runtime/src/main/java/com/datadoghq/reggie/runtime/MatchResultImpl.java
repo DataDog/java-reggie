@@ -44,7 +44,12 @@ public class MatchResultImpl implements MatchResult {
    * @param groupCount number of capturing groups (not including group 0)
    */
   public MatchResultImpl(String input, int[] starts, int[] ends, int groupCount) {
-    this(input, starts, ends, groupCount, Collections.emptyMap());
+    // Not delegated: unmodifiableMap would wrap the empty map in a new object per result.
+    this.input = input;
+    this.starts = starts;
+    this.ends = ends;
+    this.groupCount = groupCount;
+    this.nameToIndex = Collections.emptyMap();
   }
 
   /**

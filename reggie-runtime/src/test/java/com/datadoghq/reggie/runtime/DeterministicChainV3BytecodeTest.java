@@ -298,6 +298,52 @@ class DeterministicChainV3BytecodeTest {
     }
   }
 
+  @Test
+  void multilineStartAnchorMatchesAfterLineTerminators() throws Exception {
+    // Never between \r and \n, never at the input end (so not on "" or after a trailing \n).
+    String[] inputs = {
+      "",
+      "\n",
+      "ab",
+      "xab",
+      "x\nab",
+      "x\r\nab",
+      "x\rab",
+      "x\r\n",
+      "x\u0085ab",
+      "x\u2028ab",
+      "x\u2029ab",
+      "k=v\nk2=v2",
+      "k=v\r\nk2=v2\r\n",
+      " k=v\nq=\n",
+      "abc\nb",
+      "xb\nabc"
+    };
+    for (String pattern :
+        new String[] {"(?m)^(\\w+)=(.*)$", "(?m)^[a-z]+", "(?m)^abc|b", "b|(?m)^abc"}) {
+      ReggieMatcher m = compileChain(pattern);
+      java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pattern);
+      for (String input : inputs) {
+        assertFullParity(m, jdk, input);
+      }
+    }
+  }
+
+  @Test
+  void anyCharGreedyLoopConsumesRestOfInput() throws Exception {
+    String[] inputs = {"", "a", "ab", "a\n", "ab\r\nc", "a b", "1a", "abc\n\n", "\nab"};
+    for (String pattern :
+        new String[] {
+          "(?s)^[a-z]+(.*)", "(?s)(?m)^[a-z]+(.*)", "(?s)a(.+)", "(?s)a.{2,}", "(?s)b[\\s\\S]*"
+        }) {
+      ReggieMatcher m = compileChain(pattern);
+      java.util.regex.Pattern jdk = java.util.regex.Pattern.compile(pattern);
+      for (String input : inputs) {
+        assertFullParity(m, jdk, input);
+      }
+    }
+  }
+
   // =====================================================================================
   // Capture ends at lazy loops (the intricate bookkeeping — see generator javadoc).
   // =====================================================================================

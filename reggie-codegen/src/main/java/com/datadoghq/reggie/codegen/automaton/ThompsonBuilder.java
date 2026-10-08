@@ -54,6 +54,15 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private int nextAtomicId = 0;
   private final boolean lazyAware;
 
+  /** Number of enclosing quantifiers that can repeat (max &gt; 1), outside lookaround bodies. */
+  private int repeatDepth = 0;
+
+  /**
+   * Quantifier wrapped directly in an atomic group: the parser's form of a possessive quantifier,
+   * which java.util.regex does not compile to GroupCurly.
+   */
+  private RegexNode atomicBody;
+
   public ThompsonBuilder() {
     this.lazyAware = false;
   }
@@ -183,6 +192,108 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   @Override
   public NFAFragment visitQuantifier(QuantifierNode node) {
+    Integer pinGroup = pinGroupOf(node);
+    boolean repeats = node.max == -1 || node.max > 1;
+    if (repeats) repeatDepth++;
+    // + and * become {1,} and {0,} so exits after min iterations stay distinguishable.
+    NFAFragment fragment =
+        pinGroup != null
+            ? buildCountedQuantifier(node.child, node.min, node.max, true, pinGroup)
+            : buildQuantifier(node);
+    if (repeats) repeatDepth--;
+    return fragment;
+  }
+
+  /**
+   * Group number to pin for {@code node}, or null. java.util.regex compiles a greedy {@code
+   * (X){min,max}} with a deterministic body to GroupCurly, which on success after more than min
+   * iterations rewrites the group to that invocation's last iteration; when an outer repeat
+   * re-enters the group, the earliest such invocation wins over later iterations ({@code
+   * (?:(a){1,2})+} on "aaa": group 1 = [1,2)). {@code ?} compiles to Ques and is not affected.
+   */
+  private Integer pinGroupOf(QuantifierNode node) {
+    if (repeatDepth == 0 || !node.greedy || node.possessive || node == atomicBody) return null;
+    if (node.max != -1 && node.max <= node.min) return null;
+    if (node.min == 0 && node.max == 1) return null;
+    if (!(node.child instanceof GroupNode)) return null;
+    GroupNode group = (GroupNode) node.child;
+    if (!group.capturing || group.atomic || !group.child.accept(DETERMINISTIC_BODY)) return null;
+    return group.groupNumber;
+  }
+
+  /**
+   * Bodies java.util.regex treats as deterministic for GroupCurly, restricted to a conservative
+   * subset: non-empty sequences of literals and character classes, optionally wrapped in
+   * non-capturing groups.
+   */
+  private static final RegexVisitor<Boolean> DETERMINISTIC_BODY =
+      new RegexVisitor<>() {
+        @Override
+        public Boolean visitLiteral(LiteralNode node) {
+          return !(node instanceof EpsilonNode);
+        }
+
+        @Override
+        public Boolean visitCharClass(CharClassNode node) {
+          return true;
+        }
+
+        @Override
+        public Boolean visitConcat(ConcatNode node) {
+          if (node.children.isEmpty()) return false;
+          for (RegexNode child : node.children) {
+            if (!child.accept(this)) return false;
+          }
+          return true;
+        }
+
+        @Override
+        public Boolean visitAlternation(AlternationNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitQuantifier(QuantifierNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitGroup(GroupNode node) {
+          return !node.capturing && !node.atomic && node.child.accept(this);
+        }
+
+        @Override
+        public Boolean visitAnchor(AnchorNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitBackreference(BackreferenceNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitAssertion(AssertionNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitSubroutine(SubroutineNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitConditional(ConditionalNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitBranchReset(BranchResetNode node) {
+          return false;
+        }
+      };
+
+  private NFAFragment buildQuantifier(QuantifierNode node) {
     NFAFragment child = node.child.accept(this);
 
     boolean lazy = lazyAware && !node.greedy && !node.possessive;
@@ -275,11 +386,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
     } else {
       // {n}, {n,m} : counted quantifier
-      return buildCountedQuantifier(node.child, node.min, node.max, node.greedy);
+      return buildCountedQuantifier(node.child, node.min, node.max, node.greedy, null);
     }
   }
 
-  private NFAFragment buildCountedQuantifier(RegexNode child, int min, int max, boolean greedy) {
+  /**
+   * @param pinGroup when non-null (greedy only), every exit taken after more than {@code min}
+   *     iterations is routed through a {@link NFA.NFAState#pinGroup} forwarder
+   */
+  private NFAFragment buildCountedQuantifier(
+      RegexNode child, int min, int max, boolean greedy, Integer pinGroup) {
     boolean lazy = lazyAware && !greedy;
 
     List<NFAFragment> fragments = new ArrayList<>();
@@ -387,6 +503,19 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
     allExits.addAll(result.exits);
 
+    if (pinGroup != null) {
+      // Appended after the continue/loop epsilons, so the pin path keeps the exit's priority.
+      for (int j = min; j < fragments.size(); j++) {
+        for (NFA.NFAState exit : fragments.get(j).exits) {
+          NFA.NFAState pin = createState();
+          pin.pinGroup = pinGroup;
+          exit.addEpsilonTransition(pin);
+          allExits.remove(exit);
+          allExits.add(pin);
+        }
+      }
+    }
+
     if (min == 0) {
       if (lazy) {
         // Lazy {0,m} or {0,}: wrap in a fresh entry state.
@@ -457,6 +586,7 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       // Atomic group (?>X): wrap the child fragment in entry/exit epsilon states that carry
       // atomicEntry/atomicExit markers so that PikeVM can enforce backtracking prevention.
       int atomicId = nextAtomicId++;
+      atomicBody = node.child;
       NFAFragment child = node.child.accept(this);
 
       NFA.NFAState atomicEntryState = createState();
@@ -554,8 +684,11 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
     NFA.NFAState assertionState = createState();
 
-    // Build NFA for sub-pattern
+    // Build NFA for sub-pattern; group pins do not apply inside it.
+    int savedRepeatDepth = repeatDepth;
+    repeatDepth = 0;
     NFAFragment subFrag = node.subPattern.accept(this);
+    repeatDepth = savedRepeatDepth;
 
     // Store assertion information in state metadata
     assertionState.assertionType = convertAssertionType(node.type);

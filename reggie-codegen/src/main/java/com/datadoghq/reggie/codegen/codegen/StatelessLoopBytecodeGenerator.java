@@ -163,36 +163,8 @@ public class StatelessLoopBytecodeGenerator {
         mv.visitJumpInsn(IF_ICMPGT, mismatch);
       }
     } else {
-      // Multiple ranges - unroll into OR checks
-      if (negated) {
-        // Negated: if ANY range matches, mismatch
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, mismatch);
-          mv.visitLabel(tryNext);
-        }
-      } else {
-        // Normal: if NO range matches, mismatch
-        Label matches = new Label();
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, matches);
-          mv.visitLabel(tryNext);
-        }
-        // No range matched - mismatch
-        mv.visitJumpInsn(GOTO, mismatch);
-        mv.visitLabel(matches);
-      }
+      BytecodeUtil.emitCharSetCheck(
+          mv, negated ? charset.complement() : charset, charVar, mismatch);
     }
   }
 

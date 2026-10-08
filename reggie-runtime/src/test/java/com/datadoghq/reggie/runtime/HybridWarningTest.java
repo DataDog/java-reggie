@@ -152,7 +152,6 @@ class HybridWarningTest {
       "([a-z]{3}).*\\1", // LINEAR_BACKREFERENCE
       "<(\\w+)>.*</\\1>", // SPECIALIZED_BACKREFERENCE
       "abc", // DFA_UNROLLED
-      "(.*)bar", // GREEDY_BACKTRACK
       "foo|bar|baz|qux|quux", // SPECIALIZED_LITERAL_ALTERNATION
       "(a)\\1{8,}", // FIXED_REPETITION_BACKREF
     };

@@ -418,11 +418,11 @@ public class OptionalGroupBackrefBytecodeGenerator {
      */
     private void generateGroupBacktrackTree(MethodVisitor mv, LocalVarAllocator alloc, int groupIdx,
             int lenVar, int posVar, int startsVar, int endsVar, int countVar, int grpLenVar,
-            boolean requireFullConsumption, Label overallSuccess, Label failLabel) {
+            boolean requireFullConsumption, boolean dollarEnd, Label overallSuccess, Label failLabel) {
 
         if (groupIdx == info.optionalGroups.size()) {
             generateBackrefsSuffixAndCompletionCheck(mv, lenVar, posVar, startsVar, endsVar,
-                countVar, grpLenVar, requireFullConsumption, failLabel);
+                countVar, grpLenVar, requireFullConsumption, dollarEnd, failLabel);
             mv.visitJumpInsn(GOTO, overallSuccess);
             return;
         }
@@ -500,7 +500,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
         // Present branch: content matched. Recurse; any downstream failure falls back to this
         // group's absent branch (the real backtracking retry that Bug 1 was missing).
         generateGroupBacktrackTree(mv, alloc, groupIdx + 1, lenVar, posVar, startsVar, endsVar,
-            countVar, grpLenVar, requireFullConsumption, overallSuccess, absentBranch);
+            countVar, grpLenVar, requireFullConsumption, dollarEnd, overallSuccess, absentBranch);
 
         mv.visitLabel(absentBranch);
         mv.visitVarInsn(ILOAD, savedPosVar);
@@ -532,7 +532,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
         // Absent branch: recurse with the caller's failLabel — once every combination is
         // exhausted, this is what ultimately reports overall failure.
         generateGroupBacktrackTree(mv, alloc, groupIdx + 1, lenVar, posVar, startsVar, endsVar,
-            countVar, grpLenVar, requireFullConsumption, overallSuccess, failLabel);
+            countVar, grpLenVar, requireFullConsumption, dollarEnd, overallSuccess, failLabel);
     }
 
     /**
@@ -543,10 +543,13 @@ public class OptionalGroupBackrefBytecodeGenerator {
      *     match semantics for matches()/match()); if false, only enforced when the pattern has
      *     an end anchor (fix for Bug 3 — find()/findMatch()/findFrom() previously ignored
      *     hasEndAnchor entirely). Callers pass {@code info.hasEndAnchor} for find-family methods.
+     * @param dollarEnd if true (find-family methods), the end check is {@code $}/{@code \Z}
+     *     semantics: {@code LineTerminators.isEnd(input, pos, len)}, which also accepts a position
+     *     before a final line terminator; matches() passes false and needs pos == len.
      */
     private void generateBackrefsSuffixAndCompletionCheck(MethodVisitor mv, int lenVar, int posVar,
             int startsVar, int endsVar, int countVar, int grpLenVar,
-            boolean requireFullConsumption, Label failLabel) {
+            boolean requireFullConsumption, boolean dollarEnd, Label failLabel) {
 
         // Match quantified backrefs
         for (BackrefEntry entry : info.backrefEntries) {
@@ -701,9 +704,18 @@ public class OptionalGroupBackrefBytecodeGenerator {
             // matches()/match(): unconditional full-match semantics.
             // find()/findMatch()/findFrom() with an end anchor (Bug 3 fix): a found match must
             // still extend to the end of input.
-            mv.visitVarInsn(ILOAD, posVar);
-            mv.visitVarInsn(ILOAD, lenVar);
-            mv.visitJumpInsn(IF_ICMPNE, failLabel);
+            if (dollarEnd) {
+                mv.visitVarInsn(ALOAD, 1);
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitVarInsn(ILOAD, lenVar);
+                mv.visitMethodInsn(INVOKESTATIC, "com/datadoghq/reggie/runtime/LineTerminators",
+                    "isEnd", "(Ljava/lang/CharSequence;II)Z", false);
+                mv.visitJumpInsn(IFEQ, failLabel);
+            } else {
+                mv.visitVarInsn(ILOAD, posVar);
+                mv.visitVarInsn(ILOAD, lenVar);
+                mv.visitJumpInsn(IF_ICMPNE, failLabel);
+            }
         }
     }
 
@@ -717,7 +729,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
             Label failLabel) {
         Label success = new Label();
         generateGroupBacktrackTree(mv, alloc, 0, lenVar, posVar, startsVar, endsVar, countVar,
-            grpLenVar, true, success, failLabel);
+            grpLenVar, true, false, success, failLabel);
         mv.visitLabel(success);
     }
 
@@ -732,7 +744,7 @@ public class OptionalGroupBackrefBytecodeGenerator {
             Label failLabel) {
         Label success = new Label();
         generateGroupBacktrackTree(mv, alloc, 0, lenVar, posVar, startsVar, endsVar, countVar,
-            grpLenVar, info.hasEndAnchor, success, failLabel);
+            grpLenVar, info.hasEndAnchor, true, success, failLabel);
         mv.visitLabel(success);
     }
 
@@ -872,9 +884,13 @@ public class OptionalGroupBackrefBytecodeGenerator {
         mv.visitIntInsn(NEWARRAY, T_INT);
         mv.visitVarInsn(ASTORE, endsVar);
 
-        // int start = startPos;
+        // int start = startPos; an anchored pattern can only match at 0
         mv.visitVarInsn(ILOAD, 2);
         mv.visitVarInsn(ISTORE, startVar);
+        if (info.hasStartAnchor) {
+            mv.visitVarInsn(ILOAD, startVar);
+            mv.visitJumpInsn(IFNE, returnNotFound);
+        }
 
         // Outer loop: try each starting position
         Label outerLoop = new Label();
@@ -917,6 +933,9 @@ public class OptionalGroupBackrefBytecodeGenerator {
 
         // Try next starting position
         mv.visitLabel(tryNextStart);
+        if (info.hasStartAnchor) {
+            mv.visitJumpInsn(GOTO, returnNotFound);
+        }
         mv.visitIincInsn(startVar, 1);
         mv.visitJumpInsn(GOTO, outerLoop);
 

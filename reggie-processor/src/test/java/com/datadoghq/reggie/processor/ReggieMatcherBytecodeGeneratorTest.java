@@ -303,23 +303,13 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testGreedyBacktrackStrategyThrows() {
-    assertThrows(
-        IllegalStateException.class,
-        () ->
-            new ReggieMatcherBytecodeGenerator(
-                    "test.generated", "GreedyBacktrackMatcher", "(.*)end")
-                .generate());
-  }
-
-  @Test
   void testNestedQuantifiedGroupsStrategy() throws Exception {
-    Object matcher = compile("((a+)+)", "NestedQuantMatcher");
-    Method matches = matcher.getClass().getMethod("matches", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "aaa"));
-    assertTrue((Boolean) matches.invoke(matcher, "a"));
-    assertFalse((Boolean) matches.invoke(matcher, "b"));
-    assertFalse((Boolean) matches.invoke(matcher, ""));
+    // A repeated capturing group under another quantifier needs thread priority for its spans:
+    // realized as a PikeVM delegate, as in RuntimeCompiler.
+    ReggieMatcherBytecodeGenerator gen =
+        new ReggieMatcherBytecodeGenerator("test.generated", "NestedQuantMatcher", "((a+)+)");
+    assertEquals(
+        ReggieMatcherBytecodeGenerator.Realization.DELEGATE_PIKEVM, gen.resolveRealization(false));
   }
 
   @Test

@@ -15,6 +15,8 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -829,28 +831,7 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, (int) range.end);
       mv.visitJumpInsn(IF_ICMPGT, noMatch);
     } else {
-      // Multiple ranges: unroll into sequential checks
-      Label match = new Label();
-
-      for (CharSet.Range range : chars.getRanges()) {
-        Label nextRange = new Label();
-
-        // if (ch < start) goto nextRange
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-
-        // if (ch <= end) goto match
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, match);
-
-        mv.visitLabel(nextRange);
-      }
-
-      // No range matched
-      mv.visitJumpInsn(GOTO, noMatch);
-      mv.visitLabel(match);
+      BytecodeUtil.emitCharSetCheck(mv, chars, chVar, noMatch);
     }
   }
 
@@ -1293,8 +1274,8 @@ public class DFASwitchBytecodeGenerator {
    *         // ANCHOR OPTIMIZATION: For ^ or \A, only try position 0
    *         if (requiresStartAnchor && tryPos != 0) return -1;
    *
-   *         // MULTILINE ^: Only try position 0 or after '\n'
-   *         if (hasMultilineStart && tryPos != 0 && input.charAt(tryPos-1) != '\n') {
+   *         // MULTILINE ^: Only try positions where it can match
+   *         if (hasMultilineStart && !LineTerminators.isMultilineStart(input, tryPos, 0, len)) {
    *             continue;
    *         }
    *
@@ -1393,26 +1374,17 @@ public class DFASwitchBytecodeGenerator {
       mv.visitInsn(IRETURN);
       mv.visitLabel(validPosition);
     } else if (hasMultilineStart) {
-      // Multiline ^: Only try position 0 or positions after '\n'
-      // if (tryPos != 0 && input.charAt(tryPos-1) != '\n') goto nextPosition;
+      // Multiline ^: Only try positions where it can match
+      // if (!LineTerminators.isMultilineStart(input, tryPos, 0, len)) goto next position;
       Label validPosition = new Label();
-      Label nextPosition = new Label();
-
-      // if (tryPos == 0) goto validPosition;
-      mv.visitVarInsn(ILOAD, tryPosVar);
-      mv.visitJumpInsn(IFEQ, validPosition);
-
-      // if (input.charAt(tryPos-1) == '\n') goto validPosition;
       mv.visitVarInsn(ALOAD, 1);
       mv.visitVarInsn(ILOAD, tryPosVar);
-      pushInt(mv, 1);
-      mv.visitInsn(ISUB);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPEQ, validPosition);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, lenVar);
+      invokeMultilineStart(mv);
+      mv.visitJumpInsn(IFNE, validPosition);
 
       // Not a valid anchor position - skip to next
-      mv.visitLabel(nextPosition);
       mv.visitIincInsn(tryPosVar, 1); // tryPos++
       mv.visitJumpInsn(GOTO, outerLoopStart);
 
@@ -1502,6 +1474,9 @@ public class DFASwitchBytecodeGenerator {
       mv.visitVarInsn(ILOAD, lenVar);
       Label notAtEnd = new Label();
       mv.visitJumpInsn(IF_ICMPNE, notAtEnd);
+      // The start state's anchor conditions (e.g. multiline ^, which never holds at the end)
+      emitAcceptanceAnchorChecks(
+          mv, dfa.getStartState().acceptanceAnchorConditions, tryPosVar, notAtEnd);
       mv.visitVarInsn(ILOAD, tryPosVar);
       mv.visitInsn(IRETURN);
       mv.visitLabel(notAtEnd);
@@ -1620,25 +1595,10 @@ public class DFASwitchBytecodeGenerator {
    */
   private void generateFirstCharFilterCheck(
       MethodVisitor mv, CharSet chars, int chVar, Label matchLabel) {
-    for (CharSet.Range range : chars.getRanges()) {
-      if (range.start == range.end) {
-        // Single character check
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPEQ, matchLabel);
-      } else {
-        // Range check: if (ch >= start && ch <= end) goto matchLabel
-        Label nextRange = new Label();
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, matchLabel);
-        mv.visitLabel(nextRange);
-      }
-    }
-    // Falls through if no range matched
+    Label noMatch = new Label();
+    BytecodeUtil.emitCharSetCheck(mv, chars, chVar, noMatch);
+    mv.visitJumpInsn(GOTO, matchLabel);
+    mv.visitLabel(noMatch);
   }
 
   /**
@@ -3757,35 +3717,24 @@ public class DFASwitchBytecodeGenerator {
           break;
         }
       case END_MULTILINE:
-        {
-          Label ok = new Label();
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
-          mv.visitJumpInsn(IF_ICMPEQ, ok);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitMethodInsn(invoke, owner, "charAt", "(I)C", isIface);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, failed);
-          mv.visitLabel(ok);
-          break;
-        }
+        // if (!LineTerminators.isMultilineEnd(input, pos, input.length())) goto failed;
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+        invokeMultilineEnd(mv);
+        mv.visitJumpInsn(IFEQ, failed);
+        break;
       case START_MULTILINE:
-        {
-          Label ok = new Label();
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitJumpInsn(IFEQ, ok);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(ISUB);
-          mv.visitMethodInsn(invoke, owner, "charAt", "(I)C", isIface);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, failed);
-          mv.visitLabel(ok);
-          break;
-        }
+        // if (!LineTerminators.isMultilineStart(input, pos, 0, input.length())) goto failed;
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+        invokeMultilineStart(mv);
+        mv.visitJumpInsn(IFEQ, failed);
+        break;
       default:
         break;
     }

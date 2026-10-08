@@ -327,7 +327,7 @@ public class PatternAnalyzer {
       QuantifierNode quant = (QuantifierNode) node;
       if (quant.child instanceof CharClassNode) {
         CharClassNode cc = (CharClassNode) quant.child;
-        return isHexDigitCharSet(cc.chars);
+        return isHexDigitCharSet(cc.negated ? cc.chars.complement() : cc.chars);
       }
     } else if (node instanceof ConcatNode) {
       for (RegexNode child : ((ConcatNode) node).children) {
@@ -770,13 +770,11 @@ public class PatternAnalyzer {
           MatchingStrategy.SPECIALIZED_GREEDY_CHARCLASS, null, greedyInfo, false, requiredLiterals);
     }
 
-    // Check for greedy backtrack patterns FIRST: (.*)bar, (.*)(\\d+)
-    // These require backtracking where greedy .* must give back characters
-    // Must be checked BEFORE multi-group greedy, which doesn't support backtracking
-    GreedyBacktrackInfo greedyBacktrackInfo = detectGreedyBacktrackPattern(ast);
-    if (greedyBacktrackInfo != null) {
+    // Check for P(.*)S with a fixed or captured-run suffix: (.*)bar, (.*)(\d+)$
+    GreedySuffixInfo greedySuffixInfo = GreedySuffixInfo.detect(ast);
+    if (greedySuffixInfo != null) {
       return new MatchingStrategyResult(
-          MatchingStrategy.GREEDY_BACKTRACK, null, greedyBacktrackInfo, false, requiredLiterals);
+          MatchingStrategy.GREEDY_SUFFIX, null, greedySuffixInfo, false, requiredLiterals);
     }
 
     // Check for multi-group greedy patterns. Decline give-back patterns: a greedy quantified
@@ -784,7 +782,7 @@ public class PatternAnalyzer {
     // non-backtracking MULTI_GROUP_GREEDY strategy cannot do — it returns NO_MATCH (e.g. (\w+)0 on
     // "ab00"). Declining lets such patterns fall through to the backtracking-capable routing
     // (the :753 requiresBacktrackingForGroups guard → RECURSIVE_DESCENT), which produces correct
-    // spans. (GREEDY_BACKTRACK above already handles the (.*)literal shape.)
+    // spans.
     // /\B decline: the MULTI_GROUP_GREEDY generator has no word-boundary modeling (the
     // assertion is a silent no-op), so find() accepts across boundaries. Measured divergence
     // (real-input find battery): name:(\S+) on "@peer.hostname:127.0.0.1" matched [10,24)
@@ -825,9 +823,21 @@ public class PatternAnalyzer {
     boolean hasLookaroundFlag = hasLookaround(ast);
     addTrace("hasLookaround", hasLookaroundFlag);
     if (hasLookaroundFlag) {
-      // CRITICAL: Check if backrefs reference groups inside lookaheads
-      // DFA-based strategies can't track capturing groups, so we must use NFA
-      if (hasBackrefToLookaheadCapture(ast)) {
+      // DFA-based strategies can't evaluate backreferences (to lookahead captures or otherwise),
+      // so any backref pattern must use the NFA.
+      if (hasBackrefs) {
+        return new MatchingStrategyResult(
+            MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
+            null,
+            null,
+            false,
+            requiredLiterals,
+            lookaheadGreedyInfo,
+            hasGroupsInRepeatingQuantifiers(ast));
+      }
+      // \b/\B: the assertion DFA silently drops per-position boundary context
+      // (SubsetConstructor.isPositionAnchor excludes WORD_BOUNDARY/NON_WORD_BOUNDARY).
+      if (nfa.hasWordBoundaryAnchor()) {
         return new MatchingStrategyResult(
             MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
             null,
@@ -842,18 +852,8 @@ public class PatternAnalyzer {
         // Attempt DFA construction - will throw UnsupportedOperationException
         // if assertions are too complex (not simple literals)
         SubsetConstructor constructor = new SubsetConstructor();
-        // literalTierCandidate: the pattern has >=2 literal-extractable lookaheads and would be
-        // taken by SPECIALIZED_LITERAL_LOOKAHEADS (intrinsified indexOf) if the ladder threw.
-        // Passing it lets the ladder's sub-DFA gates decline (SubsetConstructor throws), so the
-        // gate never preempts the indexOf tier on the (?=.*foo)(?=.*bar).*baz shapes - the
-        // gate's per-candidate char-loop scan loses to String.indexOf there.
         constructor.setLeftmostFirst(capturelessPriorityRetry);
-        boolean literalTierCandidate = false;
-        List<LiteralLookaheadInfo> literalTierLookaheads = extractLiteralLookaheads();
-        if (literalTierLookaheads != null && literalTierLookaheads.size() >= 2) {
-          literalTierCandidate = true;
-        }
-        DFA dfa = constructor.buildDFAWithAssertions(nfa, literalTierCandidate);
+        DFA dfa = constructor.buildDFAWithAssertions(nfa);
 
         // Success! Assertions are simple literals, use DFA.
         // However, when a lookahead appears inside a capturing group, the DFA path
@@ -881,10 +881,27 @@ public class PatternAnalyzer {
               lookaheadGreedyInfo,
               true /* groups in quantifier */);
         }
-        // Patterns with lookbehind AND capturing groups cannot recover inner group positions via
-        // substring re-match: the re-match strips the context before the match start, making the
-        // lookbehind fail on the bare substring. Route to NFA which tracks groups correctly.
-        if (nfa.getGroupCount() > 0 && hasLookbehind(ast)) {
+        // The assertion DFAs cannot recover capture spans: their inline group actions keep the
+        // last write rather than the priority winner ((?=a)(a|ab)(b*) on "ab" yields g1=0..2, JDK
+        // 0..1), and the substring re-match strips the context a lookbehind needs. Route to NFA
+        // which tracks groups correctly.
+        if (nfa.getGroupCount() > 0) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              lookaheadGreedyInfo,
+              hasGroupsInRepeatingQuantifiers(ast));
+        }
+        // The assertion DFA executors are exact only for assertion placements the construction
+        // certifies, and they resolve competing accepts by longest match rather than priority
+        // (x(?=a)(?:a|ab) on "xab" must end at 2). A trailing-lookahead admission is certified for
+        // the unrolled executor only. Route the rest to NFA.
+        if (constructor.hasUnsoundAssertionPlacement()
+            || dfaHasPriorityConflictTransition(dfa)
+            || (constructor.hasTrailingLookaheadAdmission() && dfa.getStateCount() >= 20)) {
           return new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND,
               null,
@@ -898,7 +915,7 @@ public class PatternAnalyzer {
         if (stateCount < 20) {
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_UNROLLED_WITH_ASSERTIONS, dfa, null, false, requiredLiterals);
-        } else if (stateCount < 300) {
+        } else if (stateCount < 300 && !hasPartialMultilineStart()) {
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_SWITCH_WITH_ASSERTIONS, dfa, null, false, requiredLiterals);
         } else {
@@ -1214,6 +1231,24 @@ public class PatternAnalyzer {
       // Try specialized strategies for patterns with quantified groups
       // These provide correct POSIX last-match semantics for group capture
       if (needsPosixSemantics) {
+        // A repeated capturing group with another quantifier on its path: which iteration of
+        // which loop consumes a char decides the spans, and only thread priority picks JDK's
+        // ((a+)+ on "aaa": group 1 = [0,3)). A single-run repeat keeps the specialized route.
+        boolean nestedRepeatedCapture =
+            !isSingleRunRepeat(ast)
+                && new NestedRepeatedCaptureDetector().hasNestedRepeatedCapture(ast);
+        addTrace("nestedRepeatedCapture", nestedRepeatedCapture);
+        if (nestedRepeatedCapture) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
+
         // Try specialized quantified group strategy first
         QuantifiedGroupInfo quantifiedGroupInfo = detectQuantifiedCapturingGroup(ast);
         if (quantifiedGroupInfo != null) {
@@ -1227,6 +1262,18 @@ public class PatternAnalyzer {
 
         // Try concatenated quantified groups: (a+)+(b+)+
         ConcatQuantifiedGroupsInfo concatInfo = detectConcatQuantifiedGroups(ast);
+        if (concatInfo != null && concatGroupsCanOverlap(concatInfo)) {
+          // PikeVM explores every split between the overlapping groups and keeps per-thread
+          // last-iteration captures.
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
         if (concatInfo != null) {
           return new MatchingStrategyResult(
               MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP,
@@ -1236,25 +1283,13 @@ public class PatternAnalyzer {
               requiredLiterals);
         }
 
-        // Try nested quantified groups: ((a|bc)+)*, ((a+|b)*)?c
-        NestedQuantifiedGroupsInfo nestedInfo = detectNestedQuantifiedGroups(ast);
-        if (nestedInfo != null) {
-          return new MatchingStrategyResult(
-              MatchingStrategy.NESTED_QUANTIFIED_GROUPS, null, nestedInfo, false, requiredLiterals);
-        }
-
         // No specialized strategy - fall through to DFA
         // Note: DFA gives correct match results but group capture may not follow
         // POSIX last-match semantics (groups may contain first match instead of last)
       }
 
-      // B4: greedy .+ group followed by a non-group suffix — the GREEDY_BACKTRACK indexOf scan
-      // overshoots on inputs ending with '\n' because '.' (ANY_EXCEPT_NEWLINE) cannot consume '\n'
-      // but the literal-suffix scan stops there. Route to PIKEVM_CAPTURE which handles this
-      // correctly. Patterns with a capturing-group suffix are excluded (different scan path).
-      boolean b4Flag =
-          FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
-              && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+      // B4: greedy .+ group followed by a non-group suffix (e.g. (.+)_) — route to PIKEVM_CAPTURE.
+      boolean b4Flag = FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast);
       addTrace("B4: hasGreedyDotPlusGroupWithSuffix", b4Flag);
       if (b4Flag) {
         return new MatchingStrategyResult(
@@ -1444,19 +1479,10 @@ public class PatternAnalyzer {
           // handles all anchor types natively (since commit 0acfc66), and RuntimeCompiler wraps
           // the result in NameEnrichingMatcher when named groups are present.
           if (!hasNamedGroups(ast) && !hasAnchorInNfa(nfa)) {
-            // INVARIANT for any new Class A route that returns PIKEVM_CAPTURE for patterns
-            // containing nullable capturing groups in alternation branches:
-            // always guard with
-            // !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)
-            // before returning PIKEVM_CAPTURE, as PikeVM diverges for nullable-content groups
-            // (e.g. (0*-?){0,}). RuntimeCompiler also enforces this via needsFallback(), but
-            // the PatternAnalyzer guard is the first line of defence.
-            // B16: nullable outer quantifier on non-nullable capturing group — TDFA POSIX
-            // last-match span wrong. PIKEVM gives correct spans when the group content itself is
-            // non-nullable; nullable-content groups (e.g. (0*-?){0,}) are left on the TDFA path
-            // and caught by needsFallback.
-            if (FallbackPatternDetector.hasNullableOuterQuantifierOnCapturingGroup(ast)
-                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+            // B16: nullable outer quantifier on a capturing group — TDFA POSIX last-match span
+            // wrong. PIKEVM gives correct spans, including for nullable group content
+            // ((0*-?){0,}).
+            if (FallbackPatternDetector.hasNullableOuterQuantifierOnCapturingGroup(ast)) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
                   null,
@@ -1485,10 +1511,7 @@ public class PatternAnalyzer {
             // be chosen at determinization time (observed: a losing thread's group-start
             // leaking into the reported spans). PikeVM resolves thread priority at match time.
             // Disjoint-overlap shapes ((?:(a):)?(b)) stay on the TDFA path.
-            boolean b17Flag =
-                nfa != null
-                    && hasNfaBypassCharsetOverlap(nfa, ast)
-                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            boolean b17Flag = nfa != null && hasNfaBypassCharsetOverlap(nfa, ast);
             addTrace("B17: multipleBypassGroups", b17Flag);
             if (b17Flag) {
               return new MatchingStrategyResult(
@@ -1517,8 +1540,7 @@ public class PatternAnalyzer {
             // priority-winning branch bypasses it (binds g1=[0,0); JDK leaves it -1). PikeVM gives
             // correct spans. A non-nullable group like (a) in (a)|b never leaks and stays on the
             // DFA.
-            if (FallbackPatternDetector.hasNullableCapturingGroupInAlternationBranch(ast)
-                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+            if (FallbackPatternDetector.hasNullableCapturingGroupInAlternationBranch(ast)) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
                   null,
@@ -1530,9 +1552,7 @@ public class PatternAnalyzer {
             }
             // A1: group body starts with a nullable first element — TDFA fires the group-start
             // tag at an epsilon-reachable state, recording match-start instead of group-start.
-            boolean a1Flag =
-                FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast)
-                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            boolean a1Flag = FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast);
             addTrace("A1: hasCapturingGroupWithNullableFirstElement", a1Flag);
             if (a1Flag) {
               return new MatchingStrategyResult(
@@ -1547,8 +1567,7 @@ public class PatternAnalyzer {
             // A2: capturing group absent from some alternation branch — TDFA binds the absent
             // group to a wrong span when the branch that lacks the group wins.
             boolean a2Flag =
-                FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
-                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+                FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast);
             addTrace("A2: hasCapturingGroupAbsentFromSomeAlternative", a2Flag);
             if (a2Flag) {
               return new MatchingStrategyResult(
@@ -1561,9 +1580,7 @@ public class PatternAnalyzer {
                   needsPosixSemantics);
             }
             // B4: greedy .+ group followed by a suffix — TDFA extends group-end into the suffix.
-            boolean b4CaFlag =
-                FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast)
-                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+            boolean b4CaFlag = FallbackPatternDetector.hasGreedyDotPlusGroupWithSuffix(ast);
             addTrace("B4: hasGreedyDotPlusGroupWithSuffix (captureAmbiguous)", b4CaFlag);
             if (b4CaFlag) {
               return new MatchingStrategyResult(
@@ -1577,8 +1594,7 @@ public class PatternAnalyzer {
             }
             // B5: group body is an alternation whose branches have different min- or max-lengths.
             boolean b5CaFlag =
-                FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast)
-                    && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+                FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast);
             addTrace("B5: hasGroupWithVariableLengthAlternationBody (captureAmbiguous)", b5CaFlag);
             if (b5CaFlag) {
               return new MatchingStrategyResult(
@@ -1608,10 +1624,8 @@ public class PatternAnalyzer {
             // END at the early exit with no later re-fire after the tail matched; jdk keeps
             // the span through the tail (group 1 "http://" vs our "http:"). The C2 priority
             // TDFA cannot express this position ambiguity — route to PIKEVM_CAPTURE, whose
-            // thread simulation tracks the span exactly. Guarded against the B16 nullable-
-            // content shape, which PikeVM also diverges on (needsFallback then rejects it).
-            if (hasTailNullableCapturingGroup(ast)
-                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+            // thread simulation tracks the span exactly.
+            if (hasTailNullableCapturingGroup(ast)) {
               return new MatchingStrategyResult(
                   MatchingStrategy.PIKEVM_CAPTURE,
                   null,
@@ -1637,7 +1651,7 @@ public class PatternAnalyzer {
                   requiredLiterals,
                   null,
                   needsPosixSemantics);
-            } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+            } else if (stateCount < DFA_SWITCH_STATE_LIMIT && !hasPartialMultilineStart()) {
               return new MatchingStrategyResult(
                   MatchingStrategy.DFA_SWITCH_WITH_GROUPS,
                   dfa,
@@ -1661,10 +1675,7 @@ public class PatternAnalyzer {
 
         // DFA with groups: choose strategy based on state count.
         // Gates for B16/B10/B15: TDFA cannot correctly compute group spans for these; PIKEVM can.
-        // B16: only when group content is non-nullable; nullable-content case left for
-        // needsFallback.
-        if (FallbackPatternDetector.hasNullableOuterQuantifierOnCapturingGroup(ast)
-            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+        if (FallbackPatternDetector.hasNullableOuterQuantifierOnCapturingGroup(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1697,8 +1708,7 @@ public class PatternAnalyzer {
         }
         // A1: group body starts with a nullable first element — TDFA fires the group-start
         // tag at an epsilon-reachable state, recording match-start instead of group-start.
-        if (FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast)
-            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+        if (FallbackPatternDetector.hasCapturingGroupWithNullableFirstElement(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1710,8 +1720,7 @@ public class PatternAnalyzer {
         }
         // A2: capturing group absent from some alternation branch — TDFA binds the absent
         // group to a wrong span when the branch that lacks the group wins.
-        if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)
-            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+        if (FallbackPatternDetector.hasCapturingGroupAbsentFromSomeAlternative(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1724,8 +1733,7 @@ public class PatternAnalyzer {
         // B5: group body is an alternation whose branches have different min- or max-lengths
         // and at least one branch contains a broad charset — TDFA cannot deterministically assign
         // the group-end tag when a broad-charset alternative competes with the suffix.
-        if (FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast)
-            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+        if (FallbackPatternDetector.hasGroupWithVariableLengthAlternationBody(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1773,10 +1781,7 @@ public class PatternAnalyzer {
         // x(?:(a):)?b) is reported unambiguous — yet the TDFA's state-entry group actions
         // still record that group's start at a stale position (start-only span leak). The
         // NFA-level B17 shape analysis (see hasNfaBypassCharsetOverlap) catches it.
-        boolean b17NonAmbiguousFlag =
-            nfa != null
-                && hasNfaBypassCharsetOverlap(nfa, ast)
-                && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast);
+        boolean b17NonAmbiguousFlag = nfa != null && hasNfaBypassCharsetOverlap(nfa, ast);
         addTrace("B17: multipleBypassGroups (non-captureAmbiguous)", b17NonAmbiguousFlag);
         if (b17NonAmbiguousFlag) {
           return new MatchingStrategyResult(
@@ -1789,10 +1794,8 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         // Nullable-tail capturing groups diverge on the tagged DFA (see the Class A route
-        // above): route to PIKEVM_CAPTURE for exact spans, unless the B16 nullable-content
-        // shape is present (PikeVM diverges there too; needsFallback handles it).
-        if (hasTailNullableCapturingGroup(ast)
-            && !FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(ast)) {
+        // above): route to PIKEVM_CAPTURE for exact spans.
+        if (hasTailNullableCapturingGroup(ast)) {
           return new MatchingStrategyResult(
               MatchingStrategy.PIKEVM_CAPTURE,
               null,
@@ -1812,7 +1815,7 @@ public class PatternAnalyzer {
               requiredLiterals,
               null,
               needsPosixSemantics);
-        } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+        } else if (stateCount < DFA_SWITCH_STATE_LIMIT && !hasPartialMultilineStart()) {
           // Use switch-based DFA for medium state counts (better cache behavior)
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_SWITCH_WITH_GROUPS,
@@ -1946,7 +1949,7 @@ public class PatternAnalyzer {
       if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_UNROLLED, dfa, null, false, requiredLiterals);
-      } else if (stateCount < DFA_SWITCH_STATE_LIMIT) {
+      } else if (stateCount < DFA_SWITCH_STATE_LIMIT && !hasPartialMultilineStart()) {
         // Use switch-based DFA for medium state counts (better cache behavior)
         return new MatchingStrategyResult(
             MatchingStrategy.DFA_SWITCH, dfa, null, false, requiredLiterals);
@@ -2302,6 +2305,15 @@ public class PatternAnalyzer {
       }
     }
     return false;
+  }
+
+  /**
+   * True if some but not all paths need multiline {@code ^}. DFA_SWITCH enforces a leading {@code
+   * ^} only through its findFrom position filter (no per-transition anchor guards), so it cannot
+   * match such patterns correctly.
+   */
+  private boolean hasPartialMultilineStart() {
+    return nfa != null && nfa.hasMultilineStartAnchor() && !nfa.requiresMultilineStartAnchor();
   }
 
   private boolean isDFATableEligible(DFA dfa) {
@@ -2895,110 +2907,6 @@ public class PatternAnalyzer {
     return false;
   }
 
-  private boolean hasLookbehind(RegexNode node) {
-    if (node instanceof AssertionNode) {
-      AssertionNode a = (AssertionNode) node;
-      if (a.type == AssertionNode.Type.POSITIVE_LOOKBEHIND
-          || a.type == AssertionNode.Type.NEGATIVE_LOOKBEHIND) {
-        return true;
-      }
-      return hasLookbehind(a.subPattern);
-    }
-    if (node instanceof GroupNode) return hasLookbehind(((GroupNode) node).child);
-    if (node instanceof ConcatNode) {
-      for (RegexNode child : ((ConcatNode) node).children) {
-        if (hasLookbehind(child)) return true;
-      }
-      return false;
-    }
-    if (node instanceof AlternationNode) {
-      for (RegexNode alt : ((AlternationNode) node).alternatives) {
-        if (hasLookbehind(alt)) return true;
-      }
-      return false;
-    }
-    if (node instanceof QuantifierNode) return hasLookbehind(((QuantifierNode) node).child);
-    return false;
-  }
-
-  /**
-   * Check if any backref references a capturing group defined inside a lookahead assertion. This
-   * requires falling back to NFA-based matching since DFA can't track groups.
-   */
-  private boolean hasBackrefToLookaheadCapture(RegexNode node) {
-    // First, collect all group numbers inside lookahead assertions
-    Set<Integer> lookaheadGroupNumbers = new HashSet<>();
-    collectLookaheadGroupNumbers(node, lookaheadGroupNumbers, false);
-
-    if (lookaheadGroupNumbers.isEmpty()) {
-      return false; // No groups in lookaheads
-    }
-
-    // Then, collect all backref numbers
-    Set<Integer> backrefNumbers = new HashSet<>();
-    collectBackrefNumbers(node, backrefNumbers);
-
-    // Check if any backref references a lookahead group
-    for (Integer backrefNum : backrefNumbers) {
-      if (lookaheadGroupNumbers.contains(backrefNum)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private void collectLookaheadGroupNumbers(
-      RegexNode node, Set<Integer> groupNumbers, boolean insideLookahead) {
-    if (node instanceof AssertionNode) {
-      AssertionNode assertion = (AssertionNode) node;
-      if (assertion.type == AssertionNode.Type.POSITIVE_LOOKAHEAD
-          || assertion.type == AssertionNode.Type.NEGATIVE_LOOKAHEAD) {
-        // Now inside lookahead - collect groups from sub-pattern
-        collectLookaheadGroupNumbers(assertion.subPattern, groupNumbers, true);
-      } else if (assertion.subPattern != null) {
-        collectLookaheadGroupNumbers(assertion.subPattern, groupNumbers, insideLookahead);
-      }
-    } else if (node instanceof GroupNode) {
-      GroupNode group = (GroupNode) node;
-      if (insideLookahead && group.capturing && group.groupNumber >= 0) {
-        groupNumbers.add(group.groupNumber);
-      }
-      if (group.child != null) {
-        collectLookaheadGroupNumbers(group.child, groupNumbers, insideLookahead);
-      }
-    } else if (node instanceof ConcatNode) {
-      for (RegexNode child : ((ConcatNode) node).children) {
-        collectLookaheadGroupNumbers(child, groupNumbers, insideLookahead);
-      }
-    } else if (node instanceof AlternationNode) {
-      for (RegexNode alt : ((AlternationNode) node).alternatives) {
-        collectLookaheadGroupNumbers(alt, groupNumbers, insideLookahead);
-      }
-    } else if (node instanceof QuantifierNode) {
-      collectLookaheadGroupNumbers(((QuantifierNode) node).child, groupNumbers, insideLookahead);
-    }
-  }
-
-  private void collectBackrefNumbers(RegexNode node, Set<Integer> backrefNumbers) {
-    if (node instanceof BackreferenceNode) {
-      backrefNumbers.add(((BackreferenceNode) node).groupNumber);
-    } else if (node instanceof ConcatNode) {
-      for (RegexNode child : ((ConcatNode) node).children) {
-        collectBackrefNumbers(child, backrefNumbers);
-      }
-    } else if (node instanceof AlternationNode) {
-      for (RegexNode alt : ((AlternationNode) node).alternatives) {
-        collectBackrefNumbers(alt, backrefNumbers);
-      }
-    } else if (node instanceof QuantifierNode) {
-      collectBackrefNumbers(((QuantifierNode) node).child, backrefNumbers);
-    } else if (node instanceof GroupNode) {
-      collectBackrefNumbers(((GroupNode) node).child, backrefNumbers);
-    } else if (node instanceof AssertionNode && ((AssertionNode) node).subPattern != null) {
-      collectBackrefNumbers(((AssertionNode) node).subPattern, backrefNumbers);
-    }
-  }
-
   private boolean hasSubroutines(RegexNode node) {
     SubroutineDetector detector = new SubroutineDetector();
     return node.accept(detector);
@@ -3040,13 +2948,18 @@ public class PatternAnalyzer {
    * iteration before it reaches the inner group's exit write, so the reported group span reflects a
    * stale earlier iteration instead of JDK's final (zero-width) one (e.g. {@code (?:(.*[_]*))+} on
    * {@code "a_b"}: JDK reports group 1 as {@code [3,3)}, BitState's DFS reports {@code [0,3)}).
+   * Declines a nullable-content capturing group under a nullable quantifier for the same reason
+   * ({@code (0*-?)*} on {@code "0"}: JDK group 1 = {@code [1,1)}, BitState {@code [0,1)}). Declines
+   * NFAs with group pins ({@link NFA#hasPinnedGroups}), which only PikeVM honors.
    */
   private boolean isBitStateEligible(RegexNode node) {
+    if (nfa != null && nfa.hasPinnedGroups()) return false;
     if (hasBackreferences(node)) return false;
     if (hasLookaround(node)) return false;
     if (hasAtomicGroups(node)) return false;
     if (hasPossessiveQuantifiers(node)) return false;
     if (hasAnchoredNullableQuantifierBody(node)) return false;
+    if (FallbackPatternDetector.hasNullableGroupContentWithNullableQuantifier(node)) return false;
     return !hasNullableQuantifierBodyWithNestedCapture(node);
   }
 
@@ -3881,8 +3794,10 @@ public class PatternAnalyzer {
     // Extract main pattern (without assertions)
     RegexNode mainPatternAST = extractMainPattern(ast);
 
-    if (mainPatternAST == null) {
-      // Pattern is only assertions - no main pattern to execute
+    // Pattern is only assertions, or extractMainPattern could not strip them (lookaheads under a
+    // top-level alternation): re-analyzing a main pattern that still has lookaround picks this
+    // strategy again and recurses without bound.
+    if (mainPatternAST == null || hasLookaround(mainPatternAST)) {
       return new LiteralLookaheadPatternInfo(literalLookaheads, requiredLiterals);
     }
 
@@ -4136,7 +4051,7 @@ public class PatternAnalyzer {
     // using trie
     SPECIALIZED_QUANTIFIED_GROUP, // Quantified capturing groups with POSIX last-match: (a)+,
     // (a|b)+, (a*)+
-    GREEDY_BACKTRACK, // Greedy patterns requiring backtracking: (.*)bar, (.*)(\d+)
+    GREEDY_SUFFIX, // P(.*)S with give-back: (.*)bar, (.*)(\d+)$, x(.+)\b(\d+)
 
     // Backreference-specific strategies (require limited backtracking)
     FIXED_REPETITION_BACKREF, // Fixed-repetition backrefs: (a)\1{8,}, (abc|def)=(\1){2,3}
@@ -4148,7 +4063,6 @@ public class PatternAnalyzer {
      */
     PINNED_BACKREFERENCE,
     OPTIONAL_GROUP_BACKREF, // Optional group backrefs: (a)?\\1, (another)?(\1+)test
-    NESTED_QUANTIFIED_GROUPS, // Nested quantified groups: ((a|bc)+)*, ((a+|b)*)?c
 
     // Generic strategies
     ONEPASS_NFA, // Unambiguous pattern - single-thread NFA
@@ -4200,7 +4114,33 @@ public class PatternAnalyzer {
     DETERMINISTIC_CHAIN_BYTECODE,
 
     /** PikeVM NFA-with-capture: O(n·m) native group extraction, leftmost-greedy, ReDoS-safe. */
-    PIKEVM_CAPTURE
+    PIKEVM_CAPTURE;
+
+    /**
+     * True if a matcher for this strategy can write instance state while matching: the {@code
+     * ReggieMatcher} state sets and scratch capture arrays used by the generated NFA code, {@code
+     * lazyFindMode} and {@code recursiveGroups} of recursive descent, the per-call buffers of
+     * PikeVM/BitState. Whether a given matcher touches them depends on the pattern (e.g. the NFA
+     * code uses the state-set fields only above 128 states), so the answer is conservative. Such an
+     * instance must not be used by concurrent callers.
+     */
+    public boolean hasMutableMatchState() {
+      switch (this) {
+        case PIKEVM_CAPTURE:
+        case BITSTATE_CAPTURE:
+        case OPTIMIZED_NFA:
+        case OPTIMIZED_NFA_WITH_BACKREFS:
+        case OPTIMIZED_NFA_WITH_LOOKAROUND:
+        case HYBRID_DFA_LOOKAHEAD:
+        case SPECIALIZED_MULTIPLE_LOOKAHEADS:
+        case SPECIALIZED_LITERAL_LOOKAHEADS:
+        case LAZY_DFA:
+        case RECURSIVE_DESCENT:
+          return true;
+        default:
+          return false;
+      }
+    }
   }
 
   /** Result of pattern analysis containing strategy and optional DFA. */
@@ -4637,7 +4577,8 @@ public class PatternAnalyzer {
   /** Extract CharSet from a node if it's a char class. */
   private CharSet extractCharSet(RegexNode node) {
     if (node instanceof CharClassNode) {
-      return ((CharClassNode) node).chars;
+      CharClassNode cc = (CharClassNode) node;
+      return cc.negated ? cc.chars.complement() : cc.chars;
     }
     return null;
   }
@@ -4744,6 +4685,8 @@ public class PatternAnalyzer {
     // Track anchors
     boolean hasStartAnchor = false;
     boolean hasEndAnchor = false;
+    boolean startAnchorMultiline = false;
+    boolean endAnchorMultiline = false;
     int startIdx = 0;
     int endIdx = children.size();
 
@@ -4752,6 +4695,7 @@ public class PatternAnalyzer {
       AnchorNode anchor = (AnchorNode) children.get(0);
       if (anchor.type == AnchorNode.Type.START || anchor.type == AnchorNode.Type.STRING_START) {
         hasStartAnchor = true;
+        startAnchorMultiline = anchor.type == AnchorNode.Type.START && anchor.multiline;
         startIdx = 1;
       }
     }
@@ -4761,6 +4705,7 @@ public class PatternAnalyzer {
       AnchorNode anchor = (AnchorNode) children.get(children.size() - 1);
       if (anchor.type == AnchorNode.Type.END || anchor.type == AnchorNode.Type.STRING_END) {
         hasEndAnchor = true;
+        endAnchorMultiline = anchor.type == AnchorNode.Type.END && anchor.multiline;
         endIdx = children.size() - 1;
       }
     }
@@ -4841,7 +4786,8 @@ public class PatternAnalyzer {
       }
     }
 
-    if (backrefIdx == -1) {
+    // The generator matches the backreference exactly once.
+    if (backrefIdx == -1 || backrefMin != 1 || backrefMax != 1) {
       return null;
     }
 
@@ -4851,6 +4797,7 @@ public class PatternAnalyzer {
     String separatorLiteral = null;
     CharSet separatorCharSet = null;
     int separatorMinCount = 0;
+    int separatorMaxCount = 0;
     int separatorGroupNumber = -1;
 
     if (backrefIdx > groupIdx + 1) {
@@ -4863,6 +4810,7 @@ public class PatternAnalyzer {
         separatorLiteral = sepInfo.literal;
         separatorCharSet = sepInfo.charSet;
         separatorMinCount = sepInfo.minCount;
+        separatorMaxCount = sepInfo.maxCount;
         separatorGroupNumber = sepInfo.groupNumber;
       } else {
         // Complex separator - not supported
@@ -4890,6 +4838,23 @@ public class PatternAnalyzer {
     // Decline so the pattern falls through to OPTIMIZED_NFA_WITH_BACKREFS, which evaluates \b
     // correctly. START/STRING_START and END/STRING_END are handled via hasStartAnchor/hasEndAnchor.
     if (containsWordBoundaryAnchor(prefix) || containsWordBoundaryAnchor(suffix)) {
+      return null;
+    }
+    // Other anchors in the prefix are dropped the same way (only the leading/trailing anchor is
+    // checked, via hasStartAnchor/hasEndAnchor); decline them too.
+    for (RegexNode node : prefix) {
+      if (node instanceof AnchorNode) {
+        return null;
+      }
+    }
+    // The generator emits prefix quantifiers possessively and only for exact-count or
+    // single-char-class shapes; decline every prefix it would not match exactly.
+    CharSet groupFirst = null;
+    if (groupQuantifier.min > 0 && groupQuantifier.child instanceof CharClassNode) {
+      CharClassNode cc = (CharClassNode) groupQuantifier.child;
+      groupFirst = cc.negated ? cc.chars.complement() : cc.chars;
+    }
+    if (!isFaithfulVcbPrefix(prefix, groupFirst)) {
       return null;
     }
 
@@ -4923,6 +4888,7 @@ public class PatternAnalyzer {
         separatorLiteral,
         separatorCharSet,
         separatorMinCount,
+        separatorMaxCount,
         separatorGroupNumber,
         backref.groupNumber,
         backrefMin,
@@ -4930,7 +4896,84 @@ public class PatternAnalyzer {
         suffix,
         hasStartAnchor,
         hasEndAnchor,
+        startAnchorMultiline,
+        endAnchorMultiline,
         nfa.getGroupCount());
+  }
+
+  /**
+   * True when VariableCaptureBackrefBytecodeGenerator#emitPrefixNode matches {@code nodes} exactly:
+   * literals, char classes and non-capturing groups/concats of them, quantifiers over a single
+   * literal or char class with an exact count, and unbounded quantifiers whose repeated set is
+   * disjoint from everything that can follow (the generator's loop never gives back). {@code
+   * follow} is the first-char set of what comes after {@code nodes}, or null when unknown.
+   */
+  private static boolean isFaithfulVcbPrefix(List<RegexNode> nodes, CharSet follow) {
+    for (int i = nodes.size() - 1; i >= 0; i--) {
+      RegexNode node = nodes.get(i);
+      if (!isFaithfulVcbPrefixNode(node, follow)) {
+        return false;
+      }
+      follow = vcbPrefixFirstSet(node, follow);
+    }
+    return true;
+  }
+
+  private static boolean isFaithfulVcbPrefixNode(RegexNode node, CharSet follow) {
+    if (node instanceof LiteralNode || node instanceof CharClassNode) {
+      return true;
+    }
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      return !g.capturing && isFaithfulVcbPrefix(List.of(g.child), follow);
+    }
+    if (node instanceof ConcatNode) {
+      return isFaithfulVcbPrefix(((ConcatNode) node).children, follow);
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      CharSet repeated = vcbPrefixFirstSet(q.child, null);
+      if (repeated == null
+          || !(q.child instanceof LiteralNode || q.child instanceof CharClassNode)) {
+        return false;
+      }
+      if (q.min == q.max) {
+        return true;
+      }
+      return q.max == -1 && follow != null && !repeated.intersects(follow);
+    }
+    return false;
+  }
+
+  /** First-char set of {@code node} followed by {@code follow}; null when unknown. */
+  private static CharSet vcbPrefixFirstSet(RegexNode node, CharSet follow) {
+    if (node instanceof LiteralNode) {
+      return CharSet.of(((LiteralNode) node).ch);
+    }
+    if (node instanceof CharClassNode) {
+      CharClassNode cc = (CharClassNode) node;
+      return cc.negated ? cc.chars.complement() : cc.chars;
+    }
+    if (node instanceof GroupNode) {
+      return vcbPrefixFirstSet(((GroupNode) node).child, follow);
+    }
+    if (node instanceof ConcatNode) {
+      List<RegexNode> children = ((ConcatNode) node).children;
+      CharSet f = follow;
+      for (int i = children.size() - 1; i >= 0; i--) {
+        f = vcbPrefixFirstSet(children.get(i), f);
+      }
+      return f;
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      CharSet first = vcbPrefixFirstSet(q.child, null);
+      if (q.min > 0 || first == null) {
+        return first;
+      }
+      return follow == null ? null : first.union(follow);
+    }
+    return null;
   }
 
   /** Check if a quantifier allows variable length (*, +, ?, {n,m} where n != m). */
@@ -5044,6 +5087,7 @@ public class PatternAnalyzer {
     String literal;
     CharSet charSet;
     int minCount;
+    int maxCount; // -1 for unbounded
     int groupNumber = -1;
   }
 
@@ -5073,6 +5117,7 @@ public class PatternAnalyzer {
     info.type = VariableCaptureBackrefInfo.SeparatorType.LITERAL;
     info.literal = sb.toString();
     info.minCount = sb.length();
+    info.maxCount = sb.length();
     return info;
   }
 
@@ -5085,6 +5130,7 @@ public class PatternAnalyzer {
       info.type = VariableCaptureBackrefInfo.SeparatorType.LITERAL;
       info.literal = String.valueOf(((LiteralNode) node).ch);
       info.minCount = 1;
+      info.maxCount = 1;
       return info;
     }
 
@@ -5102,6 +5148,7 @@ public class PatternAnalyzer {
       info.type = VariableCaptureBackrefInfo.SeparatorType.LITERAL;
       info.literal = sb.toString();
       info.minCount = sb.length();
+      info.maxCount = sb.length();
       return info;
     }
 
@@ -5110,29 +5157,24 @@ public class PatternAnalyzer {
       QuantifierNode quant = (QuantifierNode) node;
       RegexNode child = quant.child;
 
-      // Check if it's a capturing group containing the separator
-      if (child instanceof GroupNode) {
-        GroupNode group = (GroupNode) child;
-        if (group.capturing) {
-          info.groupNumber = group.groupNumber;
-          child = group.child;
-          if (child instanceof QuantifierNode) {
-            quant = (QuantifierNode) child;
-            child = quant.child;
-          }
-        }
+      // A quantified capturing group spans only its last iteration, which the generator does
+      // not track (it records the whole separator span), and an inner quantifier would
+      // replace the outer one.
+      if (child instanceof GroupNode && ((GroupNode) child).capturing) {
+        return null;
       }
 
       if (child instanceof CharClassNode) {
         CharClassNode cc = (CharClassNode) child;
-        info.charSet = cc.chars;
+        info.charSet = cc.negated ? cc.chars.complement() : cc.chars;
         info.minCount = quant.min;
+        info.maxCount = quant.max;
 
-        if (cc.chars.equals(CharSet.DIGIT)) {
+        if (info.charSet.equals(CharSet.DIGIT)) {
           info.type = VariableCaptureBackrefInfo.SeparatorType.DIGIT_SEQ;
-        } else if (cc.chars.equals(CharSet.WORD)) {
+        } else if (info.charSet.equals(CharSet.WORD)) {
           info.type = VariableCaptureBackrefInfo.SeparatorType.WORD_SEQ;
-        } else if (cc.chars.equals(CharSet.WHITESPACE)) {
+        } else if (info.charSet.equals(CharSet.WHITESPACE)) {
           info.type = VariableCaptureBackrefInfo.SeparatorType.WHITESPACE_SEQ;
         } else {
           info.type = VariableCaptureBackrefInfo.SeparatorType.CHAR_CLASS_SEQ;
@@ -5144,14 +5186,15 @@ public class PatternAnalyzer {
     // Single char class
     if (node instanceof CharClassNode) {
       CharClassNode cc = (CharClassNode) node;
-      info.charSet = cc.chars;
+      info.charSet = cc.negated ? cc.chars.complement() : cc.chars;
       info.minCount = 1;
+      info.maxCount = 1;
 
-      if (cc.chars.equals(CharSet.DIGIT)) {
+      if (info.charSet.equals(CharSet.DIGIT)) {
         info.type = VariableCaptureBackrefInfo.SeparatorType.DIGIT_SEQ;
-      } else if (cc.chars.equals(CharSet.WORD)) {
+      } else if (info.charSet.equals(CharSet.WORD)) {
         info.type = VariableCaptureBackrefInfo.SeparatorType.WORD_SEQ;
-      } else if (cc.chars.equals(CharSet.WHITESPACE)) {
+      } else if (info.charSet.equals(CharSet.WHITESPACE)) {
         info.type = VariableCaptureBackrefInfo.SeparatorType.WHITESPACE_SEQ;
       } else {
         info.type = VariableCaptureBackrefInfo.SeparatorType.CHAR_CLASS_SEQ;
@@ -5172,15 +5215,8 @@ public class PatternAnalyzer {
     }
 
     if (content instanceof CharClassNode) {
-      return ((CharClassNode) content).chars;
-    }
-
-    // Dot (any char)
-    if (content instanceof CharClassNode) {
       CharClassNode cc = (CharClassNode) content;
-      if (cc.chars.equals(CharSet.ANY)) {
-        return CharSet.ANY;
-      }
+      return cc.negated ? cc.chars.complement() : cc.chars;
     }
 
     // Default to ANY for .* style groups
@@ -5212,10 +5248,12 @@ public class PatternAnalyzer {
     int startIdx = 0;
     int endIdx = children.size();
 
-    // Check for start anchor
+    // Check for start anchor. Multiline ^ and $ are line anchors, which the generator does not
+    // implement; left in place, they land in prefix/suffix and the pattern is declined below.
     if (children.get(0) instanceof AnchorNode) {
       AnchorNode anchor = (AnchorNode) children.get(0);
-      if (anchor.type == AnchorNode.Type.START || anchor.type == AnchorNode.Type.STRING_START) {
+      if ((anchor.type == AnchorNode.Type.START && !anchor.multiline)
+          || anchor.type == AnchorNode.Type.STRING_START) {
         hasStartAnchor = true;
         startIdx = 1;
       }
@@ -5224,7 +5262,8 @@ public class PatternAnalyzer {
     // Check for end anchor
     if (endIdx > startIdx && children.get(children.size() - 1) instanceof AnchorNode) {
       AnchorNode anchor = (AnchorNode) children.get(children.size() - 1);
-      if (anchor.type == AnchorNode.Type.END || anchor.type == AnchorNode.Type.STRING_END) {
+      if ((anchor.type == AnchorNode.Type.END && !anchor.multiline)
+          || anchor.type == AnchorNode.Type.STRING_END) {
         hasEndAnchor = true;
         endIdx = children.size() - 1;
       }
@@ -5423,248 +5462,6 @@ public class PatternAnalyzer {
   }
 
   /**
-   * Detect TRUE nested quantified groups: ((a)+)*, ((a|b)+)*
-   *
-   * <p>These patterns have a quantifier on a capturing group, where the group's DIRECT content is
-   * another quantifier (possibly on another group).
-   *
-   * <p>Structure that matches: Quant → Group → Quant → (content) Examples: - ((a)+)* : Quant(*) →
-   * Group1 → Quant(+) → Group2(a) - ((a|b)+)* : Quant(*) → Group1 → Quant(+) → Alternation -
-   * (([a-z])+)* : Quant(*) → Group1 → Quant(+) → Group2([a-z])
-   *
-   * <p>Structure that does NOT match (handled by SPECIALIZED_QUANTIFIED_GROUP): - (a)+ : Single
-   * level quantified group - (a|b)+ : Alternation in quantified group - (b+|a)+ : Quant → Group →
-   * Alternation → Quant (quantifier inside alternation)
-   *
-   * <p>Returns NestedQuantifiedGroupsInfo if pattern matches, null otherwise.
-   */
-  private NestedQuantifiedGroupsInfo detectNestedQuantifiedGroups(RegexNode ast) {
-    // Extract children and anchors
-    List<RegexNode> children;
-    boolean hasStartAnchor = false;
-    boolean hasEndAnchor = false;
-
-    if (ast instanceof ConcatNode) {
-      children = new ArrayList<>(((ConcatNode) ast).children);
-
-      // Check for anchors
-      if (!children.isEmpty() && children.get(0) instanceof AnchorNode) {
-        AnchorNode anchor = (AnchorNode) children.get(0);
-        if (anchor.type == AnchorNode.Type.START || anchor.type == AnchorNode.Type.STRING_START) {
-          hasStartAnchor = true;
-          children.remove(0);
-        }
-      }
-      if (!children.isEmpty() && children.get(children.size() - 1) instanceof AnchorNode) {
-        AnchorNode anchor = (AnchorNode) children.get(children.size() - 1);
-        if (anchor.type == AnchorNode.Type.END || anchor.type == AnchorNode.Type.STRING_END) {
-          hasEndAnchor = true;
-          children.remove(children.size() - 1);
-        }
-      }
-    } else {
-      children = new ArrayList<>();
-      children.add(ast);
-    }
-
-    if (children.isEmpty()) {
-      return null;
-    }
-
-    // Find the nested quantified group structure
-    // Pattern: prefix + (nested quantified group) + suffix
-    List<RegexNode> prefix = new ArrayList<>();
-    List<RegexNode> suffix = new ArrayList<>();
-    List<NestedQuantifiedGroupsInfo.QuantifierLevel> levels = new ArrayList<>();
-    int nestedGroupIdx = -1;
-
-    for (int i = 0; i < children.size(); i++) {
-      RegexNode child = children.get(i);
-
-      // Look for: Quant → Group → Quant (true nesting)
-      if (child instanceof QuantifierNode) {
-        QuantifierNode outerQuant = (QuantifierNode) child;
-
-        // Check if the quantified content is a capturing group
-        if (outerQuant.child instanceof GroupNode) {
-          GroupNode outerGroup = (GroupNode) outerQuant.child;
-
-          // TRUE NESTING CHECK: The group's child must be a quantifier wrapping a GROUP
-          // This distinguishes ((a)+)* from (a?)+ where the inner quantifier wraps literal
-          if (hasNestedQuantifiedGroup(outerGroup.child)) {
-            nestedGroupIdx = i;
-
-            // Build the nesting levels
-            levels = extractQuantifierLevels(outerQuant);
-
-            if (levels.size() >= 2) {
-              // Found valid nested quantified group
-              break;
-            }
-            levels.clear();
-          }
-        }
-      }
-    }
-
-    if (nestedGroupIdx < 0 || levels.size() < 2) {
-      return null;
-    }
-
-    // Skip NESTED_QUANTIFIED_GROUPS when any level's content contains alternation.
-    // The generator has no AlternationNode handler and falls through to accept-any-char.
-    for (NestedQuantifiedGroupsInfo.QuantifierLevel level : levels) {
-      if (containsAlternation(level.content)) {
-        return null;
-      }
-    }
-
-    // Collect prefix and suffix
-    for (int i = 0; i < nestedGroupIdx; i++) {
-      prefix.add(children.get(i));
-    }
-    for (int i = nestedGroupIdx + 1; i < children.size(); i++) {
-      suffix.add(children.get(i));
-    }
-
-    return new NestedQuantifiedGroupsInfo(
-        levels, prefix, suffix, hasStartAnchor, hasEndAnchor, nfa.getGroupCount());
-  }
-
-  /**
-   * Check if a node represents TRUE nested quantified GROUP structure.
-   *
-   * <p>TRUE nested quantified groups means there's an inner quantifier that wraps a GROUP, creating
-   * a pattern like ((a)+)* where both the outer and inner levels have quantified groups.
-   *
-   * <p>Examples of true nested groups (returns true): - QuantifierNode(+) → GroupNode (inner
-   * quantifier wraps a group) - GroupNode → QuantifierNode(+) → GroupNode (same, with extra
-   * wrapping)
-   *
-   * <p>Examples of NOT true nested groups (returns false): - QuantifierNode(?) → LiteralNode (inner
-   * quantifier on literal, e.g., (a?)+) - QuantifierNode(*) → CharClassNode (inner quantifier on
-   * charclass, e.g., ([a-z]*)+) - AlternationNode → [...] (alternation, not nested quantified
-   * groups)
-   *
-   * <p>The key distinction: - (a?)+ → Quant → Group → Quant → LITERAL (NOT nested groups) - ((a)+)*
-   * → Quant → Group → Quant → GROUP (TRUE nested groups)
-   */
-  private boolean hasNestedQuantifiedGroup(RegexNode node) {
-    // Direct quantifier - check if it wraps a group
-    if (node instanceof QuantifierNode) {
-      QuantifierNode quant = (QuantifierNode) node;
-      return unwrapsToGroup(quant.child);
-    }
-
-    // Group wrapping something - recurse into child
-    if (node instanceof GroupNode) {
-      return hasNestedQuantifiedGroup(((GroupNode) node).child);
-    }
-
-    // ConcatNode with a single child - recurse
-    if (node instanceof ConcatNode) {
-      ConcatNode concat = (ConcatNode) node;
-      if (concat.children.size() == 1) {
-        return hasNestedQuantifiedGroup(concat.children.get(0));
-      }
-    }
-
-    // AlternationNode or other node types = NOT nested quantified groups
-    return false;
-  }
-
-  /** Check if a node unwraps to a GroupNode (through concat/group wrappers). */
-  private boolean unwrapsToGroup(RegexNode node) {
-    if (node instanceof GroupNode) {
-      return true;
-    }
-    if (node instanceof ConcatNode) {
-      ConcatNode concat = (ConcatNode) node;
-      if (concat.children.size() == 1) {
-        return unwrapsToGroup(concat.children.get(0));
-      }
-    }
-    return false;
-  }
-
-  /** Extract the quantifier levels from a nested structure. Returns list from outer to inner. */
-  private List<NestedQuantifiedGroupsInfo.QuantifierLevel> extractQuantifierLevels(
-      QuantifierNode outerQuant) {
-    List<NestedQuantifiedGroupsInfo.QuantifierLevel> levels = new ArrayList<>();
-    RegexNode current = outerQuant;
-
-    while (current instanceof QuantifierNode) {
-      QuantifierNode quant = (QuantifierNode) current;
-      RegexNode child = quant.child;
-
-      int groupNumber = -1;
-      RegexNode content = child;
-
-      // If child is a capturing group, extract its info
-      if (child instanceof GroupNode) {
-        GroupNode group = (GroupNode) child;
-        if (group.capturing) {
-          groupNumber = group.groupNumber;
-        }
-        content = group.child;
-      }
-
-      // Determine charset/literal for simple content
-      CharSet charSet = null;
-      String literal = null;
-      if (content instanceof CharClassNode) {
-        charSet = ((CharClassNode) content).chars;
-      } else if (content instanceof LiteralNode) {
-        literal = String.valueOf(((LiteralNode) content).ch);
-      }
-
-      levels.add(
-          new NestedQuantifiedGroupsInfo.QuantifierLevel(
-              quant.min, quant.max, groupNumber, content, charSet, literal));
-
-      // Move to inner quantifier if present
-      if (content instanceof QuantifierNode) {
-        current = (QuantifierNode) content;
-      } else if (content instanceof ConcatNode || content instanceof AlternationNode) {
-        // Look for quantifier in the content
-        QuantifierNode innerQuant = findInnerQuantifier(content);
-        if (innerQuant != null) {
-          current = innerQuant;
-        } else {
-          break;
-        }
-      } else {
-        break;
-      }
-    }
-
-    return levels;
-  }
-
-  /** Find the first quantifier node inside a concat or alternation. */
-  private QuantifierNode findInnerQuantifier(RegexNode node) {
-    if (node instanceof QuantifierNode) {
-      return (QuantifierNode) node;
-    }
-    if (node instanceof ConcatNode) {
-      for (RegexNode child : ((ConcatNode) node).children) {
-        QuantifierNode found = findInnerQuantifier(child);
-        if (found != null) return found;
-      }
-    }
-    if (node instanceof AlternationNode) {
-      for (RegexNode alt : ((AlternationNode) node).alternatives) {
-        QuantifierNode found = findInnerQuantifier(alt);
-        if (found != null) return found;
-      }
-    }
-    if (node instanceof GroupNode) {
-      return findInnerQuantifier(((GroupNode) node).child);
-    }
-    return null;
-  }
-
-  /**
    * Detect simple backreference patterns that can be optimized with specialized generators.
    * Currently detects: - HTML/XML tags: <(\w+)>.*</\1>
    *
@@ -5752,7 +5549,10 @@ public class PatternAnalyzer {
       return null;
     }
     CharClassNode tagCharClass = (CharClassNode) tagQuantifier.child;
-    // Accept \w or [a-zA-Z0-9_] or similar
+    // The generator hardcodes the tag name as \w.
+    if (!effectiveCharSet(tagCharClass).equals(CharSet.WORD)) {
+      return null;
+    }
     idx++;
 
     // Check for closing '>'
@@ -5776,7 +5576,15 @@ public class PatternAnalyzer {
         || !middle.greedy) {
       return null; // Must be * (zero or more, greedy)
     }
-    // Child should be DOT or any char class
+    // The generator only models a gap of '.' (stops at line terminators) or any char.
+    if (!(middle.child instanceof CharClassNode)) {
+      return null;
+    }
+    CharSet gapCharSet = effectiveCharSet((CharClassNode) middle.child);
+    boolean gapStopsAtLineTerminator = gapCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE);
+    if (!gapStopsAtLineTerminator && !gapCharSet.equals(CharSet.ANY)) {
+      return null;
+    }
     idx++;
 
     // Check for closing tag: '<', '/', backreference, '>'
@@ -5832,8 +5640,8 @@ public class PatternAnalyzer {
         ">", // openSuffix
         tagCharSet, // tagCharSet
         "</", // closePrefix
-        ">" // closeSuffix
-        );
+        ">", // closeSuffix
+        gapStopsAtLineTerminator);
   }
 
   /**
@@ -5882,7 +5690,10 @@ public class PatternAnalyzer {
       return null;
     }
     CharClassNode wordCharClass = (CharClassNode) wordQuantifier.child;
-    // Accept \w or [a-zA-Z0-9_] or similar
+    // The generator hardcodes the word as \w.
+    if (!effectiveCharSet(wordCharClass).equals(CharSet.WORD)) {
+      return null;
+    }
     idx++;
 
     // Check for \s+ (whitespace, one or more, greedy)
@@ -5896,10 +5707,11 @@ public class PatternAnalyzer {
         || !spaceQuantifier.greedy) {
       return null; // Must be + (one or more, greedy)
     }
-    if (!(spaceQuantifier.child instanceof CharClassNode)) {
+    // The generator hardcodes the separator as \s.
+    if (!(spaceQuantifier.child instanceof CharClassNode)
+        || !effectiveCharSet((CharClassNode) spaceQuantifier.child).equals(CharSet.WHITESPACE)) {
       return null;
     }
-    // CharClassNode for \s should contain whitespace characters
     idx++;
 
     // Check for backreference \1
@@ -5978,7 +5790,10 @@ public class PatternAnalyzer {
       return null;
     }
     CharClassNode contentCharClass = (CharClassNode) contentQuantifier.child;
-    // Should be negated char class [^"]
+    // The generator hardcodes the content as [^"].
+    if (!effectiveCharSet(contentCharClass).equals(CharSet.ANY.minus(CharSet.of('"')))) {
+      return null;
+    }
     idx++;
 
     // Check for closing quote '"'
@@ -6000,7 +5815,9 @@ public class PatternAnalyzer {
     if (ws1.min != 0 || (ws1.max != -1 && ws1.max != Integer.MAX_VALUE) || !ws1.greedy) {
       return null; // Must be * (zero or more, greedy)
     }
-    if (!(ws1.child instanceof CharClassNode)) {
+    // The generator hardcodes the whitespace runs as \s.
+    if (!(ws1.child instanceof CharClassNode)
+        || !effectiveCharSet((CharClassNode) ws1.child).equals(CharSet.WHITESPACE)) {
       return null;
     }
     idx++;
@@ -6024,7 +5841,9 @@ public class PatternAnalyzer {
     if (ws2.min != 0 || (ws2.max != -1 && ws2.max != Integer.MAX_VALUE) || !ws2.greedy) {
       return null; // Must be * (zero or more, greedy)
     }
-    if (!(ws2.child instanceof CharClassNode)) {
+    // The generator hardcodes the whitespace runs as \s.
+    if (!(ws2.child instanceof CharClassNode)
+        || !effectiveCharSet((CharClassNode) ws2.child).equals(CharSet.WHITESPACE)) {
       return null;
     }
     idx++;
@@ -6059,7 +5878,7 @@ public class PatternAnalyzer {
     }
 
     // Pattern matches! Create ATTRIBUTE_MATCH pattern info
-    CharSet contentCharSet = contentCharClass.chars;
+    CharSet contentCharSet = effectiveCharSet(contentCharClass);
     return new BackreferencePatternInfo(
         BackreferencePatternInfo.BackrefType.ATTRIBUTE_MATCH,
         1, // group number
@@ -6127,16 +5946,10 @@ public class PatternAnalyzer {
     if (quantifier.child instanceof CharClassNode) {
       CharClassNode charClass = (CharClassNode) quantifier.child;
       groupCharSet = charClass.chars;
-      // Only accept if it's a "dot" (any character) charset
-      // A dot charset covers the full range 0x0000-0xFFFF (or close to it)
-      // \w is only about 63 chars, so we reject it
-      // Calculate total size of all ranges
-      int charSetSize = 0;
-      for (CharSet.Range range : groupCharSet.getRanges()) {
-        charSetSize += range.end - range.start + 1;
-      }
-      if (charSetSize < 1000) {
-        return null; // Not a broad enough char class - this is like \w, not .
+      // The generator never checks the group's characters, so the group must accept every char
+      // (a plain '.' excludes line terminators).
+      if (charClass.negated || !groupCharSet.equals(CharSet.ANY)) {
+        return null;
       }
     } else {
       // Not a char class - can't detect
@@ -6170,6 +5983,22 @@ public class PatternAnalyzer {
         separatorChildren.add(children.get(i));
       }
       separatorNode = new ConcatNode(separatorChildren);
+    }
+
+    // The generator checks only the separator's minimum length and a single-range charset, which
+    // is faithful for a greedy unbounded quantifier over a non-negated single-range class.
+    if (!(separatorNode instanceof QuantifierNode)) {
+      return null;
+    }
+    QuantifierNode sepQuant = (QuantifierNode) separatorNode;
+    if (!sepQuant.greedy
+        || (sepQuant.max != -1 && sepQuant.max != Integer.MAX_VALUE)
+        || !(sepQuant.child instanceof CharClassNode)) {
+      return null;
+    }
+    CharClassNode sepClass = (CharClassNode) sepQuant.child;
+    if (sepClass.negated || sepClass.chars.getRanges().size() != 1) {
+      return null;
     }
 
     // Pattern matches! Create GREEDY_ANY_BACKREF pattern info
@@ -6906,6 +6735,104 @@ public class PatternAnalyzer {
     public Boolean visitBranchReset(BranchResetNode node) {
       // Check all alternatives while preserving quantifier state
       return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
+    }
+  }
+
+  /**
+   * Detects a capturing group under a repeating quantifier that has a second quantifier on the same
+   * path, above or inside the group: (a+)+, ([a-z]+)*, ((ab)+)?, (?:(a)+)+. Not (a)+ or (a+)?.
+   */
+  private static class NestedRepeatedCaptureDetector implements RegexVisitor<Boolean> {
+    private int quantifiersAbove;
+    private boolean repeatingAbove;
+    private boolean inRepeatedCapture;
+
+    boolean hasNestedRepeatedCapture(RegexNode ast) {
+      return ast.accept(this);
+    }
+
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      for (RegexNode child : node.children) {
+        if (child.accept(this)) return true;
+      }
+      return false;
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      for (RegexNode alt : node.alternatives) {
+        if (alt.accept(this)) return true;
+      }
+      return false;
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      if (inRepeatedCapture) return true;
+      int savedCount = quantifiersAbove;
+      boolean savedRepeating = repeatingAbove;
+      quantifiersAbove++;
+      repeatingAbove |= node.max == -1 || node.max > 1;
+      boolean result = node.child.accept(this);
+      quantifiersAbove = savedCount;
+      repeatingAbove = savedRepeating;
+      return result;
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      if (!node.capturing || !repeatingAbove) return node.child.accept(this);
+      if (quantifiersAbove >= 2) return true;
+      boolean saved = inRepeatedCapture;
+      inRepeatedCapture = true;
+      boolean result = node.child.accept(this);
+      inRepeatedCapture = saved;
+      return result;
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      return node.thenBranch.accept(this)
+          || (node.elseBranch != null && node.elseBranch.accept(this));
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      for (RegexNode alt : node.alternatives) {
+        if (alt.accept(this)) return true;
+      }
+      return false;
     }
   }
 
@@ -8266,6 +8193,12 @@ public class PatternAnalyzer {
       /** Leading {@code ^} (non-multiline): the branch is only tried at scan position 0. */
       public final boolean startAnchored;
 
+      /**
+       * Leading multiline {@code ^}: the branch is unanchored for the find() scan (first-set gate,
+       * min-width bound) and each try additionally requires a line start at the scan position.
+       */
+      public final boolean multilineStart;
+
       /** Trailing {@code $}. */
       public final boolean endAnchored;
 
@@ -8286,6 +8219,7 @@ public class PatternAnalyzer {
 
       ChainBranch(
           boolean startAnchored,
+          boolean multilineStart,
           boolean endAnchored,
           boolean multilineEnd,
           ChainSeq seq,
@@ -8293,6 +8227,7 @@ public class PatternAnalyzer {
           boolean firstSetHasNonAscii,
           int minWidth) {
         this.startAnchored = startAnchored;
+        this.multilineStart = multilineStart;
         this.endAnchored = endAnchored;
         this.multilineEnd = multilineEnd;
         this.seq = seq;
@@ -8316,6 +8251,7 @@ public class PatternAnalyzer {
         hash = 31 * hash + (b.startAnchored ? 1 : 0);
         hash = 31 * hash + (b.endAnchored ? 2 : 0);
         hash = 31 * hash + (b.multilineEnd ? 4 : 0);
+        hash = 31 * hash + (b.multilineStart ? 8 : 0);
         hash = 31 * hash + b.minWidth;
         hash = 31 * chainSeqHashCode(b.seq, hash);
       }
@@ -9183,7 +9119,10 @@ public class PatternAnalyzer {
       Segment seg = segments.get(i);
       if (seg instanceof VariableGroupSegment) {
         VariableGroupSegment varSeg = (VariableGroupSegment) seg;
-        if (varSeg.minMatches == 0 || (!varSeg.negated && varSeg.charset.isAnyChar())) {
+        if (varSeg.minMatches == 0
+            || (!varSeg.negated
+                && (varSeg.charset.isAnyChar()
+                    || varSeg.charset.equals(CharSet.ANY_EXCEPT_NEWLINE)))) {
           return null; // requires inter-group backtracking
         }
       }
@@ -9405,7 +9344,8 @@ public class PatternAnalyzer {
     String quantifierLiteral = null;
 
     if (quantifiedNode instanceof CharClassNode) {
-      quantifierCharSet = ((CharClassNode) quantifiedNode).chars;
+      CharClassNode cc = (CharClassNode) quantifiedNode;
+      quantifierCharSet = cc.negated ? cc.chars.complement() : cc.chars;
     } else if (quantifiedNode instanceof LiteralNode) {
       quantifierLiteral = String.valueOf(((LiteralNode) quantifiedNode).ch);
     } else {
@@ -9628,250 +9568,6 @@ public class PatternAnalyzer {
     return new CountingGlushkovInfo(base, q.min, q.max);
   }
 
-  private GreedyBacktrackInfo detectGreedyBacktrackPattern(RegexNode ast) {
-    // Reject unsupported features
-    if (hasBackreferences(ast) || hasLookaround(ast)) {
-      return null;
-    }
-
-    List<RegexNode> allNodes = new ArrayList<>();
-
-    // Flatten the AST into a list of nodes
-    if (ast instanceof ConcatNode) {
-      allNodes.addAll(((ConcatNode) ast).children);
-    } else {
-      allNodes.add(ast);
-    }
-
-    // Find a capturing group with greedy .* or .+
-    int greedyGroupIndex = -1;
-    GroupNode greedyGroup = null;
-    int greedyGroupNumber = 0;
-    int greedyMinCount = 0;
-    CharSet greedyCharSet = null;
-    int currentGroupNum = 0;
-
-    for (int i = 0; i < allNodes.size(); i++) {
-      RegexNode node = allNodes.get(i);
-
-      if (node instanceof GroupNode) {
-        GroupNode group = (GroupNode) node;
-        if (group.capturing) {
-          currentGroupNum++;
-
-          // Check if this is greedy .* or .+ (broad charset)
-          if (group.child instanceof QuantifierNode) {
-            QuantifierNode quant = (QuantifierNode) group.child;
-            if (quant.greedy && quant.child instanceof CharClassNode) {
-              CharClassNode cc = (CharClassNode) quant.child;
-
-              // Calculate charset size
-              int charSetSize = 0;
-              for (CharSet.Range range : cc.chars.getRanges()) {
-                charSetSize += range.end - range.start + 1;
-              }
-
-              // .* and .+ have charset size > 60000 (most of Unicode)
-              // We also accept broad charsets > 1000 chars
-              if (charSetSize > 1000) {
-                // Check for .* (min=0) or .+ (min=1)
-                if ((quant.min == 0 || quant.min == 1)
-                    && (quant.max == -1 || quant.max == Integer.MAX_VALUE)) {
-
-                  if (greedyGroup != null) {
-                    // Multiple greedy groups - not supported yet
-                    return null;
-                  }
-                  greedyGroupIndex = i;
-                  greedyGroup = group;
-                  greedyGroupNumber = currentGroupNum;
-                  greedyMinCount = quant.min;
-                  greedyCharSet = cc.chars;
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-
-    // Must have a greedy capturing group
-    if (greedyGroup == null) {
-      return null;
-    }
-
-    // The GREEDY_BACKTRACK suffix-search fast paths (find/findMatch via indexOf/lastIndexOf) only
-    // re-validate the greedy run for the two '.' charsets they reason about precisely: CharSet.ANY
-    // (DOTALL '.') and CharSet.ANY_EXCEPT_NEWLINE (default '.'). Any other broad charset (e.g. a
-    // large negated class) cannot be soundly handled by the indexOf scan, so decline and let it
-    // route to a charset-validating strategy.
-    if (greedyCharSet != null
-        && !greedyCharSet.equals(CharSet.ANY)
-        && !greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE)) {
-      return null;
-    }
-
-    // There must be something after the greedy group (the suffix)
-    if (greedyGroupIndex >= allNodes.size() - 1) {
-      return null; // No suffix
-    }
-
-    // Decline .+ (min>=1) with broad charset when the suffix is a literal (not a capturing group).
-    // The GREEDY_BACKTRACK indexOf scan cannot enforce the min=1 lower bound while surrendering
-    // chars to a non-group suffix: on inputs with a trailing newline the scan overshoots, matching
-    // the newline via the suffix delimiter check instead of stopping at the non-newline boundary of
-    // '.' (ANY_EXCEPT_NEWLINE). Capturing-group suffixes use a different scan path unaffected by
-    // this.
-    boolean suffixStartsWithCapturingGroup =
-        allNodes.get(greedyGroupIndex + 1) instanceof GroupNode sg && sg.capturing;
-    if (!suffixStartsWithCapturingGroup
-        && greedyMinCount > 0
-        && greedyCharSet != null
-        && (greedyCharSet.equals(CharSet.ANY)
-            || greedyCharSet.equals(CharSet.ANY_EXCEPT_NEWLINE))) {
-      return null;
-    }
-
-    // Extract prefix (everything before the greedy group)
-    List<RegexNode> prefix = new ArrayList<>();
-    for (int i = 0; i < greedyGroupIndex; i++) {
-      RegexNode node = allNodes.get(i);
-      if (!isSimpleFixedWidth(node)) {
-        return null; // Prefix must be simple
-      }
-      prefix.add(node);
-    }
-
-    // Extract and analyze suffix (everything after the greedy group)
-    List<RegexNode> suffixNodes = new ArrayList<>();
-    for (int i = greedyGroupIndex + 1; i < allNodes.size(); i++) {
-      suffixNodes.add(allNodes.get(i));
-    }
-
-    if (suffixNodes.isEmpty()) {
-      return null;
-    }
-
-    // Analyze suffix type
-    GreedyBacktrackInfo.SuffixType suffixType = null;
-    String suffixLiteral = null;
-    CharSet suffixCharSet = null;
-    int suffixMinCount = 0;
-    int suffixGroupNumber = -1;
-    boolean hasEndAnchor = false;
-    int totalGroupCount = currentGroupNum;
-
-    // Check for end anchor
-    if (suffixNodes.get(suffixNodes.size() - 1) instanceof AnchorNode) {
-      AnchorNode anchor = (AnchorNode) suffixNodes.get(suffixNodes.size() - 1);
-      if (anchor.type == AnchorNode.Type.END) {
-        hasEndAnchor = true;
-        suffixNodes = suffixNodes.subList(0, suffixNodes.size() - 1);
-      }
-    }
-
-    if (suffixNodes.isEmpty()) {
-      suffixType = GreedyBacktrackInfo.SuffixType.ANCHORED;
-    } else if (suffixNodes.size() == 1) {
-      RegexNode suffixNode = suffixNodes.get(0);
-
-      if (suffixNode instanceof LiteralNode) {
-        // Single literal: (.*)X
-        suffixType = GreedyBacktrackInfo.SuffixType.LITERAL;
-        suffixLiteral = String.valueOf(((LiteralNode) suffixNode).ch);
-      } else if (suffixNode instanceof CharClassNode) {
-        // Single char class: (.*)[0-9]
-        suffixType = GreedyBacktrackInfo.SuffixType.CHAR_CLASS;
-        suffixCharSet = ((CharClassNode) suffixNode).chars;
-        suffixMinCount = 1;
-      } else if (suffixNode instanceof GroupNode) {
-        GroupNode suffixGroup = (GroupNode) suffixNode;
-        if (suffixGroup.capturing && suffixGroup.child instanceof QuantifierNode) {
-          // Capturing group with quantifier: (.*)(\\d+)
-          QuantifierNode quant = (QuantifierNode) suffixGroup.child;
-          if (quant.greedy && quant.child instanceof CharClassNode) {
-            suffixType = GreedyBacktrackInfo.SuffixType.QUANTIFIED_CHAR_CLASS;
-            suffixCharSet = ((CharClassNode) quant.child).chars;
-            suffixMinCount = quant.min; // 0 for *, 1 for +
-            suffixGroupNumber = greedyGroupNumber + 1;
-            totalGroupCount = Math.max(totalGroupCount, suffixGroupNumber);
-          }
-        }
-      }
-    } else if (suffixNodes.size() == 2) {
-      // Check for word boundary + quantified char class: \b(\d+)
-      RegexNode first = suffixNodes.get(0);
-      RegexNode second = suffixNodes.get(1);
-
-      if (first instanceof AnchorNode
-          && ((AnchorNode) first).type == AnchorNode.Type.WORD_BOUNDARY) {
-        // Word boundary followed by capturing group with quantifier
-        if (second instanceof GroupNode) {
-          GroupNode suffixGroup = (GroupNode) second;
-          if (suffixGroup.capturing && suffixGroup.child instanceof QuantifierNode) {
-            QuantifierNode quant = (QuantifierNode) suffixGroup.child;
-            if (quant.greedy && quant.child instanceof CharClassNode) {
-              suffixType = GreedyBacktrackInfo.SuffixType.WORD_BOUNDARY_QUANTIFIED_CHAR_CLASS;
-              suffixCharSet = ((CharClassNode) quant.child).chars;
-              suffixMinCount = quant.min;
-              suffixGroupNumber = greedyGroupNumber + 1;
-              totalGroupCount = Math.max(totalGroupCount, suffixGroupNumber);
-            }
-          }
-        }
-      }
-
-      // If not word boundary pattern, try to build literal string
-      if (suffixType == null) {
-        StringBuilder sb = new StringBuilder();
-        boolean allLiterals = true;
-        for (RegexNode node : suffixNodes) {
-          if (node instanceof LiteralNode) {
-            sb.append(((LiteralNode) node).ch);
-          } else {
-            allLiterals = false;
-            break;
-          }
-        }
-        if (allLiterals) {
-          suffixType = GreedyBacktrackInfo.SuffixType.LITERAL;
-          suffixLiteral = sb.toString();
-        }
-      }
-    } else {
-      // Multiple suffix elements (>2) - build literal string
-      StringBuilder sb = new StringBuilder();
-      for (RegexNode node : suffixNodes) {
-        if (node instanceof LiteralNode) {
-          sb.append(((LiteralNode) node).ch);
-        } else {
-          // Non-literal in suffix - not supported yet
-          return null;
-        }
-      }
-      suffixType = GreedyBacktrackInfo.SuffixType.LITERAL;
-      suffixLiteral = sb.toString();
-    }
-
-    if (suffixType == null) {
-      return null; // Couldn't determine suffix type
-    }
-
-    return new GreedyBacktrackInfo(
-        prefix,
-        greedyGroupNumber,
-        greedyMinCount,
-        greedyCharSet,
-        suffixType,
-        suffixLiteral,
-        suffixCharSet,
-        suffixMinCount,
-        suffixGroupNumber,
-        hasEndAnchor,
-        totalGroupCount,
-        suffixNodes);
-  }
-
   /**
    * Extract the main QuantifierNode from a pattern, handling anchors and wrappers.
    *
@@ -9879,6 +9575,29 @@ public class PatternAnalyzer {
    * QuantifierNode from anchor-wrapped concat - (?:(a)+) -> extracts from non-capturing group
    * wrapper - ^(?:(a)+)$ -> handles both anchors and wrapper
    */
+  /**
+   * True for a greedy unbounded single-char run directly inside a greedy unbounded repeat of a
+   * capturing group ({@code (\d+)+}, {@code ([a-z]+)*}). The run consumes every char a further
+   * outer iteration could start on, so at most one outer iteration fires and the group span is that
+   * run.
+   */
+  private boolean isSingleRunRepeat(RegexNode ast) {
+    QuantifierNode outer = extractQuantifierFromPattern(ast);
+    if (outer == null || !outer.greedy || outer.possessive || outer.min > 1 || outer.max != -1) {
+      return false;
+    }
+    if (!(outer.child instanceof GroupNode) || !((GroupNode) outer.child).capturing) return false;
+    RegexNode body = ((GroupNode) outer.child).child;
+    if (!(body instanceof QuantifierNode)) return false;
+    QuantifierNode inner = (QuantifierNode) body;
+    return inner.greedy
+        && !inner.possessive
+        && inner.min == 1
+        && inner.max == -1
+        && (inner.child instanceof CharClassNode
+            || (inner.child instanceof LiteralNode && !(inner.child instanceof EpsilonNode)));
+  }
+
   private QuantifierNode extractQuantifierFromPattern(RegexNode ast) {
     // Case 1: Direct QuantifierNode
     if (ast instanceof QuantifierNode) {
@@ -9900,12 +9619,12 @@ public class PatternAnalyzer {
 
       for (RegexNode child : concat.children) {
         if (child instanceof AnchorNode) {
-          // Skip START-type anchors — they are handled by requiresStartAnchor and do not
-          // affect SPECIALIZED_QUANTIFIED_GROUP semantics.
-          // END-type anchors ($, \Z, \z) make the pattern semantically impossible to match
-          // at non-end positions; the specialized generator is unaware of them, so bail out.
+          // Skip ^ and \A — callers see them through nfa.requiresStartAnchor().
+          // END-type anchors ($, \Z, \z) and a multiline ^ make the pattern impossible to match
+          // at some positions; the specialized generators are unaware of them, so bail out.
           AnchorNode anchor = (AnchorNode) child;
-          if (anchor.type == AnchorNode.Type.START || anchor.type == AnchorNode.Type.STRING_START) {
+          if ((anchor.type == AnchorNode.Type.START && !anchor.multiline)
+              || anchor.type == AnchorNode.Type.STRING_START) {
             continue;
           }
           return null; // END / STRING_END / STRING_END_ABSOLUTE / multiline anchors
@@ -10088,8 +9807,13 @@ public class PatternAnalyzer {
           hasComplex,
           altMinBounds,
           altMaxBounds,
+          altNegated,
           alt.alternatives,
-          altNegated);
+          false, // hasNestedQuantifier
+          1, // innerMinQuantifier
+          1, // innerMaxQuantifier
+          false, // isNegatedCharSet
+          nfa.requiresStartAnchor());
     } else if (groupChild instanceof QuantifierNode) {
       // ([a-z]+)* or ([^"]+)* - nested quantifier pattern
       QuantifierNode innerQuant = (QuantifierNode) groupChild;
@@ -10109,6 +9833,12 @@ public class PatternAnalyzer {
       // When the outer quantifier is unbounded (e.g. + or *), only one outer iteration fires
       // on the available chars so the greedy inner loop is correct.
       if ((innerQuant.max == -1 || innerQuant.max == Integer.MAX_VALUE) && quant.min == quant.max) {
+        return null;
+      }
+      // The per-char greedy loop never gives chars back: an iteration that needs >= 2 chars
+      // ((a{2}){2,}) is not enforced, and with outer min >= 2 a variable-length inner quantifier
+      // can take the chars a later required iteration needs ((a+){2,} on "aaa").
+      if (innerQuant.min > 1 || (quant.min >= 2 && innerQuant.max != 1)) {
         return null;
       }
 
@@ -10145,8 +9875,8 @@ public class PatternAnalyzer {
           true, // hasNestedQuantifier
           innerMin, // innerMinQuantifier
           innerMax, // innerMaxQuantifier
-          isNegated // isNegatedCharSet
-          );
+          isNegated, // isNegatedCharSet
+          nfa.requiresStartAnchor());
     } else {
       // Unsupported group child type
       return null;
@@ -10172,7 +9902,30 @@ public class PatternAnalyzer {
         false, // hasNestedQuantifier
         1, // innerMinQuantifier
         1, // innerMaxQuantifier
-        isNegatedCC); // isNegatedCharSet — propagates [^x] negation correctly
+        isNegatedCC, // isNegatedCharSet — propagates [^x] negation correctly
+        nfa.requiresStartAnchor());
+  }
+
+  /**
+   * True when a group can start on a character an earlier group can consume: two groups' sets
+   * intersect and every group between them can match empty. The SPECIALIZED_QUANTIFIED_GROUP
+   * generator consumes each group greedily without giving characters back, so it cannot match such
+   * shapes.
+   */
+  private static boolean concatGroupsCanOverlap(ConcatQuantifiedGroupsInfo info) {
+    List<ConcatQuantifiedGroupsInfo.GroupInfo> groups = info.groups;
+    for (int i = 0; i < groups.size(); i++) {
+      for (int j = i + 1; j < groups.size(); j++) {
+        ConcatQuantifiedGroupsInfo.GroupInfo next = groups.get(j);
+        if (groups.get(i).charSet.intersects(next.charSet)) {
+          return true;
+        }
+        if (next.outerMin > 0 && next.innerMin > 0) {
+          break;
+        }
+      }
+    }
+    return false;
   }
 
   /**
@@ -10223,7 +9976,8 @@ public class PatternAnalyzer {
         if (innerQuant.child instanceof LiteralNode) {
           charSet = CharSet.of(((LiteralNode) innerQuant.child).ch);
         } else if (innerQuant.child instanceof CharClassNode) {
-          charSet = ((CharClassNode) innerQuant.child).chars;
+          CharClassNode cc = (CharClassNode) innerQuant.child;
+          charSet = cc.negated ? cc.chars.complement() : cc.chars;
         } else {
           return null;
         }
@@ -10234,7 +9988,8 @@ public class PatternAnalyzer {
         innerMax = 1;
       } else if (groupChild instanceof CharClassNode) {
         // ([a-z])+ case
-        charSet = ((CharClassNode) groupChild).chars;
+        CharClassNode cc = (CharClassNode) groupChild;
+        charSet = cc.negated ? cc.chars.complement() : cc.chars;
         innerMin = 1;
         innerMax = 1;
       } else {
@@ -10567,6 +10322,7 @@ public class PatternAnalyzer {
       children.add(node);
     }
     boolean startAnchored = false;
+    boolean multilineStart = false;
     boolean endAnchored = false;
     boolean multilineEnd = false;
     int from = 0;
@@ -10575,11 +10331,15 @@ public class PatternAnalyzer {
     // parsed inside the seq; every other anchor in these positions is outside the family.
     if (children.get(0) instanceof AnchorNode) {
       AnchorNode a = (AnchorNode) children.get(0);
-      if (a.type == AnchorNode.Type.START && !a.multiline) {
-        startAnchored = true;
+      if (a.type == AnchorNode.Type.START) {
+        if (a.multiline) {
+          multilineStart = true;
+        } else {
+          startAnchored = true;
+        }
         from = 1;
       } else if (a.type != AnchorNode.Type.WORD_BOUNDARY) {
-        return null; // multiline ^, \A, \B, or any other leading anchor: outside the family
+        return null; // \A, \B, or any other leading anchor: outside the family
       }
     }
     if (to > from && children.get(to - 1) instanceof AnchorNode) {
@@ -10611,7 +10371,14 @@ public class PatternAnalyzer {
     computeChainFirst(seq, firstSet, nonAscii);
     int minWidth = chainSeqMinWidth(seq);
     return new DeterministicChainInfo.ChainBranch(
-        startAnchored, endAnchored, multilineEnd, seq, firstSet, nonAscii[0], minWidth);
+        startAnchored,
+        multilineStart,
+        endAnchored,
+        multilineEnd,
+        seq,
+        firstSet,
+        nonAscii[0],
+        minWidth);
   }
 
   // =======================================================================================

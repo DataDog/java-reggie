@@ -32,7 +32,6 @@ import com.datadoghq.reggie.codegen.ast.RegexVisitor;
 import com.datadoghq.reggie.codegen.ast.SubroutineNode;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.GlushkovAutomaton;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -54,6 +53,22 @@ public final class FallbackPatternDetector {
    * @param strategy the strategy selected by {@link PatternAnalyzer}
    */
   public static String needsFallback(RegexNode ast, PatternAnalyzer.MatchingStrategy strategy) {
+    return needsFallback(ast, strategy, false);
+  }
+
+  /**
+   * As {@link #needsFallback(RegexNode, PatternAnalyzer.MatchingStrategy)}; {@code
+   * backtrackingEngine} is true when the pattern runs on the priority-ordered backtracker instead
+   * of the generated code for {@code strategy}. This skips the B11 guard (the backtracker evaluates
+   * each assertion on its own search path, so alternation branches do not share assertion outcomes)
+   * and the RECURSIVE_DESCENT lookaround guard (the backtracker evaluates assertions).
+   *
+   * @param ast the parsed pattern AST
+   * @param strategy the strategy selected by {@link PatternAnalyzer}
+   * @param backtrackingEngine whether the pattern runs on the backtracker
+   */
+  public static String needsFallback(
+      RegexNode ast, PatternAnalyzer.MatchingStrategy strategy, boolean backtrackingEngine) {
     if (requiresIntraCallBacktracking(ast, false)) {
       return "recursive subroutine requires intra-call backtracking: pattern is context-free, not regular — use compileAllowingFallback() for JDK delegation";
     }
@@ -138,8 +153,10 @@ public final class FallbackPatternDetector {
       }
       if (hasEndAnchorBeforeOptionalConsumer(ast)
           && strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
-          && strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE) {
-        return "end-anchor before optional consumer: DFA mishandles zero-width accept path";
+          && strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS) {
+        return "end-anchor before optional consumer: strategy does not model zero-width accept path";
       }
     }
 
@@ -168,6 +185,14 @@ public final class FallbackPatternDetector {
       return "lazy quantifier: requires shortest-match semantics not supported by this strategy";
     }
 
+    // The RECURSIVE_DESCENT generator emits an unconditional failure for every lookaround, so a
+    // pattern containing one never matches through it.
+    if (strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+        && !backtrackingEngine
+        && v.hasAssertion) {
+      return "lookaround on recursive-descent route: the descent parser does not evaluate assertions";
+    }
+
     // B6 [NEEDS-RND]: Thompson NFA group-state contamination (OPTIMIZED_NFA_WITH_BACKREFS) and
     // RECURSIVE_DESCENT backtracking limitations: both fail when a backref \N appears in one
     // alternative of an alternation but group N is defined in a DIFFERENT alternative of the same
@@ -184,9 +209,11 @@ public final class FallbackPatternDetector {
     // character (e.g. a?, [x]?). For these, contamination produces groupLen≤1 and the longest-match
     // semantics plus the early-accept ensure correct results. Groups whose body can capture strings
     // of length > 1 (e.g. [0]?-*, a{0,2}) can produce contaminated groupLen > 1, causing spurious
-    // bounds-check failures that the early-accept cannot prevent. Those cases still need fallback.
+    // bounds-check failures that the early-accept cannot prevent. Those cases still need fallback
+    // unless the backtracking engine runs them: it records the span of the path it takes.
     if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
+        && !backtrackingEngine
         && hasAmbiguouslyNullableBackrefGroup(ast)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
@@ -231,6 +258,7 @@ public final class FallbackPatternDetector {
     // Confirmed by LookaroundEngineNativeTest (spike: disabling guard causes wrong results for
     // ((?=\d+)x|y) and ((?!.*[A-Z])a|b) on the OPTIMIZED_NFA_WITH_LOOKAROUND path).
     if (strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_LOOKAROUND
+        && !backtrackingEngine
         && hasLookaheadInAlternation(ast)) {
       return "lookahead inside alternation branch: "
           + "NFA thread scheduler does not correctly isolate assertions per branch";
@@ -307,23 +335,17 @@ public final class FallbackPatternDetector {
     // B15 [ELIMINATED]: DFA_*_WITH_GROUPS capturing-group-in-quantified-alternation.
     // PatternAnalyzer now routes these to PIKEVM_CAPTURE before the DFA ladder.
 
-    // B16 [PARTIAL]: nullable outer quantifier on capturing group with nullable content.
-    // When the group content is itself nullable (e.g. (0*-?){0,}), PIKEVM_CAPTURE also diverges
-    // (wrong last-iteration spans), so these still fall back to JDK. The non-nullable-content
-    // sub-case (e.g. (a)?) is handled by PatternAnalyzer routing to PIKEVM_CAPTURE.
-    // BITSTATE_CAPTURE is included here too: PatternAnalyzer#isBitStateEligible does not exclude
-    // this shape (its anchored-nullable-quantifier check requires a start anchor, which this
-    // pattern class does not have), and there is no evidence BitState's DFS+RESTORE capture model
-    // resolves the same last-iteration-span bug differently than PikeVM's — so patterns that
-    // PatternAnalyzer#routeBitState substituted PIKEVM_CAPTURE→BITSTATE_CAPTURE for must still hit
-    // this guard.
+    // B16 [PARTIAL]: nullable outer quantifier on capturing group with nullable content
+    // (e.g. (0*-?){0,}). PIKEVM_CAPTURE reports JDK's final zero-width iteration and is not
+    // listed. BITSTATE_CAPTURE stays: its visited set collapses that iteration ((0*-?)* on "0":
+    // JDK group 1 = [1,1), BitState [0,1)); PatternAnalyzer#isBitStateEligible declines this shape
+    // so PikeVM keeps it.
     if ((strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
             || strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS
-            || strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
             || strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE)
         && hasNullableGroupContentWithNullableQuantifier(ast)) {
       return "capturing group with nullable content and nullable outer quantifier: "
-          + "PIKEVM_CAPTURE diverges; TDFA POSIX last-match span also incorrect";
+          + "BITSTATE_CAPTURE and TDFA POSIX last-match spans incorrect";
     }
 
     // OPTIMIZED_NFA: \Z (STRING_END) in an alternation combined with capturing groups,
@@ -351,28 +373,6 @@ public final class FallbackPatternDetector {
         && hasNullableAlternationBranchAnywhere(ast)) {
       return "nullable alternation branch: "
           + "find() first-alternative semantics incorrect for empty/nullable branch";
-    }
-
-    // B-CGG-1: SPECIALIZED_CONCAT_GREEDY_GROUP with a negated CharClassNode as the quantifier's
-    // child. The generator stores quantifierCharSet = charClass.chars (non-negated) and calls
-    // generateCharSetCheck with negated=false, so it checks if the char IS in the class instead
-    // of is NOT. For example [^b]{2} stored as charset={b} matches only 'b' chars, producing
-    // false negatives for any input that does not contain 'b'.
-    if (strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_CONCAT_GREEDY_GROUP
-        && hasConcatGreedyGroupWithNegatedCharClass(ast)) {
-      return "SPECIALIZED_CONCAT_GREEDY_GROUP: negated char class in group quantifier — "
-          + "generator passes non-negated charset without negation flag, producing wrong matches";
-    }
-
-    // B-SQG-1: SPECIALIZED_QUANTIFIED_GROUP with an inner QuantifierNode whose min > 1. The
-    // generator models the pattern as a per-character greedy loop over the charset; when the
-    // inner quantifier requires >= 2 chars per outer iteration (e.g. c{2} inside (c{2}){1,}),
-    // a single char satisfies the outer min=1 and the loop terminates early, producing false
-    // positives.
-    if (strategy == PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP
-        && hasQuantifiedGroupWithMultiCharInnerQuantifier(ast)) {
-      return "SPECIALIZED_QUANTIFIED_GROUP: inner quantifier min > 1 — "
-          + "per-char greedy loop cannot enforce multi-char per-iteration constraint";
     }
 
     if (strategy == PatternAnalyzer.MatchingStrategy.COUNTING_GLUSHKOV) {
@@ -532,8 +532,9 @@ public final class FallbackPatternDetector {
       }
     }
     if (cc == null) return false;
+    CharSet chars = cc.negated ? cc.chars.complement() : cc.chars;
     int size = 0;
-    for (CharSet.Range r : cc.chars.getRanges()) {
+    for (CharSet.Range r : chars.getRanges()) {
       size += r.end - r.start + 1;
       if (size > 1) return true;
     }
@@ -993,16 +994,17 @@ public final class FallbackPatternDetector {
     if (node instanceof LiteralNode) return ((LiteralNode) node).ch == '\n';
     if (node instanceof CharClassNode) {
       CharClassNode cc = (CharClassNode) node;
-      return cc.chars.isSingleChar() && cc.chars.getSingleChar() == '\n';
+      CharSet chars = cc.negated ? cc.chars.complement() : cc.chars;
+      return chars.isSingleChar() && chars.getSingleChar() == '\n';
     }
     return false;
   }
 
   /**
    * Returns true if the AST contains an END/STRING_END anchor immediately before an OPTIONAL
-   * consumer (quantifier with min=0) that can match non-newline chars. Patterns like {@code
-   * \Z[^1]?} produce wrong spans on empty input under DFA because the zero-width accept path
-   * (anchor matches, optional consumer matches nothing) is mishandled.
+   * consumer (quantifier with min=0) that can match non-newline chars, as in {@code \Z[^1]?}. Both
+   * the zero-width accept path (anchor matches, optional consumer matches nothing) and the
+   * consuming path must be modelled by the strategy.
    */
   private static boolean hasEndAnchorBeforeOptionalConsumer(RegexNode ast) {
     if (ast instanceof ConcatNode) {
@@ -1744,7 +1746,7 @@ public final class FallbackPatternDetector {
       if (!(body instanceof QuantifierNode q)) continue;
       if (q.min < 1 || (q.max != Integer.MAX_VALUE && q.max != -1)) continue;
       if (!(q.child instanceof CharClassNode cc)) continue;
-      CharSet cs = cc.chars;
+      CharSet cs = cc.negated ? cc.chars.complement() : cc.chars;
       if (cs.equals(CharSet.ANY) || cs.equals(CharSet.ANY_EXCEPT_NEWLINE)) return true;
     }
     return false;
@@ -1889,8 +1891,8 @@ public final class FallbackPatternDetector {
    * Returns true if any capturing GroupNode is directly wrapped by a QuantifierNode with min=0 AND
    * the group's content is itself nullable (can match the empty string). Example: {@code
    * (0*-?){0,}} — group content {@code 0*-?} is nullable, outer quantifier {@code {0,}} is
-   * nullable. PIKEVM diverges for this sub-case; only non-nullable-content B16 patterns are safe to
-   * route to PIKEVM_CAPTURE.
+   * nullable. BITSTATE_CAPTURE and the TDFA POSIX last-match spans diverge for this sub-case;
+   * PIKEVM_CAPTURE does not.
    */
   public static boolean hasNullableGroupContentWithNullableQuantifier(RegexNode ast) {
     if (ast instanceof QuantifierNode) {
@@ -2235,9 +2237,11 @@ public final class FallbackPatternDetector {
   private static final class Visitor implements RegexVisitor<Void> {
     boolean lookaheadInQuantifier = false;
     boolean hasLazyQuantifier = false;
+    boolean hasAssertion = false;
 
     @Override
     public Void visitAssertion(AssertionNode node) {
+      hasAssertion = true;
       node.subPattern.accept(this);
       return null;
     }
@@ -2317,90 +2321,5 @@ public final class FallbackPatternDetector {
     public Void visitSubroutine(SubroutineNode node) {
       return null;
     }
-  }
-
-  /**
-   * Returns true when the pattern matches SPECIALIZED_CONCAT_GREEDY_GROUP structure and the
-   * quantifier's child inside the capturing group is a negated {@link CharClassNode}. The generator
-   * stores the non-negated charset without the negation flag, producing wrong character matches.
-   *
-   * <p><b>Depth restriction is intentional:</b> this method only inspects direct children of the
-   * top-level {@link ConcatNode} (or the root node itself if it is not a concat). This mirrors the
-   * exact depth that {@code PatternAnalyzer.detectConcatGreedyGroup} inspects — that method also
-   * only scans top-level concat children and returns {@code null} for patterns where the qualifying
-   * group is nested inside another group. Therefore any pattern matched by {@code
-   * SPECIALIZED_CONCAT_GREEDY_GROUP} has its capturing group at the top level of a concat, and this
-   * guard is complete for all patterns that strategy can be selected for.
-   */
-  private static boolean hasConcatGreedyGroupWithNegatedCharClass(RegexNode ast) {
-    List<RegexNode> nodes = new ArrayList<>();
-    if (ast instanceof ConcatNode) {
-      nodes.addAll(((ConcatNode) ast).children);
-    } else {
-      nodes.add(ast);
-    }
-    for (RegexNode node : nodes) {
-      if (node instanceof GroupNode) {
-        GroupNode g = (GroupNode) node;
-        if (g.capturing && g.child instanceof QuantifierNode) {
-          QuantifierNode q = (QuantifierNode) g.child;
-          if (q.greedy && q.child instanceof CharClassNode && ((CharClassNode) q.child).negated) {
-            return true;
-          }
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Returns true when the pattern matches SPECIALIZED_QUANTIFIED_GROUP structure (outer quantifier
-   * wrapping a capturing group) and the group body is an inner {@link QuantifierNode} with {@code
-   * min > 1}. The generator's per-character greedy loop cannot enforce a minimum of more than one
-   * character per outer iteration.
-   */
-  private static boolean hasQuantifiedGroupWithMultiCharInnerQuantifier(RegexNode ast) {
-    QuantifierNode outerQuant = extractOuterQuantifierForFallback(ast);
-    if (outerQuant == null) return false;
-    if (!(outerQuant.child instanceof GroupNode)) return false;
-    GroupNode g = (GroupNode) outerQuant.child;
-    if (!g.capturing) return false;
-    if (!(g.child instanceof QuantifierNode)) return false;
-    return ((QuantifierNode) g.child).min > 1;
-  }
-
-  /**
-   * Extracts the outermost {@link QuantifierNode} from patterns that {@code
-   * detectQuantifiedCapturingGroup} would recognize: a bare quantifier, a non-capturing group
-   * wrapper, or a concat of anchors plus one quantifier.
-   */
-  private static QuantifierNode extractOuterQuantifierForFallback(RegexNode ast) {
-    if (ast instanceof QuantifierNode) return (QuantifierNode) ast;
-    if (ast instanceof GroupNode) {
-      GroupNode g = (GroupNode) ast;
-      return g.capturing ? null : extractOuterQuantifierForFallback(g.child);
-    }
-    if (ast instanceof ConcatNode) {
-      QuantifierNode found = null;
-      for (RegexNode child : ((ConcatNode) ast).children) {
-        if (child instanceof AnchorNode) continue;
-        if (child instanceof QuantifierNode) {
-          if (found != null) return null;
-          found = (QuantifierNode) child;
-        } else if (child instanceof GroupNode && !((GroupNode) child).capturing) {
-          QuantifierNode q = extractOuterQuantifierForFallback(child);
-          if (q != null) {
-            if (found != null) return null;
-            found = q;
-          } else {
-            return null;
-          }
-        } else {
-          return null;
-        }
-      }
-      return found;
-    }
-    return null;
   }
 }

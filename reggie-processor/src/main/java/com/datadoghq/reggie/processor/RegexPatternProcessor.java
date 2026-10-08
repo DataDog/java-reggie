@@ -177,9 +177,9 @@ public class RegexPatternProcessor extends AbstractProcessor {
   }
 
   /**
-   * Generates the matcher class file (for NATIVE) and returns a {@link
-   * ImplClassBytecodeGenerator.MethodInfo} describing how the impl class should wire this method.
-   * Returns {@code null} on error (error already reported to messager).
+   * Generates the matcher class file (for NATIVE) or the two hybrid class files (for HYBRID) and
+   * returns a {@link ImplClassBytecodeGenerator.MethodInfo} describing how the impl class should
+   * wire this method. Returns {@code null} on error (error already reported to messager).
    */
   private ImplClassBytecodeGenerator.MethodInfo generateMatcherClass(
       String packageName, String providerClassName, ExecutableElement method) throws Exception {
@@ -244,7 +244,25 @@ public class RegexPatternProcessor extends AbstractProcessor {
       try (OutputStream os = classFile.openOutputStream()) {
         os.write(bytecode);
       }
-      return ImplClassBytecodeGenerator.MethodInfo.native_(methodName, matcherClassName);
+      return strategy.hasMutableMatchState()
+          ? ImplClassBytecodeGenerator.MethodInfo.pooled(methodName, matcherClassName)
+          : ImplClassBytecodeGenerator.MethodInfo.native_(methodName, matcherClassName);
+    } else if (realization == ReggieMatcherBytecodeGenerator.Realization.HYBRID) {
+      ReggieMatcherBytecodeGenerator.HybridClasses halves = generator.generateHybrid();
+      String dfaClassName = matcherClassName + ReggieMatcherBytecodeGenerator.DFA_HALF_SUFFIX;
+      String nfaClassName = matcherClassName + ReggieMatcherBytecodeGenerator.NFA_HALF_SUFFIX;
+      FileObject dfaFile =
+          processingEnv.getFiler().createClassFile(packageName + "." + dfaClassName);
+      try (OutputStream os = dfaFile.openOutputStream()) {
+        os.write(halves.dfaHalf());
+      }
+      FileObject nfaFile =
+          processingEnv.getFiler().createClassFile(packageName + "." + nfaClassName);
+      try (OutputStream os = nfaFile.openOutputStream()) {
+        os.write(halves.nfaHalf());
+      }
+      return ImplClassBytecodeGenerator.MethodInfo.hybrid(
+          methodName, pattern, dfaClassName, nfaClassName, halves.lazyFind());
     } else if (realization == ReggieMatcherBytecodeGenerator.Realization.DELEGATE_PIKEVM) {
       messager.printMessage(
           Diagnostic.Kind.NOTE,
@@ -254,6 +272,16 @@ public class RegexPatternProcessor extends AbstractProcessor {
           method);
       String encodedNames = encodeNameMap(generator.resolvedNameMap());
       return ImplClassBytecodeGenerator.MethodInfo.pikevm(methodName, pattern, encodedNames);
+    } else if (realization == ReggieMatcherBytecodeGenerator.Realization.DELEGATE_BACKTRACK) {
+      messager.printMessage(
+          Diagnostic.Kind.NOTE,
+          "@RegexPattern '"
+              + pattern
+              + "' delegates to the runtime backtracking engine (native, not bakeable at compile"
+              + " time).",
+          method);
+      String encodedNames = encodeNameMap(generator.resolvedNameMap());
+      return ImplClassBytecodeGenerator.MethodInfo.backtrack(methodName, pattern, encodedNames);
     } else {
       // DELEGATE_FALLBACK
       messager.printMessage(

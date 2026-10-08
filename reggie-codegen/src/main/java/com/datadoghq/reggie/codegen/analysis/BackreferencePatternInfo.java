@@ -62,6 +62,7 @@ public class BackreferencePatternInfo implements PatternInfo {
   public final CharSet tagCharSet; // e.g., \w for tag name
   public final String closePrefix; // e.g., "</"
   public final String closeSuffix; // e.g., ">"
+  public final boolean gapStopsAtLineTerminator; // gap is '.' (non-dotall), not [\s\S]
 
   // REPEATED_WORD specific fields
   public final boolean hasWordBoundary; // true if \b present
@@ -87,7 +88,8 @@ public class BackreferencePatternInfo implements PatternInfo {
       String openSuffix,
       CharSet tagCharSet,
       String closePrefix,
-      String closeSuffix) {
+      String closeSuffix,
+      boolean gapStopsAtLineTerminator) {
     this.type = type;
     this.groupNumber = groupNumber;
     this.fullPattern = null;
@@ -96,6 +98,7 @@ public class BackreferencePatternInfo implements PatternInfo {
     this.tagCharSet = tagCharSet;
     this.closePrefix = closePrefix;
     this.closeSuffix = closeSuffix;
+    this.gapStopsAtLineTerminator = gapStopsAtLineTerminator;
     this.hasWordBoundary = false;
     this.wordCharSet = null;
     this.separator = null;
@@ -126,6 +129,7 @@ public class BackreferencePatternInfo implements PatternInfo {
     this.tagCharSet = null;
     this.closePrefix = null;
     this.closeSuffix = null;
+    this.gapStopsAtLineTerminator = false;
     this.quoteChar = null;
     this.contentCharSet = null;
     this.assignmentOp = null;
@@ -153,6 +157,7 @@ public class BackreferencePatternInfo implements PatternInfo {
     this.tagCharSet = null;
     this.closePrefix = null;
     this.closeSuffix = null;
+    this.gapStopsAtLineTerminator = false;
     this.hasWordBoundary = false;
     this.wordCharSet = null;
     this.separator = null;
@@ -187,6 +192,7 @@ public class BackreferencePatternInfo implements PatternInfo {
     this.tagCharSet = null;
     this.closePrefix = null;
     this.closeSuffix = null;
+    this.gapStopsAtLineTerminator = false;
     this.hasWordBoundary = false;
     this.wordCharSet = null;
     this.separator = null;

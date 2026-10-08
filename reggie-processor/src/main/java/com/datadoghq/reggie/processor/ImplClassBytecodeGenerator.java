@@ -26,6 +26,10 @@ import org.objectweb.asm.*;
  */
 public class ImplClassBytecodeGenerator {
 
+  private static final String REGGIE_MATCHER = "com/datadoghq/reggie/runtime/ReggieMatcher";
+  private static final String POOLED_MATCHER = "com/datadoghq/reggie/runtime/PooledMatcher";
+  private static final String HYBRID_MATCHER = "com/datadoghq/reggie/runtime/HybridMatcher";
+
   private final String packageName;
   private final String superClassName;
   private final String implClassName;
@@ -34,39 +38,68 @@ public class ImplClassBytecodeGenerator {
   public static class MethodInfo {
     public enum Kind {
       NATIVE,
+      /** Generated matcher that writes instance state while matching; cached as a PooledMatcher. */
+      POOLED,
+      HYBRID,
       PIKEVM,
+      /** Stateless runtime backtracker, cached and shared like the other kinds. */
+      BACKTRACK,
       FALLBACK
     }
 
     public final String methodName;
     public final Kind kind;
-    public final String matcherClassName; // NATIVE only
-    public final String pattern; // PIKEVM and FALLBACK
-    public final String encodedNames; // PIKEVM only
+    public final String matcherClassName; // NATIVE, POOLED; HYBRID: the DFA half
+    public final String nfaClassName; // HYBRID only
+    public final boolean lazyFind; // HYBRID only
+    public final String pattern; // HYBRID, PIKEVM, BACKTRACK and FALLBACK
+    public final String encodedNames; // PIKEVM and BACKTRACK
 
     private MethodInfo(
         String methodName,
         Kind kind,
         String matcherClassName,
+        String nfaClassName,
+        boolean lazyFind,
         String pattern,
         String encodedNames) {
       this.methodName = methodName;
       this.kind = kind;
       this.matcherClassName = matcherClassName;
+      this.nfaClassName = nfaClassName;
+      this.lazyFind = lazyFind;
       this.pattern = pattern;
       this.encodedNames = encodedNames;
     }
 
     public static MethodInfo native_(String methodName, String matcherClassName) {
-      return new MethodInfo(methodName, Kind.NATIVE, matcherClassName, null, null);
+      return new MethodInfo(methodName, Kind.NATIVE, matcherClassName, null, false, null, null);
+    }
+
+    public static MethodInfo pooled(String methodName, String matcherClassName) {
+      return new MethodInfo(methodName, Kind.POOLED, matcherClassName, null, false, null, null);
+    }
+
+    public static MethodInfo hybrid(
+        String methodName,
+        String pattern,
+        String dfaClassName,
+        String nfaClassName,
+        boolean lazyFind) {
+      return new MethodInfo(
+          methodName, Kind.HYBRID, dfaClassName, nfaClassName, lazyFind, pattern, null);
     }
 
     public static MethodInfo pikevm(String methodName, String pattern, String encodedNames) {
-      return new MethodInfo(methodName, Kind.PIKEVM, null, pattern, encodedNames);
+      return new MethodInfo(methodName, Kind.PIKEVM, null, null, false, pattern, encodedNames);
+    }
+
+    public static MethodInfo backtrack(String methodName, String pattern, String encodedNames) {
+      return new MethodInfo(methodName, Kind.BACKTRACK, null, null, false, pattern, encodedNames);
     }
 
     public static MethodInfo fallback(String methodName, String pattern) {
-      return new MethodInfo(methodName, Kind.FALLBACK, null, pattern, null);
+      return new MethodInfo(methodName, Kind.FALLBACK, null, null, false, pattern, null);
     }
   }
 
@@ -132,9 +165,12 @@ public class ImplClassBytecodeGenerator {
   }
 
   /**
-   * Generate method with lazy initialization and double-check locking for NATIVE and FALLBACK
-   * kinds, or a direct compilePikeVm() call for PIKEVM (PikeVMMatcher has mutable per-call buffers
-   * and must not be cached/shared across invocations).
+   * Generate method with lazy initialization and double-check locking for NATIVE, POOLED, HYBRID,
+   * BACKTRACK and FALLBACK kinds, or a direct compilePikeVm() call for PIKEVM (PikeVMMatcher has
+   * mutable per-call buffers and must not be cached/shared across invocations). The cached matcher
+   * is shared by all callers, so every matcher that writes instance state while matching is reached
+   * through a PooledMatcher: the POOLED matcher, the NFA half of HYBRID and the runtime-compiled
+   * FALLBACK matcher.
    */
   private void generateLazyInitMethod(ClassWriter cw, MethodInfo method) {
     MethodVisitor mv =
@@ -163,7 +199,9 @@ public class ImplClassBytecodeGenerator {
     }
 
     String matcherClassFullName =
-        method.kind == MethodInfo.Kind.NATIVE ? packageName + "/" + method.matcherClassName : null;
+        method.kind == MethodInfo.Kind.NATIVE || method.kind == MethodInfo.Kind.POOLED
+            ? packageName + "/" + method.matcherClassName
+            : null;
     String fieldDescriptor =
         method.kind == MethodInfo.Kind.NATIVE
             ? "L" + matcherClassFullName + ";"
@@ -200,15 +238,73 @@ public class ImplClassBytecodeGenerator {
         mv.visitInsn(DUP);
         mv.visitMethodInsn(INVOKESPECIAL, matcherClassFullName, "<init>", "()V", false);
         break;
-      case FALLBACK:
+      case POOLED:
+        // new PooledMatcher(<constructor handle of Matcher>)
+        emitPooled(
+            mv, new Handle(H_NEWINVOKESPECIAL, matcherClassFullName, "<init>", "()V", false));
+        break;
+      case HYBRID:
+        {
+          // new HybridMatcher(pattern, new Dfa(), new PooledMatcher(<ctor handle of Nfa>),
+          // lazyFind)
+          String dfaClass = packageName + "/" + method.matcherClassName;
+          String nfaClass = packageName + "/" + method.nfaClassName;
+          mv.visitTypeInsn(NEW, HYBRID_MATCHER);
+          mv.visitInsn(DUP);
+          mv.visitLdcInsn(method.pattern);
+          mv.visitTypeInsn(NEW, dfaClass);
+          mv.visitInsn(DUP);
+          mv.visitMethodInsn(INVOKESPECIAL, dfaClass, "<init>", "()V", false);
+          emitPooled(mv, new Handle(H_NEWINVOKESPECIAL, nfaClass, "<init>", "()V", false));
+          mv.visitInsn(method.lazyFind ? ICONST_1 : ICONST_0);
+          mv.visitMethodInsn(
+              INVOKESPECIAL,
+              HYBRID_MATCHER,
+              "<init>",
+              "(Ljava/lang/String;L" + REGGIE_MATCHER + ";L" + REGGIE_MATCHER + ";Z)V",
+              false);
+          break;
+        }
+      case BACKTRACK:
         mv.visitLdcInsn(method.pattern);
+        mv.visitLdcInsn(method.encodedNames != null ? method.encodedNames : "");
         mv.visitMethodInsn(
             INVOKESTATIC,
-            "com/datadoghq/reggie/Reggie",
-            "compileAllowingFallback",
-            "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/ReggieMatcher;",
+            "com/datadoghq/reggie/runtime/RuntimeCompiler",
+            "compileBackrefBacktrack",
+            "(Ljava/lang/String;Ljava/lang/String;)L" + REGGIE_MATCHER + ";",
             false);
         break;
+      case FALLBACK:
+        {
+          // new PooledMatcher(insertArguments(Reggie::compileAllowingFallback, 0, pattern)):
+          // runtime compile() returns a fresh instance for matchers with mutable match state.
+          mv.visitTypeInsn(NEW, POOLED_MATCHER);
+          mv.visitInsn(DUP);
+          mv.visitLdcInsn(
+              new Handle(
+                  H_INVOKESTATIC,
+                  "com/datadoghq/reggie/Reggie",
+                  "compileAllowingFallback",
+                  "(Ljava/lang/String;)L" + REGGIE_MATCHER + ";",
+                  false));
+          mv.visitInsn(ICONST_0);
+          mv.visitInsn(ICONST_1);
+          mv.visitTypeInsn(ANEWARRAY, "java/lang/Object");
+          mv.visitInsn(DUP);
+          mv.visitInsn(ICONST_0);
+          mv.visitLdcInsn(method.pattern);
+          mv.visitInsn(AASTORE);
+          mv.visitMethodInsn(
+              INVOKESTATIC,
+              "java/lang/invoke/MethodHandles",
+              "insertArguments",
+              "(Ljava/lang/invoke/MethodHandle;I[Ljava/lang/Object;)Ljava/lang/invoke/MethodHandle;",
+              false);
+          mv.visitMethodInsn(
+              INVOKESPECIAL, POOLED_MATCHER, "<init>", "(Ljava/lang/invoke/MethodHandle;)V", false);
+          break;
+        }
       default:
         throw new IllegalStateException("Unexpected kind: " + method.kind);
     }
@@ -241,6 +337,15 @@ public class ImplClassBytecodeGenerator {
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
+  }
+
+  /** Pushes {@code new PooledMatcher(factory)}. */
+  private static void emitPooled(MethodVisitor mv, Handle factory) {
+    mv.visitTypeInsn(NEW, POOLED_MATCHER);
+    mv.visitInsn(DUP);
+    mv.visitLdcInsn(factory);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, POOLED_MATCHER, "<init>", "(Ljava/lang/invoke/MethodHandle;)V", false);
   }
 
   private String capitalizeFirst(String s) {

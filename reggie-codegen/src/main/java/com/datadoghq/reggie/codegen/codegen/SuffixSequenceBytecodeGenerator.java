@@ -677,33 +677,8 @@ public class SuffixSequenceBytecodeGenerator {
         mv.visitJumpInsn(IF_ICMPGT, exitLabel);
       }
     } else {
-      if (negated) {
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, exitLabel);
-          mv.visitLabel(tryNext);
-        }
-      } else {
-        Label matches = new Label();
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, matches);
-          mv.visitLabel(tryNext);
-        }
-        // No range matched - exit
-        mv.visitJumpInsn(GOTO, exitLabel);
-        mv.visitLabel(matches);
-      }
+      BytecodeUtil.emitCharSetCheck(
+          mv, negated ? charset.complement() : charset, charVar, exitLabel);
     }
   }
 

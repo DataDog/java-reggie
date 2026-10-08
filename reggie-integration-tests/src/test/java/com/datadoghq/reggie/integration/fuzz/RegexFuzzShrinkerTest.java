@@ -47,7 +47,7 @@ public class RegexFuzzShrinkerTest {
     // Build a synthetic Finding that DOES diverge, shrink it, and confirm the result still
     // diverges.
     // Use a known diverging pattern from the fuzz inventory.
-    // (.+)_ on __ is a known divergence (GREEDY_BACKTRACK find bug).
+    // (.+)_ on __ was a known divergence.
     List<Finding> findings = ORACLE.check("(.+)_", "__").findings;
     // If this pattern is already fixed by another task, skip. Otherwise verify shrinking.
     if (findings.isEmpty()) {

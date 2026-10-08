@@ -28,6 +28,7 @@ public final class NFA {
   private final Set<NFAState> acceptStates;
   private final int groupCount;
   private final boolean hasCountedLoops;
+  private final boolean hasPinnedGroups;
 
   public NFA(
       List<NFAState> states, NFAState startState, Set<NFAState> acceptStates, int groupCount) {
@@ -36,13 +37,13 @@ public final class NFA {
     this.acceptStates = Set.copyOf(acceptStates);
     this.groupCount = groupCount;
     boolean counted = false;
+    boolean pinned = false;
     for (NFAState s : this.states) {
-      if (s.countedLoopId != null) {
-        counted = true;
-        break;
-      }
+      counted |= s.countedLoopId != null;
+      pinned |= s.pinGroup != null;
     }
     this.hasCountedLoops = counted;
+    this.hasPinnedGroups = pinned;
   }
 
   public List<NFAState> getStates() {
@@ -68,6 +69,14 @@ public final class NFA {
    */
   public boolean hasCountedLoops() {
     return hasCountedLoops;
+  }
+
+  /**
+   * True if any state carries a {@link NFAState#pinGroup} marker. Only PikeVM honors the marker;
+   * every other capture engine reports the plain last-iteration span for such groups.
+   */
+  public boolean hasPinnedGroups() {
+    return hasPinnedGroups;
   }
 
   /**
@@ -366,6 +375,7 @@ public final class NFA {
       // Include group markers
       hash = mult * hash + (state.enterGroup != null ? state.enterGroup + 1 : 0);
       hash = mult * hash + (state.exitGroup != null ? state.exitGroup + 1 : 0);
+      hash = mult * hash + (state.pinGroup != null ? state.pinGroup + 1 : 0);
 
       // Assertion type: use ordinal() — hashCode() uses System.identityHashCode() which can be 0.
       hash = mult * hash + (state.assertionType != null ? state.assertionType.ordinal() + 1 : 0);
@@ -409,6 +419,12 @@ public final class NFA {
     // For capturing groups
     public Integer enterGroup = null; // entering group N
     public Integer exitGroup = null; // exiting group N
+
+    // JDK GroupCurly span pin: epsilon forwarder on the exit of a greedy (X){min,max} taken after
+    // more than min iterations, inside an outer repeat. java.util.regex rewrites group N to the
+    // last iteration of the earliest such exit on the match path, overriding later iterations;
+    // the first pin on a thread's path therefore fixes the reported span of group N.
+    public Integer pinGroup = null;
 
     // For atomic groups: atomicEntry >= 0 on the entry state of atomic group N;
     // atomicExit >= 0 on the exit state of atomic group N (same N pairs entry/exit).
@@ -480,6 +496,7 @@ public final class NFA {
       StringBuilder sb = new StringBuilder("State(" + id);
       if (enterGroup != null) sb.append(", enter=").append(enterGroup);
       if (exitGroup != null) sb.append(", exit=").append(exitGroup);
+      if (pinGroup != null) sb.append(", pin=").append(pinGroup);
       if (backrefCheck != null) sb.append(", backref=").append(backrefCheck);
       if (anchor != null) sb.append(", anchor=").append(anchor);
       if (assertionType != null) sb.append(", assertion=").append(assertionType);

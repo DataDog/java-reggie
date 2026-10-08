@@ -22,7 +22,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for GREEDY_BACKTRACK strategy with star (*) quantifier in suffix group.
+ * Tests for a greedy group followed by a star (*) quantified suffix group.
  *
  * <p>The star quantifier allows matching zero characters, so the greedy group should be able to
  * consume the entire input when the suffix matches nothing.

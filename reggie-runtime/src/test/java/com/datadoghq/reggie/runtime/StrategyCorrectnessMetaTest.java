@@ -82,6 +82,9 @@ public class StrategyCorrectnessMetaTest {
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_GREEDY_CHARCLASS,
         new Spec("(\\d+)", List.of("12345", "abc123def", "abc", "", "４2")));
     m.put(
+        PatternAnalyzer.MatchingStrategy.GREEDY_SUFFIX,
+        new Spec("(.*)\\b(\\d+)$", List.of("abc 123", "x12", "12", "a1\n", "", "abc", "1 2 3\n")));
+    m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTI_GROUP_GREEDY,
         new Spec(
             "([a-z]+)@([a-z]+)\\.com",
@@ -122,8 +125,11 @@ public class StrategyCorrectnessMetaTest {
         new Spec("(?=(a+z))(?=(b+q))x", List.of("aazbbqx", "aazq", "abx", "", "azbq")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_LOOKAHEADS,
+        // The group keeps this off the DFA-with-assertions gate ladder (gate admission is
+        // groupless-patterns-only); the groupless (?=.*foo)(?=.*bar).*baz routes to
+        // DFA_UNROLLED_WITH_ASSERTIONS via the sub-DFA gate.
         new Spec(
-            "(?=.*foo)(?=.*bar).*baz",
+            "(?=.*foo)(?=.*bar)(.*baz)",
             List.of("foobarbaz", "xx foobarbaz", "foobaz", "", "foobarbáz")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_LITERAL_ALTERNATION,
@@ -131,9 +137,6 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_QUANTIFIED_GROUP,
         new Spec("(a)+", List.of("aaa", "xaaay", "bbb", "", "aaaé")));
-    m.put(
-        PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK,
-        new Spec("(.*)bar", List.of("xxbar", "a bar b", "foo", "", "hébar")));
     m.put(
         PatternAnalyzer.MatchingStrategy.FIXED_REPETITION_BACKREF,
         new Spec("(a)\\1{8,}", List.of("aaaaaaaaa", "xaaaaaaaaay", "aaaa", "", "aaaaaaaaaé")));
@@ -149,9 +152,6 @@ public class StrategyCorrectnessMetaTest {
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIONAL_GROUP_BACKREF,
         new Spec("(a)?\\1", List.of("aa", "xaay", "ab", "", "aaé")));
-    m.put(
-        PatternAnalyzer.MatchingStrategy.NESTED_QUANTIFIED_GROUPS,
-        new Spec("((a)+)+", List.of("aaa", "xaaay", "bbb", "", "aaé")));
     // (foo)(bar) now routes to SPECIALIZED_FIXED_SEQUENCE (fixed literal concat — faster path).
     // Use a char-class group to keep a genuine ONEPASS_NFA representative.
     m.put(
@@ -208,14 +208,12 @@ public class StrategyCorrectnessMetaTest {
         new Spec(
             ".*a.{9}", List.of("a123456789", "zza123456789zz", "nomatchhere", "", "xa12345678é")));
     // alternationPriorityConflict: quantified capturing group with a nested quantifier in its body
-    // causes DFA priority-ordering to be unreliable → OPTIMIZED_NFA (JDK fallback).
-    // Simple bodies like (a|b) are now routed to PIKEVM_CAPTURE instead.
-    // NOTE: this representative tests the routing decision and JDK-delegated correctness,
-    // not native OPTIMIZED_NFA bytecode — RuntimeCompiler calls fallbackOrThrow for
-    // alternationPriorityConflict patterns before reaching the native NFA compiler.
+    // causes DFA priority-ordering to be unreliable → OPTIMIZED_NFA.
+    // NOTE: this representative tests the routing decision, not native OPTIMIZED_NFA bytecode —
+    // RuntimeCompiler re-routes alternation-priority-conflict patterns to PIKEVM_CAPTURE.
     m.put(
         PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA,
-        new Spec("(a+|b)+c", List.of("abc", "xabcy", "xyz", "", "abcé")));
+        new Spec("((?:a|bc)+)?", List.of("abc", "xabcy", "xyz", "", "abcé")));
     // The leading literal 'x' prevents COUNTING_GLUSHKOV interception so this routes to LAZY_DFA.
     // The embedded input uses "y" prefix so findFrom's DEAD-restart doesn't skip the match start.
     m.put(

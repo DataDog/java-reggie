@@ -72,15 +72,16 @@ final class LaurikariDFACache {
   static final int FALLBACK = -3;
 
   /**
-   * Number of {@link #lookaheadClass} buckets. See that method's javadoc for why exactly these 3
+   * Number of {@link #lookaheadClass} buckets. See that method's javadoc for why exactly these 4
    * suffice to make every one of the 6 new anchor types' {@code checkAnchor} outcome a pure
    * function of {@code (consumed char, lookahead class)} away from {@code regionEnd}.
    */
-  private static final int LOOKAHEAD_CLASSES = 3;
+  private static final int LOOKAHEAD_CLASSES = 4;
 
   private static final int LOOKAHEAD_WORD = 0;
   private static final int LOOKAHEAD_NEWLINE = 1;
   private static final int LOOKAHEAD_OTHER = 2;
+  private static final int LOOKAHEAD_OTHER_TERMINATOR = 3;
 
   /**
    * Below this distance from {@code regionEnd}, {@code checkAnchor}'s {@code END}/{@code
@@ -368,12 +369,13 @@ final class LaurikariDFACache {
    * <ul>
    *   <li>{@code END}/{@code STRING_END}/{@code STRING_END_ABSOLUTE}: always false away from {@code
    *       regionEnd} — no dependency on this class at all.
-   *   <li>{@code END_MULTILINE}: {@code pos < regionEnd && charAt(pos) == '\n'} — true iff {@link
-   *       #LOOKAHEAD_NEWLINE}.
+   *   <li>{@code END_MULTILINE}: {@code LineTerminators.isMultilineEnd} — true for {@link
+   *       #LOOKAHEAD_OTHER_TERMINATOR} ({@code \r}, U+0085, U+2028, U+2029), and for {@link
+   *       #LOOKAHEAD_NEWLINE} ({@code \n}) unless the consumed char {@code c} is {@code \r}.
    *   <li>{@code WORD_BOUNDARY}: {@code isWordChar(charAt(pos-1)) != isWordChar(charAt( pos))}. The
    *       first operand is {@code PikeVMMatcher.isWordChar((char) c)} (already a cache dimension);
-   *       the second is true iff {@link #LOOKAHEAD_WORD} (a newline is never a word char, so {@link
-   *       #LOOKAHEAD_NEWLINE} and {@link #LOOKAHEAD_WORD} are mutually exclusive).
+   *       the second is true iff {@link #LOOKAHEAD_WORD} (a line terminator is never a word char,
+   *       so the terminator classes and {@link #LOOKAHEAD_WORD} are mutually exclusive).
    *   <li>{@code NON_WORD_BOUNDARY}: the negation of {@code WORD_BOUNDARY}'s equation above — same
    *       two operands, {@code ==} instead of {@code !=} — so it depends on this class exactly the
    *       same way.
@@ -382,6 +384,7 @@ final class LaurikariDFACache {
   private static int lookaheadClass(String input, int pos) {
     char next = input.charAt(pos);
     if (next == '\n') return LOOKAHEAD_NEWLINE;
+    if (LineTerminators.isLineTerminator(next)) return LOOKAHEAD_OTHER_TERMINATOR;
     return PikeVMMatcher.isWordChar(next) ? LOOKAHEAD_WORD : LOOKAHEAD_OTHER;
   }
 

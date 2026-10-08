@@ -109,7 +109,7 @@ class CompileCacheHygieneTest {
     Reggie.compile(
         "^jdbc:snowflake://([^/?:]+)\\.snowflakecomputing\\.com(?::(\\d+))?/x_"); // hybrid
     RuntimeCompiler.clearCache();
-    for (String name : new String[] {"LITERAL_CACHE", "COUNTED_LOOP_NFA_CACHE", "HYBRID_CACHE"}) {
+    for (String name : new String[] {"LITERAL_CACHE", "BACKTRACK_NFA_CACHE", "HYBRID_CACHE"}) {
       Field f = RuntimeCompiler.class.getDeclaredField(name);
       f.setAccessible(true);
       assertTrue(((Map<?, ?>) f.get(null)).isEmpty(), name + " must be cleared");

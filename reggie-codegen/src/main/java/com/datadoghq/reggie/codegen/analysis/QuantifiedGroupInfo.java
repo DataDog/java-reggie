@@ -54,6 +54,7 @@ public class QuantifiedGroupInfo implements PatternInfo {
   public final int innerMinQuantifier; // Inner quantifier min (1 for +, 0 for *)
   public final int innerMaxQuantifier; // Inner quantifier max (MAX for + or *)
   public final boolean isNegatedCharSet; // True if charset is negated ([^...])
+  public final boolean startAnchored; // True if a ^ or \A must precede the quantifier
 
   public QuantifiedGroupInfo(
       int groupNumber,
@@ -118,7 +119,7 @@ public class QuantifiedGroupInfo implements PatternInfo {
         false);
   }
 
-  /** Full constructor with nested quantifier support. */
+  /** Constructor with nested quantifier support. */
   public QuantifiedGroupInfo(
       int groupNumber,
       RegexNode groupChild,
@@ -137,6 +138,47 @@ public class QuantifiedGroupInfo implements PatternInfo {
       int innerMinQuantifier,
       int innerMaxQuantifier,
       boolean isNegatedCharSet) {
+    this(
+        groupNumber,
+        groupChild,
+        minQuantifier,
+        maxQuantifier,
+        charSet,
+        literal,
+        isAlternation,
+        alternationCharSets,
+        hasComplexAlternation,
+        alternationMinBounds,
+        alternationMaxBounds,
+        alternationNegated,
+        alternatives,
+        hasNestedQuantifier,
+        innerMinQuantifier,
+        innerMaxQuantifier,
+        isNegatedCharSet,
+        false);
+  }
+
+  /** Full constructor. */
+  public QuantifiedGroupInfo(
+      int groupNumber,
+      RegexNode groupChild,
+      int minQuantifier,
+      int maxQuantifier,
+      CharSet charSet,
+      String literal,
+      boolean isAlternation,
+      CharSet[] alternationCharSets,
+      boolean hasComplexAlternation,
+      int[] alternationMinBounds,
+      int[] alternationMaxBounds,
+      boolean[] alternationNegated,
+      List<RegexNode> alternatives,
+      boolean hasNestedQuantifier,
+      int innerMinQuantifier,
+      int innerMaxQuantifier,
+      boolean isNegatedCharSet,
+      boolean startAnchored) {
     this.groupNumber = groupNumber;
     this.groupChild = groupChild;
     this.minQuantifier = minQuantifier;
@@ -154,6 +196,7 @@ public class QuantifiedGroupInfo implements PatternInfo {
     this.innerMinQuantifier = innerMinQuantifier;
     this.innerMaxQuantifier = innerMaxQuantifier;
     this.isNegatedCharSet = isNegatedCharSet;
+    this.startAnchored = startAnchored;
   }
 
   /** Returns true if this is an unbounded greedy quantifier (*, +, {n,}). */
@@ -194,6 +237,7 @@ public class QuantifiedGroupInfo implements PatternInfo {
     hash = 31 * hash + (hasComplexAlternation ? 8 : 0);
     hash = 31 * hash + (hasNestedQuantifier ? 16 : 0);
     hash = 31 * hash + (isNegatedCharSet ? 32 : 0);
+    hash = 31 * hash + (startAnchored ? 64 : 0);
     hash = 31 * hash + innerMinQuantifier;
     hash = 31 * hash + innerMaxQuantifier;
     if (alternationCharSets != null) {

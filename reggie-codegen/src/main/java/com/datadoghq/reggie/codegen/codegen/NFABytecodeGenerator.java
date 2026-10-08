@@ -15,6 +15,9 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -1658,6 +1661,91 @@ public class NFABytecodeGenerator {
   }
 
   /**
+   * Emit {@code \b} ({@code negated == false}) or {@code \B} at {@code pos}: jumps to {@code fail}
+   * unless {@code isWord(pos - 1) != isWord(pos)} ({@code ==} for {@code \B}), where positions
+   * outside {@code [0, len)} are non-word and the word set is {@code [A-Za-z0-9_]} (same set as
+   * {@code PikeVMMatcher.isWordChar}). {@code lenVar < 0} reads {@code input.length()}.
+   */
+  private static void emitWordBoundaryGuard(
+      MethodVisitor mv, int inputVar, int posVar, int lenVar, boolean negated, Label fail) {
+    // before = pos > 0 && isWord(input.charAt(pos - 1))
+    Label beforeNone = new Label();
+    Label beforeDone = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitJumpInsn(IFLE, beforeNone);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISUB);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    emitIsWordChar(mv);
+    mv.visitJumpInsn(GOTO, beforeDone);
+    mv.visitLabel(beforeNone);
+    mv.visitInsn(ICONST_0);
+    mv.visitLabel(beforeDone);
+    // after = pos < len && isWord(input.charAt(pos))
+    Label afterNone = new Label();
+    Label afterDone = new Label();
+    mv.visitVarInsn(ILOAD, posVar);
+    if (lenVar >= 0) {
+      mv.visitVarInsn(ILOAD, lenVar);
+    } else {
+      mv.visitVarInsn(ALOAD, inputVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    }
+    mv.visitJumpInsn(IF_ICMPGE, afterNone);
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    emitIsWordChar(mv);
+    mv.visitJumpInsn(GOTO, afterDone);
+    mv.visitLabel(afterNone);
+    mv.visitInsn(ICONST_0);
+    mv.visitLabel(afterDone);
+    mv.visitJumpInsn(negated ? IF_ICMPNE : IF_ICMPEQ, fail);
+  }
+
+  /** Stack: {@code char} → {@code int} (1 iff the char is in {@code [A-Za-z0-9_]}). */
+  private static void emitIsWordChar(MethodVisitor mv) {
+    Label notLower = new Label();
+    Label notUpper = new Label();
+    Label notDigit = new Label();
+    Label yesPop = new Label();
+    Label yes = new Label();
+    Label done = new Label();
+    mv.visitInsn(DUP);
+    pushInt(mv, 'a');
+    mv.visitJumpInsn(IF_ICMPLT, notLower);
+    mv.visitInsn(DUP);
+    pushInt(mv, 'z');
+    mv.visitJumpInsn(IF_ICMPLE, yesPop);
+    mv.visitLabel(notLower);
+    mv.visitInsn(DUP);
+    pushInt(mv, 'A');
+    mv.visitJumpInsn(IF_ICMPLT, notUpper);
+    mv.visitInsn(DUP);
+    pushInt(mv, 'Z');
+    mv.visitJumpInsn(IF_ICMPLE, yesPop);
+    mv.visitLabel(notUpper);
+    mv.visitInsn(DUP);
+    pushInt(mv, '0');
+    mv.visitJumpInsn(IF_ICMPLT, notDigit);
+    mv.visitInsn(DUP);
+    pushInt(mv, '9');
+    mv.visitJumpInsn(IF_ICMPLE, yesPop);
+    mv.visitLabel(notDigit);
+    pushInt(mv, '_');
+    mv.visitJumpInsn(IF_ICMPEQ, yes);
+    mv.visitInsn(ICONST_0);
+    mv.visitJumpInsn(GOTO, done);
+    mv.visitLabel(yesPop);
+    mv.visitInsn(POP);
+    mv.visitLabel(yes);
+    mv.visitInsn(ICONST_1);
+    mv.visitLabel(done);
+  }
+
+  /**
    * Anchor predicate guard (mirrors legacy closure), then push eps targets at curPos if it holds.
    */
   private void emitPerConfigAnchorAndEps(
@@ -1670,7 +1758,6 @@ public class NFABytecodeGenerator {
       int lenVar,
       Label worklistContinue) {
     // If the anchor fails, jump to worklistContinue (skip this state's eps targets).
-    Label passed = new Label();
     switch (state.anchor) {
       case START:
       case STRING_START:
@@ -1679,16 +1766,14 @@ public class NFABytecodeGenerator {
         mv.visitJumpInsn(IFNE, worklistContinue);
         break;
       case START_MULTILINE:
-        // curPos == 0 || input.charAt(curPos-1) == '\n'
-        mv.visitVarInsn(ILOAD, curPosVar);
-        mv.visitJumpInsn(IFEQ, passed);
+        // LineTerminators.isMultilineStart(input, pos, 0, input.length())
         mv.visitVarInsn(ALOAD, 1);
         mv.visitVarInsn(ILOAD, curPosVar);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(ISUB);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        pushInt(mv, '\n');
-        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        invokeMultilineStart(mv);
+        mv.visitJumpInsn(IFEQ, worklistContinue);
         break;
       case STRING_END_ABSOLUTE:
         // curPos == len
@@ -1698,69 +1783,35 @@ public class NFABytecodeGenerator {
         break;
       case END:
       case STRING_END:
-        // curPos == len
-        //   || (curPos == len-1 && charAt(curPos) == '\n')
-        //   || (curPos == len-2 && charAt(curPos) == '\r' && charAt(curPos+1) == '\n')
-        {
-          Label checkEndM2 = new Label();
-          mv.visitVarInsn(ILOAD, curPosVar);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitJumpInsn(IF_ICMPEQ, passed);
-          // curPos == len-1?
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(ISUB);
-          mv.visitVarInsn(ILOAD, curPosVar);
-          mv.visitJumpInsn(IF_ICMPNE, checkEndM2);
-          // charAt(curPos) == '\n'?
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, curPosVar);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
-          mv.visitJumpInsn(GOTO, passed);
-          // curPos == len-2?
-          mv.visitLabel(checkEndM2);
-          mv.visitVarInsn(ILOAD, lenVar);
-          mv.visitInsn(ICONST_2);
-          mv.visitInsn(ISUB);
-          mv.visitVarInsn(ILOAD, curPosVar);
-          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
-          // charAt(curPos) == '\r'?
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, curPosVar);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\r');
-          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
-          // charAt(curPos+1) == '\n'?
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, curPosVar);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(IADD);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
-        }
-        break;
-      case END_MULTILINE:
-        // curPos == len || input.charAt(curPos) == '\n'
-        mv.visitVarInsn(ILOAD, curPosVar);
-        mv.visitVarInsn(ILOAD, lenVar);
-        mv.visitJumpInsn(IF_ICMPEQ, passed);
+        // LineTerminators.isEnd(input, pos, len)
         mv.visitVarInsn(ALOAD, 1);
         mv.visitVarInsn(ILOAD, curPosVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        pushInt(mv, '\n');
-        mv.visitJumpInsn(IF_ICMPNE, worklistContinue);
+        mv.visitVarInsn(ILOAD, lenVar);
+        invokeEnd(mv);
+        mv.visitJumpInsn(IFEQ, worklistContinue);
+        break;
+      case END_MULTILINE:
+        // LineTerminators.isMultilineEnd(input, pos, len)
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, curPosVar);
+        mv.visitVarInsn(ILOAD, lenVar);
+        invokeMultilineEnd(mv);
+        mv.visitJumpInsn(IFEQ, worklistContinue);
+        break;
+      case WORD_BOUNDARY:
+      case NON_WORD_BOUNDARY:
+        emitWordBoundaryGuard(
+            mv,
+            1,
+            curPosVar,
+            lenVar,
+            state.anchor == NFA.AnchorType.NON_WORD_BOUNDARY,
+            worklistContinue);
         break;
       default:
-        // WORD_BOUNDARY and others: treat as pass (mirrors legacy).
-        // TODO(perconfig): \b/\B are not evaluated here — if the legacy
-        // generateEpsilonClosureWithGroups ever starts evaluating them in-closure, this silently
-        // diverges. Backref patterns reaching this path with \b would need explicit handling.
+        // RESET_MATCH: always passes.
         break;
     }
-    mv.visitLabel(passed);
     for (NFA.NFAState target : state.getEpsilonTransitions()) {
       emitPerConfigInnerPush(mv, seenVar, inWlVar, inSizeVar, target.id);
     }
@@ -2130,22 +2181,6 @@ public class NFABytecodeGenerator {
   private void generateStateSetIsEmpty(MethodVisitor mv) {
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/StateSet", "isEmpty", "()Z", false);
-  }
-
-  /** Generate bytecode to get the size of the state set. Stack: ..., stateSet -> ..., int */
-  private void generateStateSetSize(MethodVisitor mv) {
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "com/datadoghq/reggie/runtime/StateSet", "size", "()I", false);
-  }
-
-  /** Get the internal type descriptor for the state set type. */
-  private String getStateSetDescriptor() {
-    return "Lcom/datadoghq/reggie/runtime/StateSet;";
-  }
-
-  /** Get the internal type name for the state set type. */
-  private String getStateSetType() {
-    return "com/datadoghq/reggie/runtime/StateSet";
   }
 
   // ========== Phase 2B: Single-Long Bit Operations (Inline) ==========
@@ -2926,87 +2961,6 @@ public class NFABytecodeGenerator {
   }
 
   /**
-   * Generate indexOf-based scanning loop for patterns with a single required literal. This
-   * optimization skips directly to positions where the required literal appears, avoiding
-   * unnecessary pattern evaluations at positions that cannot possibly match.
-   *
-   * <p>Generated pseudo-code:
-   *
-   * <pre>
-   * int pos = startPos;
-   * while (pos <= endPos) {
-   *     int nextPos = input.indexOf(requiredChar, pos);
-   *     if (nextPos < 0 || nextPos > endPos) return -1;
-   *     if (matchesAt(input, nextPos)) return nextPos;
-   *     pos = nextPos + 1;
-   * }
-   * return -1;
-   * </pre>
-   *
-   * @param mv method visitor
-   * @param requiredChar the literal character that must appear in any match
-   * @param inputVar local variable slot for input string
-   * @param startPosVar local variable slot for start position
-   * @param endPosVar local variable slot for end position
-   * @param matchAtPosLabel label to jump to for testing match at found position
-   * @param allocator local variable allocator
-   * @param posVar local variable slot to store current scan position
-   */
-  private void generateLiteralSkipScan(
-      MethodVisitor mv,
-      char requiredChar,
-      int inputVar,
-      int startPosVar,
-      int endPosVar,
-      Label matchAtPosLabel,
-      LocalVariableAllocator allocator,
-      int posVar) {
-    // int pos = startPos;
-    mv.visitVarInsn(ILOAD, startPosVar);
-    mv.visitVarInsn(ISTORE, posVar);
-
-    Label loopStart = new Label();
-    Label loopEnd = new Label();
-    Label returnNotFound = new Label();
-
-    // while (pos <= endPos)
-    mv.visitLabel(loopStart);
-    mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ILOAD, endPosVar);
-    mv.visitJumpInsn(IF_ICMPGT, returnNotFound);
-
-    // nextPos = input.indexOf(requiredChar, pos)
-    mv.visitVarInsn(ALOAD, inputVar);
-    pushInt(mv, (int) requiredChar);
-    mv.visitVarInsn(ILOAD, posVar);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-    int nextPosVar = allocator.allocateInt();
-    mv.visitVarInsn(ISTORE, nextPosVar);
-
-    // if (nextPos < 0 || nextPos > endPos) return -1
-    mv.visitVarInsn(ILOAD, nextPosVar);
-    mv.visitJumpInsn(IFLT, returnNotFound);
-    mv.visitVarInsn(ILOAD, nextPosVar);
-    mv.visitVarInsn(ILOAD, endPosVar);
-    mv.visitJumpInsn(IF_ICMPGT, returnNotFound);
-
-    // Store nextPos in posVar for match attempt
-    mv.visitVarInsn(ILOAD, nextPosVar);
-    mv.visitVarInsn(ISTORE, posVar);
-
-    // Jump to match attempt code (caller will handle this)
-    mv.visitJumpInsn(GOTO, matchAtPosLabel);
-
-    // After match fails (caller will jump back here), increment pos
-    // This label will be visited by the caller after match failure
-    // pos = nextPos + 1; goto loopStart;
-
-    mv.visitLabel(returnNotFound);
-    mv.visitInsn(ICONST_M1);
-    mv.visitInsn(IRETURN);
-  }
-
-  /**
    * Generate matches() method that simulates NFA execution.
    *
    * <h4>Generated Method Signature</h4>
@@ -3056,6 +3010,7 @@ public class NFABytecodeGenerator {
    *
    *         // Swap: currentStates = nextStates
    *         swap(currentStates, nextStates);
+   *         if (currentStates.isEmpty()) return false;
    *     }
    *
    *     // Check accept states
@@ -3101,20 +3056,11 @@ public class NFABytecodeGenerator {
       return;
     }
 
-    // OPTIMIZATION: Literal lookahead checks using indexOf() - must pass BEFORE running NFA
+    // OPTIMIZATION: Literal lookahead checks using indexOf() - must pass BEFORE running NFA.
+    // They are necessary conditions only; the full NFA below still verifies the lookaheads and
+    // anchors the main pattern at both ends.
     if (literalLookaheadInfo != null) {
       generateLiteralLookaheadChecks(mv, allocator, 1);
-
-      // PHASE 3: Separate main pattern execution using its optimal strategy
-      // After indexOf() checks pass, execute main pattern using DFA (8 states) instead of full NFA
-      // (39 states)
-      if (literalLookaheadInfo.mainPatternStrategy != null
-          && literalLookaheadInfo.mainPatternNFA != null) {
-        generateSeparateMainPatternExecution(mv, allocator, className);
-        mv.visitMaxs(0, 0);
-        mv.visitEnd();
-        return;
-      }
     }
 
     // OPTIMIZATION: Detect and generate custom bytecode for (?=.*[CharClass])+.{n,m} pattern
@@ -3478,6 +3424,15 @@ public class NFABytecodeGenerator {
     // Swap state sets (auto-detects dual-long)
     swapStateSets(mv, currentStatesVar, nextStatesVar, allocator);
 
+    // No thread survives and none is added later in a full match: the rest of the input cannot
+    // match.
+    Label statesAlive = new Label();
+    isStateSetEmpty(mv, currentStatesVar);
+    mv.visitJumpInsn(IFEQ, statesAlive);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(statesAlive);
+
     mv.visitJumpInsn(GOTO, loopStart);
 
     mv.visitLabel(loopEnd);
@@ -3767,16 +3722,14 @@ public class NFABytecodeGenerator {
               mv.visitJumpInsn(IFNE, worklistLoop);
               break;
             case START_MULTILINE:
-              // pos == 0 || input.charAt(pos-1) == '\n'
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitJumpInsn(IFEQ, anchorPassed);
+              // LineTerminators.isMultilineStart(input, pos, 0, input.length())
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitVarInsn(ILOAD, posVar);
-              mv.visitInsn(ICONST_1);
-              mv.visitInsn(ISUB);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-              pushInt(mv, '\n');
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              mv.visitInsn(ICONST_0);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              invokeMultilineStart(mv);
+              mv.visitJumpInsn(IFEQ, worklistLoop);
               break;
             case STRING_END_ABSOLUTE:
               // \z: strict pos == input.length()
@@ -3873,19 +3826,26 @@ public class NFABytecodeGenerator {
               }
               break;
             case END_MULTILINE:
-              // pos == input.length() || input.charAt(pos) == '\n'
+              // LineTerminators.isMultilineEnd(input, pos, len)
+              mv.visitVarInsn(ALOAD, inputVar);
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-              mv.visitJumpInsn(IF_ICMPEQ, anchorPassed);
-              mv.visitVarInsn(ALOAD, inputVar);
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-              pushInt(mv, '\n');
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              invokeMultilineEnd(mv);
+              mv.visitJumpInsn(IFEQ, worklistLoop);
+              break;
+            case WORD_BOUNDARY:
+            case NON_WORD_BOUNDARY:
+              emitWordBoundaryGuard(
+                  mv,
+                  inputVar,
+                  posVar,
+                  -1,
+                  state.anchor == NFA.AnchorType.NON_WORD_BOUNDARY,
+                  worklistLoop);
               break;
             default:
-              // Other anchor types (e.g. WORD_BOUNDARY): treat as always passing
+              // RESET_MATCH: always passes.
               break;
           }
           mv.visitLabel(anchorPassed);
@@ -4095,30 +4055,11 @@ public class NFABytecodeGenerator {
       mv.visitInsn(ICONST_0);
       mv.visitLabel(end);
     } else {
-      // Multiple ranges - check each
-      List<CharSet.Range> ranges = charset.getRanges();
-      Label success = new Label();
+      // Multiple ranges - bisected range check
       Label fail = new Label();
-
-      for (CharSet.Range range : ranges) {
-        // ch >= start && ch <= end
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        Label notThisRange = new Label();
-        mv.visitJumpInsn(IF_ICMPLT, notThisRange);
-
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, success);
-
-        mv.visitLabel(notThisRange);
-      }
-
-      mv.visitJumpInsn(GOTO, fail);
-
-      mv.visitLabel(success);
-      mv.visitInsn(ICONST_1);
       Label end = new Label();
+      BytecodeUtil.emitCharSetCheck(mv, charset, chVar, fail);
+      mv.visitInsn(ICONST_1);
       mv.visitJumpInsn(GOTO, end);
 
       mv.visitLabel(fail);
@@ -5172,70 +5113,6 @@ public class NFABytecodeGenerator {
     }
 
     mv.visitLabel(defaultLabel);
-    mv.visitLabel(afterSwitch);
-  }
-
-  /**
-   * Generate DFA transition switch for a given DFA. Updates stateVar with the next state based on
-   * character in chVar. Sets stateVar to -1 if no transition exists (dead state).
-   */
-  private void generateDFATransitionSwitch(MethodVisitor mv, DFA dfa, int stateVar, int chVar) {
-    List<DFA.DFAState> states = new ArrayList<>(dfa.getAllStates());
-    states.sort(Comparator.comparingInt(s -> s.id));
-
-    Label defaultLabel = new Label();
-    Label afterSwitch = new Label();
-    Label[] caseLabels = new Label[states.size()];
-    int[] caseKeys = new int[states.size()];
-
-    for (int i = 0; i < states.size(); i++) {
-      caseLabels[i] = new Label();
-      caseKeys[i] = states.get(i).id;
-    }
-
-    // switch (state) { ... }
-    mv.visitVarInsn(ILOAD, stateVar);
-    mv.visitLookupSwitchInsn(defaultLabel, caseKeys, caseLabels);
-
-    // Generate case for each state
-    for (int i = 0; i < states.size(); i++) {
-      mv.visitLabel(caseLabels[i]);
-      DFA.DFAState state = states.get(i);
-
-      if (state.transitions.isEmpty()) {
-        // Dead state - set to -1
-        mv.visitInsn(ICONST_M1);
-        mv.visitVarInsn(ISTORE, stateVar);
-      } else {
-        // Generate transitions
-        for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-          CharSet chars = entry.getKey();
-          DFA.DFATransition trans = entry.getValue();
-
-          // Check if character matches charset
-          Label notMatch = new Label();
-          generateCharSetCheck(mv, chars, chVar);
-          mv.visitJumpInsn(IFEQ, notMatch); // If 0 (false), skip this transition
-          pushInt(mv, trans.target.id);
-          mv.visitVarInsn(ISTORE, stateVar);
-          mv.visitJumpInsn(GOTO, afterSwitch); // Match found — jump past entire switch
-          mv.visitLabel(notMatch);
-        }
-
-        // No transition matched - set to dead state
-        mv.visitInsn(ICONST_M1);
-        mv.visitVarInsn(ISTORE, stateVar);
-      }
-
-      // Each case must break out of the switch to prevent fall-through
-      mv.visitJumpInsn(GOTO, afterSwitch);
-    }
-
-    // Default case (should not happen, but required by LOOKUPSWITCH)
-    mv.visitLabel(defaultLabel);
-    mv.visitInsn(ICONST_M1);
-    mv.visitVarInsn(ISTORE, stateVar);
-
     mv.visitLabel(afterSwitch);
   }
 
@@ -6395,39 +6272,9 @@ public class NFABytecodeGenerator {
     }
 
     Label done = new Label();
-
-    for (CharSet.Range range : ranges) {
-      if (range.start == range.end) {
-        // Single character: if (ch == expected) result = 1
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        Label notThis = new Label();
-        mv.visitJumpInsn(IF_ICMPNE, notThis);
-        // Match!
-        mv.visitInsn(ICONST_1);
-        mv.visitVarInsn(ISTORE, resultVar);
-        mv.visitJumpInsn(GOTO, done);
-        mv.visitLabel(notThis);
-      } else {
-        // Range: if (ch >= start && ch <= end) result = 1
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        Label notThis = new Label();
-        mv.visitJumpInsn(IF_ICMPLT, notThis); // ch < start → skip
-
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPGT, notThis); // ch > end → skip
-
-        // Match!
-        mv.visitInsn(ICONST_1);
-        mv.visitVarInsn(ISTORE, resultVar);
-        mv.visitJumpInsn(GOTO, done);
-
-        mv.visitLabel(notThis);
-      }
-    }
-
+    BytecodeUtil.emitCharSetCheck(mv, charset, chVar, done);
+    mv.visitInsn(ICONST_1);
+    mv.visitVarInsn(ISTORE, resultVar);
     mv.visitLabel(done);
     // Load result onto stack
     mv.visitVarInsn(ILOAD, resultVar);
@@ -7271,6 +7118,10 @@ public class NFABytecodeGenerator {
       Set<Integer> startStates,
       boolean followThroughAssertions,
       LocalVariableAllocator allocator) {
+    // The inline code below addresses single-long and object state sets only.
+    if (isDualLongEncoded(statesVar)) {
+      return false;
+    }
     // Compute complete epsilon closure for all start states
     Set<Integer> completeClosure = new HashSet<>();
     for (Integer stateId : startStates) {
@@ -7723,89 +7574,6 @@ public class NFABytecodeGenerator {
     }
 
     return acceptCharSet;
-  }
-
-  /**
-   * Generate optimized single-pass bytecode for multiple (?=.*[CharClass]) lookaheads. Zero
-   * allocations, early exit when all conditions met, direct bytecode character checks.
-   */
-  private void generateOptimizedMultiLookahead(
-      MethodVisitor mv,
-      List<CharSet> charSets,
-      int inputVar,
-      int posVar,
-      int lenVar,
-      Label failLabel,
-      LocalVariableAllocator allocator) {
-    int numChecks = charSets.size();
-
-    // Allocate flag slots for each character check
-    int[] flagSlots = new int[numChecks];
-    for (int i = 0; i < numChecks; i++) {
-      flagSlots[i] = allocator.allocateInt();
-    }
-
-    // Allocate temp variables
-    int scanPosVar = allocator.allocateInt();
-    int charVar = allocator.allocateInt();
-
-    // Initialize all flags to false (0)
-    for (int i = 0; i < numChecks; i++) {
-      mv.visitInsn(ICONST_0);
-      mv.visitVarInsn(ISTORE, flagSlots[i]);
-    }
-
-    mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ISTORE, scanPosVar);
-
-    Label loopStart = new Label();
-    Label loopEnd = new Label();
-
-    mv.visitLabel(loopStart);
-
-    mv.visitVarInsn(ILOAD, scanPosVar);
-    mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGE, loopEnd);
-
-    mv.visitVarInsn(ALOAD, inputVar);
-    mv.visitVarInsn(ILOAD, scanPosVar);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-    mv.visitVarInsn(ISTORE, charVar);
-
-    for (int i = 0; i < numChecks; i++) {
-      Label skipCheck = new Label();
-
-      mv.visitVarInsn(ILOAD, flagSlots[i]);
-      mv.visitJumpInsn(IFNE, skipCheck);
-
-      generateCharSetCheck(mv, charSets.get(i), charVar);
-
-      Label noMatch = new Label();
-      mv.visitJumpInsn(IFEQ, noMatch);
-      mv.visitInsn(ICONST_1);
-      mv.visitVarInsn(ISTORE, flagSlots[i]);
-      mv.visitLabel(noMatch);
-
-      mv.visitLabel(skipCheck);
-    }
-
-    Label continueLoop = new Label();
-    for (int i = 0; i < numChecks; i++) {
-      mv.visitVarInsn(ILOAD, flagSlots[i]);
-      mv.visitJumpInsn(IFEQ, continueLoop);
-    }
-    mv.visitJumpInsn(GOTO, loopEnd);
-
-    mv.visitLabel(continueLoop);
-    mv.visitIincInsn(scanPosVar, 1);
-    mv.visitJumpInsn(GOTO, loopStart);
-
-    mv.visitLabel(loopEnd);
-
-    for (int i = 0; i < numChecks; i++) {
-      mv.visitVarInsn(ILOAD, flagSlots[i]);
-      mv.visitJumpInsn(IFEQ, failLabel);
-    }
   }
 
   /**
@@ -9446,15 +9214,14 @@ public class NFABytecodeGenerator {
               mv.visitJumpInsn(IFNE, worklistLoop);
               break;
             case START_MULTILINE:
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitJumpInsn(IFEQ, anchorPassedWG);
+              // LineTerminators.isMultilineStart(input, pos, 0, input.length())
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitVarInsn(ILOAD, posVar);
-              mv.visitInsn(ICONST_1);
-              mv.visitInsn(ISUB);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-              pushInt(mv, '\n');
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              mv.visitInsn(ICONST_0);
+              mv.visitVarInsn(ALOAD, inputVar);
+              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+              invokeMultilineStart(mv);
+              mv.visitJumpInsn(IFEQ, worklistLoop);
               break;
             case STRING_END_ABSOLUTE:
               // \z: strict pos == input.length()
@@ -9551,18 +9318,26 @@ public class NFABytecodeGenerator {
               }
               break;
             case END_MULTILINE:
+              // LineTerminators.isMultilineEnd(input, pos, len)
+              mv.visitVarInsn(ALOAD, inputVar);
               mv.visitVarInsn(ILOAD, posVar);
               mv.visitVarInsn(ALOAD, inputVar);
               mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-              mv.visitJumpInsn(IF_ICMPEQ, anchorPassedWG);
-              mv.visitVarInsn(ALOAD, inputVar);
-              mv.visitVarInsn(ILOAD, posVar);
-              mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-              pushInt(mv, '\n');
-              mv.visitJumpInsn(IF_ICMPNE, worklistLoop);
+              invokeMultilineEnd(mv);
+              mv.visitJumpInsn(IFEQ, worklistLoop);
+              break;
+            case WORD_BOUNDARY:
+            case NON_WORD_BOUNDARY:
+              emitWordBoundaryGuard(
+                  mv,
+                  inputVar,
+                  posVar,
+                  -1,
+                  state.anchor == NFA.AnchorType.NON_WORD_BOUNDARY,
+                  worklistLoop);
               break;
             default:
-              // Other anchor types (e.g. WORD_BOUNDARY): treat as always passing
+              // RESET_MATCH: always passes.
               break;
           }
           mv.visitLabel(anchorPassedWG);
@@ -10559,43 +10334,7 @@ public class NFABytecodeGenerator {
       pushInt(mv, max);
       mv.visitJumpInsn(IF_ICMPGT, noMatch);
     } else {
-      // General case - call charset.contains(ch)
-      // For now, use inline range checks for performance
-      List<CharSet.Range> ranges = charset.getRanges();
-      if (ranges.isEmpty()) {
-        // Empty charset - always fail
-        mv.visitJumpInsn(GOTO, noMatch);
-      } else {
-        Label matched = new Label();
-
-        for (CharSet.Range range : ranges) {
-          Label tryNext = new Label();
-
-          if (range.start == range.end) {
-            // Single character
-            mv.visitVarInsn(ILOAD, chVar);
-            pushInt(mv, range.start);
-            mv.visitJumpInsn(IF_ICMPEQ, matched);
-          } else {
-            // Range check: if (ch >= start && ch <= end) -> matched
-            Label rangeNoMatch = new Label();
-
-            mv.visitVarInsn(ILOAD, chVar);
-            pushInt(mv, range.start);
-            mv.visitJumpInsn(IF_ICMPLT, rangeNoMatch);
-
-            mv.visitVarInsn(ILOAD, chVar);
-            pushInt(mv, range.end);
-            mv.visitJumpInsn(IF_ICMPLE, matched);
-
-            mv.visitLabel(rangeNoMatch);
-          }
-        }
-
-        // No range matched - fail
-        mv.visitJumpInsn(GOTO, noMatch);
-        mv.visitLabel(matched);
-      }
+      BytecodeUtil.emitCharSetCheck(mv, charset, chVar, noMatch);
     }
   }
 
@@ -10891,40 +10630,6 @@ public class NFABytecodeGenerator {
 
     // Length
     pushInt(mv, groupCount + 1);
-
-    // System.arraycopy
-    mv.visitMethodInsn(
-        INVOKESTATIC,
-        "java/lang/System",
-        "arraycopy",
-        "(Ljava/lang/Object;ILjava/lang/Object;II)V",
-        false);
-  }
-
-  /**
-   * Generate bytecode to extract per-config group arrays to global result arrays. IMPORTANT: Skips
-   * group 0 which is managed globally (entire match span). Generates:
-   * System.arraycopy(configGroupArray[stateId], 1, globalArray, 1, groupCount);
-   */
-  private void generateExtractConfigToGlobal(
-      MethodVisitor mv, int configArrayVar, int stateId, int globalArrayVar, int groupCount) {
-    // Skip if no user-defined capturing groups (only group 0 exists)
-    if (groupCount == 0) {
-      return;
-    }
-
-    // Load source row: configGroupArray[stateId]
-    mv.visitVarInsn(ALOAD, configArrayVar);
-    pushInt(mv, stateId);
-    mv.visitInsn(AALOAD);
-    mv.visitInsn(ICONST_1); // srcPos = 1 (skip group 0)
-
-    // Load destination: globalArray
-    mv.visitVarInsn(ALOAD, globalArrayVar);
-    mv.visitInsn(ICONST_1); // dstPos = 1 (skip group 0)
-
-    // Length = groupCount (groups 1..N, not including group 0)
-    pushInt(mv, groupCount);
 
     // System.arraycopy
     mv.visitMethodInsn(
@@ -11254,226 +10959,6 @@ public class NFABytecodeGenerator {
   }
 
   /**
-   * Generate optimized findFrom() that uses indexOf() checks + separated main pattern DFA.
-   *
-   * <p>Strategy:
-   *
-   * <ol>
-   *   <li>Quick check: indexOf() for required literals - reject early if not found
-   *   <li>Try each position from start to len
-   *   <li>At each position: check lookaheads via indexOf(), then try DFA match
-   *   <li>Return first match position or -1
-   * </ol>
-   *
-   * @param mv method visitor
-   * @param allocator variable allocator
-   * @param className class name for method calls
-   */
-  private void generateOptimizedFindFrom(
-      MethodVisitor mv, LocalVariableAllocator allocator, String className) {
-    // Method signature: findFrom(String input, int start)
-    // Slots: 0=this, 1=input, 2=start
-
-    // Allocate local variables
-    int lenVar = allocator.allocateInt(); // input.length()
-    int tryPosVar = allocator.allocateInt(); // position we're trying to match from
-
-    // int len = input.length();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitVarInsn(ISTORE, lenVar);
-
-    // Quick pre-check: are required literals present in substring from 'start'?
-    // If indexOf returns < start, the literal isn't in the valid range
-    Label literalsFound = new Label();
-    for (LiteralLookaheadInfo lookahead : literalLookaheadInfo.lookaheads) {
-      switch (lookahead.getType()) {
-        case SINGLE_CHAR:
-          // if (input.indexOf(char, start) < start) return -1;
-          mv.visitVarInsn(ALOAD, 1);
-          pushInt(mv, (int) lookahead.getSingleChar());
-          mv.visitVarInsn(ILOAD, 2); // start
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-          mv.visitVarInsn(ILOAD, 2);
-          Label thisLiteralOK = new Label();
-          mv.visitJumpInsn(IF_ICMPGE, thisLiteralOK);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IRETURN);
-          mv.visitLabel(thisLiteralOK);
-          break;
-
-        case SUBSTRING:
-          // if (input.indexOf(string, start) < start) return -1;
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitLdcInsn(lookahead.getLiteral());
-          mv.visitVarInsn(ILOAD, 2); // start
-          mv.visitMethodInsn(
-              INVOKEVIRTUAL, "java/lang/String", "indexOf", "(Ljava/lang/String;I)I", false);
-          mv.visitVarInsn(ILOAD, 2);
-          Label thisSubstringOK = new Label();
-          mv.visitJumpInsn(IF_ICMPGE, thisSubstringOK);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IRETURN);
-          mv.visitLabel(thisSubstringOK);
-          break;
-
-        case CHAR_CLASS:
-          // Skip CHAR_CLASS for now - too complex for pre-check
-          break;
-      }
-    }
-
-    // Try matching from each position
-    // for (int tryPos = start; tryPos <= len; tryPos++)
-    mv.visitVarInsn(ILOAD, 2); // start
-    mv.visitVarInsn(ISTORE, tryPosVar);
-
-    Label loopStart = new Label();
-    Label loopEnd = new Label();
-
-    mv.visitLabel(loopStart);
-    // if (tryPos > len) goto loopEnd
-    mv.visitVarInsn(ILOAD, tryPosVar);
-    mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGT, loopEnd);
-
-    // At this position, check if lookaheads would pass
-    Label thisPositionFailed = new Label();
-    for (LiteralLookaheadInfo lookahead : literalLookaheadInfo.lookaheads) {
-      switch (lookahead.getType()) {
-        case SINGLE_CHAR:
-          // if (input.indexOf(char, tryPos) < tryPos) continue to next position
-          mv.visitVarInsn(ALOAD, 1);
-          pushInt(mv, (int) lookahead.getSingleChar());
-          mv.visitVarInsn(ILOAD, tryPosVar);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-          mv.visitVarInsn(ILOAD, tryPosVar);
-          mv.visitJumpInsn(IF_ICMPLT, thisPositionFailed);
-          break;
-
-        case SUBSTRING:
-          // if (input.indexOf(string, tryPos) < tryPos) continue to next position
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitLdcInsn(lookahead.getLiteral());
-          mv.visitVarInsn(ILOAD, tryPosVar);
-          mv.visitMethodInsn(
-              INVOKEVIRTUAL, "java/lang/String", "indexOf", "(Ljava/lang/String;I)I", false);
-          mv.visitVarInsn(ILOAD, tryPosVar);
-          mv.visitJumpInsn(IF_ICMPLT, thisPositionFailed);
-          break;
-
-        case CHAR_CLASS:
-          // Skip for now
-          break;
-      }
-    }
-
-    // Lookaheads passed - try matching main pattern from this position
-    // Call matchesAtStart(input, tryPos) - we need to generate this helper
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitVarInsn(ILOAD, tryPosVar); // tryPos
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "matchesMainPatternAtStart",
-        "(Ljava/lang/String;I)Z",
-        false);
-
-    // if (matchesMainPatternAtStart returned true) return tryPos
-    Label noMatchAtThisPos = new Label();
-    mv.visitJumpInsn(IFEQ, noMatchAtThisPos);
-    mv.visitVarInsn(ILOAD, tryPosVar);
-    mv.visitInsn(IRETURN);
-
-    mv.visitLabel(noMatchAtThisPos);
-    mv.visitLabel(thisPositionFailed);
-    // tryPos++
-    mv.visitIincInsn(tryPosVar, 1);
-    mv.visitJumpInsn(GOTO, loopStart);
-
-    mv.visitLabel(loopEnd);
-    // No match found
-    mv.visitInsn(ICONST_M1);
-    mv.visitInsn(IRETURN);
-  }
-
-  /**
-   * Generate bytecode to execute the main pattern (without lookaheads) using its optimal strategy.
-   *
-   * <p>After indexOf() lookahead checks have passed, this delegates to the main pattern's optimized
-   * execution (e.g., DFA_UNROLLED instead of 39-state NFA).
-   *
-   * <p>Example: Pattern {@code (?=\w+@)(?=.*example).*@\w+\.com}
-   *
-   * <ul>
-   *   <li>Lookaheads checked: '@' and "example" via indexOf()
-   *   <li>Main pattern: {@code .*@\w+\.com} executed via DFA_UNROLLED (8 states)
-   * </ul>
-   *
-   * @param mv method visitor
-   * @param allocator variable allocator
-   * @param classInternalName internal name of generated class
-   */
-  private void generateSeparateMainPatternExecution(
-      MethodVisitor mv, LocalVariableAllocator allocator, String classInternalName) {
-    // Get main pattern info
-    NFA mainNFA = literalLookaheadInfo.mainPatternNFA;
-    PatternAnalyzer.MatchingStrategyResult mainStrategy = literalLookaheadInfo.mainPatternStrategy;
-
-    // Load input parameter for main pattern execution
-    mv.visitVarInsn(ALOAD, 1); // input string
-
-    // Delegate to appropriate strategy
-    switch (mainStrategy.strategy) {
-      case DFA_UNROLLED:
-      case DFA_SWITCH:
-        // Generate inline DFA execution for main pattern
-        try {
-          SubsetConstructor constructor = new SubsetConstructor();
-          DFA mainDFA = constructor.buildDFA(mainNFA);
-
-          if (mainStrategy.strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED) {
-            // Inline DFA_UNROLLED logic
-            generateInlineDFAUnrolled(mv, mainDFA);
-          } else {
-            // Inline DFA_SWITCH logic
-            generateInlineDFASwitch(mv, mainDFA);
-          }
-        } catch (Exception e) {
-          // If DFA construction fails, fall back to NFA
-          generateInlineNFA(mv, mainNFA);
-        }
-        break;
-
-      case OPTIMIZED_NFA:
-      case OPTIMIZED_NFA_WITH_LOOKAROUND:
-      default:
-        // Use NFA execution for main pattern
-        generateInlineNFA(mv, mainNFA);
-        break;
-    }
-
-    // Return the result (boolean already on stack)
-    mv.visitInsn(IRETURN);
-  }
-
-  /**
-   * Generate inline DFA_UNROLLED execution for main pattern. Uses unrolled state machine for
-   * maximum performance.
-   */
-  private void generateInlineDFAUnrolled(MethodVisitor mv, DFA dfa) {
-    // Use the existing DFAUnrolledBytecodeGenerator but extract just the core logic
-    generateCompleteDFAExecution(mv, dfa);
-  }
-
-  /** Generate inline DFA_SWITCH execution for main pattern. */
-  private void generateInlineDFASwitch(MethodVisitor mv, DFA dfa) {
-    // For smaller DFAs, unrolled is fine
-    generateCompleteDFAExecution(mv, dfa);
-  }
-
-  /**
    * Generate inline DFA check for a lookahead assertion (zero-width).
    *
    * <p>Checks if the lookahead DFA matches starting from tryPos. If it doesn't match, jumps to
@@ -11545,8 +11030,7 @@ public class NFABytecodeGenerator {
 
         Label nextTransition = new Label();
 
-        mv.visitVarInsn(ILOAD, chVar);
-        generateCharSetMatchCheck(mv, chars, nextTransition, chVar);
+        BytecodeUtil.emitCharSetCheck(mv, chars, chVar, nextTransition);
 
         mv.visitJumpInsn(GOTO, stateLabels.get(target.id));
 
@@ -11635,8 +11119,7 @@ public class NFABytecodeGenerator {
 
         Label nextTransition = new Label();
 
-        mv.visitVarInsn(ILOAD, chVar);
-        generateCharSetMatchCheck(mv, chars, nextTransition, chVar);
+        BytecodeUtil.emitCharSetCheck(mv, chars, chVar, nextTransition);
 
         mv.visitJumpInsn(GOTO, stateLabels.get(target.id));
 
@@ -11650,189 +11133,5 @@ public class NFABytecodeGenerator {
 
     // All states exhausted without accepting: the caller's code is placed here.
     mv.visitLabel(noMatch);
-  }
-
-  /**
-   * Generate complete DFA execution for main pattern. This generates a find() implementation that
-   * returns true if pattern matches anywhere in input.
-   */
-  private void generateCompleteDFAExecution(MethodVisitor mv, DFA dfa) {
-    // input is already on stack from ALOAD 1 in caller
-    // We're in the matches(String) method, so:
-    // - this = var 0
-    // - input = var 1
-    // Start using var 2+ for local variables
-
-    // Get input length: int len = input.length();
-    mv.visitInsn(DUP); // Duplicate input reference
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    int lenVar = 2;
-    mv.visitVarInsn(ISTORE, lenVar);
-    // Stack now: [input]
-    mv.visitInsn(POP); // Clear input from stack
-
-    // Try matching from each position: for (int tryPos = 0; tryPos <= len; tryPos++)
-    mv.visitInsn(ICONST_0);
-    int tryPosVar = 3;
-    mv.visitVarInsn(ISTORE, tryPosVar);
-
-    Label outerLoop = new Label();
-    Label outerLoopEnd = new Label();
-
-    mv.visitLabel(outerLoop);
-    // if (tryPos > len) goto outerLoopEnd
-    mv.visitVarInsn(ILOAD, tryPosVar);
-    mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGT, outerLoopEnd);
-
-    // Try matching from tryPos using DFA
-    // Create labels for all DFA states
-    Map<Integer, Label> stateLabels = new HashMap<>();
-    for (DFA.DFAState state : dfa.getAllStates()) {
-      stateLabels.put(state.id, new Label());
-    }
-    // Label to jump to when this tryPos attempt fails (no match found starting here)
-    Label tryNextPos = new Label();
-
-    // Local variables for DFA execution
-    int posVar = 4; // Current position in input during DFA simulation
-    int chVar = 5; // Current character
-
-    // pos = tryPos
-    mv.visitVarInsn(ILOAD, tryPosVar);
-    mv.visitVarInsn(ISTORE, posVar);
-
-    // Start at DFA start state
-    mv.visitJumpInsn(GOTO, stateLabels.get(dfa.getStartState().id));
-
-    // Generate code for each DFA state
-    for (DFA.DFAState state : dfa.getAllStates()) {
-      mv.visitLabel(stateLabels.get(state.id));
-
-      // Check if this is an accept state at end of input or with more input available
-      if (dfa.getAcceptStates().contains(state)) {
-        // Accept state - return true
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IRETURN);
-      }
-
-      // Check if at end of input
-      Label endOfInput = new Label();
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitVarInsn(ILOAD, lenVar);
-      mv.visitJumpInsn(IF_ICMPGE, endOfInput);
-
-      // Read next character: ch = input.charAt(pos)
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitVarInsn(ILOAD, posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      mv.visitVarInsn(ISTORE, chVar);
-
-      // pos++
-      mv.visitIincInsn(posVar, 1);
-
-      // Check each transition
-      boolean hasTransitions = false;
-      for (Map.Entry<CharSet, DFA.DFATransition> entry : state.transitions.entrySet()) {
-        hasTransitions = true;
-        CharSet chars = entry.getKey();
-        DFA.DFAState target = entry.getValue().target;
-
-        Label nextTransition = new Label();
-
-        // Check if ch matches this character set
-        mv.visitVarInsn(ILOAD, chVar);
-        generateCharSetMatchCheck(mv, chars, nextTransition, chVar);
-
-        // Match - jump to target state
-        mv.visitJumpInsn(GOTO, stateLabels.get(target.id));
-
-        mv.visitLabel(nextTransition);
-      }
-
-      // No transition matched (or end of input): this tryPos did not lead to a match
-      mv.visitLabel(endOfInput);
-      mv.visitJumpInsn(GOTO, tryNextPos); // prevent fall-through to next state's code
-    }
-
-    // No match from this position - try next
-    mv.visitLabel(tryNextPos);
-    mv.visitIincInsn(tryPosVar, 1);
-    mv.visitJumpInsn(GOTO, outerLoop);
-
-    // No match found at any position
-    mv.visitLabel(outerLoopEnd);
-    mv.visitInsn(ICONST_0);
-  }
-
-  /**
-   * Generate bytecode to check if a character matches a CharSet. Jumps to noMatchLabel if character
-   * does NOT match. The character value must already be loaded on the stack before calling this
-   * method, and {@code chVar} must be the local-variable slot that holds the same character (needed
-   * to reload the value when the IF_ICMPLT comparison consumes it on the last range check).
-   */
-  private void generateCharSetMatchCheck(
-      MethodVisitor mv, CharSet charSet, Label noMatchLabel, int chVar) {
-    // ch is already loaded on stack
-    // Check each range in the charset
-    List<CharSet.Range> ranges = charSet.getRanges();
-
-    if (ranges.isEmpty()) {
-      // Empty charset - never matches
-      mv.visitInsn(POP); // Pop the character
-      mv.visitJumpInsn(GOTO, noMatchLabel);
-      return;
-    }
-
-    // For each range, check if ch is in [start, end]
-    for (int i = 0; i < ranges.size(); i++) {
-      CharSet.Range range = ranges.get(i);
-      Label tryNextRange = (i < ranges.size() - 1) ? new Label() : noMatchLabel;
-
-      // Duplicate ch for this check (except on last iteration)
-      if (i < ranges.size() - 1) {
-        mv.visitInsn(DUP);
-      }
-
-      // if (ch < range.start) goto tryNextRange
-      pushInt(mv, range.start);
-      mv.visitJumpInsn(IF_ICMPLT, tryNextRange);
-
-      // Reload ch for upper bound check
-      if (i < ranges.size() - 1) {
-        mv.visitInsn(DUP);
-      } else {
-        // Last range - reload ch from its local-variable slot
-        mv.visitVarInsn(ILOAD, chVar);
-      }
-
-      // if (ch <= range.end) match found (don't jump to noMatchLabel)
-      pushInt(mv, range.end);
-      Label matchFound = new Label();
-      mv.visitJumpInsn(IF_ICMPLE, matchFound);
-
-      // ch > range.end - try next range
-      if (i < ranges.size() - 1) {
-        mv.visitLabel(tryNextRange);
-      } else {
-        // Last range and no match - jump to noMatchLabel
-        mv.visitJumpInsn(GOTO, noMatchLabel);
-      }
-
-      mv.visitLabel(matchFound);
-      // Match found - continue execution (don't jump)
-      if (i < ranges.size() - 1) {
-        // Clean up the extra DUP we did
-        mv.visitInsn(POP);
-      }
-      return; // Found a match, exit method
-    }
-  }
-
-  /** Generate inline NFA execution for main pattern. */
-  private void generateInlineNFA(MethodVisitor mv, NFA mainNFA) {
-    // Fallback: Use existing NFA bytecode generator logic
-    // For now, just return true (lookaheads already filtered out non-matches)
-    mv.visitInsn(ICONST_1);
   }
 }

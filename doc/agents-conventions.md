@@ -85,14 +85,25 @@ Missing fields → cache collisions → wrong results.
   matching. These matchers are **safe for concurrent use from multiple threads** without external
   synchronization.
 
-- **NFA-backed matchers** (strategies `OPTIMIZED_NFA`, `OPTIMIZED_NFA_WITH_BACKREFS`,
-  `OPTIMIZED_NFA_WITH_LOOKAROUND`, `PIKEVM_CAPTURE`, and similar): the generated class pre-allocates
-  state arrays as instance fields and writes to them during matching. `Reggie.compile()` returns a
-  **fresh instance** per call from `NFA_CLASS_CACHE`. Each instance is **not thread-safe** — do not
-  share a single NFA matcher instance across threads or sequential calls. Call `Reggie.compile()`
-  once per thread or per match operation.
+- **Matchers with mutable match state** (strategies for which
+  `MatchingStrategy.hasMutableMatchState()` is true: the NFA-backed strategies such as
+  `OPTIMIZED_NFA`, `OPTIMIZED_NFA_WITH_BACKREFS`, `OPTIMIZED_NFA_WITH_LOOKAROUND`, `LAZY_DFA`, plus
+  `PIKEVM_CAPTURE`, `BITSTATE_CAPTURE` and `RECURSIVE_DESCENT`): the matcher writes instance fields
+  during matching (state sets, scratch capture arrays, `lazyFindMode`, per-call buffers).
+  `Reggie.compile()` returns a **fresh instance** per call. Each instance is **not thread-safe** — do
+  not share a single instance across threads. Call `Reggie.compile()` once per thread or per match
+  operation.
 
-This contract is verified by `DfaMatcherConcurrencyTest` and `NfaMatcherConcurrencyTest`.
+- **Shared matchers built from stateful parts** wrap them in `PooledMatcher`, which hands each call
+  an exclusive instance (one pooled instance, a new one when it is in use). The annotation
+  processor's `$Impl` caches one matcher per method, so it caches a `PooledMatcher` for
+  mutable-state strategies and for `ALLOW_JDK_FALLBACK` delegates, and builds the HYBRID
+  realization as a `HybridMatcher` whose NFA half is a `PooledMatcher`. The
+  `DETERMINISTIC_CHAIN_BYTECODE` PikeVM fallback (`RuntimeCompiler.createChainFallback`) is a
+  `PooledMatcher` too.
+
+This contract is verified by `DfaMatcherConcurrencyTest`, `NfaMatcherConcurrencyTest`,
+`ChainFallbackPoolingTest` and `HybridRealizationProcessorTest`.
 
 ## Code Style
 

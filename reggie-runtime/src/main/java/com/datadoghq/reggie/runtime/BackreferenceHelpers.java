@@ -31,7 +31,7 @@ public final class BackreferenceHelpers {
    * semantics: the rightmost (longest) valid occurrence, not the first found.
    *
    * <p>Matches patterns of the form: {@code openPrefix + (\w+) + openSuffix + .* + closePrefix + \1
-   * + closeSuffix}
+   * + closeSuffix}, where the gap is {@code .} or any char.
    *
    * @param input the string to search
    * @param startPos starting position for the search
@@ -39,6 +39,7 @@ public final class BackreferenceHelpers {
    * @param openSuffixChar the character that ends the opening tag, e.g. {@code '>'}
    * @param closePrefixStr the string that starts the closing tag, e.g. {@code "</"}
    * @param closeSuffixChar the character that ends the closing tag, e.g. {@code '>'}
+   * @param gapStopsAtLineTerminator whether the gap is {@code .}, which excludes line terminators
    * @return a {@link MatchResult} or {@code null} if no match was found
    */
   public static MatchResult findHtmlTagMatchFrom(
@@ -47,7 +48,8 @@ public final class BackreferenceHelpers {
       int openPrefixChar,
       int openSuffixChar,
       String closePrefixStr,
-      int closeSuffixChar) {
+      int closeSuffixChar,
+      boolean gapStopsAtLineTerminator) {
     if (input == null) return null;
 
     // Clamp negative start to 0 (cross-generator findFrom contract)
@@ -62,15 +64,22 @@ public final class BackreferenceHelpers {
       if (group1End >= len || input.charAt(group1End) != (char) openSuffixChar) continue;
       int group1Len = group1End - group1Start;
       int searchFrom = group1End + 1;
+      // The closing tag must start no later than the gap's first excluded char.
+      int gapLimit = len;
+      if (gapStopsAtLineTerminator) {
+        gapLimit = searchFrom;
+        while (gapLimit < len && !LineTerminators.isLineTerminator(input.charAt(gapLimit)))
+          gapLimit++;
+      }
       // Look for closePrefix + tagname + closeSuffix. The gap in between is unbounded (.*), so
       // more than one occurrence of the closing tag can be valid for this start position (e.g.
       // "<a>x</a>y</a>" - "</a>" at index 4 and again at index 9). Greedy .* prefers to consume
       // as much as possible, so the correct match is the LAST valid occurrence, not the first -
       // keep searching past a successful candidate instead of returning immediately.
-      MatchResult best = null;
+      int bestEnd = -1;
       while (searchFrom <= len - (closePrefixStr.length() + group1Len + 1)) {
         int closeIdx = input.indexOf(closePrefixStr, searchFrom);
-        if (closeIdx < 0) break;
+        if (closeIdx < 0 || closeIdx > gapLimit) break;
         int backrefStart = closeIdx + closePrefixStr.length();
         if (backrefStart + group1Len >= len) break;
         if (!input.regionMatches(backrefStart, input, group1Start, group1Len)) {
@@ -82,14 +91,12 @@ public final class BackreferenceHelpers {
           searchFrom = closeIdx + 1;
           continue;
         }
-        int matchEnd = afterBackref + 1;
-        best =
-            new MatchResultImpl(
-                input, new int[] {pos, group1Start}, new int[] {matchEnd, group1End}, 1);
+        bestEnd = afterBackref + 1;
         searchFrom = closeIdx + 1;
       }
-      if (best != null) {
-        return best;
+      if (bestEnd >= 0) {
+        return new MatchResultImpl(
+            input, new int[] {pos, group1Start}, new int[] {bestEnd, group1End}, 1);
       }
     }
     return null;
@@ -178,7 +185,8 @@ public final class BackreferenceHelpers {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
   }
 
+  /** {@code \s}: {@code [ \t\n\x0B\f\r]}. */
   private static boolean isWhitespace(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    return c == ' ' || (c >= '\t' && c <= '\r');
   }
 }

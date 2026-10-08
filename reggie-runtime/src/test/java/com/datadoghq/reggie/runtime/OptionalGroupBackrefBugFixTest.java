@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieOptions;
+import com.datadoghq.reggie.UnsupportedPatternException;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -41,6 +42,10 @@ import org.junit.jupiter.api.Test;
  * handles them correctly) rather than silently mismatching.
  *
  * <p>Bug 3: {@code hasEndAnchor} was computed but never enforced by find()/findMatch()/findFrom().
+ *
+ * <p>Anchors: findFrom() ignored a start anchor, multiline {@code ^}/{@code $} were treated as
+ * string anchors, and find-family methods required {@code pos == len} for {@code $}/{@code \Z},
+ * which also match before a final line terminator.
  */
 class OptionalGroupBackrefBugFixTest {
 
@@ -205,6 +210,59 @@ class OptionalGroupBackrefBugFixTest {
     ReggieMatcher m = Reggie.compile("^(a)?\\1$");
     assertEquals(-1, m.findFrom("aax", 0), "must NOT find a match — trailing 'x' violates $");
     assertEquals(0, m.findFrom("aa", 0));
+  }
+
+  // --- Anchors -----------------------------------------------------------------------------
+
+  @Test
+  void anchoredPatterns_agreeWithJdk() {
+    String[] patterns = {
+      "(?m)^(a)?\\1$", "^(cow|)\\1(bell)", "(?m)^(cow|)\\1(bell)$", "^(cow|)\\1(bell)$",
+      "(cow|)\\1(bell)\\Z", "^(a)?\\1\\Z", "^(a|)\\1$", "(a|)\\1$"
+    };
+    String[] inputs = {
+      "",
+      "aa",
+      "x\naa\n",
+      "aa\n",
+      "aa\r\n",
+      "aa\n\n",
+      "aa\r",
+      "aa\u2028",
+      "aa\n\r",
+      "a\n",
+      "\n",
+      "\r\n",
+      "cowcowbell",
+      "x\ncowcowbell\n",
+      "cowcowbell\n",
+      "cowcowbell\r\n",
+      "bell\n"
+    };
+    for (String p : patterns) {
+      ReggieMatcher m;
+      try {
+        m = Reggie.compile(p);
+      } catch (UnsupportedPatternException e) {
+        continue; // refused: no wrong answers to check
+      }
+      Pattern jdk = Pattern.compile(p);
+      for (String in : inputs) {
+        String ctx = p + " on \"" + in.replace("\n", "\\n").replace("\r", "\\r") + "\"";
+        Matcher jm = jdk.matcher(in);
+        boolean found = jm.find();
+        assertEquals(jdk.matcher(in).matches(), m.matches(in), ctx + " matches");
+        assertEquals(found, m.find(in), ctx + " find");
+        MatchResult r = m.findMatch(in);
+        assertEquals(found, r != null, ctx + " findMatch");
+        if (found) {
+          for (int g = 0; g <= jm.groupCount(); g++) {
+            assertEquals(jm.start(g), r.start(g), ctx + " start(" + g + ")");
+            assertEquals(jm.end(g), r.end(g), ctx + " end(" + g + ")");
+          }
+        }
+      }
+    }
   }
 
   // --- Group-count cap (bytecode-size safety valve for the Bug 1 backtracking tree) ----------

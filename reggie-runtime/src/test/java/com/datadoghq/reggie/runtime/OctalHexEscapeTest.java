@@ -21,8 +21,10 @@ import com.datadoghq.reggie.Reggie;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for octal and hex escape sequences. PCRE supports: - Hex escapes: \xhh where h is a hex
- * digit (e.g., \x40 = '@') - Octal escapes: \nnn where n is 0-7 (e.g., \100 = '@', \1000 = '@0')
+ * Tests for octal, hex and Unicode escape sequences. PCRE supports: - Hex escapes: \xhh where h is
+ * a hex digit (e.g., \x40 = '@') - Octal escapes: \nnn where n is 0-7 (e.g., \100 = '@', \1000 =
+ * '@0'). java.util.regex also supports Unicode escapes: {@code \}{@code uhhhh} with exactly four
+ * hex digits.
  */
 class OctalHexEscapeTest {
 
@@ -161,6 +163,29 @@ class OctalHexEscapeTest {
     // \x48 = 'H', \145 = 'e' (octal), \154 = 'l' (octal), \154 = 'l' (octal), \x6f = 'o'
     ReggieMatcher rm = Reggie.compile("\\x48\\145\\154\\154\\x6f");
     assertTrue(rm.matches("Hello"));
+  }
+
+  @Test
+  void testUnicodeEscape() {
+    ReggieMatcher rm = Reggie.compile("\\u006b\\u0085");
+    assertTrue(rm.matches("k\u0085"));
+    assertFalse(rm.matches("u006bu0085"));
+  }
+
+  @Test
+  void testUnicodeEscapeInCharClass() {
+    ReggieMatcher rm = Reggie.compile("^([^\\n\\r\\u0085\\u2028\\u2029]*)$");
+    assertTrue(rm.matches("key=lorem 0258u"));
+    assertFalse(rm.matches("a\u2028b"));
+    ReggieMatcher range = Reggie.compile("[\\u0061-\\u007a]+");
+    assertTrue(range.matches("az"));
+    assertFalse(range.matches("u0061"));
+  }
+
+  @Test
+  void testUnicodeEscapeRequiresFourHexDigits() {
+    assertThrows(RuntimeException.class, () -> Reggie.compile("\\u12"));
+    assertThrows(RuntimeException.class, () -> Reggie.compile("[\\u12g4]"));
   }
 
   @Test

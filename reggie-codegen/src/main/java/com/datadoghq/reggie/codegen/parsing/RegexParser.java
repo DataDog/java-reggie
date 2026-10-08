@@ -534,6 +534,8 @@ public class RegexParser {
         case 'x':
           // Hex escape: \xhh
           return parseCharFromHexEscape();
+        case 'u':
+          return parseUnicodeEscape();
         case '0':
         case '1':
         case '2':
@@ -604,6 +606,8 @@ public class RegexParser {
       case 'x':
         // Hex escape: \xhh
         return parseHexEscape();
+      case 'u':
+        return literalNode(parseUnicodeEscape());
       case '0':
         // \0 followed by octal digits is always octal
         pos--; // Back up to the digit
@@ -704,6 +708,28 @@ public class RegexParser {
       return ((LiteralNode) node).ch;
     }
     throw new ParseException("Invalid hex escape in character class at position " + pos);
+  }
+
+  /**
+   * Parse a Unicode escape {@code \}{@code uhhhh} (the '\' and 'u' have already been consumed):
+   * exactly four hex digits, as in java.util.regex. Surrogate values are rejected because
+   * java.util.regex pairs them into a supplementary code point, which Reggie does not support.
+   */
+  private char parseUnicodeEscape() throws ParseException {
+    int value = 0;
+    for (int i = 0; i < 4; i++) {
+      int digit = hasMore() ? Character.digit(peek(), 16) : -1;
+      if (digit == -1) {
+        throw new ParseException("Illegal Unicode escape sequence at position " + pos);
+      }
+      value = value * 16 + digit;
+      consume();
+    }
+    if (Character.isSurrogate((char) value)) {
+      throw new UnsupportedPatternException(
+          "Surrogate Unicode escape \\u" + Integer.toHexString(value) + " is not supported");
+    }
+    return (char) value;
   }
 
   /** Parse octal escape in character class context and return the character. */

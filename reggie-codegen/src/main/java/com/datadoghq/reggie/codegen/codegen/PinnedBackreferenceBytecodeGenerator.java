@@ -659,19 +659,7 @@ public class PinnedBackreferenceBytecodeGenerator {
       BytecodeUtil.pushInt(mv, range.end);
       mv.visitJumpInsn(IF_ICMPGT, failLabel);
     } else {
-      Label matches = new Label();
-      for (CharSet.Range range : charSet.getRanges()) {
-        Label tryNext = new Label();
-        mv.visitVarInsn(ILOAD, charVar);
-        BytecodeUtil.pushInt(mv, range.start);
-        mv.visitJumpInsn(IF_ICMPLT, tryNext);
-        mv.visitVarInsn(ILOAD, charVar);
-        BytecodeUtil.pushInt(mv, range.end);
-        mv.visitJumpInsn(IF_ICMPLE, matches);
-        mv.visitLabel(tryNext);
-      }
-      mv.visitJumpInsn(GOTO, failLabel);
-      mv.visitLabel(matches);
+      BytecodeUtil.emitCharSetCheck(mv, charSet, charVar, failLabel);
     }
   }
 
