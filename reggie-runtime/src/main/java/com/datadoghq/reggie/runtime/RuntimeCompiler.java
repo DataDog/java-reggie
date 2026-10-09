@@ -208,6 +208,13 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<Object, PikeVMEntry> PIKEVM_NFA_CACHE =
       new ConcurrentHashMap<>();
 
+  // compilePikeVm() entries, keyed by the bare pattern. Separate from PIKEVM_NFA_CACHE, whose
+  // DEFAULT-options key is also the bare pattern: compile() serves any PIKEVM_NFA_CACHE entry on
+  // its
+  // fast path, so a shared map would route compile() to PikeVM after a stub call.
+  private static final ConcurrentHashMap<String, PikeVMEntry> STUB_PIKEVM_CACHE =
+      new ConcurrentHashMap<>();
+
   /**
    * Cached entry for patterns run on {@link BackrefBacktrackMatcher} (counted-loop-lowered, generic
    * backreference and lookaround patterns): immutable NFA + name map. BackrefBacktrackMatcher is
@@ -778,7 +785,7 @@ public class RuntimeCompiler {
   }
 
   public static ReggieMatcher compilePikeVm(String pattern, String encodedNames) {
-    PikeVMEntry entry = PIKEVM_NFA_CACHE.get(pattern);
+    PikeVMEntry entry = STUB_PIKEVM_CACHE.get(pattern);
     if (entry != null) {
       return entry.newMatcher(pattern);
     }
@@ -798,8 +805,8 @@ public class RuntimeCompiler {
       // extracted capture spans take the greedy split and diverge from the JDK (group spans of
       // both match() and findMatch*()). Every other PikeVM compile site builds lazy-aware.
       NFA nfa = new ThompsonBuilder(true).build(ast, groupCount);
-      PIKEVM_NFA_CACHE.putIfAbsent(pattern, new PikeVMEntry(nfa, nameMap));
-      return PIKEVM_NFA_CACHE.get(pattern).newMatcher(pattern);
+      STUB_PIKEVM_CACHE.putIfAbsent(pattern, new PikeVMEntry(nfa, nameMap));
+      return STUB_PIKEVM_CACHE.get(pattern).newMatcher(pattern);
     } catch (RegexParser.ParseException e) {
       throw new java.util.regex.PatternSyntaxException(e.getMessage(), pattern, -1);
     }
@@ -931,6 +938,7 @@ public class RuntimeCompiler {
     USER_CACHE.clear();
     NFA_CLASS_CACHE.clear();
     PIKEVM_NFA_CACHE.clear();
+    STUB_PIKEVM_CACHE.clear();
     BITSTATE_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
     BACKTRACK_NFA_CACHE.clear();
