@@ -200,10 +200,10 @@ String userPattern = getUserInput();
 // Use custom key to control caching
 ReggieMatcher matcher = Reggie.cached("user-search-pattern", userPattern);
 
-// Even if pattern changes, same key = same cache slot
+// Same key + same pattern + same options = same instance
+// Same key with a different pattern or different options throws IllegalStateException
 String newPattern = getUserInput();
 ReggieMatcher updated = Reggie.cached("user-search-pattern", newPattern);
-// If pattern different, old one replaced
 ```
 
 #### Inspecting Cache

@@ -43,7 +43,11 @@ public final class PooledMatcher extends ReggieMatcher {
     this(adapt(factory), create(adapt(factory)));
   }
 
-  private PooledMatcher(MethodHandle factory, ReggieMatcher first) {
+  /**
+   * @param factory no-arg handle already adapted to {@code ()ReggieMatcher}
+   * @param first the initial pooled instance; supplies {@link #pattern()} and the group-name map
+   */
+  PooledMatcher(MethodHandle factory, ReggieMatcher first) {
     super(first.pattern());
     this.factory = factory;
     this.slot = new AtomicReference<>(first);

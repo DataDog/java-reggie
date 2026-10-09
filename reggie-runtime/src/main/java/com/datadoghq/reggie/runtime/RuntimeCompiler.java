@@ -109,6 +109,15 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<Object, ReggieMatcher> PATTERN_CACHE =
       new ConcurrentHashMap<>();
 
+  // User-keyed entries from cached(key, ...); a namespace separate from PATTERN_CACHE so a user key
+  // never aliases a pattern compiled by compile().
+  private static final ConcurrentHashMap<String, UserEntry> USER_CACHE = new ConcurrentHashMap<>();
+
+  /**
+   * A cached(key, ...) entry: the engine key identifies the pattern and options it was built for.
+   */
+  private record UserEntry(String pattern, String engineKey, ReggieMatcher matcher) {}
+
   /**
    * Factory for NFA-backed matchers. Encapsulates the compiled class and the name map so that each
    * compile() call can produce a fully-enriched fresh instance without re-parsing the pattern.
@@ -494,36 +503,10 @@ public class RuntimeCompiler {
       String reportedPattern,
       java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
 
-    // Fast path: PIKEVM_CAPTURE patterns are in PIKEVM_NFA_CACHE — return a fresh matcher.
-    // PikeVMMatcher carries mutable per-call buffers and must not be shared across calls.
-    PikeVMEntry pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
-    if (pikevmEntry != null) {
-      return reportPattern(wrapCompiled(pikevmEntry.newMatcher(pattern), pattern), reportedPattern);
-    }
-
-    // Fast path: BITSTATE_CAPTURE patterns are in BITSTATE_NFA_CACHE — return a fresh matcher.
-    // BitStateMatcher carries mutable per-call buffers and must not be shared across calls.
-    BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
-    if (bitStateEntry != null) {
-      return reportPattern(
-          wrapCompiled(bitStateEntry.newMatcher(pattern), pattern), reportedPattern);
-    }
-
-    // Fast path: hybrid patterns are in HYBRID_CACHE — return a fresh matcher. The hybrid's
-    // nfa-half (PikeVM/BitState, or a generated NFA matcher) is mutable per call; only the
-    // stateless dfa-half instance is shared.
-    HybridEntry hybridEntry = HYBRID_CACHE.get(cacheKey);
-    if (hybridEntry != null) {
-      return reportPattern(
-          wrapCompiled(newHybridMatcher(hybridEntry, pattern), pattern), reportedPattern);
-    }
-
-    // Fast path: NFA-backed patterns are in NFA_CLASS_CACHE — return a fresh instance.
-    // NFA matchers mutate shared instance fields during matching and cannot be shared across
-    // threads or calls; we cache a factory and instantiate per-call instead.
-    NfaMatcherFactory factory = NFA_CLASS_CACHE.get(cacheKey);
-    if (factory != null) {
-      return reportPattern(wrapCompiled(factory.newInstance(pattern), pattern), reportedPattern);
+    // Fast path: mutable-strategy patterns return a fresh matcher (see newMutableInstance).
+    ReggieMatcher fresh = newMutableInstance(pattern, cacheKey);
+    if (fresh != null) {
+      return reportPattern(fresh, reportedPattern);
     }
 
     // Slow path: compile and cache the result.
@@ -545,40 +528,47 @@ public class RuntimeCompiler {
                         pattern),
                     reportedPattern));
 
-    // Post-compilation fixup: if compileInternal registered this pattern as PIKEVM_CAPTURE,
-    // remove it from L1 and return a fresh matcher so callers never share mutable state.
-    pikevmEntry = PIKEVM_NFA_CACHE.get(cacheKey);
-    if (pikevmEntry != null) {
+    // Post-compilation fixup: if compileInternal registered this pattern under a mutable
+    // strategy, remove it from L1 and return a fresh matcher so callers never share mutable state.
+    fresh = newMutableInstance(pattern, cacheKey);
+    if (fresh != null) {
       PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(wrapCompiled(pikevmEntry.newMatcher(pattern), pattern), reportedPattern);
-    }
-
-    // Post-compilation fixup: if compileInternal registered this pattern as BITSTATE_CAPTURE,
-    // remove it from L1 and return a fresh matcher so callers never share mutable state.
-    bitStateEntry = BITSTATE_NFA_CACHE.get(cacheKey);
-    if (bitStateEntry != null) {
-      PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(
-          wrapCompiled(bitStateEntry.newMatcher(pattern), pattern), reportedPattern);
-    }
-
-    // Post-compilation fixup: hybrids carry a mutable nfa-half (PikeVM/BitState, generated NFA)
-    // and must not be shared through L1 either; the entry keeps the stateless dfa-half.
-    HybridEntry hybridFixup = HYBRID_CACHE.get(cacheKey);
-    if (hybridFixup != null) {
-      PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(
-          wrapCompiled(newHybridMatcher(hybridFixup, pattern), pattern), reportedPattern);
-    }
-
-    // Post-compilation fixup: if compileInternal registered this pattern as NFA-backed,
-    // remove it from L1 and return a fresh instance so callers never share NFA state.
-    factory = NFA_CLASS_CACHE.get(cacheKey);
-    if (factory != null) {
-      PATTERN_CACHE.remove(cacheKey, compiled);
-      return reportPattern(wrapCompiled(factory.newInstance(pattern), pattern), reportedPattern);
+      return reportPattern(fresh, reportedPattern);
     }
     return compiled;
+  }
+
+  /**
+   * Returns a fresh, prefilter-wrapped matcher when {@code engineKey} is registered under a
+   * strategy whose matchers carry mutable per-call state, or {@code null} otherwise:
+   *
+   * <ul>
+   *   <li>PIKEVM_CAPTURE ({@code PIKEVM_NFA_CACHE}) and BITSTATE_CAPTURE ({@code
+   *       BITSTATE_NFA_CACHE}): mutable per-call buffers;
+   *   <li>hybrids ({@code HYBRID_CACHE}): the nfa-half (PikeVM/BitState, or a generated NFA
+   *       matcher) is mutable; only the stateless dfa-half instance is shared;
+   *   <li>NFA-backed ({@code NFA_CLASS_CACHE}): generated NFA matchers mutate instance fields, so a
+   *       factory is cached and a new instance is created per call.
+   * </ul>
+   */
+  private static ReggieMatcher newMutableInstance(String pattern, Object engineKey) {
+    PikeVMEntry pikevmEntry = PIKEVM_NFA_CACHE.get(engineKey);
+    if (pikevmEntry != null) {
+      return wrapCompiled(pikevmEntry.newMatcher(pattern), pattern);
+    }
+    BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(engineKey);
+    if (bitStateEntry != null) {
+      return wrapCompiled(bitStateEntry.newMatcher(pattern), pattern);
+    }
+    HybridEntry hybridEntry = HYBRID_CACHE.get(engineKey);
+    if (hybridEntry != null) {
+      return wrapCompiled(newHybridMatcher(hybridEntry, pattern), pattern);
+    }
+    NfaMatcherFactory factory = NFA_CLASS_CACHE.get(engineKey);
+    if (factory != null) {
+      return wrapCompiled(factory.newInstance(pattern), pattern);
+    }
+    return null;
   }
 
   /**
@@ -657,11 +647,13 @@ public class RuntimeCompiler {
   /**
    * Applies the R1 rejection prefilter to every compiled matcher, regardless of engine strategy
    * (DFA, NFA, PikeVM, BitState, hybrid, recursive descent, ...). Wrapping is a pure input
-   * rejection: it can only return no-match earlier, never a different match.
+   * rejection: it can only return no-match earlier, never a different match. A JDK fallback is
+   * returned unwrapped: the literal comes from reggie's own parse, which may read a construct
+   * differently from the JDK.
    */
   private static ReggieMatcher wrapCompiled(ReggieMatcher matcher, String pattern) {
-    if (matcher == null) {
-      return null;
+    if (matcher == null || matcher.isJdkFallback()) {
+      return matcher;
     }
     PrefilterFact fact =
         LITERAL_CACHE.computeIfAbsent(pattern, RuntimeCompiler::computeRequiredLiteral);
@@ -849,42 +841,94 @@ public class RuntimeCompiler {
    * @throws PatternSyntaxException if pattern is invalid
    */
   public static ReggieMatcher cached(String key, String pattern) {
-    ReggieMatcher existing = PATTERN_CACHE.get(key);
-    if (existing != null) {
-      if (!pattern.equals(existing.pattern())) {
-        throw new IllegalStateException(
-            "Cache key '" + key + "' is already mapped to a different pattern");
-      }
-      // Pre-wrapped at insert; same-instance contract preserved for repeat calls.
-      return existing;
-    }
-    return PATTERN_CACHE.computeIfAbsent(key, k -> wrapCompiled(compileInternal(pattern), pattern));
-  }
-
-  /** Compile with explicit cache key and runtime compilation options. */
-  public static ReggieMatcher cached(String key, String pattern, ReggieOptions options) {
-    ReggieMatcher existing = PATTERN_CACHE.get(key);
-    if (existing != null) {
-      if (!pattern.equals(existing.pattern())) {
-        throw new IllegalStateException(
-            "Cache key '" + key + "' is already mapped to a different pattern");
-      }
-      // Pre-wrapped at insert; same-instance contract preserved for repeat calls.
-      return existing;
-    }
-    return PATTERN_CACHE.computeIfAbsent(
-        key, k -> wrapCompiled(compileInternal(pattern, options), pattern));
+    return cached(key, pattern, ReggieOptions.DEFAULT);
   }
 
   /**
-   * Clears all three caches: {@code PATTERN_CACHE} (matcher instances), {@code NFA_CLASS_CACHE}
-   * (NFA-backed compiled classes), and {@code STRUCTURE_CACHE} (all hidden Class objects). Clearing
-   * the structure cache releases hidden-class references, allowing the JVM to reclaim the metaspace
-   * they occupy. For workloads compiling many unique user-provided patterns, call this periodically
-   * to avoid unbounded metaspace growth.
+   * Compile with explicit cache key and runtime compilation options. User keys live in their own
+   * namespace, separate from the {@link #compile(String, ReggieOptions)} cache. Repeated calls with
+   * the same key, pattern and options return the same instance; a matcher whose strategy writes
+   * instance state while matching is returned as a {@link PooledMatcher}, so the shared instance is
+   * thread-safe.
+   *
+   * @throws IllegalStateException if the key is already mapped to a different pattern or to the
+   *     same pattern with different options
+   */
+  public static ReggieMatcher cached(String key, String pattern, ReggieOptions options) {
+    String engineKey = cacheKeyFor(pattern, options);
+    UserEntry entry = USER_CACHE.get(key);
+    if (entry == null) {
+      entry =
+          USER_CACHE.computeIfAbsent(
+              key,
+              k ->
+                  new UserEntry(pattern, engineKey, compileUserEntry(pattern, options, engineKey)));
+    }
+    if (!entry.engineKey().equals(engineKey)) {
+      throw new IllegalStateException(
+          "Cache key '"
+              + key
+              + (entry.pattern().equals(pattern)
+                  ? "' is already mapped to the same pattern with different options"
+                  : "' is already mapped to a different pattern"));
+    }
+    return entry.matcher();
+  }
+
+  private static final MethodHandle COMPILE_WITH_OPTIONS;
+
+  static {
+    try {
+      COMPILE_WITH_OPTIONS =
+          MethodHandles.lookup()
+              .findStatic(
+                  RuntimeCompiler.class,
+                  "compile",
+                  MethodType.methodType(ReggieMatcher.class, String.class, ReggieOptions.class));
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  /**
+   * Builds the matcher for a {@code cached()} entry under the total compile deadline, without
+   * publishing it to {@code PATTERN_CACHE}. A mutable-strategy matcher is wrapped in a {@link
+   * PooledMatcher} whose factory is {@link #compile(String, ReggieOptions)}, which returns a fresh
+   * matcher for {@code engineKey} from the fast path.
+   */
+  private static ReggieMatcher compileUserEntry(
+      String pattern, ReggieOptions options, String engineKey) {
+    setTotalCompileDeadline();
+    try {
+      ReggieMatcher fresh = newMutableInstance(pattern, engineKey);
+      if (fresh == null) {
+        ReggieMatcher compiled =
+            wrapCompiled(
+                compileInternal(
+                    pattern, options, engineKey, LinearTokenSequenceAdmission.forSource(pattern)),
+                pattern);
+        fresh = newMutableInstance(pattern, engineKey);
+        if (fresh == null) {
+          return compiled;
+        }
+      }
+      return new PooledMatcher(
+          MethodHandles.insertArguments(COMPILE_WITH_OPTIONS, 0, pattern, options), fresh);
+    } finally {
+      clearTotalCompileDeadline();
+    }
+  }
+
+  /**
+   * Clears all caches, including {@code cached()} user keys: {@code PATTERN_CACHE} (matcher
+   * instances), {@code NFA_CLASS_CACHE} (NFA-backed compiled classes), and {@code STRUCTURE_CACHE}
+   * (all hidden Class objects). Clearing the structure cache releases hidden-class references,
+   * allowing the JVM to reclaim the metaspace they occupy. For workloads compiling many unique
+   * user-provided patterns, call this periodically to avoid unbounded metaspace growth.
    */
   public static void clearCache() {
     PATTERN_CACHE.clear();
+    USER_CACHE.clear();
     NFA_CLASS_CACHE.clear();
     PIKEVM_NFA_CACHE.clear();
     BITSTATE_NFA_CACHE.clear();
@@ -894,9 +938,9 @@ public class RuntimeCompiler {
     LITERAL_CACHE.clear();
   }
 
-  /** Get current pattern cache size (level 1). */
+  /** Get current pattern cache size (level 1), including {@code cached()} user keys. */
   public static int cacheSize() {
-    return PATTERN_CACHE.size();
+    return PATTERN_CACHE.size() + USER_CACHE.size();
   }
 
   /**
@@ -918,8 +962,9 @@ public class RuntimeCompiler {
    * collapse to the same displayed string.
    */
   public static Set<String> cachedPatterns() {
-    return PATTERN_CACHE.keySet().stream()
-        .map(RuntimeCompiler::cacheKeyToDisplayString)
+    return java.util.stream.Stream.concat(
+            PATTERN_CACHE.keySet().stream().map(RuntimeCompiler::cacheKeyToDisplayString),
+            USER_CACHE.keySet().stream())
         .collect(java.util.stream.Collectors.toUnmodifiableSet());
   }
 
@@ -939,21 +984,6 @@ public class RuntimeCompiler {
       return flaggedKey.pattern() + " [flags=" + flaggedKey.flags() + optionsSuffix + "]";
     }
     return String.valueOf(key);
-  }
-
-  /**
-   * Internal compilation: pattern → AST → NFA → strategy → bytecode/class → instance. Uses
-   * two-level caching: - Pattern string cache (level 1) already checked by compile() - Structural
-   * cache (level 2) checked here
-   */
-  private static ReggieMatcher compileInternal(String pattern) {
-    return compileInternal(
-        pattern, ReggieOptions.DEFAULT, pattern, LinearTokenSequenceAdmission.forSource(pattern));
-  }
-
-  private static ReggieMatcher compileInternal(String pattern, ReggieOptions options) {
-    return compileInternal(
-        pattern, options, pattern, LinearTokenSequenceAdmission.forSource(pattern));
   }
 
   private static String cacheKeyFor(String pattern, ReggieOptions options) {
