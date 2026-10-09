@@ -100,10 +100,17 @@ public final class FallbackPatternDetector {
       return "anchor inside quantifier: zero-width anchor with quantifier produces incorrect match positions";
     }
 
-    // B1, B1-narrow, B4 apply to DFA and non-capturing NFA strategies. PIKEVM_CAPTURE handles
-    // these patterns correctly (as confirmed by targeted spike tests), so skip them when the
-    // routing decision has already committed to PIKEVM_CAPTURE. Only B16 is a known PIKEVM_CAPTURE
-    // defect.
+    // PikeVMMatcher does not evaluate lookaround assertions or backreferences: it crosses their
+    // NFA states as plain epsilons. Atomic-group patterns route to PIKEVM_CAPTURE, so without this
+    // guard (?>a|ab)(?=c) would match "abc".
+    if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        && (v.hasAssertion || v.hasBackreference)) {
+      return "lookaround or backreference on PIKEVM_CAPTURE: PikeVM does not evaluate them";
+    }
+
+    // B1, B1-narrow, B4 apply to DFA and non-capturing NFA strategies. They are skipped when the
+    // routing decision has already committed to PIKEVM_CAPTURE: B1 and B1-narrow need lookaround,
+    // which the guard above already refuses there, and PIKEVM_CAPTURE handles B4.
     // PIKEVM_CAPTURE is safe here only because PatternAnalyzer's hasLookaround routing precedes
     // the lazy-quantifier PIKEVM_CAPTURE block, and !hasLookaround is an explicit guard in that
     // block.
@@ -2238,6 +2245,7 @@ public final class FallbackPatternDetector {
     boolean lookaheadInQuantifier = false;
     boolean hasLazyQuantifier = false;
     boolean hasAssertion = false;
+    boolean hasBackreference = false;
 
     @Override
     public Void visitAssertion(AssertionNode node) {
@@ -2282,6 +2290,7 @@ public final class FallbackPatternDetector {
 
     @Override
     public Void visitBackreference(BackreferenceNode node) {
+      hasBackreference = true;
       return null;
     }
 

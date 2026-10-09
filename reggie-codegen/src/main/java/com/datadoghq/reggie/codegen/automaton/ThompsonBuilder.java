@@ -54,7 +54,10 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private int nextAtomicId = 0;
   private final boolean lazyAware;
 
-  /** Number of enclosing quantifiers that can repeat (max &gt; 1), outside lookaround bodies. */
+  /**
+   * Number of enclosing quantifiers that can repeat (max &gt; 1), outside lookaround bodies and
+   * possessive repeats.
+   */
   private int repeatDepth = 0;
 
   /**
@@ -193,14 +196,17 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   @Override
   public NFAFragment visitQuantifier(QuantifierNode node) {
     Integer pinGroup = pinGroupOf(node);
-    boolean repeats = node.max == -1 || node.max > 1;
-    if (repeats) repeatDepth++;
+    int savedDepth = repeatDepth;
+    // A possessive repeat finishes its own iterations before the continuation runs, so groups
+    // inside it keep their last iteration: outer repeats do not reach through it.
+    if (node.possessive) repeatDepth = 0;
+    else if (node.max == -1 || node.max > 1) repeatDepth++;
     // + and * become {1,} and {0,} so exits after min iterations stay distinguishable.
     NFAFragment fragment =
         pinGroup != null
             ? buildCountedQuantifier(node.child, node.min, node.max, true, pinGroup)
             : buildQuantifier(node);
-    if (repeats) repeatDepth--;
+    repeatDepth = savedDepth;
     return fragment;
   }
 
@@ -392,7 +398,8 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   /**
    * @param pinGroup when non-null (greedy only), every exit taken after more than {@code min}
-   *     iterations is routed through a {@link NFA.NFAState#pinGroup} forwarder
+   *     iterations is routed through a {@link NFA.NFAState#pinGroup} forwarder; a lowered counted
+   *     loop carries it as {@link NFA.NFAState#countedLoopPinGroup} instead
    */
   private NFAFragment buildCountedQuantifier(
       RegexNode child, int min, int max, boolean greedy, Integer pinGroup) {
@@ -410,7 +417,7 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       int childCost = Math.max(1, allStates.size() - sizeBefore);
       int tailCopies = max - min;
       if ((long) tailCopies * childCost > COUNTED_LOOP_UNROLL_BUDGET) {
-        return buildCountedLoopFragment(child, first, min, tailCopies, lazy);
+        return buildCountedLoopFragment(child, first, min, tailCopies, lazy, pinGroup);
       }
       // Unroll, preserving the original state-id sequence: `first` is copy #1 of the
       // required run (min >= 1) or of the optional run (min == 0).
@@ -552,7 +559,7 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
    * precede the marker.
    */
   private NFAFragment buildCountedLoopFragment(
-      RegexNode child, NFAFragment body, int min, int tailCopies, boolean lazy) {
+      RegexNode child, NFAFragment body, int min, int tailCopies, boolean lazy, Integer pinGroup) {
     NFA.NFAState stop = createState();
     NFA.NFAState marker = createState();
     int id = nextCountedLoopId++;
@@ -561,6 +568,7 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     marker.countedLoopLazy = lazy;
     marker.countedLoopBodyEntryId = body.entry.id;
     marker.countedLoopStopId = stop.id;
+    marker.countedLoopPinGroup = pinGroup != null ? pinGroup : -1;
 
     // Required prefix: `body` is copy #1 when min >= 1; build the remaining min-1 copies and
     // chain them (linear in min — min copies never carry the multiplicative blowup).

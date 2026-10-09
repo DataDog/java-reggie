@@ -203,7 +203,12 @@ class NestedQuantifiedGroupSpanTest {
           "(?:(a+){1,2})+",
           "(?:(a)?)+",
           "(a){1,2}",
-          "(?:(?:(a){1,2})b)*"
+          "(?:(?:(a){1,2})b)*",
+          "(?:(a){1,2})++b",
+          "(?:(a){1,2})*+b",
+          "(?:(a){1,2}){2,3}+b",
+          "(?:(?:(a){1,2})++b?)+",
+          "(?>(?:(a){1,2})+)b"
         }) {
       PatternAnalyzer.MatchingStrategy route = StrategyCorrectnessMetaTest.routeOf(p);
       ReggieMatcher routed = Reggie.compile(p);
@@ -214,6 +219,39 @@ class NestedQuantifiedGroupSpanTest {
       for (String in : inputs) {
         check(p, in, routed, "routed(" + route + ")", failures);
         check(p, in, pike, "pikevm", failures);
+      }
+    }
+    assertEquals(List.of(), failures);
+  }
+
+  /**
+   * GroupCurly pins on BackrefBacktrackMatcher: lowered counted loops, backreferences (which read
+   * the unpinned span) and lookaround (a pin set inside a lookahead body applies when the body
+   * completes, so a later backreference reads the pinned span).
+   */
+  @Test
+  void groupCurlyPinOnBacktrackerAgreesWithJdk() throws Exception {
+    List<String> inputs = TrailingLookaheadDifferentialTest.inputs(new char[] {'a', 'b', 'x'}, 5);
+    List<String> failures = new ArrayList<>();
+    for (String p :
+        new String[] {
+          "(?:(a){1,6000})+",
+          "(?:(a){1,6000}b)+",
+          "(?:(a){0,6000}b)+",
+          "(?:(ab){1,3000})+",
+          "(?:(?:(a){1,6000}b)+x)+",
+          "(?:(a){1,6000})+\\1",
+          "(?:(a){1,2})+b\\1",
+          "(?:(a){1,2})+(?=b)",
+          "(?<=b)(?:(a){1,2})+",
+          "(?:(a){1,2})+(?=b)\\1",
+          "(?=(?:(a){1,2})+)a",
+          "(?=(?:([ab]){1,2})+x)\\1",
+          "(?=(?:([ab]){1,2})+x)\\1.*(?=(?:([ab]){1,2})+x)\\2"
+        }) {
+      ReggieMatcher routed = Reggie.compile(p);
+      for (String in : inputs) {
+        check(p, in, routed, "routed", failures);
       }
     }
     assertEquals(List.of(), failures);

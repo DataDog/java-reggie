@@ -75,6 +75,55 @@ class LinearBackrefAnchorDifferentialTest {
     assertEquals(List.of(), failures);
   }
 
+  /**
+   * The linear engine never gives characters back, so a variable quantifier anywhere must keep a
+   * pattern off LINEAR_BACKREFERENCE ({@code (a).*\1} on "aa" used to fail).
+   */
+  @Test
+  void variableQuantifiersLeaveLinearRoute() throws Exception {
+    List<String> inputs = TrailingLookaheadDifferentialTest.inputs(new char[] {'a', 'b', 'x'}, 5);
+    List<String> failures = new ArrayList<>();
+    for (String p :
+        new String[] {
+          "a+(a)\\1",
+          "a*(a)\\1",
+          "(a)a*\\1",
+          "(a)b*a?\\1",
+          "(a)b?a?\\1",
+          "([ab])[ab]*\\1",
+          "([ab]{2}).*\\1",
+          "(a).*\\1b",
+          "(a).+\\1"
+        }) {
+      if (StrategyCorrectnessMetaTest.routeOf(p) == LINEAR_BACKREFERENCE) {
+        failures.add("/" + p + "/ routes to LINEAR_BACKREFERENCE");
+      }
+      String f = check(p, inputs);
+      if (f != null) failures.add("/" + p + "/ " + f);
+    }
+    // A capturing group under a repeat: JDK keeps the backed-off iteration's span (Perl does not),
+    // so only the match boundaries are compared.
+    for (String p : new String[] {"(?:(a))+\\1", "(?:(a){1,2})+\\1", "(?:(a)b)+\\1"}) {
+      if (StrategyCorrectnessMetaTest.routeOf(p) == LINEAR_BACKREFERENCE) {
+        failures.add("/" + p + "/ routes to LINEAR_BACKREFERENCE");
+      }
+      ReggieMatcher r = Reggie.compile(p);
+      Pattern jdk = Pattern.compile(p);
+      for (String in : inputs) {
+        Matcher m = jdk.matcher(in);
+        String exp = m.find() ? m.start() + "," + m.end() : "null";
+        MatchResult got = r.findMatch(in);
+        if (!exp.equals(got == null ? "null" : got.start() + "," + got.end())) {
+          failures.add("/" + p + "/ findMatch on \"" + in + "\"");
+        }
+        if (jdk.matcher(in).matches() != r.matches(in)) {
+          failures.add("/" + p + "/ matches on \"" + in + "\"");
+        }
+      }
+    }
+    assertEquals(List.of(), failures);
+  }
+
   private static String check(String p, List<String> inputs) {
     ReggieMatcher r = Reggie.compile(p);
     Pattern jdk = Pattern.compile(p);

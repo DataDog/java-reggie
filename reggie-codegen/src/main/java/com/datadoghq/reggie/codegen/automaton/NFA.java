@@ -40,7 +40,7 @@ public final class NFA {
     boolean pinned = false;
     for (NFAState s : this.states) {
       counted |= s.countedLoopId != null;
-      pinned |= s.pinGroup != null;
+      pinned |= s.pinGroup != null || s.countedLoopPinGroup >= 0;
     }
     this.hasCountedLoops = counted;
     this.hasPinnedGroups = pinned;
@@ -72,8 +72,9 @@ public final class NFA {
   }
 
   /**
-   * True if any state carries a {@link NFAState#pinGroup} marker. Only PikeVM honors the marker;
-   * every other capture engine reports the plain last-iteration span for such groups.
+   * True if any state carries a {@link NFAState#pinGroup} or {@link NFAState#countedLoopPinGroup}
+   * marker. Only PikeVM and BackrefBacktrackMatcher honor the markers; every other capture engine
+   * reports the plain last-iteration span for such groups.
    */
   public boolean hasPinnedGroups() {
     return hasPinnedGroups;
@@ -464,6 +465,9 @@ public final class NFA {
     public boolean countedLoopLazy = false;
     public int countedLoopBodyEntryId = -1;
     public int countedLoopStopId = -1;
+    // Group pinned (see pinGroup) when the stop branch is taken after at least one tail pass, i.e.
+    // after more than min iterations; -1 = none.
+    public int countedLoopPinGroup = -1;
 
     public NFAState(int id) {
       this.id = id;

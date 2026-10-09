@@ -121,6 +121,13 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   private final int groupCount;
   private final int slotCount;
   private final int stateCount;
+
+  /**
+   * First slot of the group pins ({@link NFA.NFAState#pinGroup}): group g's pinned span lives at
+   * {@code pinBase + 2g}; -1 when the NFA has no pins.
+   */
+  private final int pinBase;
+
   private final int startStateId;
 
   // ---- Flattened NFA, indexed by state id (see class javadoc) ----
@@ -130,11 +137,13 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   private final int[] enterGroupById; // -1 = none
   private final int[] exitGroupById; // -1 = none
   private final int[] backrefById; // -1 = none
+  private final int[] pinGroupById; // -1 = none
   private final NFA.AnchorType[] anchorById; // null = none
   private final boolean[] acceptById;
   private final boolean[] markerById; // counted-loop decision point
   private final int[] mBodyEntry; // valid where markerById
   private final int[] mStop;
+  private final int[] mPinGroup; // group pinned on a stop after a tail pass, -1 = none
   private final int[] mTailMax;
   private final int[] mSlot; // counter slot, dense
   private final boolean[] mLazy;
@@ -163,7 +172,8 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   public BackrefBacktrackMatcher(NFA nfa, String pattern) {
     super(pattern);
     this.groupCount = nfa.getGroupCount();
-    this.slotCount = 2 * (groupCount + 1);
+    this.pinBase = nfa.hasPinnedGroups() ? 2 * (groupCount + 1) : -1;
+    this.slotCount = (nfa.hasPinnedGroups() ? 4 : 2) * (groupCount + 1);
     int maxId = 0;
     for (NFA.NFAState s : nfa.getStates()) {
       if (s.id > maxId) {
@@ -180,11 +190,13 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     this.enterGroupById = new int[n];
     this.exitGroupById = new int[n];
     this.backrefById = new int[n];
+    this.pinGroupById = new int[n];
     this.anchorById = new NFA.AnchorType[n];
     this.acceptById = new boolean[n];
     this.markerById = new boolean[n];
     this.mBodyEntry = new int[n];
     this.mStop = new int[n];
+    this.mPinGroup = new int[n];
     this.mTailMax = new int[n];
     this.mSlot = new int[n];
     this.mLazy = new boolean[n];
@@ -199,6 +211,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     Arrays.fill(enterGroupById, -1);
     Arrays.fill(exitGroupById, -1);
     Arrays.fill(backrefById, -1);
+    Arrays.fill(pinGroupById, -1);
 
     Set<Integer> refs = new HashSet<>();
     java.util.TreeMap<Integer, Integer> loopSlots = new java.util.TreeMap<>();
@@ -209,6 +222,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       }
       if (s.exitGroup != null) {
         exitGroupById[id] = s.exitGroup;
+      }
+      if (s.pinGroup != null) {
+        pinGroupById[id] = s.pinGroup;
       }
       if (s.backrefCheck != null) {
         backrefById[id] = s.backrefCheck;
@@ -262,6 +278,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         mSlot[id] = slot;
         mBodyEntry[id] = s.countedLoopBodyEntryId;
         mStop[id] = s.countedLoopStopId;
+        mPinGroup[id] = s.countedLoopPinGroup;
         mTailMax[id] = s.countedLoopTailMax;
         mLazy[id] = s.countedLoopLazy;
       }
@@ -310,6 +327,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
               && i != startStateId
               && enterGroupById[i] < 0
               && exitGroupById[i] < 0
+              && pinGroupById[i] < 0
               && backrefById[i] < 0
               && anchorById[i] == null
               && assertTypeById[i] == null
@@ -1168,6 +1186,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       // group 0's end in place is safe: the stack is dead on return and no later read happens.
       if (acceptById[state] && (!wholeInput || pos == regionEnd)) {
         d[caps + 1] = pos; // group-0 end
+        if (pinBase >= 0) {
+          applyPins(d, caps, -1);
+        }
         return caps;
       }
 
@@ -1176,6 +1197,12 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       // Greedy prefers iterate, lazy prefers stop (Perl order).
       if (markerById[state]) {
         int slot = mSlot[state];
+        // Stopping after a tail pass ends an invocation that ran more than min times.
+        int stopCaps = caps;
+        if (mPinGroup[state] >= 0 && d[loops + slot] > 0) {
+          stopCaps = pin(arena, caps, mPinGroup[state]);
+          d = arena.data;
+        }
         if (d[loops + slot] < mTailMax[state]) {
           // Only the iterate branch diverges: copy the counter vector for it (the stop branch
           // and all frames below the stack still share the parent's vector). Entering the body
@@ -1188,13 +1215,13 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
           }
           if (mLazy[state]) {
             stack.push(mBodyEntry[state], pos, caps, iterLoops, prog);
-            stack.push(mStop[state], pos, caps, loops, prog);
+            stack.push(mStop[state], pos, stopCaps, loops, prog);
           } else {
-            stack.push(mStop[state], pos, caps, loops, prog);
+            stack.push(mStop[state], pos, stopCaps, loops, prog);
             stack.push(mBodyEntry[state], pos, caps, iterLoops, prog);
           }
         } else {
-          stack.push(mStop[state], pos, caps, loops, prog);
+          stack.push(mStop[state], pos, stopCaps, loops, prog);
         }
         continue;
       }
@@ -1205,8 +1232,12 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       final int eg = enterGroupById[state];
       final int xg = exitGroupById[state];
       int c = caps;
+      if (pinGroupById[state] >= 0) {
+        c = pin(arena, caps, pinGroupById[state]);
+        d = arena.data;
+      }
       if (eg >= 0 || xg >= 0) {
-        c = arena.copy(caps, slotCount);
+        c = arena.copy(c, slotCount);
         d = arena.data;
         if (eg >= 0) {
           d[c + 2 * eg] = pos;
@@ -1367,7 +1398,11 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       final int pos = stack.positions[stack.size - 1];
       final int c0 = stack.capsStack[stack.size - 1];
       if (top < 0) {
-        return c0; // deferred accept: every higher-priority continuation failed
+        // Deferred accept: every higher-priority continuation failed.
+        if (pinBase >= 0) {
+          applyPins(arena.data, c0, caps);
+        }
+        return c0;
       }
       final int state = top;
       final long prog = stack.progress[stack.size - 1] & ~headBit[state];
@@ -1389,10 +1424,14 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         }
       }
       int c = c0;
+      if (pinGroupById[state] >= 0) {
+        c = pin(arena, c0, pinGroupById[state]);
+        d = arena.data;
+      }
       final int eg = enterGroupById[state];
       final int xg = exitGroupById[state];
       if (eg >= 0 || xg >= 0) {
-        c = arena.copy(c0, ws.slotCount);
+        c = arena.copy(c, ws.slotCount);
         d = arena.data;
         if (eg >= 0) {
           d[c + 2 * eg] = pos;
@@ -1534,6 +1573,43 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       }
     }
     return size;
+  }
+
+  /**
+   * Captures {@code caps} with group {@code g}'s current span pinned, or {@code caps} itself when
+   * an earlier pin on the path already fixed it (the first pin wins). Re-read the arena data after.
+   */
+  private int pin(IntArena arena, int caps, int g) {
+    if (arena.data[caps + pinBase + 2 * g] != -1) {
+      return caps;
+    }
+    int c = arena.copy(caps, slotCount);
+    int[] d = arena.data;
+    d[c + pinBase + 2 * g] = d[c + 2 * g];
+    d[c + pinBase + 2 * g + 1] = d[c + 2 * g + 1];
+    return c;
+  }
+
+  /**
+   * At an accept, in place: rewrites each pinned group of {@code caps} to its pinned span. With
+   * {@code entry >= 0} (a lookaround body accept, entered with captures {@code entry}) only pins
+   * set inside the body apply, and they are cleared: java.util.regex rewrites the group when the
+   * body completes, so the outer continuation reads the pinned span and a later evaluation of the
+   * body pins afresh.
+   */
+  private void applyPins(int[] d, int caps, int entry) {
+    for (int g = 1; g <= groupCount; g++) {
+      int p = caps + pinBase + 2 * g;
+      if (d[p] == -1 || (entry >= 0 && d[entry + pinBase + 2 * g] != -1)) {
+        continue;
+      }
+      d[caps + 2 * g] = d[p];
+      d[caps + 2 * g + 1] = d[p + 1];
+      if (entry >= 0) {
+        d[p] = -1;
+        d[p + 1] = -1;
+      }
+    }
   }
 
   private MatchResult buildResult(String input, int[] d, int caps) {

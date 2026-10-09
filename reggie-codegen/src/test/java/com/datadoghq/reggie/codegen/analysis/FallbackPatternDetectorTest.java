@@ -95,12 +95,13 @@ class FallbackPatternDetectorTest {
   // ── B1 / B4 are skipped for PIKEVM_CAPTURE ────────────────────────────────────────────────
 
   @Test
-  void b1_lookaheadInQuantifier_noFallbackForPikeVmCapture() throws Exception {
-    // DFA strategy triggers B1; PIKEVM_CAPTURE correctly handles it and must not fall back.
+  void lookaroundAndBackrefs_fallBackForPikeVmCapture() throws Exception {
+    // PikeVM crosses lookaround and backreference states as plain epsilons ((?=a)b would match
+    // "b"), so PIKEVM_CAPTURE must refuse them.
     assertNotNull(detect("(?:(?=a)b)+"));
-    assertNull(
-        detect("(?:(?=a)b)+", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE),
-        "PIKEVM_CAPTURE must skip B1");
+    for (String p : new String[] {"(?:(?=a)b)+", "(?>a|ab)(?=c)", "(?<=x)(?>a)", "(a)(?>\\1|b)"}) {
+      assertNotNull(detect(p, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE), p);
+    }
   }
 
   @Test

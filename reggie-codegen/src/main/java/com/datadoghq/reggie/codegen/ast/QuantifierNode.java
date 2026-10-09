@@ -17,7 +17,8 @@ package com.datadoghq.reggie.codegen.ast;
 
 /**
  * Represents quantifiers like *, +, ?, {n}, {n,m}. Possessive quantifiers ({@code X*+}, {@code
- * X++}, etc.) have {@code possessive=true}.
+ * X++}, etc.) have {@code possessive=true}; the parser also wraps them in an atomic {@link
+ * GroupNode}.
  */
 public final class QuantifierNode implements RegexNode {
 

@@ -124,15 +124,15 @@ public class RegexParser {
         {
           consume();
           int suffix = checkQuantifierSuffix();
-          QuantifierNode q = new QuantifierNode(base, 0, -1, suffix != 1);
-          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+          if (suffix == 2) return possessive(base, 0, -1);
+          return new QuantifierNode(base, 0, -1, suffix != 1);
         }
       case '+':
         {
           consume();
           int suffix = checkQuantifierSuffix();
-          QuantifierNode q = new QuantifierNode(base, 1, -1, suffix != 1);
-          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+          if (suffix == 2) return possessive(base, 1, -1);
+          return new QuantifierNode(base, 1, -1, suffix != 1);
         }
       case '?':
         consume();
@@ -147,8 +147,8 @@ public class RegexParser {
         }
         {
           int suffix = checkQuantifierSuffix();
-          QuantifierNode q = new QuantifierNode(base, 0, 1, suffix != 1);
-          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+          if (suffix == 2) return possessive(base, 0, 1);
+          return new QuantifierNode(base, 0, 1, suffix != 1);
         }
       case '{':
         return parseCountedQuantifier(base);
@@ -205,8 +205,21 @@ public class RegexParser {
     }
 
     int suffix = checkQuantifierSuffix();
-    QuantifierNode q = new QuantifierNode(base, min, max, suffix != 1);
-    return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+    if (suffix == 2) return possessive(base, min, max);
+    return new QuantifierNode(base, min, max, suffix != 1);
+  }
+
+  /**
+   * Possessive quantifier, built the way JDK runs one: the repeat never gives back, and when the
+   * base is a group each iteration is atomic too ({@code (?:a+){2}+b} cannot match "aab"). Builds
+   * {@code (?>(?>X){min,max})} for a non-atomic group base X, {@code (?>X{min,max})} otherwise.
+   */
+  private static RegexNode possessive(RegexNode base, int min, int max) {
+    RegexNode iteration =
+        base instanceof GroupNode && !((GroupNode) base).atomic
+            ? new GroupNode(base, 0, false, null, true)
+            : base;
+    return new GroupNode(new QuantifierNode(iteration, min, max, true, true), 0, false, null, true);
   }
 
   private int parseNumber() throws ParseException {

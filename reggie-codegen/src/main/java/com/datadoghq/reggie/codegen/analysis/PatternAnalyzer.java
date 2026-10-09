@@ -1165,8 +1165,8 @@ public class PatternAnalyzer {
       // LINEAR_BACKREFERENCE supports group capture and backreference validation via straight-line
       // bytecode
       // IMPORTANT: Linear backreference strategy does NOT support backtracking, so patterns with
-      // variable quantifiers in capturing groups must fall through to NFA_WITH_BACKREFS
-      if (LinearPatternDetector.isLinear(ast) && !hasVariableQuantifiersInCapturingGroups(ast)) {
+      // variable quantifiers must fall through to NFA_WITH_BACKREFS
+      if (LinearPatternDetector.isLinear(ast) && !hasVariableQuantifiers(ast)) {
         LinearPatternInfo linearInfo = LinearPatternAnalyzer.analyze(ast, nfa.getGroupCount());
         return new MatchingStrategyResult(
             MatchingStrategy.LINEAR_BACKREFERENCE, null, linearInfo, false, requiredLiterals);
@@ -3128,14 +3128,12 @@ public class PatternAnalyzer {
   }
 
   /**
-   * Check if pattern has variable quantifiers (*, +, ?, {n,m}) inside capturing groups. Fixed
-   * quantifiers {n} are allowed as they don't require backtracking. This check is important for
-   * backreference patterns - LINEAR_BACKREFERENCE doesn't support backtracking, so patterns like
-   * (a+)\1 must fall through to NFA_WITH_BACKREFS.
+   * Check if pattern has variable quantifiers (*, +, ?, {n,m}) anywhere. Fixed quantifiers {n} are
+   * allowed as they don't require backtracking. LINEAR_BACKREFERENCE never gives characters back,
+   * so patterns like (a+)\1, (a).*\1 or (?:(a))+\1 must fall through to NFA_WITH_BACKREFS.
    */
-  private boolean hasVariableQuantifiersInCapturingGroups(RegexNode node) {
-    VariableLengthInGroupsDetector detector = new VariableLengthInGroupsDetector();
-    return node.accept(detector);
+  private boolean hasVariableQuantifiers(RegexNode node) {
+    return node.accept(new VariableLengthQuantifierDetector());
   }
 
   /**
@@ -4040,8 +4038,8 @@ public class PatternAnalyzer {
     // \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3} (IPv4)
     SPECIALIZED_OPTIONAL_GROUP, // Single-literal optional group + single-literal suffix,
     // optional ^/$ anchors: (a)?b, ^(a)?b$
-    LINEAR_BACKREFERENCE, // Linear patterns with backreferences (no alternation): (\w+)\s+\1,
-    // (a+)b\1
+    LINEAR_BACKREFERENCE, // Backreference patterns with no alternation and only fixed-count
+    // quantifiers: (a)\1, ([a-z]{3})-\1
     SPECIALIZED_BACKREFERENCE, // Hardcoded backreference patterns: <(\w+)>.*</\1>, \b(\w+)\s+\1\b
     SPECIALIZED_MULTIPLE_LOOKAHEADS, // Sequential lookaheads + main pattern:
     // (?=\w+@)(?=.*example).*@\w+\.com
@@ -6444,10 +6442,6 @@ public class PatternAnalyzer {
     @Override
     public Boolean visitQuantifier(QuantifierNode node) {
       // Check if this quantifier is non-greedy (possessive quantifiers are not lazy).
-      // Note: node.possessive is always false in parsed patterns — the parser converts X*+/X++/
-      // X?+/X{n,m}+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode rather than setting
-      // node.possessive=true. The !node.possessive guard is therefore purely defensive for
-      // hypothetical future parser changes and does not change current behavior.
       if (!node.greedy && !node.possessive) {
         return true; // Found non-greedy quantifier!
       }
@@ -6516,13 +6510,8 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitQuantifier(QuantifierNode node) {
-      // Note: node.possessive is always false in parsed patterns. The parser converts X*+/X++/
-      // X?+/X{n,m}+ to GroupNode(atomic=true) wrapping a greedy QuantifierNode rather than setting
-      // node.possessive=true. This check is therefore currently dead code, but is kept as a
-      // defensive guard for hypothetical future parser changes. visitGroup() also checks
-      // node.atomic for the current parser representation; both together make this detector
-      // redundant-safe regardless of whether the parser encodes possessives via node.possessive or
-      // GroupNode(atomic=true).
+      // The parser wraps X*+/X++/X?+/X{n,m}+ in GroupNode(atomic=true), which visitGroup() also
+      // rejects.
       if (node.possessive) {
         return true;
       }
@@ -7128,12 +7117,8 @@ public class PatternAnalyzer {
     }
   }
 
-  /**
-   * Visitor to detect variable-length quantifiers inside capturing groups. DFA group tracking only
-   * works for fixed-length patterns.
-   */
-  private static class VariableLengthInGroupsDetector implements RegexVisitor<Boolean> {
-    private boolean inGroup = false;
+  /** Visitor to detect variable-length quantifiers (*, +, ?, {n,}, {n,m} with n != m). */
+  private static class VariableLengthQuantifierDetector implements RegexVisitor<Boolean> {
 
     @Override
     public Boolean visitLiteral(LiteralNode node) {
@@ -7157,43 +7142,12 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitQuantifier(QuantifierNode node) {
-      // Check if this is a variable-length quantifier
-      boolean isVariableLength = false;
-      if (node.min == 0 && node.max == -1) {
-        // * quantifier - variable length
-        isVariableLength = true;
-      } else if (node.min == 1 && node.max == -1) {
-        // + quantifier - variable length
-        isVariableLength = true;
-      } else if (node.max == -1) {
-        // {n,} - variable length
-        isVariableLength = true;
-      } else if (node.min != node.max) {
-        // {n,m} where n != m - variable length
-        isVariableLength = true;
-      }
-
-      // If we're inside a group and found variable-length, return true
-      if (inGroup && isVariableLength) {
-        return true;
-      }
-
-      // Recursively check child
-      return node.child.accept(this);
+      return node.max != node.min || node.child.accept(this);
     }
 
     @Override
     public Boolean visitGroup(GroupNode node) {
-      // Only check capturing groups (non-capturing groups don't matter)
-      if (node.capturing) {
-        boolean wasInGroup = inGroup;
-        inGroup = true;
-        boolean result = node.child.accept(this);
-        inGroup = wasInGroup;
-        return result;
-      } else {
-        return node.child.accept(this);
-      }
+      return node.child.accept(this);
     }
 
     @Override
@@ -7208,7 +7162,6 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitAssertion(AssertionNode node) {
-      // Assertions don't affect group tracking
       return false;
     }
 
@@ -7220,7 +7173,6 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitConditional(ConditionalNode node) {
-      // Check both branches while preserving inGroup state
       boolean hasThen = node.thenBranch.accept(this);
       boolean hasElse = node.elseBranch != null && node.elseBranch.accept(this);
       return hasThen || hasElse;
@@ -7228,7 +7180,6 @@ public class PatternAnalyzer {
 
     @Override
     public Boolean visitBranchReset(BranchResetNode node) {
-      // Check all alternatives while preserving inGroup state
       return node.alternatives.stream().anyMatch(alt -> alt.accept(this));
     }
   }
