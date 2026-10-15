@@ -18,15 +18,14 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
-import com.datadoghq.reggie.UnsupportedPatternException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Tests for the D1 detector ({@code requiresIntraCallBacktracking}) in {@code
- * FallbackPatternDetector}. Verifies that patterns requiring intra-call backtracking (subroutine
- * call inside an alternation arm) throw {@link UnsupportedPatternException} from {@code
- * Reggie.compile()}, while patterns that do not require it compile successfully.
+ * Tests for subroutine calls inside alternation arms. The D1 detector ({@code
+ * requiresIntraCallBacktracking} in {@code FallbackPatternDetector}) rejects these for the
+ * RECURSIVE_DESCENT generator; on the backtracker, which retries every choice point inside a call,
+ * they compile and match as PCRE2 does.
  */
 class NonLinearPatternRoutingTest {
 
@@ -35,63 +34,41 @@ class NonLinearPatternRoutingTest {
     Reggie.clearCache();
   }
 
-  // ── Positive cases: must throw UnsupportedPatternException ──────────────────
+  // ── Call inside an alternation arm: runs on the backtracker ────────────────
 
   @Test
-  void palindromeWithNumberedSubroutineInAlternationArm_throws() {
+  void palindromeWithNumberedSubroutineInAlternationArm_matches() {
     // ^((.)(?1)\2|.?)$ — (?1) is inside an alternation arm (palindrome, issue #38).
-    // D1 flags this: the call site of (?1) is reachable from inside the first alternative.
-    UnsupportedPatternException ex =
-        assertThrows(
-            UnsupportedPatternException.class,
-            () -> Reggie.compile("^((.)(?1)\\2|.?)$"),
-            "palindrome (?1) in alternation arm must throw");
-    String msg = ex.getMessage();
-    assertTrue(
-        msg.contains("recursive subroutine") || msg.contains("context-free"),
-        "message should mention 'recursive subroutine' or 'context-free', got: " + msg);
+    ReggieMatcher m = assertDoesNotThrow(() -> Reggie.compile("^((.)(?1)\\2|.?)$"));
+    assertTrue(m.matches("abcba"));
+    assertTrue(m.matches("abba"));
+    assertFalse(m.matches("abc"));
   }
 
   @Test
-  void palindromeWithWholePatternRecursionInAlternationArm_throws() {
-    // ^((.)(?R)\2|.?)$ — (?R) inside an alternation arm (palindrome variant).
-    UnsupportedPatternException ex =
-        assertThrows(
-            UnsupportedPatternException.class,
-            () -> Reggie.compile("^((.)(?R)\\2|.?)$"),
-            "palindrome (?R) in alternation arm must throw");
-    String msg = ex.getMessage();
-    assertTrue(
-        msg.contains("recursive subroutine") || msg.contains("context-free"),
-        "message should mention 'recursive subroutine' or 'context-free', got: " + msg);
+  void palindromeWithWholePatternRecursionInAlternationArm_matches() {
+    // ^((.)(?R)\2|.?)$ — (?R) recurses with the anchors, so ^ fails inside it (PCRE2 10.47).
+    ReggieMatcher m = assertDoesNotThrow(() -> Reggie.compile("^((.)(?R)\\2|.?)$"));
+    assertTrue(m.matches("a"));
+    assertFalse(m.matches("aba"));
   }
 
   @Test
-  void topLevelAlternationWithWholePatternRecursion_throws() {
-    // x|(?R) — (?R) directly in a top-level alternation arm.
-    UnsupportedPatternException ex =
-        assertThrows(
-            UnsupportedPatternException.class,
-            () -> Reggie.compile("x|(?R)"),
-            "(?R) in top-level alternation arm must throw");
-    String msg = ex.getMessage();
-    assertTrue(
-        msg.contains("recursive subroutine") || msg.contains("context-free"),
-        "message should mention 'recursive subroutine' or 'context-free', got: " + msg);
+  void topLevelAlternationWithWholePatternRecursion_matches() {
+    // x|(?R) — (?R) at the position it was called from fails that path (PCRE2 reports an error).
+    ReggieMatcher m = assertDoesNotThrow(() -> Reggie.compile("x|(?R)"));
+    assertTrue(m.matches("x"));
+    assertFalse(m.find("y"));
   }
 
   @Test
-  void groupAlternationWithWholePatternRecursion_throws() {
+  void groupAlternationWithWholePatternRecursion_matches() {
     // ([^()]|(?R)) — (?R) in a group alternation arm.
-    UnsupportedPatternException ex =
-        assertThrows(
-            UnsupportedPatternException.class,
-            () -> Reggie.compile("([^()]|(?R))"),
-            "(?R) in group alternation arm must throw");
-    String msg = ex.getMessage();
-    assertTrue(
-        msg.contains("recursive subroutine") || msg.contains("context-free"),
-        "message should mention 'recursive subroutine' or 'context-free', got: " + msg);
+    ReggieMatcher m = assertDoesNotThrow(() -> Reggie.compile("([^()]|(?R))"));
+    MatchResult r = m.findMatch("a");
+    assertNotNull(r);
+    assertEquals("a", r.group(1));
+    assertFalse(m.find("()"));
   }
 
   // ── Negative cases: must NOT throw ──────────────────────────────────────────
@@ -130,33 +107,22 @@ class NonLinearPatternRoutingTest {
   // ── compileAllowingFallback for D1-positive patterns ────────────────────────
 
   @Test
-  void palindromeWithAllowFallback_propagatesJdkPatternSyntaxException() {
-    // Reggie.compileAllowingFallback() lifts the UnsupportedPatternException gate and attempts
-    // to delegate to java.util.regex. However, java.util.regex does not understand PCRE
-    // subroutine syntax (?1) / (?R) — it throws PatternSyntaxException. This test documents
-    // that the JDK delegation path is taken (no UnsupportedPatternException from Reggie), but
-    // java.util.regex itself cannot parse the pattern.
-    assertThrows(
-        java.util.regex.PatternSyntaxException.class,
-        () -> Reggie.compileAllowingFallback("^((.)(?1)\\2|.?)$"),
-        "JDK does not support PCRE (?1) syntax; PatternSyntaxException is expected from JDK");
+  void palindromeWithAllowFallback_runsNatively() {
+    // java.util.regex does not parse (?1); the pattern must not reach it.
+    ReggieMatcher m = Reggie.compileAllowingFallback("^((.)(?1)\\2|.?)$");
+    assertInstanceOf(BackrefBacktrackMatcher.class, m);
+    assertTrue(m.matches("abcba"));
   }
 
-  // ── Under-classification gap — documented with assertDoesNotThrow ─────────────
+  // ── Call site outside an alternation arm, alternation in the target ──────────
 
   @Test
-  void underClassificationGap_callSiteNotInAlternation_doesNotThrow() {
-    // Known D1 under-classification gap: call site is not inside an alternation arm,
-    // so D1 does not flag this even though the target body has alternation.
-    // RECURSIVE_DESCENT handles this case; whether it produces correct results is an open
-    // audit item.
-    //
-    // ^(?1)(a|b)$ — (?1) is at the top-level concat (not inside any alternation arm).
-    // Group 1's body is (a|b) which contains alternation. D1 evaluates the CALL SITE only:
-    // since (?1) is not inside an alternation arm, the heuristic does not flag it. This is
-    // the documented gap: a top-level (?N) whose target body has alternation is not detected.
-    assertDoesNotThrow(
-        () -> Reggie.compile("^(?1)(a|b)$"),
-        "(?1) at top-level concat is not flagged by D1 (documented under-classification gap)");
+  void callSiteNotInAlternation_targetWithAlternation_matches() {
+    // ^(?1)(a|b)$ — D1 evaluates the call site only and does not flag this pattern; the call
+    // retries (a|b) like any other choice point (PCRE2 10.47).
+    ReggieMatcher m = assertDoesNotThrow(() -> Reggie.compile("^(?1)(a|b)$"));
+    assertTrue(m.matches("ab"));
+    assertEquals("b", m.match("ab").group(1));
+    assertFalse(m.matches("a"));
   }
 }

@@ -23,6 +23,7 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.ast.*;
 import com.datadoghq.reggie.codegen.automaton.CharSet;
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder.GroupFinder;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -93,27 +94,66 @@ public class RecursiveDescentBytecodeGenerator {
   // Maximum recursion depth before throwing StackOverflowError
   private static final int MAX_RECURSION_DEPTH = 100;
 
+  // Parse-method calls a non-one-way attempt may make per character of its region, on top of
+  // BacktrackConfig.MAX_RD_STEPS: linear matches make a few calls per character and stay inside it
+  private static final int RD_STEPS_PER_CHAR = 16;
+
+  // Children per range helper when a concat or alternation is split: a call or an inline leaf
+  // takes at most about 57 bytes, which keeps each helper under HotSpot's 8000-byte
+  // HugeMethodLimit (and the 64 KB limit)
+  private static final int RANGE_CHUNK = 128;
+
+  // Capture groups copied out of the packed groups array by straight-line code; above, a loop
+  private static final int UNROLLED_GROUP_COPY_MAX = 16;
+
+  // First-char sets with more ranges skip the findBoundsFrom prefilter: its range bisection
+  // would push findBoundsFrom over the JIT size limit
+  private static final int FIRST_CHAR_PREFILTER_MAX_RANGES = 128;
+
+  // Nested backtracking levels generated in one method; deeper levels get their own method
+  private static final int NESTED_LEVELS_PER_METHOD = 8;
+  // Longer child runs in a backtracking concat call range helpers: one method can hold many runs
+  // (prefix, suffix, nested levels, both optional-group paths), so each inline run stays small
+  private static final int INLINE_CHILD_RUN_MAX = 8;
+  // Longer runs of consecutive branch-reset groups are cleared with one Arrays.fill call
+  private static final int UNROLLED_RESET_RUN_MAX = 4;
+
+  // Char-class ranges up to which a class leaf is checked inline: the range bisection grows with
+  // the
+  // number of ranges, and an inline leaf must cost about as much as a call
+  private static final int INLINE_CLASS_RANGES = 2;
+
   private final RegexNode ast;
   private final NFA nfa;
   private final int groupCount;
   private final Map<RegexNode, String> nodeToMethodName;
   private final Map<SubroutineNode, Integer> subroutineNodeIds;
-  private final Map<Integer, RegexNode> groupNumberToNode;
+  // True when the pattern is one-way (RecursiveDescentChoiceAnalysis): no backtrack caps
+  private final boolean oneWay;
+  // Non-one-way root concat followed by \z: matches(), match() and matchInto() parse it, so the
+  // end-of-input check runs inside the concat's give-back. Null otherwise.
+  private final ConcatNode wholeRoot;
   private int methodCounter = 0;
   private int nodeIdCounter = 0;
 
   public RecursiveDescentBytecodeGenerator(RegexNode ast, NFA nfa) {
+    this(ast, nfa, false);
+  }
+
+  public RecursiveDescentBytecodeGenerator(RegexNode ast, NFA nfa, boolean oneWay) {
     this.ast = ast;
+    this.oneWay = oneWay;
+    this.wholeRoot = !oneWay && ast instanceof ConcatNode ? endAnchored((ConcatNode) ast) : null;
     this.nfa = nfa;
     this.groupCount = nfa != null ? nfa.getGroupCount() : countGroups(ast);
     this.nodeToMethodName = new HashMap<>();
     this.subroutineNodeIds = new HashMap<>();
-    this.groupNumberToNode = new HashMap<>();
+  }
 
-    // Build map of group numbers to their content nodes
-    if (ast != null) {
-      buildGroupMap(ast);
-    }
+  private static ConcatNode endAnchored(ConcatNode root) {
+    List<RegexNode> children = new ArrayList<>(root.children);
+    children.add(new AnchorNode(AnchorNode.Type.STRING_END_ABSOLUTE));
+    return new ConcatNode(children);
   }
 
   /** Count the number of capturing groups in the AST. */
@@ -314,188 +354,147 @@ public class RecursiveDescentBytecodeGenerator {
         });
   }
 
-  /** Build a map from group numbers to their content nodes. */
-  private void buildGroupMap(RegexNode node) {
-    node.accept(
-        new RegexVisitor<Void>() {
-          @Override
-          public Void visitLiteral(LiteralNode node) {
-            return null;
-          }
-
-          @Override
-          public Void visitCharClass(CharClassNode node) {
-            return null;
-          }
-
-          @Override
-          public Void visitGroup(GroupNode node) {
-            if (node.groupNumber > 0) {
-              groupNumberToNode.put(node.groupNumber, node.child);
-            }
-            node.child.accept(this);
-            return null;
-          }
-
-          @Override
-          public Void visitQuantifier(QuantifierNode node) {
-            node.child.accept(this);
-            return null;
-          }
-
-          @Override
-          public Void visitAlternation(AlternationNode node) {
-            for (RegexNode child : node.alternatives) {
-              child.accept(this);
-            }
-            return null;
-          }
-
-          @Override
-          public Void visitConcat(ConcatNode node) {
-            for (RegexNode child : node.children) {
-              child.accept(this);
-            }
-            return null;
-          }
-
-          @Override
-          public Void visitAnchor(AnchorNode node) {
-            return null;
-          }
-
-          @Override
-          public Void visitAssertion(AssertionNode node) {
-            if (node.subPattern != null) {
-              node.subPattern.accept(this);
-            }
-            return null;
-          }
-
-          @Override
-          public Void visitBackreference(BackreferenceNode node) {
-            return null;
-          }
-
-          @Override
-          public Void visitSubroutine(SubroutineNode node) {
-            return null;
-          }
-
-          @Override
-          public Void visitConditional(ConditionalNode node) {
-            node.thenBranch.accept(this);
-            if (node.elseBranch != null) {
-              node.elseBranch.accept(this);
-            }
-            return null;
-          }
-
-          @Override
-          public Void visitBranchReset(BranchResetNode node) {
-            // PCRE semantics: (?1) in branch reset calls the FIRST alternative's pattern
-            // for that group number, not all alternatives.
-            // Example: (?|(x)|(y))(?1) - (?1) always calls (x), regardless of which matched
-            java.util.Map<Integer, RegexNode> firstGroupByNumber = new java.util.HashMap<>();
-
-            // Collect FIRST group child for each group number (in order of alternatives)
-            for (RegexNode alt : node.alternatives) {
-              collectFirstBranchResetGroup(alt, firstGroupByNumber);
-            }
-
-            // Store the first pattern for each group number
-            for (java.util.Map.Entry<Integer, RegexNode> entry : firstGroupByNumber.entrySet()) {
-              groupNumberToNode.put(entry.getKey(), entry.getValue());
-            }
-
-            // Still visit children for any nested groups not directly in the branch reset
-            for (RegexNode alt : node.alternatives) {
-              visitNonBranchResetGroups(alt, this);
-            }
-            return null;
-          }
-
-          private void collectFirstBranchResetGroup(
-              RegexNode node, java.util.Map<Integer, RegexNode> map) {
-            if (node instanceof GroupNode) {
-              GroupNode g = (GroupNode) node;
-              if (g.groupNumber > 0) {
-                // Only store the FIRST occurrence for each group number
-                map.putIfAbsent(g.groupNumber, g.child);
-              }
-              // Don't recurse into the group's child here - we want top-level groups only
-            } else if (node instanceof ConcatNode) {
-              for (RegexNode child : ((ConcatNode) node).children) {
-                collectFirstBranchResetGroup(child, map);
-              }
-            }
-            // Don't recurse into other node types for top-level group collection
-          }
-
-          private void visitNonBranchResetGroups(RegexNode node, RegexVisitor<Void> visitor) {
-            if (node instanceof GroupNode) {
-              GroupNode g = (GroupNode) node;
-              // Visit children of groups for nested groups
-              g.child.accept(visitor);
-            } else if (node instanceof ConcatNode) {
-              for (RegexNode child : ((ConcatNode) node).children) {
-                visitNonBranchResetGroups(child, visitor);
-              }
-            } else if (node instanceof QuantifierNode) {
-              visitNonBranchResetGroups(((QuantifierNode) node).child, visitor);
-            } else if (node instanceof AlternationNode) {
-              for (RegexNode alt : ((AlternationNode) node).alternatives) {
-                visitNonBranchResetGroups(alt, visitor);
-              }
-            }
-          }
-        });
+  /** True for a call to the whole pattern: (?R) or (?0). */
+  /**
+   * Children per range-helper call when {@code size} children are split: {@code chunk} times a
+   * power of RANGE_CHUNK, the smallest that leaves at most RANGE_CHUNK calls in one method. The
+   * result is below {@code size} unless it is {@code chunk}.
+   */
+  private static int rangeSpan(int size, int chunk) {
+    long span = chunk;
+    while (size > span * RANGE_CHUNK) {
+      span *= RANGE_CHUNK;
+    }
+    return (int) span;
   }
 
   /**
-   * True when the node cannot write to the groups array (no capturing groups, backrefs,
-   * subroutines, conditionals or branch resets anywhere inside — lookaround bodies are checked
-   * recursively because Java captures inside lookaheads). A capture-free quantifier body is
-   * deterministic given (pos, end, groups), which is what the fast give-back path relies on.
+   * A single-char literal or a char class with at most INLINE_CLASS_RANGES ranges: concats and
+   * alternations check it inline instead of calling a parser method, so a pattern does not need one
+   * method (and its constant-pool entries) per character.
    */
-  private static boolean isCaptureFree(RegexNode node) {
-    if (node == null) {
+  private static boolean isInlineLeaf(RegexNode node) {
+    if (node instanceof EpsilonNode) {
+      return false;
+    }
+    if (node instanceof LiteralNode) {
       return true;
     }
-    if (node instanceof GroupNode g) {
-      if (g.groupNumber > 0) {
+    if (!(node instanceof CharClassNode)) {
+      return false;
+    }
+    CharClassNode cc = (CharClassNode) node;
+    return (cc.negated ? cc.chars.complement() : cc.chars).getRanges().size()
+        <= INLINE_CLASS_RANGES;
+  }
+
+  private static boolean isRootCall(SubroutineNode node) {
+    return node.name == null && node.groupNumber <= 0;
+  }
+
+  /**
+   * Body of the group a non-root call invokes: the first capturing group in pattern order with the
+   * call's number, or with the named group's number when the call is named (as ThompsonBuilder
+   * resolves calls). Null when no such group exists.
+   */
+  private RegexNode callTarget(SubroutineNode node) {
+    GroupNode group = ast.accept(new GroupFinder(node.groupNumber, node.name));
+    if (group != null && node.name != null) {
+      // A name stands for its number: in a branch reset (?&n) calls the first group numbered as n
+      group = ast.accept(new GroupFinder(group.groupNumber, null));
+    }
+    return group != null ? group.child : null;
+  }
+
+  /**
+   * True when parsing the node leaves the groups array as it found it: no capturing group anywhere
+   * inside (lookaround bodies included, since Java captures inside lookaheads). Subroutine calls
+   * qualify because visitSubroutine restores the groups after the call; backreferences only read
+   * them. Conditionals and branch resets are refused conservatively. Given unchanged groups, such a
+   * node's result depends only on (pos, end, groups, depth), which is what the fast give-back path
+   * and the skipped group snapshots rely on.
+   */
+  private static boolean isGroupsNeutral(RegexNode node) {
+    return node == null || node.accept(GroupsNeutral.INSTANCE);
+  }
+
+  /** {@link #isGroupsNeutral} for every concat child from {@code from} on. */
+  private static boolean isGroupsNeutralFrom(ConcatNode node, int from) {
+    for (int i = from; i < node.children.size(); i++) {
+      if (!isGroupsNeutral(node.children.get(i))) {
         return false;
       }
-      return isCaptureFree(g.child);
     }
-    if (node instanceof ConcatNode c) {
-      for (RegexNode child : c.children) {
-        if (!isCaptureFree(child)) {
+    return true;
+  }
+
+  private static final class GroupsNeutral implements RegexVisitor<Boolean> {
+    static final GroupsNeutral INSTANCE = new GroupsNeutral();
+
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      return isGroupsNeutralFrom(node, 0);
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      for (RegexNode alt : node.alternatives) {
+        if (!isGroupsNeutral(alt)) {
           return false;
         }
       }
       return true;
     }
-    if (node instanceof AlternationNode a) {
-      for (RegexNode alt : a.alternatives) {
-        if (!isCaptureFree(alt)) {
-          return false;
-        }
-      }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      return isGroupsNeutral(node.child);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.groupNumber <= 0 && isGroupsNeutral(node.child);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
       return true;
     }
-    if (node instanceof QuantifierNode q) {
-      return isCaptureFree(q.child);
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return true;
     }
-    if (node instanceof AssertionNode as) {
-      return isCaptureFree(as.subPattern);
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return isGroupsNeutral(node.subPattern);
     }
-    // Backrefs write nothing but make results depend on mutable group contents; subroutines,
-    // conditionals and branch resets are context-free constructs — all conservative refusals.
-    return !(node instanceof BackreferenceNode
-        || node instanceof SubroutineNode
-        || node instanceof ConditionalNode
-        || node instanceof BranchResetNode);
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return true;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return false;
+    }
   }
 
   /**
@@ -531,153 +530,124 @@ public class RecursiveDescentBytecodeGenerator {
 
   /**
    * Compute the set of characters that can start a match for this pattern. Used for first-character
-   * optimization in findBoundsFrom. Returns null if the optimization is not applicable (e.g.,
-   * pattern starts with ^).
+   * optimization in findBoundsFrom. Returns {@link CharSet#ANY} when the optimization does not
+   * apply: the pattern can match the empty string, or a starting char cannot be bounded.
    */
   private CharSet computeFirstCharSet(RegexNode node) {
     if (node == null) {
       return CharSet.ANY; // Conservative: any character
     }
+    FirstChars first = new FirstChars();
+    boolean nullable = node.accept(first);
+    return nullable ? CharSet.ANY : first.chars;
+  }
 
-    return node.accept(
-        new RegexVisitor<CharSet>() {
-          @Override
-          public CharSet visitLiteral(LiteralNode node) {
-            return CharSet.of(node.ch);
-          }
+  /**
+   * Collects into {@link #chars} the chars that can start a match of the visited node; returns true
+   * when the node can match the empty string. A concat continues into the next child while the
+   * children so far are nullable.
+   */
+  private final class FirstChars implements RegexVisitor<Boolean> {
+    CharSet chars = CharSet.empty();
+    // Call targets being visited: a call that re-enters one is unbounded
+    private final Set<RegexNode> activeTargets = new HashSet<>();
 
-          @Override
-          public CharSet visitCharClass(CharClassNode node) {
-            // Negated character classes could match almost anything
-            // Conservative: if negated, return ANY
-            if (node.negated) {
-              return CharSet.ANY;
-            }
-            return node.chars;
-          }
+    private Boolean any() {
+      chars = CharSet.ANY;
+      return true;
+    }
 
-          @Override
-          public CharSet visitGroup(GroupNode node) {
-            return node.child.accept(this);
-          }
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      // EpsilonNode extends LiteralNode: test it first
+      if (node instanceof EpsilonNode) {
+        return true;
+      }
+      chars = chars.union(CharSet.of(node.ch));
+      return false;
+    }
 
-          @Override
-          public CharSet visitQuantifier(QuantifierNode node) {
-            // If min == 0, pattern can match empty string, so can't optimize
-            if (node.min == 0) {
-              return CharSet.ANY;
-            }
-            return node.child.accept(this);
-          }
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      chars = node.negated ? CharSet.ANY : chars.union(node.chars);
+      return false;
+    }
 
-          @Override
-          public CharSet visitConcat(ConcatNode node) {
-            if (node.children.isEmpty()) {
-              return CharSet.ANY;
-            }
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.child.accept(this);
+    }
 
-            // Skip over zero-width assertions and anchors to find actual first character
-            for (RegexNode child : node.children) {
-              if (child instanceof AnchorNode) {
-                // Anchors don't consume, skip to next
-                continue;
-              }
-              // This child could consume a character, use it
-              CharSet charSet = child.accept(this);
-              // If this child returns ANY, it means we can't optimize further
-              if (!charSet.equals(CharSet.ANY)) {
-                return charSet;
-              }
-              // Child could match anything or is too complex, stop here
-              return CharSet.ANY;
-            }
-            // All children are anchors - can't optimize
-            return CharSet.ANY;
-          }
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      boolean childNullable = node.child.accept(this);
+      return node.min == 0 || childNullable;
+    }
 
-          @Override
-          public CharSet visitAlternation(AlternationNode node) {
-            if (node.alternatives.isEmpty()) {
-              return CharSet.ANY;
-            }
-            // Union of first char sets from all alternatives
-            CharSet result = node.alternatives.get(0).accept(this);
-            for (int i = 1; i < node.alternatives.size(); i++) {
-              CharSet altSet = node.alternatives.get(i).accept(this);
-              result = result.union(altSet);
-            }
-            return result;
-          }
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      for (RegexNode child : node.children) {
+        if (!child.accept(this)) {
+          return false;
+        }
+      }
+      return true;
+    }
 
-          @Override
-          public CharSet visitAnchor(AnchorNode node) {
-            // Anchors don't consume characters, they're zero-width
-            // Return empty set to signal "skip me" in concat context
-            // (but this will be handled by concat logic above)
-            return CharSet.ANY;
-          }
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      return anyNullable(node.alternatives);
+    }
 
-          @Override
-          public CharSet visitAssertion(AssertionNode node) {
-            // Lookahead/lookbehind don't consume characters
-            // Would need to analyze what follows the assertion
-            // Conservative: return ANY
-            return CharSet.ANY;
-          }
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return true; // zero-width
+    }
 
-          @Override
-          public CharSet visitBackreference(BackreferenceNode node) {
-            // Backreference content is unknown at analysis time
-            return CharSet.ANY;
-          }
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return true; // zero-width
+    }
 
-          @Override
-          public CharSet visitSubroutine(SubroutineNode node) {
-            // Resolve subroutine target
-            RegexNode target;
-            if (node.groupNumber == 0) {
-              // (?R) - entire pattern
-              target = ast;
-            } else {
-              // (?1), (?2), etc.
-              target = groupNumberToNode.get(node.groupNumber);
-            }
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      // Content unknown at analysis time; may be empty
+      return any();
+    }
 
-            if (target == null) {
-              return CharSet.ANY;
-            }
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      RegexNode target = isRootCall(node) ? ast : callTarget(node);
+      if (target == null || !activeTargets.add(target)) {
+        return any();
+      }
+      boolean nullable = target.accept(this);
+      activeTargets.remove(target);
+      return nullable;
+    }
 
-            // Recursively compute first char set
-            // Note: This could infinite loop if pattern is directly self-recursive
-            // In practice, most subroutine patterns have some literal/charclass prefix
-            return target.accept(this);
-          }
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      boolean nullable = node.thenBranch.accept(this);
+      // A missing else branch matches empty
+      if (node.elseBranch == null) {
+        return true;
+      }
+      return node.elseBranch.accept(this) | nullable;
+    }
 
-          @Override
-          public CharSet visitConditional(ConditionalNode node) {
-            // Union of then and else branches
-            CharSet result = node.thenBranch.accept(this);
-            if (node.elseBranch != null) {
-              CharSet elseSet = node.elseBranch.accept(this);
-              result = result.union(elseSet);
-            }
-            return result;
-          }
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      return anyNullable(node.alternatives);
+    }
 
-          @Override
-          public CharSet visitBranchReset(BranchResetNode node) {
-            if (node.alternatives.isEmpty()) {
-              return CharSet.ANY;
-            }
-            // Union of first char sets from all alternatives
-            CharSet result = node.alternatives.get(0).accept(this);
-            for (int i = 1; i < node.alternatives.size(); i++) {
-              CharSet altSet = node.alternatives.get(i).accept(this);
-              result = result.union(altSet);
-            }
-            return result;
-          }
-        });
+    private boolean anyNullable(List<RegexNode> alternatives) {
+      boolean nullable = alternatives.isEmpty();
+      for (RegexNode alt : alternatives) {
+        nullable |= alt.accept(this);
+      }
+      return nullable;
+    }
   }
 
   /** Main entry point: Generate matcher class with all parsing methods. */
@@ -704,9 +674,6 @@ public class RecursiveDescentBytecodeGenerator {
     // Generate findBoundsFrom() method
     generateFindBoundsFromMethod(cw, className);
 
-    // Generate matchesBounded() method
-    generateMatchesBoundedMethod(cw, className);
-
     // Generate match() method that returns MatchResult
     generateMatchMethod(cw, className);
 
@@ -731,6 +698,10 @@ public class RecursiveDescentBytecodeGenerator {
     // Lazy quantifiers use this to return the minimum match for find() vs the
     // greedy (full-coverage) match for matches().
     cw.visitField(ACC_PRIVATE, "lazyFindMode", "Z", null, null).visitEnd();
+    // Parse-method calls left in the current match attempt (non-one-way only; see emitStepCheck)
+    if (!oneWay) {
+      cw.visitField(ACC_PRIVATE, "stepsLeft", "J", null, null).visitEnd();
+    }
 
     // IMPORTANT: Generate parser methods for AST nodes FIRST
     // This must happen before generateParseRootMethod, because parseRoot
@@ -739,7 +710,16 @@ public class RecursiveDescentBytecodeGenerator {
     generateParserMethod(cw, className, ast);
 
     // Generate parseRoot method (entry point that delegates to ast parser)
-    generateParseRootMethod(cw, className);
+    generateParseRootMethod(cw, className, "parseRoot", ast);
+    if (wholeRoot != null) {
+      generateParserMethod(cw, className, wholeRoot);
+      generateParseRootMethod(cw, className, "parseWholeRoot", wholeRoot);
+    }
+  }
+
+  /** The parseRoot variant for an attempt that must consume the whole input. */
+  private String wholeInputRootMethod() {
+    return wholeRoot != null ? "parseWholeRoot" : "parseRoot";
   }
 
   /** Generate constructor that calls super(). */
@@ -758,6 +738,7 @@ public class RecursiveDescentBytecodeGenerator {
   public void generateMatchesMethod(ClassWriter cw, String className) {
     MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "matches", "(Ljava/lang/String;)Z", null, null);
     mv.visitCode();
+    emitWholeInputStepReset(mv, className);
 
     // Local vars: 0=this, 1=input
     LocalVarAllocator allocator = new LocalVarAllocator(2);
@@ -799,55 +780,11 @@ public class RecursiveDescentBytecodeGenerator {
     // that reaches the end.
     Label matchSuccess = new Label();
     if (ast instanceof AlternationNode) {
-      AlternationNode altNode = (AlternationNode) ast;
-      for (int altIdx = 0; altIdx < altNode.alternatives.size(); altIdx++) {
-        RegexNode alt = altNode.alternatives.get(altIdx);
-        generateParserMethod(cw, className, alt);
-        String altMethod = getMethodNameForNode(alt);
-
-        // Reset groups to -1 before each alternative (groups may have been dirtied by a
-        // previous alternative that partially matched).
-        if (altIdx > 0) {
-          Label resetLoopStart = new Label();
-          Label resetLoopEnd = new Label();
-          mv.visitInsn(ICONST_0);
-          mv.visitVarInsn(ISTORE, iVar);
-          mv.visitLabel(resetLoopStart);
-          mv.visitVarInsn(ILOAD, iVar);
-          mv.visitVarInsn(ALOAD, groupsVar);
-          mv.visitInsn(ARRAYLENGTH);
-          mv.visitJumpInsn(IF_ICMPGE, resetLoopEnd);
-          mv.visitVarInsn(ALOAD, groupsVar);
-          mv.visitVarInsn(ILOAD, iVar);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IASTORE);
-          mv.visitIincInsn(iVar, 1);
-          mv.visitJumpInsn(GOTO, resetLoopStart);
-          mv.visitLabel(resetLoopEnd);
-        }
-
-        // Call this alternative's parser
-        mv.visitVarInsn(ALOAD, 0); // this
-        mv.visitVarInsn(ALOAD, 1); // input
-        mv.visitInsn(ICONST_0); // pos = 0
-        mv.visitVarInsn(ALOAD, 1); // input
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitVarInsn(ALOAD, groupsVar); // groups
-        mv.visitInsn(ICONST_0); // depth = 0
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, resultVar);
-
-        // If this alternative consumed the whole input, we have a full match
-        mv.visitVarInsn(ILOAD, resultVar);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitJumpInsn(IF_ICMPEQ, matchSuccess);
-        // Otherwise continue to the next alternative
-      }
+      emitRootAlternatives(
+          cw, mv, className, (AlternationNode) ast, groupsVar, resultVar, iVar, matchSuccess);
     } else {
       // Non-alternation root: call the single root parser and check for full match
-      String rootParserMethod = getMethodNameForNode(ast);
+      String rootParserMethod = getMethodNameForNode(wholeRoot != null ? wholeRoot : ast);
       mv.visitVarInsn(ALOAD, 0); // this
       mv.visitVarInsn(ALOAD, 1); // input
       mv.visitInsn(ICONST_0); // pos = 0
@@ -878,13 +815,78 @@ public class RecursiveDescentBytecodeGenerator {
   }
 
   /**
+   * Gives a non-one-way matcher a fresh step budget for an attempt over the whole input. matches()
+   * and match() call root parsers directly, bypassing parseRoot's reset: matches() always, match()
+   * when the root is an alternation.
+   */
+  private void emitWholeInputStepReset(MethodVisitor mv, String className) {
+    if (!oneWay) {
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      emitStepReset(mv, className);
+    }
+  }
+
+  /**
+   * Non-one-way only. Consumes the attempt's region length (int) from the stack and sets {@code
+   * this.stepsLeft = BacktrackConfig.MAX_RD_STEPS + RD_STEPS_PER_CHAR * (long) length}.
+   */
+  private static void emitStepReset(MethodVisitor mv, String className) {
+    mv.visitInsn(I2L);
+    mv.visitLdcInsn((long) RD_STEPS_PER_CHAR);
+    mv.visitInsn(LMUL);
+    mv.visitFieldInsn(
+        GETSTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "MAX_RD_STEPS", "I");
+    mv.visitInsn(I2L);
+    mv.visitInsn(LADD);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitInsn(DUP_X2);
+    mv.visitInsn(POP);
+    mv.visitFieldInsn(PUTFIELD, className, "stepsLeft", "J");
+  }
+
+  /**
+   * Parse-method prologue of a non-one-way matcher: {@code if (--this.stepsLeft < 0) throw
+   * BacktrackConfig.rdStepBudgetExceeded();}. Every repeated unit of work (a quantifier iteration,
+   * retry or replay, a subroutine call) makes at least one parse-method call, so the budget bounds
+   * the work of an attempt. A one-way matcher emits nothing: its work is linear in the region.
+   */
+  private void emitStepCheck(MethodVisitor mv, String className) {
+    if (oneWay) {
+      return;
+    }
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitInsn(DUP);
+    mv.visitFieldInsn(GETFIELD, className, "stepsLeft", "J");
+    mv.visitInsn(LCONST_1);
+    mv.visitInsn(LSUB);
+    mv.visitInsn(DUP2_X1);
+    mv.visitFieldInsn(PUTFIELD, className, "stepsLeft", "J");
+    mv.visitInsn(LCONST_0);
+    mv.visitInsn(LCMP);
+    Label ok = new Label();
+    mv.visitJumpInsn(IFGE, ok);
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "com/datadoghq/reggie/runtime/BacktrackConfig",
+        "rdStepBudgetExceeded",
+        "()Lcom/datadoghq/reggie/runtime/MatchBudgetExceededException;",
+        false);
+    mv.visitInsn(ATHROW);
+    mv.visitLabel(ok);
+  }
+
+  /**
    * Generate findBoundsFrom() implementation with first-character optimization. Signature:
    * protected int findBoundsFrom(CharSequence input, int fromIndex, int[] bounds)
    */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
     // Compute first-character set for optimization
     CharSet firstCharSet = computeFirstCharSet(ast);
-    boolean canOptimize = firstCharSet != null && !firstCharSet.equals(CharSet.ANY);
+    boolean canOptimize =
+        firstCharSet != null
+            && !firstCharSet.equals(CharSet.ANY)
+            && firstCharSet.getRanges().size() <= FIRST_CHAR_PREFILTER_MAX_RANGES;
     // R2: an ^/\A-anchored pattern (non-multiline) can only match at position 0 — searching
     // from a later offset cannot succeed, and scanning forward position by position is the
     // O(n^2) that dominates .*-prefix anchored rules (e.g. ^(.*)-([0-9]{1,4})$).
@@ -1162,145 +1164,6 @@ public class RecursiveDescentBytecodeGenerator {
   }
 
   /**
-   * Generate matchesBounded() implementation. Signature: public boolean matchesBounded(CharSequence
-   * input, int start, int end)
-   */
-  public void generateMatchesBoundedMethod(ClassWriter cw, String className) {
-    MethodVisitor mv =
-        cw.visitMethod(ACC_PUBLIC, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", null, null);
-    mv.visitCode();
-
-    // Local vars: 0=this, 1=input, 2=start, 3=end
-    // Note: slot 1 will be reused for String input
-    LocalVarAllocator allocator = new LocalVarAllocator(4);
-    int groupsVar = allocator.allocate();
-    int resultVar = allocator.allocate();
-    int iVar = allocator.allocate();
-
-    // Cast CharSequence to String
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitVarInsn(ASTORE, 1); // Replace input with String version
-
-    // Allocate groups array: int[] groups = new int[(groupCount + 1) * 2]
-    com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt(mv, (groupCount + 1) * 2);
-    mv.visitIntInsn(NEWARRAY, T_INT);
-    mv.visitVarInsn(ASTORE, groupsVar);
-
-    // Initialize groups to -1
-    Label initLoopStart = new Label();
-    Label initLoopEnd = new Label();
-    mv.visitInsn(ICONST_0); // i = 0
-    mv.visitVarInsn(ISTORE, iVar);
-
-    mv.visitLabel(initLoopStart);
-    mv.visitVarInsn(ILOAD, iVar);
-    mv.visitVarInsn(ALOAD, groupsVar);
-    mv.visitInsn(ARRAYLENGTH);
-    mv.visitJumpInsn(IF_ICMPGE, initLoopEnd);
-
-    // groups[i] = -1
-    mv.visitVarInsn(ALOAD, groupsVar);
-    mv.visitVarInsn(ILOAD, iVar);
-    mv.visitInsn(ICONST_M1); // -1
-    mv.visitInsn(IASTORE);
-    mv.visitIincInsn(iVar, 1); // i++
-    mv.visitJumpInsn(GOTO, initLoopStart);
-
-    mv.visitLabel(initLoopEnd);
-
-    // Call the root parser, trying each alternation branch separately when the root is an
-    // alternation (same logic as generateMatchesMethod — see comment there).
-    Label matchFailed = new Label();
-    if (ast instanceof AlternationNode) {
-      AlternationNode altNode = (AlternationNode) ast;
-      Label matchOk = new Label();
-      for (int altIdx = 0; altIdx < altNode.alternatives.size(); altIdx++) {
-        RegexNode alt = altNode.alternatives.get(altIdx);
-        generateParserMethod(cw, className, alt);
-        String altMethod = getMethodNameForNode(alt);
-
-        if (altIdx > 0) {
-          Label resetLoopStart = new Label();
-          Label resetLoopEnd = new Label();
-          mv.visitInsn(ICONST_0);
-          mv.visitVarInsn(ISTORE, iVar);
-          mv.visitLabel(resetLoopStart);
-          mv.visitVarInsn(ILOAD, iVar);
-          mv.visitVarInsn(ALOAD, groupsVar);
-          mv.visitInsn(ARRAYLENGTH);
-          mv.visitJumpInsn(IF_ICMPGE, resetLoopEnd);
-          mv.visitVarInsn(ALOAD, groupsVar);
-          mv.visitVarInsn(ILOAD, iVar);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IASTORE);
-          mv.visitIincInsn(iVar, 1);
-          mv.visitJumpInsn(GOTO, resetLoopStart);
-          mv.visitLabel(resetLoopEnd);
-        }
-
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitInsn(ICONST_0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitVarInsn(ALOAD, groupsVar);
-        mv.visitInsn(ICONST_0);
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, resultVar);
-
-        mv.visitVarInsn(ILOAD, resultVar);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitJumpInsn(IF_ICMPEQ, matchOk);
-      }
-      mv.visitJumpInsn(GOTO, matchFailed);
-      mv.visitLabel(matchOk);
-    } else {
-      mv.visitVarInsn(ALOAD, 0); // this
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitInsn(ICONST_0); // start = 0
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitMethodInsn(
-          INVOKEVIRTUAL, "java/lang/String", "length", "()I", false); // end = input.length()
-      mv.visitVarInsn(ALOAD, groupsVar);
-      mv.visitInsn(ICONST_0); // depth = 0
-      mv.visitMethodInsn(
-          INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
-      mv.visitVarInsn(ISTORE, resultVar);
-
-      mv.visitVarInsn(ILOAD, resultVar);
-      mv.visitVarInsn(ALOAD, 1); // input
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-      mv.visitJumpInsn(IF_ICMPNE, matchFailed); // if result != input.length(), match failed
-    }
-
-    // Set group 0 (entire match): groups[0] = 0, groups[1] = result
-    mv.visitVarInsn(ALOAD, groupsVar);
-    mv.visitInsn(ICONST_0); // index 0
-    mv.visitInsn(ICONST_0); // start = 0
-    mv.visitInsn(IASTORE); // groups[0] = 0
-
-    mv.visitVarInsn(ALOAD, groupsVar);
-    mv.visitInsn(ICONST_1); // index 1
-    mv.visitVarInsn(ILOAD, 3); // result (end position)
-    mv.visitInsn(IASTORE); // groups[1] = result
-
-    // Convert groups array to MatchResult format
-    mv.visitInsn(ICONST_1); // true
-    mv.visitInsn(IRETURN);
-
-    mv.visitLabel(matchFailed);
-    mv.visitInsn(ICONST_0); // false
-    mv.visitInsn(IRETURN);
-
-    mv.visitMaxs(5, allocator.peek());
-    mv.visitEnd();
-  }
-
-  /**
    * Generate match() method that returns MatchResult with capturing groups. Signature: public
    * MatchResult match(String input)
    */
@@ -1313,6 +1176,7 @@ public class RecursiveDescentBytecodeGenerator {
             null,
             null);
     mv.visitCode();
+    emitWholeInputStepReset(mv, className);
 
     // Local vars: 0=this, 1=input
     LocalVarAllocator allocator = new LocalVarAllocator(2);
@@ -1352,46 +1216,7 @@ public class RecursiveDescentBytecodeGenerator {
     if (ast instanceof AlternationNode) {
       AlternationNode altNode = (AlternationNode) ast;
       Label matchOk = new Label();
-      for (int altIdx = 0; altIdx < altNode.alternatives.size(); altIdx++) {
-        RegexNode alt = altNode.alternatives.get(altIdx);
-        generateParserMethod(cw, className, alt);
-        String altMethod = getMethodNameForNode(alt);
-
-        if (altIdx > 0) {
-          Label resetLoopStart = new Label();
-          Label resetLoopEnd = new Label();
-          mv.visitInsn(ICONST_0);
-          mv.visitVarInsn(ISTORE, iVar);
-          mv.visitLabel(resetLoopStart);
-          mv.visitVarInsn(ILOAD, iVar);
-          mv.visitVarInsn(ALOAD, groupsVar);
-          mv.visitInsn(ARRAYLENGTH);
-          mv.visitJumpInsn(IF_ICMPGE, resetLoopEnd);
-          mv.visitVarInsn(ALOAD, groupsVar);
-          mv.visitVarInsn(ILOAD, iVar);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IASTORE);
-          mv.visitIincInsn(iVar, 1);
-          mv.visitJumpInsn(GOTO, resetLoopStart);
-          mv.visitLabel(resetLoopEnd);
-        }
-
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitInsn(ICONST_0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitVarInsn(ALOAD, groupsVar);
-        mv.visitInsn(ICONST_0);
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, resultVar);
-
-        mv.visitVarInsn(ILOAD, resultVar);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitJumpInsn(IF_ICMPEQ, matchOk);
-      }
+      emitRootAlternatives(cw, mv, className, altNode, groupsVar, resultVar, iVar, matchOk);
       mv.visitJumpInsn(GOTO, matchFailed);
       mv.visitLabel(matchOk);
       // parseRoot normally sets groups[0]=0 and groups[1]=result.  Since we called the
@@ -1413,7 +1238,7 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ALOAD, groupsVar);
       mv.visitInsn(ICONST_0); // depth = 0
       mv.visitMethodInsn(
-          INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
+          INVOKESPECIAL, className, wholeInputRootMethod(), "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, resultVar);
 
       mv.visitVarInsn(ILOAD, resultVar);
@@ -1432,27 +1257,7 @@ public class RecursiveDescentBytecodeGenerator {
     mv.visitVarInsn(ASTORE, endsVar);
 
     // Copy from groups to starts/ends
-    // for (int i = 0; i <= groupCount; i++) {
-    //     starts[i] = groups[i * 2];
-    //     ends[i] = groups[i * 2 + 1];
-    // }
-    for (int i = 0; i <= groupCount; i++) {
-      // starts[i] = groups[i * 2]
-      mv.visitVarInsn(ALOAD, startsVar);
-      BytecodeUtil.pushInt(mv, i); // index
-      mv.visitVarInsn(ALOAD, groupsVar);
-      BytecodeUtil.pushInt(mv, i * 2); // groups index
-      mv.visitInsn(IALOAD); // groups[i * 2]
-      mv.visitInsn(IASTORE); // starts[i] = ...
-
-      // ends[i] = groups[i * 2 + 1]
-      mv.visitVarInsn(ALOAD, endsVar);
-      BytecodeUtil.pushInt(mv, i); // index
-      mv.visitVarInsn(ALOAD, groupsVar);
-      BytecodeUtil.pushInt(mv, i * 2 + 1); // groups index
-      mv.visitInsn(IALOAD); // groups[i * 2 + 1]
-      mv.visitInsn(IASTORE); // ends[i] = ...
-    }
+    emitUnpackGroups(mv, groupsVar, startsVar, endsVar, iVar);
 
     // new MatchResultImpl(input, starts, ends, groupCount)
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
@@ -1522,22 +1327,6 @@ public class RecursiveDescentBytecodeGenerator {
         false);
     mv.visitInsn(POP);
 
-    Label startsLengthOk = new Label();
-    mv.visitVarInsn(ALOAD, 2);
-    mv.visitInsn(ARRAYLENGTH);
-    BytecodeUtil.pushInt(mv, requiredGroups);
-    mv.visitJumpInsn(IF_ICMPGE, startsLengthOk);
-    generateGroupArrayTooSmallThrow(mv, requiredGroups);
-    mv.visitLabel(startsLengthOk);
-
-    Label endsLengthOk = new Label();
-    mv.visitVarInsn(ALOAD, 3);
-    mv.visitInsn(ARRAYLENGTH);
-    BytecodeUtil.pushInt(mv, requiredGroups);
-    mv.visitJumpInsn(IF_ICMPGE, endsLengthOk);
-    generateGroupArrayTooSmallThrow(mv, requiredGroups);
-    mv.visitLabel(endsLengthOk);
-
     // int[] groups = this.recursiveGroups;
     mv.visitVarInsn(ALOAD, 0);
     mv.visitFieldInsn(
@@ -1571,7 +1360,8 @@ public class RecursiveDescentBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ALOAD, groupsVar);
     mv.visitInsn(ICONST_0);
-    mv.visitMethodInsn(INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, className, wholeInputRootMethod(), "(Ljava/lang/String;II[II)I", false);
     mv.visitVarInsn(ISTORE, resultVar);
 
     // Full-match check.
@@ -1581,22 +1371,25 @@ public class RecursiveDescentBytecodeGenerator {
     Label matchFailed = new Label();
     mv.visitJumpInsn(IF_ICMPNE, matchFailed);
 
-    // Copy packed groups into caller arrays: starts[i] = groups[2*i], ends[i] = groups[2*i + 1]
-    for (int i = 0; i <= groupCount; i++) {
-      mv.visitVarInsn(ALOAD, 2);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitVarInsn(ALOAD, groupsVar);
-      BytecodeUtil.pushInt(mv, i * 2);
-      mv.visitInsn(IALOAD);
-      mv.visitInsn(IASTORE);
+    // Undersized caller arrays throw only on a match; a failed match returns false.
+    Label startsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 2);
+    mv.visitInsn(ARRAYLENGTH);
+    BytecodeUtil.pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, startsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(startsLengthOk);
 
-      mv.visitVarInsn(ALOAD, 3);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitVarInsn(ALOAD, groupsVar);
-      BytecodeUtil.pushInt(mv, i * 2 + 1);
-      mv.visitInsn(IALOAD);
-      mv.visitInsn(IASTORE);
-    }
+    Label endsLengthOk = new Label();
+    mv.visitVarInsn(ALOAD, 3);
+    mv.visitInsn(ARRAYLENGTH);
+    BytecodeUtil.pushInt(mv, requiredGroups);
+    mv.visitJumpInsn(IF_ICMPGE, endsLengthOk);
+    generateGroupArrayTooSmallThrow(mv, requiredGroups);
+    mv.visitLabel(endsLengthOk);
+
+    // Copy packed groups into caller arrays
+    emitUnpackGroups(mv, groupsVar, 2, 3, iVar);
 
     mv.visitInsn(ICONST_1);
     mv.visitInsn(IRETURN);
@@ -1607,6 +1400,61 @@ public class RecursiveDescentBytecodeGenerator {
 
     mv.visitMaxs(6, allocator.peek());
     mv.visitEnd();
+  }
+
+  /**
+   * starts[i] = groups[2 * i], ends[i] = groups[2 * i + 1] for i in 0..groupCount: unrolled up to
+   * {@link #UNROLLED_GROUP_COPY_MAX} groups, else a loop over {@code iVar} (constant size).
+   */
+  private void emitUnpackGroups(
+      MethodVisitor mv, int groupsVar, int startsVar, int endsVar, int iVar) {
+    if (groupCount <= UNROLLED_GROUP_COPY_MAX) {
+      for (int i = 0; i <= groupCount; i++) {
+        mv.visitVarInsn(ALOAD, startsVar);
+        BytecodeUtil.pushInt(mv, i);
+        mv.visitVarInsn(ALOAD, groupsVar);
+        BytecodeUtil.pushInt(mv, i * 2);
+        mv.visitInsn(IALOAD);
+        mv.visitInsn(IASTORE);
+
+        mv.visitVarInsn(ALOAD, endsVar);
+        BytecodeUtil.pushInt(mv, i);
+        mv.visitVarInsn(ALOAD, groupsVar);
+        BytecodeUtil.pushInt(mv, i * 2 + 1);
+        mv.visitInsn(IALOAD);
+        mv.visitInsn(IASTORE);
+      }
+      return;
+    }
+    Label loop = new Label();
+    Label done = new Label();
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, iVar);
+    mv.visitLabel(loop);
+    mv.visitVarInsn(ILOAD, iVar);
+    BytecodeUtil.pushInt(mv, groupCount);
+    mv.visitJumpInsn(IF_ICMPGT, done);
+    mv.visitVarInsn(ALOAD, startsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISHL);
+    mv.visitInsn(IALOAD);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, endsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitVarInsn(ALOAD, groupsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(ISHL);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitInsn(IALOAD);
+    mv.visitInsn(IASTORE);
+    mv.visitIincInsn(iVar, 1);
+    mv.visitJumpInsn(GOTO, loop);
+    mv.visitLabel(done);
   }
 
   private void generateGroupArrayTooSmallThrow(MethodVisitor mv, int requiredGroups) {
@@ -1791,18 +1639,28 @@ public class RecursiveDescentBytecodeGenerator {
     mv.visitJumpInsn(GOTO, initLoopStart);
     mv.visitLabel(initLoopEnd);
 
-    // Call parseRoot at the matched position to get all group captures
-    // int result = parseRoot(input, matchStart, bounds[1], groups, 0)
+    // Call parseRoot at the matched position to get all group captures:
+    // parseRoot(input, matchStart, bounds[1], groups, 0). A non-one-way matcher reparses up to
+    // input.length(), as the search did: a narrower end changes $, \z and the give-back.
     mv.visitVarInsn(ALOAD, 0); // this
     mv.visitVarInsn(ALOAD, 1); // input
     mv.visitVarInsn(ILOAD, matchStartVar); // matchStart (pos)
-    mv.visitVarInsn(ALOAD, boundsVar);
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IALOAD); // bounds[1] (end)
+    if (oneWay) {
+      mv.visitVarInsn(ALOAD, boundsVar);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IALOAD); // bounds[1] (end)
+    } else {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    }
     mv.visitVarInsn(ALOAD, groupsVar);
     mv.visitInsn(ICONST_0); // depth = 0
     mv.visitMethodInsn(INVOKESPECIAL, className, "parseRoot", "(Ljava/lang/String;II[II)I", false);
     mv.visitVarInsn(ISTORE, resultVar);
+
+    // if (result < 0) return null: the re-parse under the found end failed
+    mv.visitVarInsn(ILOAD, resultVar);
+    mv.visitJumpInsn(IFLT, notFound);
 
     // Create MatchResult: allocate starts and ends arrays
     BytecodeUtil.pushInt(mv, groupCount + 1);
@@ -1814,23 +1672,7 @@ public class RecursiveDescentBytecodeGenerator {
     mv.visitVarInsn(ASTORE, endsVar);
 
     // Copy from groups to starts/ends
-    for (int i = 0; i <= groupCount; i++) {
-      // starts[i] = groups[i * 2]
-      mv.visitVarInsn(ALOAD, startsVar);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitVarInsn(ALOAD, groupsVar);
-      BytecodeUtil.pushInt(mv, i * 2);
-      mv.visitInsn(IALOAD);
-      mv.visitInsn(IASTORE);
-
-      // ends[i] = groups[i * 2 + 1]
-      mv.visitVarInsn(ALOAD, endsVar);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitVarInsn(ALOAD, groupsVar);
-      BytecodeUtil.pushInt(mv, i * 2 + 1);
-      mv.visitInsn(IALOAD);
-      mv.visitInsn(IASTORE);
-    }
+    emitUnpackGroups(mv, groupsVar, startsVar, endsVar, iVar);
 
     // new MatchResultImpl(input, starts, ends, groupCount)
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
@@ -1860,12 +1702,20 @@ public class RecursiveDescentBytecodeGenerator {
    * Generate parseRoot method - entry point that delegates to the root parser. Signature: private
    * int parseRoot(String input, int pos, int end, int[] groups)
    */
-  private void generateParseRootMethod(ClassWriter cw, String className) {
-    String rootMethod = getMethodNameForNode(ast);
+  private void generateParseRootMethod(
+      ClassWriter cw, String className, String name, RegexNode root) {
+    String rootMethod = getMethodNameForNode(root);
 
-    MethodVisitor mv =
-        cw.visitMethod(ACC_PRIVATE, "parseRoot", "(Ljava/lang/String;II[II)I", null, null);
+    MethodVisitor mv = cw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;II[II)I", null, null);
     mv.visitCode();
+    // Each parseRoot call is one match attempt: a fresh budget for the region [pos, end)
+    if (!oneWay) {
+      mv.visitVarInsn(ILOAD, 3); // end
+      mv.visitVarInsn(ILOAD, 2); // pos
+      mv.visitInsn(ISUB);
+      emitStepReset(mv, className);
+    }
+    emitStepCheck(mv, className);
 
     // Local vars: 0=this, 1=input, 2=pos, 3=end, 4=groups, 5=depth
     LocalVarAllocator allocator = new LocalVarAllocator(6);
@@ -1914,6 +1764,141 @@ public class RecursiveDescentBytecodeGenerator {
    * Generate parser method for a specific AST node. Signature: private int parse_X_N(String input,
    * int pos, int end, int[] groups, int depth)
    */
+  /**
+   * Tries each alternative of a root alternation on the whole input, resetting the groups to -1
+   * before every alternative but the first, and jumps to {@code success} with {@code resultVar} =
+   * input.length() when one consumes it all. Over {@link #RANGE_CHUNK} alternatives, range helpers
+   * try them, as in visitAlternation; else they are tried inline.
+   */
+  private void emitRootAlternatives(
+      ClassWriter cw,
+      MethodVisitor mv,
+      String className,
+      AlternationNode altNode,
+      int groupsVar,
+      int resultVar,
+      int iVar,
+      Label success) {
+    List<RegexNode> alternatives = altNode.alternatives;
+    int n = alternatives.size();
+    if (n > RANGE_CHUNK) {
+      int span = rangeSpan(n, RANGE_CHUNK);
+      for (int lo = 0; lo < n; ) {
+        int hi = n - lo <= span ? n : lo + span;
+        String helper = generateRootRangeMethod(cw, className, alternatives, lo, hi);
+        lo = hi;
+        mv.visitVarInsn(ALOAD, 0); // this
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitInsn(ICONST_0); // pos = 0
+        mv.visitVarInsn(ALOAD, 1); // input
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        mv.visitVarInsn(ALOAD, groupsVar); // groups
+        mv.visitInsn(ICONST_0); // depth = 0
+        mv.visitMethodInsn(INVOKESPECIAL, className, helper, "(Ljava/lang/String;II[II)I", false);
+        mv.visitVarInsn(ISTORE, resultVar);
+        // The helper returns input.length() or -1
+        mv.visitVarInsn(ILOAD, resultVar);
+        mv.visitInsn(ICONST_M1);
+        mv.visitJumpInsn(IF_ICMPNE, success);
+      }
+      return;
+    }
+    for (int altIdx = 0; altIdx < n; altIdx++) {
+      RegexNode alt = alternatives.get(altIdx);
+      generateParserMethod(cw, className, alt);
+      String altMethod = getMethodNameForNode(alt);
+
+      // Reset groups to -1 before each alternative (groups may have been dirtied by a
+      // previous alternative that partially matched).
+      if (altIdx > 0) {
+        Label resetLoopStart = new Label();
+        Label resetLoopEnd = new Label();
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ISTORE, iVar);
+        mv.visitLabel(resetLoopStart);
+        mv.visitVarInsn(ILOAD, iVar);
+        mv.visitVarInsn(ALOAD, groupsVar);
+        mv.visitInsn(ARRAYLENGTH);
+        mv.visitJumpInsn(IF_ICMPGE, resetLoopEnd);
+        mv.visitVarInsn(ALOAD, groupsVar);
+        mv.visitVarInsn(ILOAD, iVar);
+        mv.visitInsn(ICONST_M1);
+        mv.visitInsn(IASTORE);
+        mv.visitIincInsn(iVar, 1);
+        mv.visitJumpInsn(GOTO, resetLoopStart);
+        mv.visitLabel(resetLoopEnd);
+      }
+
+      // Call this alternative's parser
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitInsn(ICONST_0); // pos = 0
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitVarInsn(ALOAD, groupsVar); // groups
+      mv.visitInsn(ICONST_0); // depth = 0
+      mv.visitMethodInsn(INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, resultVar);
+
+      // If this alternative consumed the whole input, we have a full match
+      mv.visitVarInsn(ILOAD, resultVar);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      mv.visitJumpInsn(IF_ICMPEQ, success);
+      // Otherwise continue to the next alternative
+    }
+  }
+
+  /**
+   * Root range helper: returns {@code end} when one of {@code alternatives[from..to)} matches from
+   * pos to end, else -1. Groups are reset to -1 before every alternative but the root's first.
+   */
+  private String generateRootRangeMethod(
+      ClassWriter cw, String className, List<RegexNode> alternatives, int from, int to) {
+    String name = "parse_RootRange_" + (methodCounter++);
+    MethodVisitor m = cw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;II[II)I", null, null);
+    m.visitCode();
+    emitStepCheck(m, className);
+    int span = to - from > RANGE_CHUNK ? rangeSpan(to - from, RANGE_CHUNK) : 1;
+    for (int lo = from; lo < to; ) {
+      int hi = to - lo <= span ? to : lo + span;
+      String method;
+      if (span == 1) {
+        RegexNode alt = alternatives.get(lo);
+        generateParserMethod(cw, className, alt);
+        method = getMethodNameForNode(alt);
+        if (lo > 0) {
+          m.visitVarInsn(ALOAD, 4);
+          m.visitInsn(ICONST_M1);
+          m.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([II)V", false);
+        }
+      } else {
+        method = generateRootRangeMethod(cw, className, alternatives, lo, hi);
+      }
+      lo = hi;
+      Label next = new Label();
+      m.visitVarInsn(ALOAD, 0);
+      m.visitVarInsn(ALOAD, 1);
+      m.visitVarInsn(ILOAD, 2);
+      m.visitVarInsn(ILOAD, 3);
+      m.visitVarInsn(ALOAD, 4);
+      m.visitVarInsn(ILOAD, 5);
+      m.visitMethodInsn(INVOKESPECIAL, className, method, "(Ljava/lang/String;II[II)I", false);
+      m.visitVarInsn(ISTORE, 6);
+      m.visitVarInsn(ILOAD, 6);
+      m.visitVarInsn(ILOAD, 3);
+      m.visitJumpInsn(IF_ICMPNE, next);
+      m.visitVarInsn(ILOAD, 6);
+      m.visitInsn(IRETURN);
+      m.visitLabel(next);
+    }
+    m.visitInsn(ICONST_M1);
+    m.visitInsn(IRETURN);
+    m.visitMaxs(0, 0);
+    m.visitEnd();
+    return name;
+  }
+
   private void generateParserMethod(ClassWriter cw, String className, RegexNode node) {
     // Skip if already generated
     if (nodeToMethodName.containsKey(node)) {
@@ -1925,6 +1910,7 @@ public class RecursiveDescentBytecodeGenerator {
     MethodVisitor mv =
         cw.visitMethod(ACC_PRIVATE, methodName, "(Ljava/lang/String;II[II)I", null, null);
     mv.visitCode();
+    emitStepCheck(mv, className);
 
     // Visit the node to generate parsing logic
     node.accept(new ParserMethodGenerator(cw, mv, className));
@@ -2299,51 +2285,14 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitTypeInsn(CHECKCAST, "[I");
       mv.visitVarInsn(ASTORE, 6); // savedGroups in slot 6
 
-      // Try each alternative
-      for (int i = 0; i < node.alternatives.size(); i++) {
-        RegexNode alt = node.alternatives.get(i);
-        Label nextAlt = new Label();
-
-        // Generate parser method for this alternative if needed
-        generateParserMethod(cw, className, alt);
-        String altMethod = getMethodNameForNode(alt);
-
-        // Call alternative parser: result = parse_alt(input, pos, end, groups, depth)
-        mv.visitVarInsn(ALOAD, 0); // this
-        mv.visitVarInsn(ALOAD, 1); // input
-        mv.visitVarInsn(ILOAD, 2); // pos
-        mv.visitVarInsn(ILOAD, 3); // end
-        mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, 5); // depth
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, 7); // result in slot 7
-
-        // If succeeded (result != -1), return result
-        mv.visitVarInsn(ILOAD, 7);
-        mv.visitInsn(ICONST_M1);
-        mv.visitJumpInsn(IF_ICMPEQ, nextAlt); // If failed, try next alternative
-
-        // Success: return result
-        mv.visitVarInsn(ILOAD, 7);
-        mv.visitInsn(IRETURN);
-
-        // Failed: restore groups and try next
-        mv.visitLabel(nextAlt);
-        if (i < node.alternatives.size() - 1) {
-          // Restore groups array: System.arraycopy(savedGroups, 0, groups, 0, groups.length)
-          mv.visitVarInsn(ALOAD, 6); // savedGroups
-          mv.visitInsn(ICONST_0); // srcPos
-          mv.visitVarInsn(ALOAD, 4); // groups
-          mv.visitInsn(ICONST_0); // destPos
-          mv.visitVarInsn(ALOAD, 4); // groups
-          mv.visitInsn(ARRAYLENGTH); // length
-          mv.visitMethodInsn(
-              INVOKESTATIC,
-              "java/lang/System",
-              "arraycopy",
-              "(Ljava/lang/Object;ILjava/lang/Object;II)V",
-              false);
+      int n = node.alternatives.size();
+      if (n > RANGE_CHUNK) {
+        // Each range helper tries its alternatives in order and restores groups between them;
+        // restoring between helpers gives the same sequence as the unsplit loop.
+        emitAlternationRanges(mv, node.alternatives, null, 0, n, RANGE_CHUNK);
+      } else {
+        for (int i = 0; i < n; i++) {
+          emitAlternative(mv, node.alternatives.get(i), i < n - 1);
         }
       }
 
@@ -2352,6 +2301,221 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitInsn(IRETURN);
 
       return null;
+    }
+
+    /**
+     * Calls one range helper per span of alternatives [from, to), restoring groups (slot 6) between
+     * them.
+     */
+    private void emitAlternationRanges(
+        MethodVisitor mv,
+        List<RegexNode> alternatives,
+        Set<Integer> resetGroups,
+        int from,
+        int to,
+        int chunk) {
+      int span = rangeSpan(to - from, chunk);
+      for (int lo = from; lo < to; ) {
+        int hi = to - lo <= span ? to : lo + span;
+        emitAlternativeCall(
+            mv, generateAlternationRangeMethod(alternatives, resetGroups, lo, hi, chunk), hi < to);
+        lo = hi;
+      }
+    }
+
+    /**
+     * Range helper for an oversized alternation or branch reset: alternatives [from, to), -1 if all
+     * fail. A non-null {@code resetGroups} clears those groups before each alternative. A range
+     * larger than {@code chunk} calls nested range helpers instead.
+     */
+    private String generateAlternationRangeMethod(
+        List<RegexNode> alternatives, Set<Integer> resetGroups, int from, int to, int chunk) {
+      String name = "parse_AlternationRange_" + (methodCounter++);
+      MethodVisitor m = cw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;II[II)I", null, null);
+      m.visitCode();
+      emitStepCheck(m, className);
+      m.visitVarInsn(ALOAD, 4);
+      m.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
+      m.visitTypeInsn(CHECKCAST, "[I");
+      m.visitVarInsn(ASTORE, 6);
+      if (to - from > chunk) {
+        emitAlternationRanges(m, alternatives, resetGroups, from, to, chunk);
+      } else {
+        for (int i = from; i < to; i++) {
+          if (resetGroups != null) {
+            emitGroupReset(m, resetGroups);
+          }
+          emitAlternative(m, alternatives.get(i), i < to - 1);
+        }
+      }
+      m.visitInsn(ICONST_M1);
+      m.visitInsn(IRETURN);
+      m.visitMaxs(0, 0);
+      m.visitEnd();
+      return name;
+    }
+
+    /**
+     * Tries one alternative: an inline leaf returns pos + 1 when it matches, other nodes are called
+     * through their parser method. A leaf writes no groups, so a failed leaf needs no restore.
+     */
+    private void emitAlternative(MethodVisitor mv, RegexNode alt, boolean restore) {
+      if (isInlineLeaf(alt)) {
+        Label nextAlt = new Label();
+        emitLeafCheck(mv, alt, 2, nextAlt);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitInsn(ICONST_1);
+        mv.visitInsn(IADD);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(nextAlt);
+        return;
+      }
+      generateParserMethod(cw, className, alt);
+      emitAlternativeCall(mv, getMethodNameForNode(alt), restore);
+    }
+
+    /**
+     * Matches one concat child at currentPos (slot 6): an inline leaf advances currentPos or
+     * returns -1, other nodes are called through their parser method.
+     */
+    private void emitSequenceChild(MethodVisitor mv, RegexNode child) {
+      if (!isInlineLeaf(child)) {
+        generateParserMethod(cw, className, child);
+        emitSequenceCall(mv, getMethodNameForNode(child));
+        return;
+      }
+      Label fail = new Label();
+      Label matched = new Label();
+      emitLeafCheck(mv, child, 6, fail);
+      mv.visitIincInsn(6, 1);
+      mv.visitJumpInsn(GOTO, matched);
+      mv.visitLabel(fail);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(matched);
+    }
+
+    /**
+     * Jumps to {@code fail} unless the leaf matches the char at the position in {@code posSlot};
+     * uses slot 7 for the char. Same semantics as visitLiteral and visitCharClass.
+     */
+    private void emitLeafCheck(MethodVisitor mv, RegexNode leaf, int posSlot, Label fail) {
+      mv.visitVarInsn(ILOAD, posSlot);
+      mv.visitVarInsn(ILOAD, 3); // end
+      mv.visitJumpInsn(IF_ICMPGE, fail);
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, posSlot);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      if (leaf instanceof LiteralNode) {
+        BytecodeUtil.pushInt(mv, ((LiteralNode) leaf).ch);
+        mv.visitJumpInsn(IF_ICMPNE, fail);
+      } else {
+        CharClassNode cc = (CharClassNode) leaf;
+        mv.visitVarInsn(ISTORE, 7);
+        BytecodeUtil.emitCharSetCheck(mv, cc.negated ? cc.chars.complement() : cc.chars, 7, fail);
+      }
+    }
+
+    /**
+     * result = method(input, pos, end, groups, depth); return it unless -1. With {@code restore}, a
+     * failed call is followed by copying savedGroups (slot 6) back into groups.
+     */
+    private void emitAlternativeCall(MethodVisitor mv, String altMethod, boolean restore) {
+      Label nextAlt = new Label();
+      // Call alternative parser: result = parse_alt(input, pos, end, groups, depth)
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 2); // pos
+      mv.visitVarInsn(ILOAD, 3); // end
+      mv.visitVarInsn(ALOAD, 4); // groups
+      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitMethodInsn(INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, 7); // result in slot 7
+
+      // If succeeded (result != -1), return result
+      mv.visitVarInsn(ILOAD, 7);
+      mv.visitInsn(ICONST_M1);
+      mv.visitJumpInsn(IF_ICMPEQ, nextAlt); // If failed, try next alternative
+
+      // Success: return result
+      mv.visitVarInsn(ILOAD, 7);
+      mv.visitInsn(IRETURN);
+
+      // Failed: restore groups and try next
+      mv.visitLabel(nextAlt);
+      if (restore) {
+        // Restore groups array: System.arraycopy(savedGroups, 0, groups, 0, groups.length)
+        mv.visitVarInsn(ALOAD, 6); // savedGroups
+        mv.visitInsn(ICONST_0); // srcPos
+        mv.visitVarInsn(ALOAD, 4); // groups
+        mv.visitInsn(ICONST_0); // destPos
+        mv.visitVarInsn(ALOAD, 4); // groups
+        mv.visitInsn(ARRAYLENGTH); // length
+        mv.visitMethodInsn(
+            INVOKESTATIC,
+            "java/lang/System",
+            "arraycopy",
+            "(Ljava/lang/Object;ILjava/lang/Object;II)V",
+            false);
+      }
+    }
+
+    /**
+     * groups[2g] = groups[2g + 1] = -1 for each g: two stores per group, or one Arrays.fill for a
+     * run of more than UNROLLED_RESET_RUN_MAX consecutive group numbers.
+     */
+    private void emitGroupReset(MethodVisitor mv, Set<Integer> groupNumbers) {
+      for (int g : groupNumbers) {
+        int last = resetRunEnd(groupNumbers, g);
+        if (last < 0) {
+          continue;
+        }
+        if (last - g >= UNROLLED_RESET_RUN_MAX) {
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, g * 2);
+          BytecodeUtil.pushInt(mv, last * 2 + 2);
+          mv.visitInsn(ICONST_M1);
+          mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([IIII)V", false);
+          continue;
+        }
+        for (int r = g; r <= last; r++) {
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, r * 2);
+          mv.visitInsn(ICONST_M1);
+          mv.visitInsn(IASTORE);
+          mv.visitVarInsn(ALOAD, 4); // groups
+          BytecodeUtil.pushInt(mv, r * 2 + 1);
+          mv.visitInsn(ICONST_M1);
+          mv.visitInsn(IASTORE);
+        }
+      }
+    }
+
+    /**
+     * Upper bound of the bytes emitGroupReset emits: at most 14 per stored group, at most 12 per
+     * Arrays.fill.
+     */
+    private static int groupResetBytes(Set<Integer> groupNumbers) {
+      int bytes = 0;
+      for (int g : groupNumbers) {
+        int last = resetRunEnd(groupNumbers, g);
+        if (last >= 0) {
+          bytes += last - g >= UNROLLED_RESET_RUN_MAX ? 12 : 14 * (last - g + 1);
+        }
+      }
+      return bytes;
+    }
+
+    /** Last group of the run of consecutive group numbers starting at g, -1 if g starts no run. */
+    private static int resetRunEnd(Set<Integer> groupNumbers, int g) {
+      if (groupNumbers.contains(g - 1)) {
+        return -1;
+      }
+      int last = g;
+      while (groupNumbers.contains(last + 1)) {
+        last++;
+      }
+      return last;
     }
 
     @Override
@@ -2379,31 +2543,14 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitVarInsn(ILOAD, 2); // currentPos = pos
         mv.visitVarInsn(ISTORE, 6);
 
-        // Match each child in sequence
-        for (RegexNode child : node.children) {
-          generateParserMethod(cw, className, child);
-          String childMethod = getMethodNameForNode(child);
-          Label successLabel = new Label();
-
-          // Call child parser: currentPos = parse_child(input, currentPos, end, groups, depth)
-          mv.visitVarInsn(ALOAD, 0); // this
-          mv.visitVarInsn(ALOAD, 1); // input
-          mv.visitVarInsn(ILOAD, 6); // currentPos
-          mv.visitVarInsn(ILOAD, 3); // end
-          mv.visitVarInsn(ALOAD, 4); // groups
-          mv.visitVarInsn(ILOAD, 5); // depth
-          mv.visitMethodInsn(
-              INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-          mv.visitVarInsn(ISTORE, 6); // currentPos = result
-
-          // If failed, return -1
-          mv.visitVarInsn(ILOAD, 6);
-          mv.visitInsn(ICONST_M1);
-          mv.visitJumpInsn(IF_ICMPNE, successLabel);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IRETURN);
-
-          mv.visitLabel(successLabel);
+        // Match each child in sequence; an oversized concat calls one range helper per chunk
+        int n = node.children.size();
+        if (n > RANGE_CHUNK) {
+          emitConcatRanges(mv, node, 0, n);
+        } else {
+          for (RegexNode child : node.children) {
+            emitSequenceChild(mv, child);
+          }
         }
 
         // All children matched: return final position
@@ -2419,13 +2566,141 @@ public class RecursiveDescentBytecodeGenerator {
       return null;
     }
 
+    /** Calls one range helper per span of children [from, to), threading currentPos (slot 6). */
+    private void emitConcatRanges(MethodVisitor mv, ConcatNode node, int from, int to) {
+      int span = rangeSpan(to - from, RANGE_CHUNK);
+      for (int lo = from; lo < to; ) {
+        int hi = to - lo <= span ? to : lo + span;
+        emitSequenceCall(mv, generateConcatRangeMethod(node, lo, hi));
+        lo = hi;
+      }
+    }
+
+    /**
+     * Range helper for an oversized simple concat: children [from, to) in sequence. A range larger
+     * than RANGE_CHUNK calls nested range helpers instead.
+     */
+    private String generateConcatRangeMethod(ConcatNode node, int from, int to) {
+      String name = "parse_ConcatRange_" + (methodCounter++);
+      MethodVisitor m = cw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;II[II)I", null, null);
+      m.visitCode();
+      emitStepCheck(m, className);
+      m.visitVarInsn(ILOAD, 2);
+      m.visitVarInsn(ISTORE, 6);
+      if (to - from > RANGE_CHUNK) {
+        emitConcatRanges(m, node, from, to);
+      } else {
+        for (int i = from; i < to; i++) {
+          emitSequenceChild(m, node.children.get(i));
+        }
+      }
+      m.visitVarInsn(ILOAD, 6);
+      m.visitInsn(IRETURN);
+      m.visitMaxs(0, 0);
+      m.visitEnd();
+      return name;
+    }
+
+    /** currentPos (slot 6) = method(input, currentPos, end, groups, depth); return -1 on -1. */
+    private void emitSequenceCall(MethodVisitor mv, String method) {
+      Label successLabel = new Label();
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 6); // currentPos
+      mv.visitVarInsn(ILOAD, 3); // end
+      mv.visitVarInsn(ALOAD, 4); // groups
+      mv.visitVarInsn(ILOAD, 5); // depth
+      mv.visitMethodInsn(INVOKESPECIAL, className, method, "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, 6); // currentPos = result
+      mv.visitVarInsn(ILOAD, 6);
+      mv.visitInsn(ICONST_M1);
+      mv.visitJumpInsn(IF_ICMPNE, successLabel);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(successLabel);
+    }
+
+    /**
+     * Children [from, to) of {@code node} in sequence on currentPos (slot 5), with the depth in
+     * depthSlot. A failed child leaves -1 in slot 5 and jumps to {@code fail}, or returns -1 when
+     * {@code fail} is null. A run longer than INLINE_CHILD_RUN_MAX calls range helpers instead.
+     */
+    private void emitChildRun(ConcatNode node, int from, int to, Label fail) {
+      if (to - from > INLINE_CHILD_RUN_MAX) {
+        int span = rangeSpan(to - from, RANGE_CHUNK);
+        for (int lo = from; lo < to; ) {
+          int hi = to - lo <= span ? to : lo + span;
+          emitChildCall(generateConcatRangeMethod(node, lo, hi), fail);
+          lo = hi;
+        }
+        return;
+      }
+      for (int i = from; i < to; i++) {
+        RegexNode child = node.children.get(i);
+        generateParserMethod(cw, className, child);
+        emitChildCall(getMethodNameForNode(child), fail);
+      }
+    }
+
+    /** emitChildRun where a failed child backtracks, as {@link #emitBacktrack}. */
+    private void emitChildRunOrBacktrack(
+        ConcatNode node, int from, int to, int trySlot, int delta, Label loop) {
+      if (from >= to) {
+        return;
+      }
+      Label failed = new Label();
+      Label done = new Label();
+      emitChildRun(node, from, to, failed);
+      mv.visitJumpInsn(GOTO, done);
+      mv.visitLabel(failed);
+      emitBacktrack(trySlot, delta, loop);
+      mv.visitLabel(done);
+    }
+
+    /** tryMatchCount ({@code trySlot}, none when negative) += delta; goto loop. */
+    private void emitBacktrack(int trySlot, int delta, Label loop) {
+      if (trySlot >= 0) {
+        mv.visitIincInsn(trySlot, delta);
+      }
+      mv.visitJumpInsn(GOTO, loop);
+    }
+
+    /**
+     * currentPos (slot 5) = method(input, currentPos, end, groups, depth); -1 as in emitChildRun.
+     */
+    private void emitChildCall(String method, Label fail) {
+      mv.visitVarInsn(ALOAD, 0); // this
+      mv.visitVarInsn(ALOAD, 1); // input
+      mv.visitVarInsn(ILOAD, 5); // currentPos
+      mv.visitVarInsn(ILOAD, 3); // end
+      mv.visitVarInsn(ALOAD, 4); // groups
+      mv.visitVarInsn(ILOAD, depthSlot); // depth
+      mv.visitMethodInsn(INVOKESPECIAL, className, method, "(Ljava/lang/String;II[II)I", false);
+      mv.visitVarInsn(ISTORE, 5);
+      mv.visitVarInsn(ILOAD, 5);
+      mv.visitInsn(ICONST_M1);
+      if (fail != null) {
+        mv.visitJumpInsn(IF_ICMPEQ, fail);
+        return;
+      }
+      Label ok = new Label();
+      mv.visitJumpInsn(IF_ICMPNE, ok);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(ok);
+    }
+
     /**
      * Check if a node contains a quantifier that might need backtracking. Both greedy and
-     * non-greedy quantifiers need backtracking when followed by more children.
+     * non-greedy quantifiers need backtracking when followed by more children. A possessive
+     * quantifier or an atomic group never gives back.
      */
     private boolean containsBacktrackingQuantifier(RegexNode node) {
       if (node instanceof QuantifierNode) {
         QuantifierNode q = (QuantifierNode) node;
+        if (q.possessive) {
+          return false;
+        }
         // Non-greedy quantifiers always need backtracking when followed by more children
         // because they return after minimum, and need to expand if rest fails
         if (!q.greedy && q.min != q.max) {
@@ -2438,6 +2713,9 @@ public class RecursiveDescentBytecodeGenerator {
       }
       if (node instanceof GroupNode) {
         GroupNode g = (GroupNode) node;
+        if (g.atomic) {
+          return false;
+        }
         // A GroupNode whose child concat has a trailing optional backref needs backtracking
         // at the outer concat level (e.g. (a\1?) where \1 could match variable-length).
         // Only detect this for non-self-referencing groups (self-ref groups are handled by
@@ -2478,17 +2756,8 @@ public class RecursiveDescentBytecodeGenerator {
 
     /** Returns true if the subroutine's target pattern contains a variable-length quantifier. */
     private boolean hasVariableLengthTarget(SubroutineNode node) {
-      RegexNode targetNode;
-      if (node.groupNumber == -1) {
-        targetNode = ast;
-      } else if (node.groupNumber >= 0) {
-        RegexNode stored = groupNumberToNode.get(node.groupNumber);
-        if (stored == null) return false;
-        targetNode = (stored instanceof GroupNode) ? ((GroupNode) stored).child : stored;
-      } else {
-        return false;
-      }
-      return containsVariableLengthQuantifier(targetNode);
+      RegexNode targetNode = isRootCall(node) ? ast : callTarget(node);
+      return targetNode != null && containsVariableLengthQuantifier(targetNode);
     }
 
     private boolean containsVariableLengthQuantifier(RegexNode node) {
@@ -2594,9 +2863,8 @@ public class RecursiveDescentBytecodeGenerator {
       // slot 9: tryMatchCount (backtracking loop variable)
       // slot 10: matchCount (for quantifier matching loop)
       // slot 11: result (temporary for method calls)
-      // slot 14: greedyIterations (BacktrackConfig limit tracking)
-      // slot 15: backtrackIterations (BacktrackConfig limit tracking)
-      // localBase: int[] iterEnd (R2 fast give-back; nested backtracking starts above it)
+      // localBase: R2 fast give-back iterEnd (int[], or int when max == 1), else the int
+      //            greedyClean flag; nested backtracking starts above it
 
       // Preserve depth before repurposing slot 5 as currentPos.
       // Push pos then depth in order; store depth into the now-dead pos slot (2),
@@ -2608,34 +2876,19 @@ public class RecursiveDescentBytecodeGenerator {
       depthSlot = 2;
 
       // Process children before the backtracking point
-      for (int i = 0; i < backtrackChildIndex; i++) {
-        RegexNode child = node.children.get(i);
-        generateParserMethod(cw, className, child);
-        String childMethod = getMethodNameForNode(child);
-        Label successLabel = new Label();
+      emitChildRun(node, 0, backtrackChildIndex, null);
 
-        mv.visitVarInsn(ALOAD, 0); // this
-        mv.visitVarInsn(ALOAD, 1); // input
-        mv.visitVarInsn(ILOAD, 5); // currentPos
-        mv.visitVarInsn(ILOAD, 3); // end
-        mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, depthSlot); // depth
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, 5); // currentPos = result
-
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitInsn(ICONST_M1);
-        mv.visitJumpInsn(IF_ICMPNE, successLabel);
-        mv.visitInsn(ICONST_M1);
-        mv.visitInsn(IRETURN);
-
-        mv.visitLabel(successLabel);
-      }
+      RegexNode greedyChild = node.children.get(backtrackChildIndex);
+      QuantifierNode quantNode = extractQuantifier(greedyChild);
 
       // Save groups array AFTER matching children before the backtracking point
-      // This preserves any group captures set by those children during backtracking
-      generateGroupArraySave(4, 6); // savedGroups = groups.clone()
+      // This preserves any group captures set by those children during backtracking.
+      // When nothing from the backtracking point on can write groups, the snapshot and its
+      // restores are no-ops and are skipped (the two-path group handling always needs slot 6).
+      boolean saveGroups = quantNode == null || !isGroupsNeutralFrom(node, backtrackChildIndex);
+      if (saveGroups) {
+        generateGroupArraySave(4, 6); // savedGroups = groups.clone()
+      }
 
       // Save position before quantifier
       mv.visitVarInsn(ILOAD, 5); // quantifierStartPos = currentPos
@@ -2647,10 +2900,6 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ISTORE, 12); // lastIterationStart = -1
       mv.visitInsn(ICONST_M1);
       mv.visitVarInsn(ISTORE, 13); // lastIterationEnd = -1
-
-      // Get the quantifier node and extract parameters
-      RegexNode greedyChild = node.children.get(backtrackChildIndex);
-      QuantifierNode quantNode = extractQuantifier(greedyChild);
 
       // Check if this is a capturing group (we need to set group boundaries)
       int captureGroupNumber = -1;
@@ -2692,13 +2941,19 @@ public class RecursiveDescentBytecodeGenerator {
       generateParserMethod(cw, className, quantNode.child);
       String quantChildMethod = getMethodNameForNode(quantNode.child);
 
-      // R2 fast give-back: when the quantifier body is capture-free, re-matching it k times
+      // R2 fast give-back: when the quantifier body is groups-neutral, re-matching it k times
       // from the start on every backtracking level is pure waste (deterministic body, no group
       // writes): record each iteration's end position during the greedy consume and look it up
-      // instead. This turns .*-prefix give-back from O(n^2) into O(n). Slot 16: int[] iterEnd,
-      // iterEnd[k] = position after k iterations.
-      boolean fastGiveBack = quantNode.greedy && isCaptureFree(quantNode.child);
-      if (fastGiveBack) {
+      // instead. This turns .*-prefix give-back from O(n^2) into O(n), and a quantified
+      // subroutine call from O(2^depth) into O(depth). localBase: iterEnd[k] = position after k
+      // iterations; for max == 1 only iterEnd[1] is needed and it lives in an int slot.
+      boolean fastGiveBack = isGroupsNeutral(quantNode.child);
+      boolean singleIter = fastGiveBack && quantNode.max == 1;
+      if (singleIter) {
+        // iterEnd1 = quantifierStartPos (overwritten by the one greedy iteration, if any)
+        mv.visitVarInsn(ILOAD, 7);
+        mv.visitVarInsn(ISTORE, localBase);
+      } else if (fastGiveBack) {
         // iterEnd = new int[(end - quantifierStartPos) + min + 2]
         // (progress iterations <= end-start; empty iterations counted only while below min)
         mv.visitVarInsn(ILOAD, 3); // end
@@ -2708,6 +2963,20 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitInsn(IADD);
         mv.visitIntInsn(NEWARRAY, T_INT);
         mv.visitVarInsn(ASTORE, localBase);
+        // iterEnd[0] = quantifierStartPos (read as the last iteration's start when k == 1)
+        mv.visitVarInsn(ALOAD, localBase);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ILOAD, 7);
+        mv.visitInsn(IASTORE);
+      }
+      // Greedy body that may write groups: the first backtracking step (k == maxMatches) can
+      // keep the greedy pass's position and groups instead of replaying it, unless the greedy
+      // loop ended on a failed child call, which may have left partial captures behind.
+      // localBase: greedyClean flag.
+      boolean skipFirstReplay = quantNode.greedy && !fastGiveBack;
+      if (skipFirstReplay) {
+        mv.visitInsn(ICONST_1);
+        mv.visitVarInsn(ISTORE, localBase); // greedyClean = true
       }
 
       // First, do a greedy match to find maxMatches
@@ -2715,30 +2984,11 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, 10);
 
-      // Initialize greedy iteration counter (slot 14)
-      mv.visitInsn(ICONST_0);
-      mv.visitVarInsn(ISTORE, 14);
-
       // Match greedily
       Label greedyLoop = new Label();
       Label greedyEnd = new Label();
 
       mv.visitLabel(greedyLoop);
-
-      // Check backtrack limit to prevent infinite loops
-      mv.visitVarInsn(ILOAD, 14);
-      mv.visitMethodInsn(
-          INVOKESTATIC,
-          "com/datadoghq/reggie/runtime/BacktrackConfig",
-          "checkLimit",
-          "(I)Z",
-          false);
-      Label greedyLimitOk = new Label();
-      mv.visitJumpInsn(IFEQ, greedyLimitOk);
-      // Limit exceeded: stop greedy matching
-      mv.visitJumpInsn(GOTO, greedyEnd);
-      mv.visitLabel(greedyLimitOk);
-      mv.visitIincInsn(14, 1); // greedyIterations++
 
       // Check max limit
       if (quantNode.max != -1 && quantNode.max != Integer.MAX_VALUE) {
@@ -2759,9 +3009,18 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ISTORE, 11); // result in slot 11
 
       // If failed, stop
+      Label greedyFailed = new Label();
       mv.visitVarInsn(ILOAD, 11);
       mv.visitInsn(ICONST_M1);
-      mv.visitJumpInsn(IF_ICMPEQ, greedyEnd);
+      mv.visitJumpInsn(IF_ICMPEQ, skipFirstReplay ? greedyFailed : greedyEnd);
+
+      if (skipFirstReplay) {
+        // Last iteration bounds, as the replay loop would record them (POSIX slots 12/13)
+        mv.visitVarInsn(ILOAD, 5);
+        mv.visitVarInsn(ISTORE, 12); // lastIterationStart = currentPos
+        mv.visitVarInsn(ILOAD, 11);
+        mv.visitVarInsn(ISTORE, 13); // lastIterationEnd = result
+      }
 
       // Check for empty match (no progress) - prevents infinite loop on (a?)+
       mv.visitVarInsn(ILOAD, 11); // result
@@ -2772,13 +3031,7 @@ public class RecursiveDescentBytecodeGenerator {
       // we must keep counting until matchCount reaches min before stopping, otherwise the
       // minimum repetition requirement won't be satisfied.
       mv.visitIincInsn(10, 1); // matchCount++
-      if (fastGiveBack) {
-        // iterEnd[matchCount] = currentPos (zero-width iteration)
-        mv.visitVarInsn(ALOAD, localBase);
-        mv.visitVarInsn(ILOAD, 10);
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitInsn(IASTORE);
-      }
+      emitIterEndStore(fastGiveBack, singleIter, localBase, 10);
       if (quantNode.min > 1) {
         // If matchCount is still below min, continue counting (safe: pos doesn't change)
         mv.visitVarInsn(ILOAD, 10); // matchCount
@@ -2792,15 +3045,14 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ILOAD, 11);
       mv.visitVarInsn(ISTORE, 5); // currentPos = result
       mv.visitIincInsn(10, 1); // matchCount++
-      if (fastGiveBack) {
-        // iterEnd[matchCount] = currentPos
-        mv.visitVarInsn(ALOAD, localBase);
-        mv.visitVarInsn(ILOAD, 10);
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitInsn(IASTORE);
-      }
+      emitIterEndStore(fastGiveBack, singleIter, localBase, 10);
       mv.visitJumpInsn(GOTO, greedyLoop);
 
+      mv.visitLabel(greedyFailed);
+      if (skipFirstReplay) {
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ISTORE, localBase); // greedyClean = false
+      }
       mv.visitLabel(greedyEnd);
 
       // Check if we matched minimum required
@@ -2829,30 +3081,10 @@ public class RecursiveDescentBytecodeGenerator {
       }
       mv.visitVarInsn(ISTORE, 9);
 
-      // Initialize backtrack iteration counter (slot 15)
-      mv.visitInsn(ICONST_0);
-      mv.visitVarInsn(ISTORE, 15);
-
       Label backtrackLoop = new Label();
       Label backtrackEnd = new Label();
 
       mv.visitLabel(backtrackLoop);
-
-      // Check backtrack limit to prevent infinite backtracking
-      mv.visitVarInsn(ILOAD, 15);
-      mv.visitMethodInsn(
-          INVOKESTATIC,
-          "com/datadoghq/reggie/runtime/BacktrackConfig",
-          "checkLimit",
-          "(I)Z",
-          false);
-      Label backtrackLimitOk = new Label();
-      mv.visitJumpInsn(IFEQ, backtrackLimitOk);
-      // Limit exceeded: give up and return failure
-      mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IRETURN);
-      mv.visitLabel(backtrackLimitOk);
-      mv.visitIincInsn(15, 1); // backtrackIterations++
 
       // Check loop termination:
       // Greedy: exit when tryMatchCount < min
@@ -2866,42 +3098,56 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitJumpInsn(IF_ICMPGT, backtrackEnd);
       }
 
+      Label matchEnd = new Label();
+      if (skipFirstReplay) {
+        // First step after a clean greedy pass: slot 5, slots 12/13 and the groups still hold
+        // its k == maxMatches state.
+        Label replay = new Label();
+        mv.visitVarInsn(ILOAD, localBase); // greedyClean
+        mv.visitJumpInsn(IFEQ, replay);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ISTORE, localBase); // greedyClean = false
+        mv.visitJumpInsn(GOTO, matchEnd);
+        mv.visitLabel(replay);
+      }
+
       // Restore groups by copying contents (not replacing reference)
-      generateGroupArrayRestore(
-          6, 4); // System.arraycopy(savedGroups, 0, groups, 0, savedGroups.length)
+      if (saveGroups) {
+        generateGroupArrayRestore(
+            6, 4); // System.arraycopy(savedGroups, 0, groups, 0, savedGroups.length)
+      }
 
       Label matchEndFast = new Label();
       if (fastGiveBack) {
         // currentPos = (tryMatchCount == 0) ? quantifierStartPos : iterEnd[tryMatchCount]
-        Label kIsZero = new Label();
-        Label posSet = new Label();
-        mv.visitVarInsn(ILOAD, 9); // tryMatchCount
-        mv.visitJumpInsn(IFGT, kIsZero);
-        mv.visitVarInsn(ILOAD, 7); // quantifierStartPos
-        mv.visitVarInsn(ISTORE, 5);
-        mv.visitJumpInsn(GOTO, posSet);
-        mv.visitLabel(kIsZero);
-        mv.visitVarInsn(ALOAD, localBase); // iterEnd
-        mv.visitVarInsn(ILOAD, 9);
-        mv.visitInsn(IALOAD);
-        mv.visitVarInsn(ISTORE, 5);
-        mv.visitLabel(posSet);
         // POSIX last-iteration tracking (slots 12/13): only ever read when tryMatchCount == 1
         // (inner-shrink retry); k == 0 leaves them stale exactly like the re-match path.
-        Label noLastIter = new Label();
-        mv.visitVarInsn(ILOAD, 9);
-        mv.visitJumpInsn(IFLE, noLastIter);
-        mv.visitVarInsn(ALOAD, localBase);
-        mv.visitVarInsn(ILOAD, 9);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(ISUB);
-        mv.visitInsn(IALOAD);
-        mv.visitVarInsn(ISTORE, 12); // lastIterationStart = iterEnd[k-1]
-        mv.visitVarInsn(ALOAD, localBase);
-        mv.visitVarInsn(ILOAD, 9);
-        mv.visitInsn(IALOAD);
+        Label kIsPositive = new Label();
+        mv.visitVarInsn(ILOAD, 9); // tryMatchCount
+        mv.visitJumpInsn(IFGT, kIsPositive);
+        mv.visitVarInsn(ILOAD, 7); // quantifierStartPos
+        mv.visitVarInsn(ISTORE, 5);
+        mv.visitJumpInsn(GOTO, matchEndFast);
+        mv.visitLabel(kIsPositive);
+        if (singleIter) {
+          mv.visitVarInsn(ILOAD, localBase); // iterEnd1
+          mv.visitVarInsn(ISTORE, 5);
+          mv.visitVarInsn(ILOAD, 7);
+          mv.visitVarInsn(ISTORE, 12); // lastIterationStart = quantifierStartPos
+        } else {
+          mv.visitVarInsn(ALOAD, localBase); // iterEnd
+          mv.visitVarInsn(ILOAD, 9);
+          mv.visitInsn(IALOAD);
+          mv.visitVarInsn(ISTORE, 5);
+          mv.visitVarInsn(ALOAD, localBase);
+          mv.visitVarInsn(ILOAD, 9);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitInsn(IALOAD);
+          mv.visitVarInsn(ISTORE, 12); // lastIterationStart = iterEnd[k-1]
+        }
+        mv.visitVarInsn(ILOAD, 5);
         mv.visitVarInsn(ISTORE, 13); // lastIterationEnd = iterEnd[k]
-        mv.visitLabel(noLastIter);
         mv.visitJumpInsn(GOTO, matchEndFast);
       }
 
@@ -2915,7 +3161,6 @@ public class RecursiveDescentBytecodeGenerator {
       mv.visitVarInsn(ISTORE, 10);
 
       Label matchLoop = new Label();
-      Label matchEnd = new Label();
 
       mv.visitLabel(matchLoop);
 
@@ -3009,177 +3254,117 @@ public class RecursiveDescentBytecodeGenerator {
       Label doBacktrackOrShrink = new Label();
 
       if (nestedBacktrackIndex == -1) {
-        // Simple case: no nested backtracking needed
-        for (int i = backtrackChildIndex + 1; i < node.children.size(); i++) {
+        // Simple case: no nested backtracking needed. A SubroutineNode with a variable-length
+        // target not in last position gets a retry loop, so the subroutine can be retried with a
+        // smaller end bound if the continuation fails; that loop matches the children after it.
+        int n = node.children.size();
+        int retryIndex = n;
+        for (int i = backtrackChildIndex + 1; i + 1 < n; i++) {
           RegexNode child = node.children.get(i);
+          if (child instanceof SubroutineNode && hasVariableLengthTarget((SubroutineNode) child)) {
+            retryIndex = i;
+            break;
+          }
+        }
 
-          // Special case: SubroutineNode with variable-length target not in last position —
-          // generate a retry loop so the subroutine can be retried with a smaller end bound
-          // if the continuation fails.
-          if (child instanceof SubroutineNode
-              && hasVariableLengthTarget((SubroutineNode) child)
-              && i + 1 < node.children.size()) {
-            SubroutineNode subroutineNode = (SubroutineNode) child;
+        // A failed child attempts inner-iteration shrink or outer backtrack
+        emitChildRun(node, backtrackChildIndex + 1, retryIndex, doBacktrackOrShrink);
 
-            // Resolve the subroutine target method
-            RegexNode targetNode;
-            if (subroutineNode.groupNumber == -1) {
-              targetNode = ast;
-            } else {
-              RegexNode stored = groupNumberToNode.get(subroutineNode.groupNumber);
-              targetNode = (stored instanceof GroupNode) ? ((GroupNode) stored).child : stored;
-            }
-            generateParserMethod(cw, className, targetNode);
-            String targetMethod = getMethodNameForNode(targetNode);
+        if (retryIndex < n) {
+          SubroutineNode subroutineNode = (SubroutineNode) node.children.get(retryIndex);
 
-            // Slots for retry loop (above the existing slot range 0-15):
-            //   100: savedGroupsForRetry (int[])
-            //   101: subResult (int)
-            //   102: maxSubEnd (int)
-            //   103: preSubroutinePos (int)
+          // Resolve the subroutine target method
+          RegexNode targetNode = isRootCall(subroutineNode) ? ast : callTarget(subroutineNode);
+          generateParserMethod(cw, className, targetNode);
+          String targetMethod = getMethodNameForNode(targetNode);
 
-            // preSubroutinePos = currentPos (slot 5)
-            mv.visitVarInsn(ILOAD, 5);
-            mv.visitVarInsn(ISTORE, 103);
-            // maxSubEnd = end (slot 3)
-            mv.visitVarInsn(ILOAD, 3);
-            mv.visitVarInsn(ISTORE, 102);
+          // Slots for retry loop (above the existing slot range 0-15):
+          //   100: savedGroupsForRetry (int[])
+          //   101: subResult (int)
+          //   102: maxSubEnd (int)
+          //   103: preSubroutinePos (int)
+
+          // preSubroutinePos = currentPos (slot 5)
+          mv.visitVarInsn(ILOAD, 5);
+          mv.visitVarInsn(ISTORE, 103);
+          // maxSubEnd = end (slot 3)
+          mv.visitVarInsn(ILOAD, 3);
+          mv.visitVarInsn(ISTORE, 102);
+          // A target that cannot write groups needs no snapshot: the restores would be no-ops
+          boolean saveForRetry = !isGroupsNeutral(targetNode);
+          if (saveForRetry) {
             // savedGroupsForRetry = groups.clone()
             mv.visitVarInsn(ALOAD, 4);
             mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
             mv.visitTypeInsn(CHECKCAST, "[I");
             mv.visitVarInsn(ASTORE, 100);
-
-            Label retryLabel = new Label();
-            Label subroutineExhaustedLabel = new Label();
-            Label subroutineSuccessLabel = new Label();
-
-            mv.visitLabel(retryLabel);
-
-            // Guard: if maxSubEnd < preSubroutinePos, subroutine exhausted
-            mv.visitVarInsn(ILOAD, 102);
-            mv.visitVarInsn(ILOAD, 103);
-            mv.visitJumpInsn(IF_ICMPLT, subroutineExhaustedLabel);
-
-            // Restore groups to pre-subroutine state before each retry
-            mv.visitVarInsn(ALOAD, 100);
-            mv.visitInsn(ICONST_0);
-            mv.visitVarInsn(ALOAD, 4);
-            mv.visitInsn(ICONST_0);
-            mv.visitVarInsn(ALOAD, 100);
-            mv.visitInsn(ARRAYLENGTH);
-            mv.visitMethodInsn(
-                INVOKESTATIC,
-                "java/lang/System",
-                "arraycopy",
-                "(Ljava/lang/Object;ILjava/lang/Object;II)V",
-                false);
-
-            // Call subroutine: subResult = targetMethod(input, preSubroutinePos, maxSubEnd, groups,
-            // depth+1)
-            mv.visitVarInsn(ALOAD, 0);
-            mv.visitVarInsn(ALOAD, 1);
-            mv.visitVarInsn(ILOAD, 103); // preSubroutinePos
-            mv.visitVarInsn(ILOAD, 102); // maxSubEnd
-            mv.visitVarInsn(ALOAD, 4);
-            mv.visitVarInsn(ILOAD, depthSlot);
-            mv.visitInsn(ICONST_1);
-            mv.visitInsn(IADD);
-            mv.visitMethodInsn(
-                INVOKESPECIAL, className, targetMethod, "(Ljava/lang/String;II[II)I", false);
-            mv.visitVarInsn(ISTORE, 101);
-
-            // PCRE semantics: restore groups after subroutine call
-            mv.visitVarInsn(ALOAD, 100);
-            mv.visitInsn(ICONST_0);
-            mv.visitVarInsn(ALOAD, 4);
-            mv.visitInsn(ICONST_0);
-            mv.visitVarInsn(ALOAD, 100);
-            mv.visitInsn(ARRAYLENGTH);
-            mv.visitMethodInsn(
-                INVOKESTATIC,
-                "java/lang/System",
-                "arraycopy",
-                "(Ljava/lang/Object;ILjava/lang/Object;II)V",
-                false);
-
-            // If subroutine itself failed, exhaust
-            mv.visitVarInsn(ILOAD, 101);
-            mv.visitInsn(ICONST_M1);
-            mv.visitJumpInsn(IF_ICMPEQ, subroutineExhaustedLabel);
-
-            // Subroutine succeeded: update currentPos
-            mv.visitVarInsn(ILOAD, 101);
-            mv.visitVarInsn(ISTORE, 5);
-
-            // Try remaining children (j = i+1 ... end)
-            for (int j = i + 1; j < node.children.size(); j++) {
-              RegexNode childJ = node.children.get(j);
-              generateParserMethod(cw, className, childJ);
-              String childJMethod = getMethodNameForNode(childJ);
-
-              Label childJOk = new Label();
-
-              mv.visitVarInsn(ALOAD, 0);
-              mv.visitVarInsn(ALOAD, 1);
-              mv.visitVarInsn(ILOAD, 5);
-              mv.visitVarInsn(ILOAD, 3);
-              mv.visitVarInsn(ALOAD, 4);
-              mv.visitVarInsn(ILOAD, depthSlot);
-              mv.visitMethodInsn(
-                  INVOKESPECIAL, className, childJMethod, "(Ljava/lang/String;II[II)I", false);
-              mv.visitVarInsn(ISTORE, 5);
-
-              mv.visitVarInsn(ILOAD, 5);
-              mv.visitInsn(ICONST_M1);
-              mv.visitJumpInsn(IF_ICMPNE, childJOk);
-
-              // childJ failed: retry subroutine with smaller end (subResult - 1)
-              mv.visitVarInsn(ILOAD, 101);
-              mv.visitInsn(ICONST_1);
-              mv.visitInsn(ISUB);
-              mv.visitVarInsn(ISTORE, 102);
-              mv.visitJumpInsn(GOTO, retryLabel);
-
-              mv.visitLabel(childJOk);
-            }
-
-            // All j-children succeeded
-            mv.visitJumpInsn(GOTO, subroutineSuccessLabel);
-
-            mv.visitLabel(subroutineExhaustedLabel);
-            // Subroutine exhausted: backtrack outer quantifier
-            mv.visitIincInsn(9, quantNode.greedy ? -1 : 1);
-            mv.visitJumpInsn(GOTO, backtrackLoop);
-
-            mv.visitLabel(subroutineSuccessLabel);
-            // All remaining children handled; break out of outer for-loop
-            break;
           }
 
-          // Normal (non-retryable) child
-          generateParserMethod(cw, className, child);
-          String childMethod = getMethodNameForNode(child);
+          Label retryLabel = new Label();
+          Label subroutineExhaustedLabel = new Label();
+          Label subroutineSuccessLabel = new Label();
 
+          mv.visitLabel(retryLabel);
+
+          // Guard: if maxSubEnd < preSubroutinePos, subroutine exhausted
+          mv.visitVarInsn(ILOAD, 102);
+          mv.visitVarInsn(ILOAD, 103);
+          mv.visitJumpInsn(IF_ICMPLT, subroutineExhaustedLabel);
+
+          // Restore groups to pre-subroutine state before each retry
+          if (saveForRetry) {
+            generateGroupArrayRestore(100, 4);
+          }
+
+          // Call subroutine: subResult = targetMethod(input, preSubroutinePos, maxSubEnd, groups,
+          // depth+1)
           mv.visitVarInsn(ALOAD, 0);
           mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitVarInsn(ILOAD, 3);
+          mv.visitVarInsn(ILOAD, 103); // preSubroutinePos
+          mv.visitVarInsn(ILOAD, 102); // maxSubEnd
           mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, depthSlot); // depth
+          mv.visitVarInsn(ILOAD, depthSlot);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(IADD);
           mv.visitMethodInsn(
-              INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
+              INVOKESPECIAL, className, targetMethod, "(Ljava/lang/String;II[II)I", false);
+          mv.visitVarInsn(ISTORE, 101);
+
+          // PCRE semantics: restore groups after subroutine call
+          if (saveForRetry) {
+            generateGroupArrayRestore(100, 4);
+          }
+
+          // If subroutine itself failed, exhaust
+          mv.visitVarInsn(ILOAD, 101);
+          mv.visitInsn(ICONST_M1);
+          mv.visitJumpInsn(IF_ICMPEQ, subroutineExhaustedLabel);
+
+          // Subroutine succeeded: update currentPos
+          mv.visitVarInsn(ILOAD, 101);
           mv.visitVarInsn(ISTORE, 5);
 
-          // If this child failed, attempt inner-iteration shrink or outer backtrack
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitInsn(ICONST_M1);
-          Label childSucceeded = new Label();
-          mv.visitJumpInsn(IF_ICMPNE, childSucceeded);
+          // Try remaining children; a failed one retries the subroutine with a smaller end
+          Label childJFailed = new Label();
+          emitChildRun(node, retryIndex + 1, n, childJFailed);
 
-          mv.visitJumpInsn(GOTO, doBacktrackOrShrink);
+          // All j-children succeeded
+          mv.visitJumpInsn(GOTO, subroutineSuccessLabel);
 
-          mv.visitLabel(childSucceeded);
+          mv.visitLabel(childJFailed);
+          // maxSubEnd = subResult - 1
+          mv.visitVarInsn(ILOAD, 101);
+          mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          mv.visitVarInsn(ISTORE, 102);
+          mv.visitJumpInsn(GOTO, retryLabel);
+
+          mv.visitLabel(subroutineExhaustedLabel);
+          // Subroutine exhausted: backtrack outer quantifier
+          mv.visitIincInsn(9, quantNode.greedy ? -1 : 1);
+          mv.visitJumpInsn(GOTO, backtrackLoop);
+
+          mv.visitLabel(subroutineSuccessLabel);
         }
 
         // All suffix children succeeded: jump past the doBacktrackOrShrink block so we don't
@@ -3226,7 +3411,9 @@ public class RecursiveDescentBytecodeGenerator {
             mv.visitIincInsn(13, -1);
 
             // Restore groups from savedGroups (same as the start of backtrackLoop)
-            generateGroupArrayRestore(6, 4);
+            if (saveGroups) {
+              generateGroupArrayRestore(6, 4);
+            }
 
             // Reset currentPos to lastIterationStart
             mv.visitVarInsn(ILOAD, 12); // lastIterationStart
@@ -3284,35 +3471,25 @@ public class RecursiveDescentBytecodeGenerator {
       } else {
         // Complex case: nested backtracking needed
         // Process children before the nested backtrack point
-        for (int i = backtrackChildIndex + 1; i < nestedBacktrackIndex; i++) {
-          RegexNode child = node.children.get(i);
-          generateParserMethod(cw, className, child);
-          String childMethod = getMethodNameForNode(child);
-
-          mv.visitVarInsn(ALOAD, 0);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitVarInsn(ILOAD, 3);
-          mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, depthSlot); // depth
-          mv.visitMethodInsn(
-              INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-          mv.visitVarInsn(ISTORE, 5);
-
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitInsn(ICONST_M1);
-          Label childSucceeded = new Label();
-          mv.visitJumpInsn(IF_ICMPNE, childSucceeded);
-          mv.visitIincInsn(9, quantNode.greedy ? -1 : 1);
-          mv.visitJumpInsn(GOTO, backtrackLoop);
-          mv.visitLabel(childSucceeded);
-        }
+        emitChildRunOrBacktrack(
+            node,
+            backtrackChildIndex + 1,
+            nestedBacktrackIndex,
+            9,
+            quantNode.greedy ? -1 : 1,
+            backtrackLoop);
 
         // Generate nested backtracking for the remaining children
         // Use localBase+1.. for nested backtracking (above this level's iterEnd, and clear of
         // the fixed slots 2-15); each nested level grows its base by 6.
         generateNestedBacktracking(
-            node, nestedBacktrackIndex, backtrackLoop, quantNode.greedy ? -1 : 1, 9, localBase + 1);
+            node,
+            nestedBacktrackIndex,
+            backtrackLoop,
+            quantNode.greedy ? -1 : 1,
+            9,
+            localBase + 1,
+            1);
       }
 
       // All remaining children succeeded.
@@ -3349,8 +3526,10 @@ public class RecursiveDescentBytecodeGenerator {
      * @param nestedIndex Index of the backtracking quantifier to handle
      * @param outerBacktrackLoop Label to jump to when this level exhausts backtracking
      * @param outerBacktrackDelta Amount to adjust outer tryMatchCount slot before jumping
-     * @param outerTryMatchCountSlot Slot containing outer level's tryMatchCount (for adjustment)
-     * @param slotBase Base slot for this nesting level (16, 22, 28, etc.)
+     * @param outerTryMatchCountSlot Slot containing outer level's tryMatchCount (for adjustment);
+     *     negative when there is none
+     * @param slotBase Base slot for this nesting level; the next level starts at slotBase + 7
+     * @param level Nesting levels generated in this method, this one included
      */
     private void generateNestedBacktracking(
         ConcatNode node,
@@ -3358,7 +3537,8 @@ public class RecursiveDescentBytecodeGenerator {
         Label outerBacktrackLoop,
         int outerBacktrackDelta,
         int outerTryMatchCountSlot,
-        int slotBase) {
+        int slotBase,
+        int level) {
       // Slots for this level's nested backtracking (relative to slotBase):
       // slotBase + 0: nestedSavedGroups
       // slotBase + 1: nestedQuantifierStartPos
@@ -3366,12 +3546,15 @@ public class RecursiveDescentBytecodeGenerator {
       // slotBase + 3: nestedTryMatchCount
       // slotBase + 4: nestedMatchCount
       // slotBase + 5: nestedResult
+      // slotBase + 6: iterEnd (int[], or int when max == 1) or the int greedyClean flag, as in
+      //               generateConcatWithBacktracking's localBase
       final int SAVED_GROUPS_SLOT = slotBase;
       final int QUANT_START_POS_SLOT = slotBase + 1;
       final int MAX_MATCHES_SLOT = slotBase + 2;
       final int TRY_MATCH_COUNT_SLOT = slotBase + 3;
       final int MATCH_COUNT_SLOT = slotBase + 4;
       final int RESULT_SLOT = slotBase + 5;
+      final int ITER_SLOT = slotBase + 6;
 
       RegexNode nestedChild = node.children.get(nestedIndex);
       QuantifierNode nestedQuantNode = extractQuantifier(nestedChild);
@@ -3399,54 +3582,19 @@ public class RecursiveDescentBytecodeGenerator {
                 localFail);
             mv.visitJumpInsn(GOTO, successDone);
             mv.visitLabel(localFail);
-            mv.visitIincInsn(outerTryMatchCountSlot, outerBacktrackDelta);
-            mv.visitJumpInsn(GOTO, outerBacktrackLoop);
+            emitBacktrack(outerTryMatchCountSlot, outerBacktrackDelta, outerBacktrackLoop);
             mv.visitLabel(successDone);
             return;
           }
         }
-        // Not a quantifier - process normally and continue
-        generateParserMethod(cw, className, nestedChild);
-        String childMethod = getMethodNameForNode(nestedChild);
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitVarInsn(ILOAD, 3);
-        mv.visitVarInsn(ALOAD, 4);
-        mv.visitVarInsn(ILOAD, depthSlot); // depth
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, 5);
-
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitInsn(ICONST_M1);
-        Label ok = new Label();
-        mv.visitJumpInsn(IF_ICMPNE, ok);
-        mv.visitIincInsn(outerTryMatchCountSlot, outerBacktrackDelta);
-        mv.visitJumpInsn(GOTO, outerBacktrackLoop);
-        mv.visitLabel(ok);
-
-        // Process rest
-        for (int i = nestedIndex + 1; i < node.children.size(); i++) {
-          RegexNode child = node.children.get(i);
-          generateParserMethod(cw, className, child);
-          String method = getMethodNameForNode(child);
-          mv.visitVarInsn(ALOAD, 0);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitVarInsn(ILOAD, 3);
-          mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, depthSlot); // depth
-          mv.visitMethodInsn(INVOKESPECIAL, className, method, "(Ljava/lang/String;II[II)I", false);
-          mv.visitVarInsn(ISTORE, 5);
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitInsn(ICONST_M1);
-          Label ok2 = new Label();
-          mv.visitJumpInsn(IF_ICMPNE, ok2);
-          mv.visitIincInsn(outerTryMatchCountSlot, outerBacktrackDelta);
-          mv.visitJumpInsn(GOTO, outerBacktrackLoop);
-          mv.visitLabel(ok2);
-        }
+        // Not a quantifier - process it and the rest normally
+        emitChildRunOrBacktrack(
+            node,
+            nestedIndex,
+            node.children.size(),
+            outerTryMatchCountSlot,
+            outerBacktrackDelta,
+            outerBacktrackLoop);
         return;
       }
 
@@ -3459,8 +3607,11 @@ public class RecursiveDescentBytecodeGenerator {
         }
       }
 
-      // Save groups for nested backtracking
-      generateGroupArraySave(4, SAVED_GROUPS_SLOT);
+      // Save groups for nested backtracking (skipped when the snapshot cannot change)
+      boolean saveGroups = !isGroupsNeutralFrom(node, nestedIndex);
+      if (saveGroups) {
+        generateGroupArraySave(4, SAVED_GROUPS_SLOT);
+      }
 
       // Save position before nested quantifier
       mv.visitVarInsn(ILOAD, 5);
@@ -3469,6 +3620,28 @@ public class RecursiveDescentBytecodeGenerator {
       // Generate parser for nested quantifier's child
       generateParserMethod(cw, className, nestedQuantNode.child);
       String nestedQuantChildMethod = getMethodNameForNode(nestedQuantNode.child);
+
+      // Same replay avoidance as generateConcatWithBacktracking: iterEnd lookup for a
+      // groups-neutral body, otherwise reuse of a clean greedy pass for the first greedy step.
+      boolean fastGiveBack = isGroupsNeutral(nestedQuantNode.child);
+      boolean singleIter = fastGiveBack && nestedQuantNode.max == 1;
+      boolean skipFirstReplay = nestedQuantNode.greedy && !fastGiveBack;
+      if (singleIter) {
+        mv.visitVarInsn(ILOAD, QUANT_START_POS_SLOT);
+        mv.visitVarInsn(ISTORE, ITER_SLOT); // iterEnd1 = start
+      } else if (fastGiveBack) {
+        // iterEnd = new int[(end - start) + 2] (at most one empty iteration is counted)
+        mv.visitVarInsn(ILOAD, 3);
+        mv.visitVarInsn(ILOAD, QUANT_START_POS_SLOT);
+        mv.visitInsn(ISUB);
+        mv.visitInsn(ICONST_2);
+        mv.visitInsn(IADD);
+        mv.visitIntInsn(NEWARRAY, T_INT);
+        mv.visitVarInsn(ASTORE, ITER_SLOT);
+      } else if (skipFirstReplay) {
+        mv.visitInsn(ICONST_1);
+        mv.visitVarInsn(ISTORE, ITER_SLOT); // greedyClean = true
+      }
 
       // Greedy match for nested quantifier
       mv.visitInsn(ICONST_0);
@@ -3497,9 +3670,10 @@ public class RecursiveDescentBytecodeGenerator {
           INVOKESPECIAL, className, nestedQuantChildMethod, "(Ljava/lang/String;II[II)I", false);
       mv.visitVarInsn(ISTORE, RESULT_SLOT);
 
+      Label nestedGreedyFailed = new Label();
       mv.visitVarInsn(ILOAD, RESULT_SLOT);
       mv.visitInsn(ICONST_M1);
-      mv.visitJumpInsn(IF_ICMPEQ, nestedGreedyEnd);
+      mv.visitJumpInsn(IF_ICMPEQ, skipFirstReplay ? nestedGreedyFailed : nestedGreedyEnd);
 
       // Check for empty match
       mv.visitVarInsn(ILOAD, RESULT_SLOT);
@@ -3507,14 +3681,21 @@ public class RecursiveDescentBytecodeGenerator {
       Label nestedMadeProgress = new Label();
       mv.visitJumpInsn(IF_ICMPNE, nestedMadeProgress);
       mv.visitIincInsn(MATCH_COUNT_SLOT, 1);
+      emitIterEndStore(fastGiveBack, singleIter, ITER_SLOT, MATCH_COUNT_SLOT);
       mv.visitJumpInsn(GOTO, nestedGreedyEnd);
 
       mv.visitLabel(nestedMadeProgress);
       mv.visitVarInsn(ILOAD, RESULT_SLOT);
       mv.visitVarInsn(ISTORE, 5);
       mv.visitIincInsn(MATCH_COUNT_SLOT, 1);
+      emitIterEndStore(fastGiveBack, singleIter, ITER_SLOT, MATCH_COUNT_SLOT);
       mv.visitJumpInsn(GOTO, nestedGreedyLoop);
 
+      mv.visitLabel(nestedGreedyFailed);
+      if (skipFirstReplay) {
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ISTORE, ITER_SLOT); // greedyClean = false
+      }
       mv.visitLabel(nestedGreedyEnd);
 
       // Check minimum
@@ -3524,8 +3705,7 @@ public class RecursiveDescentBytecodeGenerator {
         BytecodeUtil.pushInt(mv, nestedQuantNode.min);
         mv.visitJumpInsn(IF_ICMPGE, nestedMinOk);
         // Failed minimum - backtrack outer
-        mv.visitIincInsn(outerTryMatchCountSlot, outerBacktrackDelta);
-        mv.visitJumpInsn(GOTO, outerBacktrackLoop);
+        emitBacktrack(outerTryMatchCountSlot, outerBacktrackDelta, outerBacktrackLoop);
         mv.visitLabel(nestedMinOk);
       }
 
@@ -3556,19 +3736,47 @@ public class RecursiveDescentBytecodeGenerator {
         mv.visitJumpInsn(IF_ICMPGT, nestedBacktrackEnd);
       }
 
+      Label nestedMatchEnd = new Label();
+      if (skipFirstReplay) {
+        // First step after a clean greedy pass: slot 5 and the groups hold its state
+        Label replay = new Label();
+        mv.visitVarInsn(ILOAD, ITER_SLOT);
+        mv.visitJumpInsn(IFEQ, replay);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ISTORE, ITER_SLOT); // greedyClean = false
+        mv.visitJumpInsn(GOTO, nestedMatchEnd);
+        mv.visitLabel(replay);
+      }
+
       // Restore groups
-      generateGroupArrayRestore(SAVED_GROUPS_SLOT, 4);
+      if (saveGroups) {
+        generateGroupArrayRestore(SAVED_GROUPS_SLOT, 4);
+      }
 
       // Reset position
       mv.visitVarInsn(ILOAD, QUANT_START_POS_SLOT);
       mv.visitVarInsn(ISTORE, 5);
+
+      if (fastGiveBack) {
+        // currentPos = (tryMatchCount == 0) ? start : iterEnd[tryMatchCount]
+        mv.visitVarInsn(ILOAD, TRY_MATCH_COUNT_SLOT);
+        mv.visitJumpInsn(IFLE, nestedMatchEnd);
+        if (singleIter) {
+          mv.visitVarInsn(ILOAD, ITER_SLOT);
+        } else {
+          mv.visitVarInsn(ALOAD, ITER_SLOT);
+          mv.visitVarInsn(ILOAD, TRY_MATCH_COUNT_SLOT);
+          mv.visitInsn(IALOAD);
+        }
+        mv.visitVarInsn(ISTORE, 5);
+        mv.visitJumpInsn(GOTO, nestedMatchEnd);
+      }
 
       // Match exactly tryMatchCount times
       mv.visitInsn(ICONST_0);
       mv.visitVarInsn(ISTORE, MATCH_COUNT_SLOT);
 
       Label nestedMatchLoop = new Label();
-      Label nestedMatchEnd = new Label();
 
       mv.visitLabel(nestedMatchLoop);
       mv.visitVarInsn(ILOAD, MATCH_COUNT_SLOT);
@@ -3624,68 +3832,46 @@ public class RecursiveDescentBytecodeGenerator {
       }
 
       if (deeperNestedIndex == -1) {
-        // No more nested backtracking needed - simple iteration
-        for (int i = nestedIndex + 1; i < node.children.size(); i++) {
-          RegexNode child = node.children.get(i);
-          generateParserMethod(cw, className, child);
-          String childMethod = getMethodNameForNode(child);
-
-          mv.visitVarInsn(ALOAD, 0);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitVarInsn(ILOAD, 3);
-          mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, depthSlot); // depth
-          mv.visitMethodInsn(
-              INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-          mv.visitVarInsn(ISTORE, 5);
-
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitInsn(ICONST_M1);
-          Label nestedChildSucceeded = new Label();
-          mv.visitJumpInsn(IF_ICMPNE, nestedChildSucceeded);
-
-          // Failed - backtrack nested quantifier
-          mv.visitIincInsn(TRY_MATCH_COUNT_SLOT, nestedQuantNode.greedy ? -1 : 1);
-          mv.visitJumpInsn(GOTO, nestedBacktrackLoop);
-
-          mv.visitLabel(nestedChildSucceeded);
-        }
+        // No more nested backtracking needed - simple iteration; a failed child backtracks the
+        // nested quantifier
+        emitChildRunOrBacktrack(
+            node,
+            nestedIndex + 1,
+            node.children.size(),
+            TRY_MATCH_COUNT_SLOT,
+            nestedQuantNode.greedy ? -1 : 1,
+            nestedBacktrackLoop);
       } else {
         // MORE nested backtracking needed - process children before deeper nested, then recurse
-        for (int i = nestedIndex + 1; i < deeperNestedIndex; i++) {
-          RegexNode child = node.children.get(i);
-          generateParserMethod(cw, className, child);
-          String childMethod = getMethodNameForNode(child);
-
-          mv.visitVarInsn(ALOAD, 0);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitVarInsn(ILOAD, 3);
-          mv.visitVarInsn(ALOAD, 4);
-          mv.visitVarInsn(ILOAD, depthSlot); // depth
-          mv.visitMethodInsn(
-              INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-          mv.visitVarInsn(ISTORE, 5);
-
-          mv.visitVarInsn(ILOAD, 5);
-          mv.visitInsn(ICONST_M1);
-          Label childOk = new Label();
-          mv.visitJumpInsn(IF_ICMPNE, childOk);
-          mv.visitIincInsn(TRY_MATCH_COUNT_SLOT, nestedQuantNode.greedy ? -1 : 1);
-          mv.visitJumpInsn(GOTO, nestedBacktrackLoop);
-          mv.visitLabel(childOk);
-        }
-
-        // Recursively generate deeper nested backtracking
-        // Use slots slotBase + 6 for next level
-        generateNestedBacktracking(
+        emitChildRunOrBacktrack(
             node,
+            nestedIndex + 1,
             deeperNestedIndex,
-            nestedBacktrackLoop,
-            nestedQuantNode.greedy ? -1 : 1,
             TRY_MATCH_COUNT_SLOT,
-            slotBase + 6);
+            nestedQuantNode.greedy ? -1 : 1,
+            nestedBacktrackLoop);
+
+        if (level < NESTED_LEVELS_PER_METHOD) {
+          // Recursively generate deeper nested backtracking
+          // Use slots slotBase + 7 for next level
+          generateNestedBacktracking(
+              node,
+              deeperNestedIndex,
+              nestedBacktrackLoop,
+              nestedQuantNode.greedy ? -1 : 1,
+              TRY_MATCH_COUNT_SLOT,
+              slotBase + 7,
+              level + 1);
+        } else {
+          // The deeper levels in their own method: its -1 (exhausted) backtracks this level
+          Label deeperFailed = new Label();
+          Label deeperDone = new Label();
+          emitChildCall(generateNestedRestMethod(node, deeperNestedIndex), deeperFailed);
+          mv.visitJumpInsn(GOTO, deeperDone);
+          mv.visitLabel(deeperFailed);
+          emitBacktrack(TRY_MATCH_COUNT_SLOT, nestedQuantNode.greedy ? -1 : 1, nestedBacktrackLoop);
+          mv.visitLabel(deeperDone);
+        }
       }
 
       // All children after nested quantifier succeeded - return success (handled by caller)
@@ -3695,11 +3881,27 @@ public class RecursiveDescentBytecodeGenerator {
 
       mv.visitLabel(nestedBacktrackEnd);
       // Nested backtracking exhausted - backtrack outer
-      mv.visitIincInsn(outerTryMatchCountSlot, outerBacktrackDelta);
-      mv.visitJumpInsn(GOTO, outerBacktrackLoop);
+      emitBacktrack(outerTryMatchCountSlot, outerBacktrackDelta, outerBacktrackLoop);
 
       mv.visitLabel(nestedSuccess);
       // Success path continues in caller
+    }
+
+    /**
+     * Records {@code iterEnd[matchCount] = currentPos} for the fast give-back path: into the int
+     * slot when {@code singleIter}, else into the int[] in {@code iterSlot}.
+     */
+    private void emitIterEndStore(
+        boolean fastGiveBack, boolean singleIter, int iterSlot, int matchCountSlot) {
+      if (singleIter) {
+        mv.visitVarInsn(ILOAD, 5);
+        mv.visitVarInsn(ISTORE, iterSlot);
+      } else if (fastGiveBack) {
+        mv.visitVarInsn(ALOAD, iterSlot);
+        mv.visitVarInsn(ILOAD, matchCountSlot);
+        mv.visitVarInsn(ILOAD, 5);
+        mv.visitInsn(IASTORE);
+      }
     }
 
     /** Extract QuantifierNode from a node, handling GroupNode wrappers. */
@@ -3772,6 +3974,12 @@ public class RecursiveDescentBytecodeGenerator {
       String mandatoryMethod = getMethodNameForNode(mandatoryChild);
 
       int captureGroupNumber = backtrackGroup.groupNumber;
+      // Both attempts continue with the rest of the concat: when the rest has another such group,
+      // it is generated once as its own method, so the code is linear in the number of groups
+      String restMethod =
+          nextOptionalBacktrackGroup(node, fromIndex + 1) < 0
+              ? null
+              : generateRemainingMethod(node, fromIndex + 1);
 
       Label tryMandatory = new Label();
       Label restFailed = new Label();
@@ -3798,7 +4006,7 @@ public class RecursiveDescentBytecodeGenerator {
 
       // Try remaining children (with recursive backtracking if needed)
       // On failure, jump to restFailed; on success, fall through
-      generateRemainingWithBacktracking(node, fromIndex + 1, restFailed, extraSlotBase + 1);
+      emitRemaining(node, fromIndex + 1, restMethod, restFailed, extraSlotBase + 1);
 
       // All remaining children succeeded with full group result: fall through (success)
       // Jump past Attempt 2
@@ -3851,7 +4059,7 @@ public class RecursiveDescentBytecodeGenerator {
 
       // Try remaining children after mandatory match (with backtracking if needed)
       // On failure, jump to overall fail; on success, fall through
-      generateRemainingWithBacktracking(node, fromIndex + 1, overallFailLabel, extraSlotBase + 1);
+      emitRemaining(node, fromIndex + 1, restMethod, overallFailLabel, extraSlotBase + 1);
 
       mv.visitLabel(doneSuccess);
       // Success: slot 5 (currentPos) is already updated; caller falls through here
@@ -3873,46 +4081,13 @@ public class RecursiveDescentBytecodeGenerator {
     private void generateRemainingWithBacktracking(
         ConcatNode node, int fromIndex, Label failLabel, int extraSlotBase) {
 
-      // Find the first child at or after fromIndex that needs group-optional backtracking
-      int nextBacktrackIdx = -1;
-      GroupNode nextBacktrackGroup = null;
-      for (int i = fromIndex; i < node.children.size(); i++) {
-        RegexNode child = node.children.get(i);
-        if (child instanceof GroupNode) {
-          GroupNode g = (GroupNode) child;
-          if (g.groupNumber > 0
-              && !PatternAnalyzer.hasSelfReferencingBackref(g)
-              && (extractTrailingOptionalBackref(g.child) != null
-                  || hasTrailingOptionalQuantifier(g.child))) {
-            nextBacktrackIdx = i;
-            nextBacktrackGroup = g;
-            break;
-          }
-        }
-      }
+      int nextBacktrackIdx = nextOptionalBacktrackGroup(node, fromIndex);
+      GroupNode nextBacktrackGroup =
+          nextBacktrackIdx < 0 ? null : (GroupNode) node.children.get(nextBacktrackIdx);
 
       // Process simple sequential children before the next backtracking group
       int limit = (nextBacktrackIdx == -1) ? node.children.size() : nextBacktrackIdx;
-      for (int i = fromIndex; i < limit; i++) {
-        RegexNode child = node.children.get(i);
-        generateParserMethod(cw, className, child);
-        String childMethod = getMethodNameForNode(child);
-        Label childOk = new Label();
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitVarInsn(ILOAD, 3);
-        mv.visitVarInsn(ALOAD, 4);
-        mv.visitVarInsn(ILOAD, depthSlot); // depth
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, 5);
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitInsn(ICONST_M1);
-        mv.visitJumpInsn(IF_ICMPNE, childOk);
-        mv.visitJumpInsn(GOTO, failLabel);
-        mv.visitLabel(childOk);
-      }
+      emitChildRun(node, fromIndex, limit, failLabel);
 
       if (nextBacktrackIdx == -1) {
         // No more backtracking groups; all sequential children done → fall through (success)
@@ -3939,31 +4114,105 @@ public class RecursiveDescentBytecodeGenerator {
       // generateGroupWithOptionalBacktracking falls through on success.
     }
 
+    /**
+     * Index of the first child at or after {@code fromIndex} that needs group-optional
+     * backtracking, or -1.
+     */
+    private int nextOptionalBacktrackGroup(ConcatNode node, int fromIndex) {
+      for (int i = fromIndex; i < node.children.size(); i++) {
+        RegexNode child = node.children.get(i);
+        if (child instanceof GroupNode) {
+          GroupNode g = (GroupNode) child;
+          if (g.groupNumber > 0
+              && !PatternAnalyzer.hasSelfReferencingBackref(g)
+              && (extractTrailingOptionalBackref(g.child) != null
+                  || hasTrailingOptionalQuantifier(g.child))) {
+            return i;
+          }
+        }
+      }
+      return -1;
+    }
+
+    /**
+     * Matches the concat children from {@code fromIndex}: inline when {@code restMethod} is null,
+     * else by calling it. On failure jumps to {@code failLabel}; success falls through with
+     * currentPos (slot 5) updated.
+     */
+    private void emitRemaining(
+        ConcatNode node, int fromIndex, String restMethod, Label failLabel, int extraSlotBase) {
+      if (restMethod == null) {
+        generateRemainingWithBacktracking(node, fromIndex, failLabel, extraSlotBase);
+        return;
+      }
+      emitChildCall(restMethod, failLabel);
+    }
+
+    /**
+     * Generates a method matching the concat children from {@code fromIndex} with group-optional
+     * backtracking: returns the end position, or -1.
+     */
+    private String generateRemainingMethod(ConcatNode node, int fromIndex) {
+      String name = "parse_ConcatRest_" + (methodCounter++);
+      MethodVisitor m = cw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;II[II)I", null, null);
+      m.visitCode();
+      emitStepCheck(m, className);
+      new ParserMethodGenerator(cw, m, className).emitRemainingBody(node, fromIndex);
+      m.visitMaxs(0, 0);
+      m.visitEnd();
+      return name;
+    }
+
+    private void emitRemainingBody(ConcatNode node, int fromIndex) {
+      // Slot layout of generateConcatWithBacktracking: depth in slot 2, currentPos in slot 5
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitVarInsn(ILOAD, 5);
+      mv.visitVarInsn(ISTORE, 2);
+      mv.visitVarInsn(ISTORE, 5);
+      depthSlot = 2;
+      Label fail = new Label();
+      generateRemainingWithBacktracking(node, fromIndex, fail, 6);
+      mv.visitVarInsn(ILOAD, 5);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(fail);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+    }
+
+    /**
+     * Generates a method running the nested backtracking from {@code nestedIndex} on: returns the
+     * end position of its first success, or -1 when it is exhausted.
+     */
+    private String generateNestedRestMethod(ConcatNode node, int nestedIndex) {
+      String name = "parse_ConcatNested_" + (methodCounter++);
+      MethodVisitor m = cw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;II[II)I", null, null);
+      m.visitCode();
+      emitStepCheck(m, className);
+      new ParserMethodGenerator(cw, m, className).emitNestedRestBody(node, nestedIndex);
+      m.visitMaxs(0, 0);
+      m.visitEnd();
+      return name;
+    }
+
+    private void emitNestedRestBody(ConcatNode node, int nestedIndex) {
+      // Slot layout of generateConcatWithBacktracking: depth in slot 2, currentPos in slot 5
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitVarInsn(ILOAD, 5);
+      mv.visitVarInsn(ISTORE, 2);
+      mv.visitVarInsn(ISTORE, 5);
+      depthSlot = 2;
+      Label exhausted = new Label();
+      generateNestedBacktracking(node, nestedIndex, exhausted, 0, -1, 6, 1);
+      mv.visitVarInsn(ILOAD, 5);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(exhausted);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+    }
+
     /** Generate simple concat code when node is not a quantifier. */
     private void generateSimpleConcat(ConcatNode node, int startIndex) {
-      for (int i = startIndex; i < node.children.size(); i++) {
-        RegexNode child = node.children.get(i);
-        generateParserMethod(cw, className, child);
-        String childMethod = getMethodNameForNode(child);
-
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, 5); // currentPos
-        mv.visitVarInsn(ILOAD, 3); // end
-        mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, depthSlot); // depth
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, childMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, 5);
-
-        Label success = new Label();
-        mv.visitVarInsn(ILOAD, 5);
-        mv.visitInsn(ICONST_M1);
-        mv.visitJumpInsn(IF_ICMPNE, success);
-        mv.visitInsn(ICONST_M1);
-        mv.visitInsn(IRETURN);
-        mv.visitLabel(success);
-      }
+      emitChildRun(node, startIndex, node.children.size(), null);
 
       mv.visitVarInsn(ILOAD, 5);
       mv.visitInsn(IRETURN);
@@ -4371,38 +4620,11 @@ public class RecursiveDescentBytecodeGenerator {
       // Subroutine call: (?R), (?1), (?&name)
       // Find the target node and call its parser
 
-      RegexNode targetNode;
-      if (node.groupNumber == -1) {
-        // (?R): call root pattern (recursive call to entire pattern)
-        targetNode = ast;
-      } else if (node.groupNumber >= 0) {
-        // (?1), (?2), etc.: call group by number
-        RegexNode groupNode = groupNumberToNode.get(node.groupNumber);
-        if (groupNode == null) {
-          // Group not found, fail
-          // S: []
-          mv.visitInsn(ICONST_M1);
-          // S: [I]
-          mv.visitInsn(IRETURN);
-          return null;
-        }
-        // PCRE semantics: subroutine calls match the pattern but do NOT capture.
-        // Use the group's child (the pattern inside) instead of the group itself.
-        // This prevents the subroutine from overwriting the original group capture.
-        if (groupNode instanceof GroupNode) {
-          targetNode = ((GroupNode) groupNode).child;
-        } else {
-          targetNode = groupNode;
-        }
-      } else if (node.name != null) {
-        // (?&name): named group not supported yet
-        // S: []
-        mv.visitInsn(ICONST_M1);
-        // S: [I]
-        mv.visitInsn(IRETURN);
-        return null;
-      } else {
-        // Invalid subroutine node
+      // (?R)/(?0) calls the root pattern. A group call matches the group's body without capturing,
+      // so the call does not overwrite the group's own capture.
+      RegexNode targetNode = isRootCall(node) ? ast : callTarget(node);
+      if (targetNode == null) {
+        // No such group: fail
         // S: []
         mv.visitInsn(ICONST_M1);
         // S: [I]
@@ -4441,11 +4663,15 @@ public class RecursiveDescentBytecodeGenerator {
       // NOTE: Using slots 16-17 to avoid conflicts with concat (uses slot 6) and backtracking (uses
       // slots 6-15)
 
-      // Save groups array: int[] savedGroups = groups.clone()
-      mv.visitVarInsn(ALOAD, 4); // groups
-      mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
-      mv.visitTypeInsn(CHECKCAST, "[I");
-      mv.visitVarInsn(ASTORE, 16); // savedGroups in slot 16
+      // A target that cannot write groups leaves them unchanged: skip the save and restore.
+      boolean saveGroups = !isGroupsNeutral(targetNode);
+      if (saveGroups) {
+        // Save groups array: int[] savedGroups = groups.clone()
+        mv.visitVarInsn(ALOAD, 4); // groups
+        mv.visitMethodInsn(INVOKEVIRTUAL, "[I", "clone", "()Ljava/lang/Object;", false);
+        mv.visitTypeInsn(CHECKCAST, "[I");
+        mv.visitVarInsn(ASTORE, 16); // savedGroups in slot 16
+      }
 
       // Call target parser with depth+1: result = parse_target(input, pos, end, groups, depth+1)
       mv.visitVarInsn(ALOAD, 0); // this
@@ -4462,18 +4688,9 @@ public class RecursiveDescentBytecodeGenerator {
 
       // Restore groups array: System.arraycopy(savedGroups, 0, groups, 0, savedGroups.length)
       // This preserves the original group captures, implementing PCRE subroutine semantics
-      mv.visitVarInsn(ALOAD, 16); // savedGroups (src)
-      mv.visitInsn(ICONST_0); // srcPos = 0
-      mv.visitVarInsn(ALOAD, 4); // groups (dest)
-      mv.visitInsn(ICONST_0); // destPos = 0
-      mv.visitVarInsn(ALOAD, 16); // savedGroups
-      mv.visitInsn(ARRAYLENGTH); // length
-      mv.visitMethodInsn(
-          INVOKESTATIC,
-          "java/lang/System",
-          "arraycopy",
-          "(Ljava/lang/Object;ILjava/lang/Object;II)V",
-          false);
+      if (saveGroups) {
+        generateGroupArrayRestore(16, 4);
+      }
 
       // Check if subroutine matched
       mv.visitVarInsn(ILOAD, 17);
@@ -4605,71 +4822,16 @@ public class RecursiveDescentBytecodeGenerator {
       // Collect the group numbers that are actually inside this branch reset
       Set<Integer> branchResetGroups = collectBranchResetGroupNumbers(node);
 
-      // Try each alternative
-      for (int i = 0; i < node.alternatives.size(); i++) {
-        RegexNode alt = node.alternatives.get(i);
-        Label nextAlt = new Label();
-
-        // Generate parser method for this alternative
-        generateParserMethod(cw, className, alt);
-        String altMethod = getMethodNameForNode(alt);
-
-        // Reset ONLY the groups that are inside the branch reset
-        // This is the "branch reset" behavior: each alternative starts fresh
-        // but groups OUTSIDE the branch reset are preserved
-        for (int g : branchResetGroups) {
-          int startIdx = g * 2;
-          int endIdx = g * 2 + 1;
-
-          // groups[startIdx] = -1
-          mv.visitVarInsn(ALOAD, 4); // groups
-          BytecodeUtil.pushInt(mv, startIdx);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IASTORE);
-
-          // groups[endIdx] = -1
-          mv.visitVarInsn(ALOAD, 4); // groups
-          BytecodeUtil.pushInt(mv, endIdx);
-          mv.visitInsn(ICONST_M1);
-          mv.visitInsn(IASTORE);
-        }
-
-        // Try to match this alternative
-        mv.visitVarInsn(ALOAD, 0); // this
-        mv.visitVarInsn(ALOAD, 1); // input
-        mv.visitVarInsn(ILOAD, 2); // pos
-        mv.visitVarInsn(ILOAD, 3); // end
-        mv.visitVarInsn(ALOAD, 4); // groups
-        mv.visitVarInsn(ILOAD, 5); // depth
-        mv.visitMethodInsn(
-            INVOKESPECIAL, className, altMethod, "(Ljava/lang/String;II[II)I", false);
-        mv.visitVarInsn(ISTORE, 7); // result in slot 7
-
-        // If succeeded, return result
-        mv.visitVarInsn(ILOAD, 7);
-        mv.visitInsn(ICONST_M1);
-        mv.visitJumpInsn(IF_ICMPEQ, nextAlt);
-
-        // Success: return result (groups already set by alternative)
-        mv.visitVarInsn(ILOAD, 7);
-        mv.visitInsn(IRETURN);
-
-        // Failed: restore groups and try next
-        mv.visitLabel(nextAlt);
-        if (i < node.alternatives.size() - 1) {
-          // Restore groups array
-          mv.visitVarInsn(ALOAD, 6); // savedGroups
-          mv.visitInsn(ICONST_0);
-          mv.visitVarInsn(ALOAD, 4); // groups
-          mv.visitInsn(ICONST_0);
-          mv.visitVarInsn(ALOAD, 4);
-          mv.visitInsn(ARRAYLENGTH);
-          mv.visitMethodInsn(
-              INVOKESTATIC,
-              "java/lang/System",
-              "arraycopy",
-              "(Ljava/lang/Object;ILjava/lang/Object;II)V",
-              false);
+      // Each alternative starts with the branch-reset groups cleared; groups outside the branch
+      // reset are preserved; the reset adds at most groupResetBytes per alternative.
+      int n = node.alternatives.size();
+      int chunk = Math.max(1, RANGE_CHUNK * 40 / (40 + groupResetBytes(branchResetGroups)));
+      if (n > chunk) {
+        emitAlternationRanges(mv, node.alternatives, branchResetGroups, 0, n, chunk);
+      } else {
+        for (int i = 0; i < n; i++) {
+          emitGroupReset(mv, branchResetGroups);
+          emitAlternative(mv, node.alternatives.get(i), i < n - 1);
         }
       }
 

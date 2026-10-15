@@ -28,6 +28,7 @@ import com.datadoghq.reggie.codegen.analysis.OptionalGroupBackrefInfo;
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
+import com.datadoghq.reggie.codegen.analysis.RecursiveDescentChoiceAnalysis;
 import com.datadoghq.reggie.codegen.analysis.SpecializedOptionalGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
 import com.datadoghq.reggie.codegen.analysis.VariableCaptureBackrefInfo;
@@ -69,6 +70,8 @@ import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenera
 import com.datadoghq.reggie.codegen.parsing.GroupCounter;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import org.objectweb.asm.*;
 
 /**
@@ -132,11 +135,50 @@ public class ReggieMatcherBytecodeGenerator {
    * {@link #resolvedStrategy()} as a side effect.
    */
   public Realization resolveRealization(boolean allowJdkFallback) throws Exception {
+    return resolveRealization(allowJdkFallback, true);
+  }
+
+  /**
+   * As {@link #resolveRealization(boolean)}; with {@code oneWayRoute} false the one-way
+   * recursive-descent route is skipped; RegexPatternProcessor uses it when that class exceeds the
+   * JVM method size limit. A pattern java.util.regex cannot parse is never realized as {@link
+   * Realization#DELEGATE_FALLBACK}.
+   */
+  public Realization resolveRealization(boolean allowJdkFallback, boolean oneWayRoute)
+      throws Exception {
+    Realization realization = resolve(allowJdkFallback, oneWayRoute);
+    if (realization == Realization.DELEGATE_FALLBACK && !jdkParses(pattern)) {
+      throw new UnsupportedOperationException(noJdkFallback(pattern));
+    }
+    return realization;
+  }
+
+  /** Error message for a pattern that needs java.util.regex, which cannot parse it. */
+  static String noJdkFallback(String pattern) {
+    return "Pattern '"
+        + pattern
+        + "' requires java.util.regex fallback, but java.util.regex cannot parse it.";
+  }
+
+  /** Whether java.util.regex parses {@code pattern}. */
+  static boolean jdkParses(String pattern) {
+    try {
+      Pattern.compile(pattern);
+      return true;
+    } catch (PatternSyntaxException e) {
+      return false;
+    }
+  }
+
+  private Realization resolve(boolean allowJdkFallback, boolean oneWayRoute) throws Exception {
     RegexParser parser = new RegexParser();
     RegexNode ast = parser.parse(pattern);
     int groupCount = GroupCounter.count(pattern);
-    NFA nfa = new ThompsonBuilder().build(ast, groupCount);
-    if (nfa.hasCountedLoops()) {
+    // As in RuntimeCompiler: the analysis of a context-free pattern (subroutine, conditional,
+    // branch reset) needs no NFA.
+    boolean recursiveDescent = PatternAnalyzer.requiresRecursiveDescent(ast);
+    NFA nfa = recursiveDescent ? null : new ThompsonBuilder().build(ast, groupCount);
+    if (nfa != null && nfa.hasCountedLoops()) {
       // The counted-loop lowering runs in this build too, but only the runtime pipeline
       // executes the markers (BackrefBacktrackMatcher). No compile-time generator interprets
       // them — the markers would read as dead states and reject valid matches.
@@ -182,17 +224,34 @@ public class ReggieMatcherBytecodeGenerator {
       }
       return Realization.DELEGATE_PIKEVM;
     }
+    // Mirrors RuntimeCompiler's one-way check before step 4: the recursive-descent generator
+    // runs a pattern with no choice point it would have to retry.
+    if (oneWayRoute && rdOneWay(ast, result)) {
+      return Realization.NATIVE;
+    }
     // Mirrors RuntimeCompiler step 4.5: patterns whose generated engine diverges from
     // java.util.regex run on the backtracker when it supports them. The DFA-level refusals
     // (anchor dilution, alternation-priority conflict, capture ambiguity) precede that step there
     // and stay with needsJdk here.
+    boolean backtrackerRuns = false;
+    String backtrackRefusal = "the backtracking engine does not route strategy " + result.strategy;
     if (!result.anchorConditionDiluted
         && !result.alternationPriorityConflict
         && !result.captureAmbiguous
-        && !PatternAnalyzer.requiresRecursiveDescent(ast)
-        && BacktrackSupport.routesToBacktracker(result.strategy, nfa)
-        && BacktrackSupport.unsupportedFeature(new ThompsonBuilder(true).build(ast, groupCount))
-            == null) {
+        && (nfa != null || recursiveDescent)
+        && BacktrackSupport.routesToBacktracker(result.strategy, nfa)) {
+      try {
+        String unsupported =
+            BacktrackSupport.unsupportedFeature(
+                new ThompsonBuilder(true, true).build(ast, groupCount));
+        backtrackerRuns = unsupported == null;
+        backtrackRefusal = "the backtracking engine does not execute " + unsupported;
+      } catch (UnsupportedOperationException e) {
+        // The state cap, or a call to a missing group: the backtracker cannot run it.
+        backtrackRefusal = "the backtracking engine cannot build it: " + e.getMessage();
+      }
+    }
+    if (backtrackerRuns) {
       String backtrackFallbackReason =
           FallbackPatternDetector.needsFallback(ast, result.strategy, true);
       if (backtrackFallbackReason == null) {
@@ -226,7 +285,29 @@ public class ReggieMatcherBytecodeGenerator {
     if (hybridPlan(analyzer, ast, nfa, result, groupCount) != null) {
       return Realization.HYBRID;
     }
+    // Mirrors RuntimeCompiler step 5.5: the recursive-descent generator does not retry a choice
+    // point when the rest of the pattern fails after it, so such a pattern is not generated.
+    if (result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+        && !rdOneWay(ast, result)) {
+      if (allowJdkFallback) {
+        return Realization.DELEGATE_FALLBACK;
+      }
+      throw new UnsupportedOperationException(
+          "Pattern '"
+              + pattern
+              + "' requires java.util.regex fallback: recursive-descent pattern with choice"
+              + " points: "
+              + backtrackRefusal
+              + ". Add options = ReggieOption.ALLOW_JDK_FALLBACK to @RegexPattern to permit a"
+              + " delegating stub, or use Reggie.compile() at runtime.");
+    }
     return Realization.NATIVE;
+  }
+
+  private static boolean rdOneWay(RegexNode ast, PatternAnalyzer.MatchingStrategyResult result) {
+    return result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+        && RecursiveDescentChoiceAnalysis.isOneWay(ast)
+        && !needsJdk(ast, result); // needsJdk includes needsFallback(ast, strategy, false)
   }
 
   private static boolean needsJdk(RegexNode ast, PatternAnalyzer.MatchingStrategyResult result) {
@@ -254,6 +335,7 @@ public class ReggieMatcherBytecodeGenerator {
       int groupCount) {
     if (groupCount == 0
         || !result.usePosixLastMatch
+        || nfa == null
         || nfa.hasCountedLoops()
         || result.strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
         || result.strategy == PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
@@ -338,11 +420,15 @@ public class ReggieMatcherBytecodeGenerator {
     // NFA is never used for matching — the throw at line 207 exits before any code generation —
     // but building it here is simpler than deferring construction until after
     // analyzeAndRecommend().
-    ThompsonBuilder nfaBuilder = new ThompsonBuilder();
+    // A context-free pattern (subroutine, conditional, branch reset) gets no NFA, as in
+    // resolveRealization.
     // Count groups in pattern for group tracking
     int groupCount = GroupCounter.count(pattern);
-    NFA nfa = nfaBuilder.build(ast, groupCount);
-    if (nfa.hasCountedLoops()) {
+    NFA nfa =
+        PatternAnalyzer.requiresRecursiveDescent(ast)
+            ? null
+            : new ThompsonBuilder().build(ast, groupCount);
+    if (nfa != null && nfa.hasCountedLoops()) {
       // See resolveRealization: only the runtime pipeline executes counted-loop markers.
       throw new UnsupportedOperationException(
           "Pattern '"
@@ -452,9 +538,18 @@ public class ReggieMatcherBytecodeGenerator {
     // Class declaration — LAZY_DFA generated class implements NfaStep directly so the cache
     // can call nfaStep() without INVOKEDYNAMIC (which is unsupported in hidden classes).
     String[] ifaces =
-        strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA
-            ? new String[] {"com/datadoghq/reggie/runtime/NfaStep"}
-            : null;
+        switch (strategy) {
+          case LAZY_DFA -> new String[] {"com/datadoghq/reggie/runtime/NfaStep"};
+          // linStep/linStartAccepts for DFALinearFind (emitted with matchesAtStart)
+          case DFA_UNROLLED,
+              DFA_UNROLLED_WITH_ASSERTIONS,
+              DFA_UNROLLED_WITH_GROUPS,
+              DFA_SWITCH,
+              DFA_SWITCH_WITH_ASSERTIONS,
+              DFA_SWITCH_WITH_GROUPS ->
+              new String[] {"com/datadoghq/reggie/runtime/DFALinearFind$Stepper"};
+          default -> null;
+        };
     cw.visit(
         V21,
         ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
@@ -923,7 +1018,7 @@ public class ReggieMatcherBytecodeGenerator {
       case RECURSIVE_DESCENT:
         // Context-free patterns: subroutines, conditionals, branch reset, non-greedy
         RecursiveDescentBytecodeGenerator recursiveGen =
-            new RecursiveDescentBytecodeGenerator(ast, nfa);
+            new RecursiveDescentBytecodeGenerator(ast, nfa, rdOneWay(ast, result));
 
         // Generate parser methods FIRST (parseRoot and AST parsers)
         recursiveGen.generateAllParserMethods(cw, cls);
@@ -934,7 +1029,6 @@ public class ReggieMatcherBytecodeGenerator {
         recursiveGen.generateFindMethod(cw, cls);
         recursiveGen.generateFindFromMethod(cw, cls);
         recursiveGen.generateFindBoundsFromMethod(cw, cls);
-        recursiveGen.generateMatchesBoundedMethod(cw, cls);
         recursiveGen.generateMatchMethod(cw, cls);
         recursiveGen.generateFindMatchMethod(cw, cls);
         recursiveGen.generateFindMatchFromMethod(cw, cls);

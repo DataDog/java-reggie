@@ -18,7 +18,11 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Tests for FIXED_REPETITION_BACKREF strategy. Patterns like (a)\1{n} where the backreference has
@@ -89,5 +93,48 @@ class FixedRepetitionBackrefTest {
     assertEquals(3, m.findFrom("xxxaaayyy", 0), "Should find at position 3");
     assertEquals(3, m.findFrom("xxxaaayyy", 3), "Should find at position 3 when starting there");
     assertEquals(-1, m.findFrom("xxxaaayyy", 4), "Should not find starting after match");
+  }
+
+  /** Nodes between the group and the quantified backreference are matched, not dropped. */
+  @ParameterizedTest
+  @CsvSource(
+      delimiter = ';',
+      value = {
+        "(q)x\\1+;qxq",
+        "(q)x\\1+;qq",
+        "(q)xy\\1+;qxyq",
+        "(q)[ab]\\1+;qaq",
+        "a(q)\\1+b;aqqb",
+      })
+  void nodesBetweenGroupAndBackrefEqualJdk(String pattern, String input) {
+    assertEquals(
+        Pattern.compile(pattern).matcher(input).find(), Reggie.compile(pattern).find(input));
+  }
+
+  /** Nodes before the group or after the quantified backreference are part of the match. */
+  @ParameterizedTest
+  @CsvSource(
+      delimiter = ';',
+      value = {
+        "(?:(b)\\1)(a)\\2{2};bbaaa",
+        "(?:(b)\\1)(a)\\2{2};xbaaa",
+        "x(a)\\1{2};aaa",
+        "^(a)\\1{2};baaa",
+        "(a)\\1{2}x;aaa",
+        "(a)\\1{2}bc;aaab",
+        "(a)\\1{2}(b);aaac",
+        "(a)\\1{2}$;aaaa",
+        "^(a)\\1{2}(.);aaab",
+      })
+  void prefixAndSuffixEqualJdk(String pattern, String input) {
+    Matcher jdk = Pattern.compile(pattern).matcher(input);
+    MatchResult r = Reggie.compile(pattern).findMatch(input);
+    if (jdk.find()) {
+      assertNotNull(r, pattern);
+      assertEquals(jdk.start(), r.start(), pattern);
+      assertEquals(jdk.end(), r.end(), pattern);
+    } else {
+      assertNull(r, pattern);
+    }
   }
 }

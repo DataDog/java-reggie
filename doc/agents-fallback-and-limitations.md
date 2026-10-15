@@ -73,6 +73,7 @@ Falling back to java.util.regex for pattern '<pattern>': <reason>
 | DFA longest-match conflicts with NFA first-alternative priority | `(a\|ab)` in find context | `alternation priority conflict: DFA longest-match vs NFA first-alternative` |
 | Capture-ambiguous group bindings requiring POSIX last-match semantics | `(a\|a)+` | `capture-ambiguous group bindings: group spans require java.util.regex semantics` |
 | Generated method exceeds JVM 64 KB method-size limit (large alternations) | large Grok patterns | `generated method too large: <class>.<method><desc> codeSize=<n>` |
+| `RECURSIVE_DESCENT` pattern with a choice point (alternation, loop) that neither the backtracker nor the hybrid runs; the recursive-descent generator does not retry it | `(a\|ab)\1+c` followed by more than 64 unbounded loops | `recursive-descent pattern with choice points in /<pattern>/: <why the backtracker refuses it>` |
 
 `StrategyJdkClassifier.classifyJdkDependency()` is a single `switch` with no explicit cases — every
 `MatchingStrategy` falls through to `default: NATIVE`. Its javadoc states that currently no strategy
@@ -140,6 +141,15 @@ with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for thos
     - Known JDK divergence (pre-existing, issue #39 audit item): under `RECURSIVE_DESCENT` (C-03), a self-reference in partial-open state resolves to a zero-length match, so `(\1+)`/`(a\1+)` match where the JDK (which resolves mid-iteration backrefs against the last *completed* span) returns no match. Optional self-references (`\1?`) are unaffected in match/no-match terms.
 - **Recursive patterns**: Limited support via RECURSIVE_DESCENT strategy:
   - Subroutines (`(?R)`, `(?1)`) and conditionals (`(?(1)yes|no)`) work for most cases
+  - Only patterns without a choice point to retry run on the generated recursive-descent matcher.
+    The others run on `BackrefBacktrackMatcher` when it supports them, including atomic groups and
+    possessive quantifiers whose bodies hold calls, conditionals, recursion or counted loops
+    (`(a|ab)(?>(?1))c`, `(a)?(?>(?(1)b|c))d?d`). The backtracker refuses more than 64 unbounded
+    loops, more than 64 call targets, an NFA over its state cap, and lookarounds containing
+    lookarounds, conditionals, calls, atomic groups or counted loops; such a pattern falls back to
+    `java.util.regex` (see the table above) or throws `UnsupportedPatternException` when the JDK
+    cannot parse it. The annotation processor applies the same rule, and never emits a
+    JDK-delegating stub for a pattern the JDK cannot parse.
   - **Recursive palindromes**: Palindrome patterns (`^((.)(?1)\2|.?)$`, `^((.)(?R)\2|.?)$`) now throw `UnsupportedPatternException` by default. To match them, use `Reggie.compileAllowingFallback()` which delegates to `java.util.regex`. Issue #38 is closed by explicit JDK routing.
 - **Branch reset groups**: Partially supported — `(?|...)` with numbered groups routes to
   `RECURSIVE_DESCENT` and passes correctness tests. The named-capture variant
@@ -161,5 +171,22 @@ benchmark suite and deferred as follow-up work:
   single-pass end position directly instead of re-scanning every candidate length via
   `matchesInRange` (was effectively O(n²) with per-length substring allocation). Boolean `find()`
   was already O(n) as of `6841723`.
+- **DFA find loops (`DFA_UNROLLED*`, `DFA_SWITCH*`, `DFA_TABLE`)**: one `find` call tries starts
+  one by one until its failed runs consume more than `reggie.dfa.linearFindWorkFactor` (default 4)
+  times (searched length + 64) characters, then switches to the single-pass search in `DFALinearFind`, which costs
+  O(stateCount · n). The bound holds per call, so iterating m matches over one input (repeated
+  `findFrom`, `findAll`) can cost O(n · m). With a nonzero factor, `DFA_UNROLLED*` find calls that search at most 256
+  characters do not count and never switch, so one such call consumes at most about 33,000
+  characters. Remaining gaps:
+  - A matcher with lookahead gates computes the gate results for the whole rest of the input each
+    time the single-pass search starts. `DFA_SWITCH_WITH_ASSERTIONS` matchers whose gates sit in
+    split-out helper methods (large state switches, gates at accepting states) count every failed
+    run as reaching the end of the input, so their find calls switch to the single-pass search after
+    a few failed starts and pay that cost on each call.
+  - Gates with more than 64 states, or whose encoded table exceeds the 65535-byte class-file
+    constant limit, keep running the gate DFA at each position; find on such patterns is O(n²)
+    when the gate scan is long.
+  - A lookahead after an unbounded loop (`[ab]*a(?=[ab]*c)`) routes to `BACKREF_BACKTRACK`, whose
+    find is bounded by its step budgets rather than linear.
 - **`SPECIALIZED_MULTI_GROUP_GREEDY` and `SPECIALIZED_BOUNDED_QUANTIFIERS`**: ~2–2.5x over JDK, the
   weakest gains among generated strategies. Profiling may reveal further optimization opportunities.

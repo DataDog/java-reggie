@@ -17,8 +17,14 @@ package com.datadoghq.reggie.codegen.parsing;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import com.datadoghq.reggie.codegen.ast.AlternationNode;
+import com.datadoghq.reggie.codegen.ast.CharClassNode;
+import com.datadoghq.reggie.codegen.ast.ConcatNode;
+import com.datadoghq.reggie.codegen.ast.GroupNode;
 import com.datadoghq.reggie.codegen.ast.LiteralNode;
+import com.datadoghq.reggie.codegen.ast.QuantifierNode;
 import com.datadoghq.reggie.codegen.ast.RegexNode;
+import com.datadoghq.reggie.codegen.automaton.CharSet;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -51,6 +57,67 @@ class RegexParserTest {
         RegexParser.ParseException.class,
         () -> parse("(?"),
         "Truncated '(?' must throw ParseException");
+  }
+
+  /** A reversed class range must throw ParseException, as the JDK rejects it. */
+  @Test
+  void reversedClassRange_throwsParseException() {
+    assertThrows(RegexParser.ParseException.class, () -> parse("[z-a]"));
+    assertThrows(RegexParser.ParseException.class, () -> parse("[\\x7a-a]"));
+  }
+
+  /** Condition group 0 must throw ParseException, as PCRE2 rejects it. */
+  @Test
+  void conditionGroupZero_throwsParseException() {
+    assertThrows(RegexParser.ParseException.class, () -> parse("(a)(?(0)b|c)"));
+  }
+
+  /** A subroutine call to a group that does not exist is a compile error, as in PCRE2. */
+  @Test
+  void subroutineToMissingGroup_throwsParseException() throws Exception {
+    assertThrows(RegexParser.ParseException.class, () -> parse("(a)(?2)"));
+    assertThrows(RegexParser.ParseException.class, () -> parse("(?|(a)|(b+))c(?2)"));
+    assertThrows(RegexParser.ParseException.class, () -> parse("(?&n)(a)"));
+    assertThrows(RegexParser.ParseException.class, () -> parse("(a)(?4294967297)"));
+    assertThrows(RegexParser.ParseException.class, () -> parse("(a)(?2147483648)"));
+    parse("(?2)(a)(b)");
+    parse("(?|(a)|(b))(?1)");
+    parse("(?&n)(?<n>a)");
+  }
+
+  /** \R is the ordered, non-atomic (?:\r\n|[\n\x0B\f\r\x85 U+2028 U+2029]). */
+  @Test
+  void linebreakEscape_shape() throws Exception {
+    GroupNode group = assertInstanceOf(GroupNode.class, parse("\\R"));
+    assertFalse(group.capturing || group.atomic);
+    AlternationNode alt = assertInstanceOf(AlternationNode.class, group.child);
+    assertEquals(2, alt.alternatives.size());
+    ConcatNode crlf = assertInstanceOf(ConcatNode.class, alt.alternatives.get(0));
+    assertEquals('\r', assertInstanceOf(LiteralNode.class, crlf.children.get(0)).ch);
+    assertEquals('\n', assertInstanceOf(LiteralNode.class, crlf.children.get(1)).ch);
+    CharClassNode single = assertInstanceOf(CharClassNode.class, alt.alternatives.get(1));
+    assertEquals(CharSet.VERTICAL_WS, single.chars);
+    assertFalse(single.negated);
+  }
+
+  /** As a class range bound, \v is VT (0x0B); \h is never a bound. */
+  @Test
+  void classRangeBounds_verticalAndHorizontalWhitespace() throws Exception {
+    CharClassNode vt = assertInstanceOf(CharClassNode.class, parse("[\\v-\\r]"));
+    assertEquals(CharSet.range('\u000B', '\r'), vt.chars);
+    CharClassNode h = assertInstanceOf(CharClassNode.class, parse("[\\h-a]"));
+    assertEquals(CharSet.HORIZONTAL_WS.union(CharSet.of('-')).union(CharSet.of('a')), h.chars);
+    assertThrows(RegexParser.ParseException.class, () -> parse("[a-\\h]"));
+  }
+
+  /** As in java.util.regex, a quantifier after \\E applies to the last quoted character only. */
+  @Test
+  void quantifierAfterQuote_appliesToLastChar() throws Exception {
+    ConcatNode concat = assertInstanceOf(ConcatNode.class, parse("\\Qab\\E+"));
+    assertEquals(2, concat.children.size());
+    assertEquals('a', assertInstanceOf(LiteralNode.class, concat.children.get(0)).ch);
+    QuantifierNode plus = assertInstanceOf(QuantifierNode.class, concat.children.get(1));
+    assertEquals('b', assertInstanceOf(LiteralNode.class, plus.child).ch);
   }
 
   /** Quantifier count overflow must throw ParseException, not NumberFormatException. */

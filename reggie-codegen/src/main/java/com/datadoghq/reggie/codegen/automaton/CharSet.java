@@ -175,6 +175,29 @@ public final class CharSet {
               new Range('\r', '\r'),
               new Range('\f', '\f')));
 
+  /**
+   * java.util.regex {@code \h}: space, tab, U+00A0, U+1680, U+180E, U+2000-U+200A, U+202F, U+205F,
+   * U+3000.
+   */
+  public static final CharSet HORIZONTAL_WS =
+      fromRanges(
+          List.of(
+              new Range(' ', ' '),
+              new Range('\t', '\t'),
+              new Range('\u00A0', '\u00A0'),
+              new Range('\u1680', '\u1680'),
+              new Range('\u180E', '\u180E'),
+              new Range('\u2000', '\u200A'),
+              new Range('\u202F', '\u202F'),
+              new Range('\u205F', '\u205F'),
+              new Range('\u3000', '\u3000')));
+
+  /** java.util.regex {@code \v}: U+000A-U+000D, U+0085, U+2028, U+2029. */
+  public static final CharSet VERTICAL_WS =
+      fromRanges(
+          List.of(
+              new Range('\n', '\r'), new Range('\u0085', '\u0085'), new Range('\u2028', '\u2029')));
+
   public static final CharSet ANY = range((char) 0, (char) 0xFFFF);
 
   /**

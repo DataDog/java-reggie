@@ -54,12 +54,9 @@ import org.objectweb.asm.MethodVisitor;
  * boolean matches(String input) {
  *     int len = input.length();
  *     int groupEnd = len;  // Start with longest possible capture
- *     int iterations = 0;
  *
  *     // Backtrack loop: try shorter captures until match found
  *     while (groupEnd >= groupMinLen) {
- *         if (BacktrackConfig.checkLimit(iterations++)) return false;
- *
  *         String captured = input.substring(0, groupEnd);
  *         int sepStart = groupEnd;
  *
@@ -126,7 +123,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
     int backrefEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
 
     Label returnNull = new Label();
 
@@ -158,10 +154,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
-    // int iterations = 0;
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
-
     Label loopStart = new Label();
     Label loopEnd = new Label();
     Label continueLoop = new Label();
@@ -174,13 +166,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     pushInt(mv, info.groupMinCount);
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, loopEnd);
-
-    // BacktrackConfig.checkLimit(iterations++)
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnNull);
-    mv.visitIincInsn(iterationsVar, 1);
 
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueLoop, alloc);
@@ -535,10 +520,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int groupEndVar = alloc.allocate();
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
     int groupStartVar = alloc.allocate();
-
-    Label returnNull = new Label();
 
     // Null check
     Label notNull = new Label();
@@ -587,10 +569,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     emitPrefixMatch(mv, groupStartVar, lenVar, innerEnd, alloc);
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
-    // iterations = 0
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
-
     Label innerLoop = new Label();
     Label continueInner = new Label();
 
@@ -602,13 +580,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     pushInt(mv, info.groupMinCount);
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, innerEnd);
-
-    // BacktrackConfig.checkLimit
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnNull);
-    mv.visitIincInsn(iterationsVar, 1);
 
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueInner, alloc);
@@ -729,7 +700,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitJumpInsn(GOTO, outerLoop);
 
     mv.visitLabel(outerEnd);
-    mv.visitLabel(returnNull);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
 
@@ -928,7 +898,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
     int backrefEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
 
     Label returnFalse = new Label();
 
@@ -961,10 +930,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     // int groupEnd = len - separatorMinLen - groupMinLen;  (start with longest possible)
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
-    // int iterations = 0;
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
-
     // Backtrack loop
     Label loopStart = new Label();
     Label loopEnd = new Label();
@@ -978,13 +943,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     pushInt(mv, info.groupMinCount);
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, loopEnd);
-
-    // Check backtrack limit: if (BacktrackConfig.checkLimit(iterations++)) return false;
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnFalse);
-    mv.visitIincInsn(iterationsVar, 1);
 
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueLoop, alloc);
@@ -1358,10 +1316,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int groupEndVar = alloc.allocate();
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
     int groupStartVar = alloc.allocate();
-
-    Label returnNotFound = new Label();
 
     // Null check
     Label notNull = new Label();
@@ -1412,10 +1367,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     emitPrefixMatch(mv, groupStartVar, lenVar, innerEnd, alloc);
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
-    // iterations = 0
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
-
     // Inner backtrack loop
     Label innerLoop = new Label();
     Label continueInner = new Label();
@@ -1428,13 +1379,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     pushInt(mv, info.groupMinCount);
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, innerEnd);
-
-    // Check backtrack limit
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnNotFound);
-    mv.visitIincInsn(iterationsVar, 1);
 
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueInner, alloc);
@@ -1492,7 +1436,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitJumpInsn(GOTO, outerLoop);
 
     mv.visitLabel(outerEnd);
-    mv.visitLabel(returnNotFound);
     mv.visitInsn(ICONST_M1);
     mv.visitInsn(IRETURN);
 

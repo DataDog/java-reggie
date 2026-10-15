@@ -191,6 +191,28 @@ class ReggieMatcherBytecodeGeneratorTest {
     assertFalse((Boolean) find.invoke(matcher, "abc"));
   }
 
+  /**
+   * A recursive-descent pattern with choice points the backtracker cannot run (more than 64
+   * unbounded loops; an atomic group inside a lookaround) is not generated: the generator would not
+   * retry its choice points. It delegates to java.util.regex when allowed and the JDK parses it.
+   */
+  @Test
+  void testRecursiveDescentChoicePointsNotGenerated() throws Exception {
+    String jdk = "(a|ab)\\1+c" + "(?:d*e)".repeat(65);
+    ReggieMatcherBytecodeGenerator gen = new ReggieMatcherBytecodeGenerator("test", "J", jdk);
+    assertEquals(
+        ReggieMatcherBytecodeGenerator.Realization.DELEGATE_FALLBACK, gen.resolveRealization(true));
+    UnsupportedOperationException e =
+        assertThrows(UnsupportedOperationException.class, () -> gen.resolveRealization(false));
+    assertTrue(
+        e.getMessage().contains("recursive-descent pattern with choice points"), e.getMessage());
+
+    String noJdk = "(?|(a)|b)(?=(?>x))(x|xy)c";
+    ReggieMatcherBytecodeGenerator gen2 = new ReggieMatcherBytecodeGenerator("test", "N", noJdk);
+    assertThrows(UnsupportedOperationException.class, () -> gen2.resolveRealization(false));
+    assertThrows(UnsupportedOperationException.class, () -> gen2.resolveRealization(true));
+  }
+
   @Test
   void testWordBoundaryBackrefStrategyNative() throws Exception {
     // \b(\w+)\s+\1\b resolves to VARIABLE_CAPTURE_BACKREF, now NATIVE (Wave 2).

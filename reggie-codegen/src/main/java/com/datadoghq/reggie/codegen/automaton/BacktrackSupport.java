@@ -34,15 +34,18 @@ public final class BacktrackSupport {
    */
   public static final int MAX_LOOP_HEADS = 64;
 
+  /** Distinct subroutine call targets the backtracker supports: one bit of a {@code long} each. */
+  public static final int MAX_CALL_TARGETS = 64;
+
   private BacktrackSupport() {}
 
   /**
    * True when a pattern analyzed as {@code strategy} runs on the backtracker instead of its
    * generated engine: generic backreference patterns and lookaround patterns, whose generated
    * matchers keep the longest match end and lose alternation priority in group spans, and
-   * RECURSIVE_DESCENT patterns containing a lookaround, which the descent generator does not
-   * evaluate. {@code nfa} is the pattern's NFA (only patterns that do not require recursive descent
-   * have one).
+   * RECURSIVE_DESCENT patterns, whose descent generator commits to the first successful choice of
+   * most choice points. {@code nfa} is the pattern's NFA; it is not read for RECURSIVE_DESCENT
+   * (patterns that require recursive descent have none) and may be null there.
    */
   public static boolean routesToBacktracker(PatternAnalyzer.MatchingStrategy strategy, NFA nfa) {
     switch (strategy) {
@@ -53,12 +56,7 @@ public final class BacktrackSupport {
       case SPECIALIZED_LITERAL_LOOKAHEADS:
         return true;
       case RECURSIVE_DESCENT:
-        for (NFA.NFAState s : nfa.getStates()) {
-          if (s.assertionType != null) {
-            return true;
-          }
-        }
-        return false;
+        return true;
       default:
         return false;
     }
@@ -70,7 +68,8 @@ public final class BacktrackSupport {
    * NFAs are reducible, so these are exactly the back edges of {@code X*} / {@code X+} and their
    * lazy forms. Edges into counted-loop markers are left out (the counter bounds those loops).
    * Lookaround bodies are walked from their own entry states: their loops gate the sub-search of
-   * the backtracker's lookaround-body capture search.
+   * the backtracker's lookaround-body capture search. Conditional branches are walked; subroutine
+   * calls are not (a recursion is not a loop iteration).
    */
   public static List<int[]> loopBackEdges(NFA nfa) {
     int n = 0;
@@ -119,6 +118,10 @@ public final class BacktrackSupport {
         t = s.getTransitions().get(e - eps).target.id;
       } else if (s.countedLoopId != null && e < eps + chars + 2) {
         t = e == eps + chars ? s.countedLoopBodyEntryId : s.countedLoopStopId;
+      } else if (s.conditionalGroup != null && e == eps + chars) {
+        t = s.thenBranch.id;
+      } else if (s.conditionalGroup != null && s.elseBranch != null && e == eps + chars + 1) {
+        t = s.elseBranch.id;
       } else {
         color[u] = 2;
         sp--;
@@ -135,22 +138,24 @@ public final class BacktrackSupport {
 
   /**
    * Returns why the backtracker cannot execute {@code nfa}, or {@code null} when it can.
-   * Conditionals and atomic groups are not executed; lookarounds are, provided their bodies hold
-   * only characters, anchors, epsilons, group boundaries and backreferences (no nested lookarounds,
-   * conditionals, atomic groups or counted-loop markers). At most {@link #MAX_LOOP_HEADS} unbounded
-   * loops are supported.
+   * Lookarounds are executed provided their bodies hold only characters, anchors, epsilons, group
+   * boundaries and backreferences (no nested lookarounds, conditionals, subroutine calls, atomic
+   * groups or counted-loop markers). At most {@link #MAX_LOOP_HEADS} unbounded loops and {@link
+   * #MAX_CALL_TARGETS} distinct call targets are supported.
    */
   public static String unsupportedFeature(NFA nfa) {
+    Set<Integer> targets = new HashSet<>();
     for (NFA.NFAState s : nfa.getStates()) {
-      if (s.conditionalGroup != null) {
-        return "a conditional (?(n)...)";
-      }
-      if (s.atomicEntry >= 0 || s.atomicExit >= 0) {
-        return "an atomic group";
-      }
       if (s.assertionType != null && !isPlainAssertionBody(s.assertionStartState)) {
-        return "a lookaround containing lookarounds, conditionals, atomic groups or counted loops";
+        return "a lookaround containing lookarounds, conditionals, subroutine calls, atomic groups"
+            + " or counted loops";
       }
+      if (s.callTarget >= 0) {
+        targets.add(s.callTarget);
+      }
+    }
+    if (targets.size() > MAX_CALL_TARGETS) {
+      return "more than " + MAX_CALL_TARGETS + " subroutine call targets";
     }
     Set<Integer> heads = new HashSet<>();
     for (int[] be : loopBackEdges(nfa)) {
@@ -171,6 +176,7 @@ public final class BacktrackSupport {
       NFA.NFAState s = queue.poll();
       if (s.assertionType != null
           || s.conditionalGroup != null
+          || s.callTarget >= 0
           || s.atomicEntry >= 0
           || s.atomicExit >= 0
           || s.countedLoopId != null) {

@@ -55,7 +55,8 @@ import org.junit.jupiter.api.io.TempDir;
  * Quantified capturing groups ({@code usePosixLastMatch}) are realized as a DFA/NFA hybrid: two
  * generated classes wired into a {@link HybridMatcher} whose NFA half is a {@link PooledMatcher}.
  * Generated matchers that write instance state while matching are cached as a {@link
- * PooledMatcher}; lookaround patterns share one stateless {@link BackrefBacktrackMatcher}.
+ * PooledMatcher}; lookaround and subroutine patterns share one stateless {@link
+ * BackrefBacktrackMatcher}.
  */
 class HybridRealizationProcessorTest {
 
@@ -70,8 +71,24 @@ class HybridRealizationProcessorTest {
           + "  public abstract ReggieMatcher lookbehind();\n"
           + "  @RegexPattern(\"(?=.*a)(?=.*b)(x|xy)\")\n"
           + "  public abstract ReggieMatcher alternatives();\n"
-          + "  @RegexPattern(\"([a-z]+)-\\\\1+\")\n"
+          + "  @RegexPattern(\"([ab]+)(?:(x)){0}(?2)?\")\n"
           + "  public abstract ReggieMatcher recursive();\n"
+          + "  @RegexPattern(\"(a|ab)(?1)\")\n"
+          + "  public abstract ReggieMatcher subroutine();\n"
+          + "  @RegexPattern(\"(?|(a)|(b))c\")\n"
+          + "  public abstract ReggieMatcher oneWay();\n"
+          + "  @RegexPattern(\"(?|(a)|b)"
+          + "c".repeat(4000)
+          + "\")\n"
+          + "  public abstract ReggieMatcher oversized();\n"
+          + "  @RegexPattern(\"(?|(a)|b)c?"
+          + "d".repeat(4000)
+          + "\")\n"
+          + "  public abstract ReggieMatcher oversizedGiveBack();\n"
+          + "  @RegexPattern(\"(?|(a)|b)"
+          + ".".repeat(40000)
+          + "\")\n"
+          + "  public abstract ReggieMatcher oversizedClass();\n"
           + "}\n";
 
   @Test
@@ -122,19 +139,20 @@ class HybridRealizationProcessorTest {
         new URLClassLoader(new URL[] {out.toUri().toURL()}, getClass().getClassLoader())) {
       Object impl = loader.loadClass("gen.HP$Impl").getDeclaredConstructor().newInstance();
 
-      // RECURSIVE_DESCENT: matchInto runs on ReggieMatcher's recursiveGroups scratch array.
-      ReggieMatcher m = pooled(impl, "recursive", "([a-z]+)-\\1+");
+      // RECURSIVE_DESCENT: matchInto runs on ReggieMatcher's recursiveGroups scratch array. One-way
+      // (no choice point to retry), so it stays on the recursive-descent generator.
+      ReggieMatcher m = pooled(impl, "recursive", "([ab]+)(?:(x)){0}(?2)?");
       assertConcurrentSpans(
           m,
-          new String[] {"ab-ab", "abcd-abcdabcd", "x-x", "abcdefg-abcdefg"},
+          new String[] {"a", "abab", "bbbbbb", "ab"},
           new int[] {0, 0, 0, 0},
-          new int[] {2, 4, 1, 7},
+          new int[] {1, 4, 6, 2},
           true);
     }
   }
 
   @Test
-  void lookaroundMatchersShareTheBacktracker(@TempDir Path out) throws Exception {
+  void backtrackerMatchersAreShared(@TempDir Path out) throws Exception {
     assertTrue(compile(out), "@RegexPattern should compile");
     try (URLClassLoader loader =
         new URLClassLoader(new URL[] {out.toUri().toURL()}, getClass().getClassLoader())) {
@@ -148,6 +166,15 @@ class HybridRealizationProcessorTest {
           new int[] {2, 8, 4, 16},
           true);
 
+      // The call of group 1 retries its alternatives; group 1 keeps the caller's span.
+      m = backtrack(impl, "subroutine", "(a|ab)(?1)");
+      assertConcurrentSpans(
+          m,
+          new String[] {"aab", "aba", "aa", "abab"},
+          new int[] {0, 0, 0, 0},
+          new int[] {1, 2, 1, 2},
+          true);
+
       // Leftmost-first alternation: the first alternative x wins over the longer xy.
       m = backtrack(impl, "alternatives", "(?=.*a)(?=.*b)(x|xy)");
       assertConcurrentSpans(
@@ -156,6 +183,64 @@ class HybridRealizationProcessorTest {
           new int[] {0, 0, 1},
           new int[] {1, 1, 2},
           false);
+    }
+  }
+
+  /**
+   * A one-way RECURSIVE_DESCENT pattern is realized by the generated matcher, not the backtracker.
+   */
+  @Test
+  void oneWayRecursiveDescentIsNative(@TempDir Path out) throws Exception {
+    ReggieMatcherBytecodeGenerator gen =
+        new ReggieMatcherBytecodeGenerator("test.generated", "S", "(?|(a)|(b))c");
+    assertEquals(ReggieMatcherBytecodeGenerator.Realization.NATIVE, gen.resolveRealization(false));
+    assertEquals(MatchingStrategy.RECURSIVE_DESCENT, gen.resolvedStrategy());
+    assertTrue(compile(out), "@RegexPattern should compile");
+    try (URLClassLoader loader =
+        new URLClassLoader(new URL[] {out.toUri().toURL()}, getClass().getClassLoader())) {
+      Object impl = loader.loadClass("gen.HP$Impl").getDeclaredConstructor().newInstance();
+      ReggieMatcher m = (ReggieMatcher) impl.getClass().getMethod("oneWay").invoke(impl);
+      assertInstanceOf(PooledMatcher.class, m);
+      assertTrue(m.matches("ac"));
+      assertFalse(m.matches("cc"));
+      MatchResult found = m.findMatch("xbc");
+      assertNotNull(found);
+      assertEquals(1, found.start());
+      assertEquals(3, found.end());
+      assertEquals(1, found.start(1));
+      assertEquals(2, found.end(1));
+    }
+  }
+
+  /**
+   * Oversized one-way and give-back concats are split into helper methods and stay native. A class
+   * with one method per dot (not checked inline) overflows the constant pool and is realized by the
+   * backtracker.
+   */
+  @Test
+  void oversizedOneWayPatterns(@TempDir Path out) throws Exception {
+    assertTrue(compile(out), "@RegexPattern should compile");
+    try (URLClassLoader loader =
+        new URLClassLoader(new URL[] {out.toUri().toURL()}, getClass().getClassLoader())) {
+      Object impl = loader.loadClass("gen.HP$Impl").getDeclaredConstructor().newInstance();
+      ReggieMatcher m = (ReggieMatcher) impl.getClass().getMethod("oversized").invoke(impl);
+      assertInstanceOf(PooledMatcher.class, m);
+      MatchResult found = m.findMatch("xb" + "c".repeat(4000));
+      assertNotNull(found);
+      assertEquals(1, found.start());
+      assertEquals(4002, found.end());
+      assertFalse(m.matches("a" + "c".repeat(3999)));
+
+      m = (ReggieMatcher) impl.getClass().getMethod("oversizedGiveBack").invoke(impl);
+      assertInstanceOf(PooledMatcher.class, m);
+      assertTrue(m.matches("ac" + "d".repeat(4000)));
+      assertTrue(m.matches("b" + "d".repeat(4000)));
+      assertFalse(m.matches("bc" + "d".repeat(3999)));
+
+      m = (ReggieMatcher) impl.getClass().getMethod("oversizedClass").invoke(impl);
+      assertInstanceOf(BackrefBacktrackMatcher.class, m);
+      assertTrue(m.matches("a" + "e".repeat(40000)));
+      assertFalse(m.matches("a" + "e".repeat(39999)));
     }
   }
 
@@ -203,8 +288,9 @@ class HybridRealizationProcessorTest {
         int offset = t;
         tasks.add(
             () -> {
-              int[] gs = new int[2];
-              int[] ge = new int[2];
+              // Room for the patterns' groups 0..2.
+              int[] gs = new int[3];
+              int[] ge = new int[3];
               for (int i = 0; i < 20_000; i++) {
                 int k = (i + offset) % inputs.length;
                 MatchResult res = m.findMatch(inputs[k]);

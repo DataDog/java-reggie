@@ -150,10 +150,11 @@ public class NfaMatcherConcurrencyTest {
    */
   @Test
   public void testConcurrentCompileAndMatchIntoRecursiveDescentPattern() throws Exception {
-    // Not prefiltered (no required literal), so matchInto reaches the generated method.
-    String pattern = "(a|bb)\\1+";
-    String[] inputs = {"aa", "bbbbbb", "aaaaaaaa", "bbbb"};
-    int[] groupEnds = {1, 2, 1, 2};
+    // Not prefiltered (no required literal), so matchInto reaches the generated method. One-way
+    // (no choice point to retry), so it stays on the recursive-descent generator.
+    String pattern = "(?:(x)){0}([ab]+)(?1)?";
+    String[] inputs = {"a", "abab", "bbbbbb", "ab"};
+    int[] groupEnds = {1, 4, 6, 2};
     assertNotSame(Reggie.compile(pattern), Reggie.compile(pattern));
 
     int numThreads = 8;
@@ -169,13 +170,13 @@ public class NfaMatcherConcurrencyTest {
               startLatch.countDown();
               startLatch.await();
               ReggieMatcher matcher = Reggie.compile(pattern);
-              int[] starts = new int[2];
-              int[] ends = new int[2];
+              int[] starts = new int[3];
+              int[] ends = new int[3];
               for (int i = 0; i < 20_000; i++) {
                 int k = (i + offset) % inputs.length;
                 if (!matcher.matchInto(inputs[k], starts, ends)
-                    || starts[1] != 0
-                    || ends[1] != groupEnds[k]) {
+                    || starts[2] != 0
+                    || ends[2] != groupEnds[k]) {
                   failures.incrementAndGet();
                 }
               }

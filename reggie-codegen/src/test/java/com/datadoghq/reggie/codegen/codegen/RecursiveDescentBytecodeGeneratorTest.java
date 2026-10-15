@@ -162,46 +162,6 @@ class RecursiveDescentBytecodeGeneratorTest {
   }
 
   @Test
-  void testGenerateMatchesBoundedMethod() throws Exception {
-    RecursiveDescentBytecodeGenerator generator = createGenerator("(?|abc|xyz)");
-
-    ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-    cw.visit(
-        org.objectweb.asm.Opcodes.V21,
-        org.objectweb.asm.Opcodes.ACC_PUBLIC | org.objectweb.asm.Opcodes.ACC_SUPER,
-        "TestMatcher",
-        null,
-        "java/lang/Object",
-        null);
-
-    assertDoesNotThrow(
-        () -> {
-          generator.generateMatchesBoundedMethod(cw, "TestMatcher");
-        },
-        "generateMatchesBoundedMethod should not throw");
-  }
-
-  @Test
-  void testGenerateMatchBoundedMethod() throws Exception {
-    RecursiveDescentBytecodeGenerator generator = createGenerator("a(?R)b");
-
-    ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-    cw.visit(
-        org.objectweb.asm.Opcodes.V21,
-        org.objectweb.asm.Opcodes.ACC_PUBLIC | org.objectweb.asm.Opcodes.ACC_SUPER,
-        "TestMatcher",
-        null,
-        "java/lang/Object",
-        null);
-
-    assertDoesNotThrow(
-        () -> {
-          generator.generateMatchesBoundedMethod(cw, "TestMatcher");
-        },
-        "generateMatchesBoundedMethod should not throw");
-  }
-
-  @Test
   void testGenerateFindMatchMethod() throws Exception {
     RecursiveDescentBytecodeGenerator generator = createGenerator("(a)?(?(1)b)");
 
@@ -281,7 +241,6 @@ class RecursiveDescentBytecodeGeneratorTest {
         () -> {
           generator.generateMatchesMethod(cw, "TestMatcher");
           generator.generateFindBoundsFromMethod(cw, "TestMatcher");
-          generator.generateMatchesBoundedMethod(cw, "TestMatcher");
           generator.generateMatchMethod(cw, "TestMatcher");
         },
         "Multiple method generation should work");

@@ -16,14 +16,16 @@
 package com.datadoghq.reggie.runtime;
 
 /**
- * Thrown when a bounded-match engine (currently the counted-loop backtracking matcher) exhausts its
- * per-call step budget. The alternative engines for these patterns (java.util.regex backtracking)
- * can burn unbounded time on the same inputs — this budget converts that into a fast, bounded
- * failure so no match call can hang or be used for denial of service.
+ * Thrown when a bounded-match engine (the counted-loop backtracking matcher or a backtracking
+ * recursive-descent matcher) exhausts its per-attempt step budget. The alternative engines for
+ * these patterns (java.util.regex backtracking) can burn unbounded time on the same inputs — this
+ * budget converts that into a fast, bounded failure so no match call can hang or be used for denial
+ * of service.
  *
  * <p>Callers should treat this like a transient, input-dependent error: the pattern is compiled and
  * valid, but this particular input is too ambiguous for the bounded exploration. Retry with a
- * higher budget ({@code -Dreggie.countedloop.maxSteps}) only if the input is trusted.
+ * higher budget ({@code -Dreggie.countedloop.maxSteps}, or {@code -Dreggie.rd.maxSteps} for
+ * recursive descent) only if the input is trusted.
  */
 public class MatchBudgetExceededException extends RuntimeException {
   public MatchBudgetExceededException(String message) {

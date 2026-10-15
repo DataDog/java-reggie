@@ -310,9 +310,9 @@ class RegexParserTest {
     RegexNode node = parser.parse("foo\\Q/bar\\Ebaz");
     assertTrue(node instanceof ConcatNode);
     ConcatNode concat = (ConcatNode) node;
-    assertEquals(7, concat.children.size());
-    assertTrue(concat.children.get(3) instanceof ConcatNode);
-    ConcatNode quoted = (ConcatNode) concat.children.get(3);
-    assertEquals('/', ((LiteralNode) quoted.children.get(0)).ch);
+    // As in java.util.regex, the quote is flattened into single-character atoms
+    assertEquals(10, concat.children.size());
+    assertEquals('/', ((LiteralNode) concat.children.get(3)).ch);
+    assertEquals('b', ((LiteralNode) concat.children.get(4)).ch);
   }
 }

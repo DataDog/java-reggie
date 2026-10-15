@@ -61,7 +61,10 @@ public final class FallbackPatternDetector {
    * backtrackingEngine} is true when the pattern runs on the priority-ordered backtracker instead
    * of the generated code for {@code strategy}. This skips the B11 guard (the backtracker evaluates
    * each assertion on its own search path, so alternation branches do not share assertion outcomes)
-   * and the RECURSIVE_DESCENT lookaround guard (the backtracker evaluates assertions).
+   * and the RECURSIVE_DESCENT lookaround guard (the backtracker evaluates assertions). For
+   * RECURSIVE_DESCENT it also skips the intra-call backtracking, B5, B6 and B9 guards: the
+   * backtracker retries every choice point, including those inside a subroutine call, records the
+   * span of the path it takes, and honours lazy quantifiers.
    *
    * @param ast the parsed pattern AST
    * @param strategy the strategy selected by {@link PatternAnalyzer}
@@ -69,7 +72,9 @@ public final class FallbackPatternDetector {
    */
   public static String needsFallback(
       RegexNode ast, PatternAnalyzer.MatchingStrategy strategy, boolean backtrackingEngine) {
-    if (requiresIntraCallBacktracking(ast, false)) {
+    boolean descentOnBacktracker =
+        backtrackingEngine && strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
+    if (!descentOnBacktracker && requiresIntraCallBacktracking(ast, false)) {
       return "recursive subroutine requires intra-call backtracking: pattern is context-free, not regular — use compileAllowingFallback() for JDK delegation";
     }
 
@@ -188,6 +193,7 @@ public final class FallbackPatternDetector {
     if ((strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
             || strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF)
+        && !descentOnBacktracker
         && v.hasLazyQuantifier) {
       return "lazy quantifier: requires shortest-match semantics not supported by this strategy";
     }
@@ -207,6 +213,7 @@ public final class FallbackPatternDetector {
     if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
             || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
+        && !descentOnBacktracker
         && hasCrossAlternativeBackref(ast)) {
       return "cross-alternative backref: group captured in one branch, used in another";
     }
@@ -243,6 +250,7 @@ public final class FallbackPatternDetector {
     // are affected. Fix requires per-frame capture state in the descent parser.
     if ((strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
             || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
+        && !descentOnBacktracker
         && hasNullableBackrefInsideCapturingGroup(ast)) {
       return "backref to nullable group inside capturing group: "
           + "recursive descent parser mishandles zero-length capture in nested group context";

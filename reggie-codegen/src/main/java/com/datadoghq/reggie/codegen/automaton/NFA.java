@@ -449,6 +449,15 @@ public final class NFA {
     public NFAState thenBranch = null; // Entry if group matched
     public NFAState elseBranch = null; // Entry if group didn't match (may be null)
 
+    // Subroutine call (?n) / (?R) / (?&name), built only by the call-state builder
+    // (ThompsonBuilder(lazyAware, true)): callTarget is the called group number (0 = whole
+    // pattern), callEntry the entry of the called group's body (whole pattern: the start state)
+    // and callReturns the states that end the call (the group's exit states; whole pattern: the
+    // accept states). The state's epsilon transitions are the continuation after the call.
+    public int callTarget = -1;
+    public NFAState callEntry = null;
+    public Set<NFAState> callReturns = null;
+
     // Counted-loop re-entry marker: when countedLoopId != null, this
     // state is the decision point of a bounded-quantifier loop x{min,max} whose unrolled size
     // exceeded the builder budget. It has NO outgoing epsilon transitions — the two branches are

@@ -18,13 +18,17 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * Tests for octal, hex and Unicode escape sequences. PCRE supports: - Hex escapes: \xhh where h is
- * a hex digit (e.g., \x40 = '@') - Octal escapes: \nnn where n is 0-7 (e.g., \100 = '@', \1000 =
- * '@0'). java.util.regex also supports Unicode escapes: {@code \}{@code uhhhh} with exactly four
- * hex digits.
+ * Tests for octal, hex and Unicode escape sequences, with java.util.regex semantics: {@code \xhh}
+ * and {@code \x{h..h}} are hex, {@code \}{@code uhhhh} takes exactly four hex digits, {@code \0} is
+ * followed by one to three octal digits (a third only when the first is at most 3), and {@code
+ * \1}-{@code \9} always start a backreference.
  */
 class OctalHexEscapeTest {
 
@@ -59,41 +63,75 @@ class OctalHexEscapeTest {
   }
 
   @Test
-  void testOctalEscapeTwoDigits() {
-    // \40 = ' ' (octal 40 = decimal 32 = space)
-    ReggieMatcher rm = Reggie.compile("\\40");
-    assertTrue(rm.matches(" "));
-    assertFalse(rm.matches("40"));
-  }
-
-  @Test
-  void testOctalEscapeThreeDigits() {
-    // \100 = '@' (octal 100 = decimal 64)
-    ReggieMatcher rm = Reggie.compile("\\100");
-    assertTrue(rm.matches("@"));
-    assertFalse(rm.matches("100"));
-  }
-
-  @Test
-  void testOctalEscapeWithExtraDigit() {
-    // \1000 = '@' + '0' (octal 100 = '@', then literal '0')
-    ReggieMatcher rm = Reggie.compile("\\1000");
-    assertTrue(rm.matches("@0"));
-    assertFalse(rm.matches("1000"));
-  }
-
-  @Test
-  void testOctalEscapeMaxValue() {
-    // \377 = 'ÿ' (octal 377 = decimal 255 = max byte value)
-    ReggieMatcher rm = Reggie.compile("\\377");
-    assertTrue(rm.matches("\u00FF"));
-  }
-
-  @Test
   void testOctalStartingWithZero() {
     // \071 = '9' (octal 71 = decimal 57)
     ReggieMatcher rm = Reggie.compile("\\071");
     assertTrue(rm.matches("9"));
+  }
+
+  private static final String[] NUMERIC_INPUTS = {
+    "",
+    " ",
+    "@",
+    "@0",
+    "00",
+    "40",
+    "100",
+    "1000",
+    "8",
+    "9",
+    "a",
+    "a89",
+    "aa",
+    "aa0",
+    "ab",
+    "A",
+    "A1",
+    " 0",
+    "\u00FF",
+    "\u0001",
+    "\u0004",
+    "\b",
+    "Hello",
+    "abcdefghija0",
+    "abcdefghijj",
+  };
+
+  /** Numeric escapes against java.util.regex: matches() and the first find() span. */
+  @ParameterizedTest
+  @ValueSource(
+      strings = {
+        "\\40",
+        "\\100",
+        "\\1000",
+        "\\377",
+        "\\1",
+        "\\8",
+        "\\9",
+        "(a)\\89",
+        "(a)\\2",
+        "(a)\\2(b)",
+        "\\0101",
+        "\\0400",
+        "\\0377",
+        "\\0477",
+        "\\04",
+        "\\x48\\145\\154\\154\\x6f",
+        "(a)(b)(c)(d)(e)(f)(g)(h)(i)(?:\\10|(j))+",
+      })
+  void numericEscapeEqualsJdk(String pattern) {
+    Pattern jdk = Pattern.compile(pattern);
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    for (String input : NUMERIC_INPUTS) {
+      assertEquals(jdk.matcher(input).matches(), reggie.matches(input), pattern + " on " + input);
+      Matcher j = jdk.matcher(input);
+      String expected = j.find() ? "[" + j.start() + "," + j.end() + ")" : "-";
+      MatchResult r = reggie.findMatch(input);
+      assertEquals(
+          expected,
+          r == null ? "-" : "[" + r.start() + "," + r.end() + ")",
+          pattern + " on " + input);
+    }
   }
 
   @Test
@@ -118,24 +156,6 @@ class OctalHexEscapeTest {
   }
 
   @Test
-  void backrefEightNineWithNoGroup() {
-    // \8 with 0 groups: no valid backref; \8 is literal '8'.
-    ReggieMatcher rm8 = Reggie.compile("\\8");
-    assertTrue(rm8.matches("8"));
-    assertFalse(rm8.matches("a"));
-
-    // \9 with 0 groups: no valid backref; \9 is literal '9'.
-    ReggieMatcher rm9 = Reggie.compile("\\9");
-    assertTrue(rm9.matches("9"));
-    assertFalse(rm9.matches("a"));
-
-    // \89 with 1 group (totalGroupCount=1 < 89): \8 is literal '8', '9' is parsed as subsequent
-    // token.
-    ReggieMatcher rm89 = Reggie.compile("(a)\\89");
-    assertTrue(rm89.matches("a89"));
-  }
-
-  @Test
   void testHexInCharacterClass() {
     // [\x40-\x5A] = [@-Z] (hex 40 = '@', hex 5A = 'Z')
     ReggieMatcher rm = Reggie.compile("[\\x40-\\x5A]");
@@ -155,14 +175,6 @@ class OctalHexEscapeTest {
     assertTrue(rm.matches("Z"));
     assertFalse(rm.matches("["));
     assertFalse(rm.matches("a"));
-  }
-
-  @Test
-  void testMixedEscapesInPattern() {
-    // Test: \x48\145\154\154\x6f = "Hello"
-    // \x48 = 'H', \145 = 'e' (octal), \154 = 'l' (octal), \154 = 'l' (octal), \x6f = 'o'
-    ReggieMatcher rm = Reggie.compile("\\x48\\145\\154\\154\\x6f");
-    assertTrue(rm.matches("Hello"));
   }
 
   @Test

@@ -76,6 +76,24 @@ tasks.named('test') {
     systemProperty 'reggie.metatest.enforce', System.getProperty('reggie.metatest.enforce', 'true')
 }
 
+// LinearDfaFindTest with the DFA find loops switching to DFALinearFind after the first failed run
+tasks.register('linearFindTest', Test) {
+    description = 'Runs LinearDfaFindTest with reggie.dfa.linearFindWorkFactor=0'
+    group = 'verification'
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching 'com.datadoghq.reggie.runtime.LinearDfaFindTest'
+    }
+    jvmArgs('-Xss8m')
+    systemProperty 'reggie.dfa.linearFindWorkFactor', '0'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('linearFindTest')
+}
+
 // Task to run bytecode debugger
 tasks.register('debugPattern', JavaExec) {
     description = 'Debug bytecode generation for a regex pattern'

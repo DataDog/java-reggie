@@ -69,6 +69,26 @@ import java.util.TreeSet;
  * it wrote and leaves the loop ({@code ((?:ba)?(?<=a))+c} on {@code "bac"} ends with group 1 =
  * 2..2). The bits are part of the memo key wherever they can still gate a loop-back edge.
  *
+ * <p>Conditionals and subroutine calls: a conditional state continues into its then branch when the
+ * condition group has an end, else into its else branch (or its own epsilons when it has none). A
+ * call state runs the body of its target group (target 0: the whole pattern) in a call context,
+ * interned by (target, position, spans of the groups that backreferences and conditions read). The
+ * first evaluation of a context records each return position of the body; a later call with the
+ * same key reuses them. Memo rows of a pattern with calls or atomic groups also key on the context
+ * instance. The caller continues after each return, highest priority first, with its own captures:
+ * the callee's group writes are discarded, except that a {@code \K} in the callee moves group 0's
+ * start. A call of a target that is already running at the same position in the call chain fails
+ * that path. Only the top-level context accepts.
+ *
+ * <p>Atomic groups (and possessive quantifiers, which the parser writes as atomic groups): the
+ * entry state runs the body in a fresh context of its own, beneath which a sentinel frame records
+ * the stack depth. The body runs in the same DFS with the frame's captures, counters and progress.
+ * The first exit reached in that context is the body's first match in priority order: every frame
+ * above the sentinel is dropped (the body's other alternatives) and the search continues after the
+ * group in the enclosing context with that match's state. When the sentinel pops instead, the body
+ * has no match and the path fails. An atomic context is not a call level, so the call recursion
+ * guard sees through it.
+ *
  * <p>First increment: implements the boolean + rich first-match API exercised by the backref
  * regression suite ({@code matches}, {@code find}, {@code findFrom}, {@code match}, {@code
  * findMatch}, {@code findMatchFrom}) plus the allocation-free {@code matchInto}/{@code
@@ -109,14 +129,23 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   private static final long PROGRESSED = -1L;
 
   /**
-   * Per-match-call step budget for the DFS (frames popped). The memo keeps the search finite, but
-   * adversarially ambiguous bounded-quantifier shapes can still expand a very large configuration
-   * space before exhausting it — the same inputs on which java.util.regex backtracking burns
-   * unbounded time. This budget converts that into a fast, bounded MatchBudgetExceededException.
-   * Override with -Dreggie.countedloop.maxSteps.
+   * Step budget for the DFS from one match start (frames popped). The memo keeps the search finite,
+   * but adversarially ambiguous bounded-quantifier shapes can still expand a very large
+   * configuration space before exhausting it — the same inputs on which java.util.regex
+   * backtracking burns unbounded time. This budget converts that into a fast, bounded
+   * MatchBudgetExceededException. Override with -Dreggie.countedloop.maxSteps.
    */
   private static final long MAX_MATCH_STEPS =
       Long.getLong("reggie.countedloop.maxSteps", 2_000_000L);
+
+  /**
+   * Per-character part of the budget shared by all match starts of one find call: the starts of a
+   * call searching {@code n} characters may pop frames and compare backreference characters {@link
+   * #MAX_MATCH_STEPS} + {@code n * STEPS_PER_CHAR} times in total. Override with
+   * -Dreggie.countedloop.stepsPerChar.
+   */
+  private static final long STEPS_PER_CHAR =
+      Long.getLong("reggie.countedloop.stepsPerChar", 16_384L);
 
   private final int groupCount;
   private final int slotCount;
@@ -163,11 +192,26 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   private final int[][] keyLoopIdx; // counter slots that can vary, per state
   private final int maxRowLen;
 
-  private final int[] referencedGroups; // sorted; groups that are targets of some \k
+  private final int[] readGroups; // sorted; groups read by a \k or a conditional
   private final int loopSlotCount; // number of distinct counted loops
   private final int[][] nestedLoopSlots; // per loop slot: slots of loops nested in its body
   private final boolean caseInsensitive;
   private final CharSet startChars; // chars that can begin a match; null = any position may
+
+  // ---- Conditionals and subroutine calls ----
+  private final int[] condGroupById; // group tested by a conditional, -1 = none
+  private final int[] condThen; // valid where condGroupById >= 0
+  private final int[] condElse; // -1 = no else branch: the state's epsilons continue
+  private final int[] callTargetIdx; // dense call-target index of a call state, -1 = none
+  private final int[] callEntryById; // called body's entry, valid where callTargetIdx >= 0
+  private final long[] returnTargets; // per state: bit t set when the state ends a call of t
+  private final boolean hasCalls;
+  private final int contextKeyWidth; // target, position, spans of readGroups
+
+  // ---- Atomic groups ----
+  private final int[] atomicById; // id + 1 on an entry state, -(id + 1) on an exit state, 0 = none
+  private final boolean hasAtomics;
+  private final boolean hasContexts; // calls or atomic groups: frames carry a context
 
   public BackrefBacktrackMatcher(NFA nfa, String pattern) {
     super(pattern);
@@ -212,9 +256,20 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     Arrays.fill(exitGroupById, -1);
     Arrays.fill(backrefById, -1);
     Arrays.fill(pinGroupById, -1);
+    this.condGroupById = new int[n];
+    this.condThen = new int[n];
+    this.condElse = new int[n];
+    this.callTargetIdx = new int[n];
+    this.callEntryById = new int[n];
+    this.returnTargets = new long[n];
+    Arrays.fill(condGroupById, -1);
+    Arrays.fill(callTargetIdx, -1);
+    this.atomicById = new int[n];
+    boolean atomics = false;
 
     Set<Integer> refs = new HashSet<>();
     java.util.TreeMap<Integer, Integer> loopSlots = new java.util.TreeMap<>();
+    java.util.TreeMap<Integer, Integer> callTargets = new java.util.TreeMap<>();
     for (NFA.NFAState s : nfa.getStates()) {
       int id = s.id;
       if (s.enterGroup != null) {
@@ -232,6 +287,34 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       }
       if (s.anchor != null) {
         anchorById[id] = s.anchor;
+      }
+      if (s.conditionalGroup != null) {
+        condGroupById[id] = s.conditionalGroup;
+        condThen[id] = s.thenBranch.id;
+        condElse[id] = s.elseBranch != null ? s.elseBranch.id : -1;
+        refs.add(s.conditionalGroup);
+      }
+      if (s.atomicEntry >= 0) {
+        atomicById[id] = s.atomicEntry + 1;
+        atomics = true;
+      } else if (s.atomicExit >= 0) {
+        atomicById[id] = -(s.atomicExit + 1);
+      }
+      if (s.callTarget >= 0) {
+        Integer t = callTargets.get(s.callTarget);
+        if (t == null) {
+          if (callTargets.size() == BacktrackSupport.MAX_CALL_TARGETS) {
+            throw new IllegalArgumentException(
+                "more than " + BacktrackSupport.MAX_CALL_TARGETS + " subroutine call targets");
+          }
+          t = callTargets.size();
+          callTargets.put(s.callTarget, t);
+        }
+        callTargetIdx[id] = t;
+        callEntryById[id] = s.callEntry.id;
+        for (NFA.NFAState ret : s.callReturns) {
+          returnTargets[ret.id] |= 1L << t;
+        }
       }
       if (s.assertionType != null) {
         assertTypeById[id] = s.assertionType;
@@ -294,7 +377,11 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       r[ri++] = g;
     }
     Arrays.sort(r);
-    this.referencedGroups = r;
+    this.readGroups = r;
+    this.hasCalls = !callTargets.isEmpty();
+    this.hasAtomics = atomics;
+    this.hasContexts = hasCalls || atomics;
+    this.contextKeyWidth = 2 + 2 * r.length;
     this.caseInsensitive = pattern.contains("(?i)");
 
     // Loop-back epsilon edges and their heads (ids are still the NFA's: no compression yet).
@@ -333,6 +420,10 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
               && assertTypeById[i] == null
               && subAcceptFor[i] < 0
               && !markerById[i]
+              && condGroupById[i] < 0
+              && callTargetIdx[i] < 0
+              && returnTargets[i] == 0
+              && atomicById[i] == 0
               && headBit[i] == 0
               && epsIsBack[i] == null
               && epsIds[i].length == 1
@@ -355,6 +446,41 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       if (assertTypeById[s] != null) {
         assertStartById[s] = resolve(assertStartById[s], pure, resolved);
       }
+      if (condGroupById[s] >= 0) {
+        condThen[s] = resolve(condThen[s], pure, resolved);
+        if (condElse[s] >= 0) {
+          condElse[s] = resolve(condElse[s], pure, resolved);
+        }
+      }
+      if (callTargetIdx[s] >= 0) {
+        callEntryById[s] = resolve(callEntryById[s], pure, resolved);
+      }
+    }
+
+    // Analysis-only edges, used by the construction passes below: conditional branches, call ->
+    // called body, and return state -> the continuation of every call it returns from.
+    int[][] extra = new int[n][];
+    for (int s = 0; s < n; s++) {
+      List<Integer> e = new ArrayList<>();
+      if (condGroupById[s] >= 0) {
+        e.add(condThen[s]);
+        if (condElse[s] >= 0) {
+          e.add(condElse[s]);
+        }
+      }
+      if (callTargetIdx[s] >= 0) {
+        e.add(callEntryById[s]);
+      }
+      if (returnTargets[s] != 0) {
+        for (int c = 0; c < n; c++) {
+          if (callTargetIdx[c] >= 0 && (returnTargets[s] & (1L << callTargetIdx[c])) != 0) {
+            for (int t : epsIds[c]) {
+              e.add(t);
+            }
+          }
+        }
+      }
+      extra[s] = e.isEmpty() ? EMPTY : toFlat(e);
     }
 
     // Nested-loop slots per loop: loops whose markers are reachable from this loop's body entry
@@ -396,6 +522,14 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
             queue.add(next);
           }
         }
+        if (condGroupById[cur] >= 0) {
+          for (int next : new int[] {condThen[cur], condElse[cur]}) {
+            if (next >= 0 && !seen[next]) {
+              seen[next] = true;
+              queue.add(next);
+            }
+          }
+        }
       }
       int[] slots = new int[nested.size()];
       int si = 0;
@@ -421,6 +555,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         inDeg[mStop[s]]++;
         inDeg[mBodyEntry[s]]++;
       }
+      for (int t : extra[s]) {
+        inDeg[t]++;
+      }
     }
     this.isJoin = new boolean[n];
     for (int i = 0; i < n; i++) {
@@ -440,17 +577,17 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     int[] queue = new int[n];
     for (int s = 0; s < n; s++) {
       if (markerById[s] && !loopLive[mSlot[s]][mBodyEntry[s]]) {
-        markReachable(loopLive[mSlot[s]], mBodyEntry[s], queue);
+        markReachable(loopLive[mSlot[s]], mBodyEntry[s], queue, extra);
       }
     }
     boolean[][] groupLive = new boolean[n][]; // by group id, referenced groups only
-    for (int g : referencedGroups) {
+    for (int g : readGroups) {
       boolean[] live = new boolean[n];
       boolean any = false;
       for (int s = 0; s < n; s++) {
         if (enterGroupById[s] == g || exitGroupById[s] == g || contains(assertBodyGroups[s], g)) {
           if (!live[s]) {
-            markReachable(live, s, queue);
+            markReachable(live, s, queue, extra);
           }
           any = true;
         }
@@ -465,7 +602,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     // head itself clears the bit before anything reads it).
     this.keyProgressMask = new long[n];
     if (headCount > 0) {
-      int[][] preds = predecessors(n);
+      int[][] preds = predecessors(n, extra);
       boolean[] fromHead = new boolean[n];
       boolean[] toSource = new boolean[n];
       for (int h = 0; h < n; h++) {
@@ -473,7 +610,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
           continue;
         }
         Arrays.fill(fromHead, false);
-        markReachable(fromHead, h, queue);
+        markReachable(fromHead, h, queue, extra);
         Arrays.fill(toSource, false);
         int qt = 0;
         for (int[] be : backEdges) {
@@ -506,7 +643,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     int maxLen = 2;
     for (int s = 0; s < n; s++) {
       List<Integer> gi = null;
-      for (int g : referencedGroups) {
+      for (int g : readGroups) {
         if (groupLive[g] != null && groupLive[g][s]) {
           if (gi == null) {
             gi = new ArrayList<>(4);
@@ -532,11 +669,13 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         maxLen = len;
       }
     }
-    this.maxRowLen = maxLen;
+    // With contexts, every memo row also holds the instance id of the frame's context.
+    this.maxRowLen = hasContexts ? maxLen + 1 : maxLen;
 
     // ---- 6. Start filter: the chars a match can begin with. ----
     // Union of the char transitions reachable from the start through non-consuming states
-    // (assertions, anchors, group boundaries, counted-loop markers). No filter when an accept is
+    // (assertions, anchors, group boundaries, counted-loop markers, conditionals, calls and
+    // returns). No filter when an accept is
     // reachable that way (empty match) or a backreference is: a group captured inside a
     // lookahead can make it consume at the start position.
     CharSet first = CharSet.empty();
@@ -565,6 +704,12 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
             seen[t] = true;
             queue[qt++] = t;
           }
+        }
+      }
+      for (int t : extra[s]) {
+        if (!seen[t]) {
+          seen[t] = true;
+          queue[qt++] = t;
         }
       }
     }
@@ -627,8 +772,8 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     return out;
   }
 
-  /** Reverse adjacency (eps + char + marker branches) of the compressed graph. */
-  private int[][] predecessors(int n) {
+  /** Reverse adjacency (eps + char + marker branches + {@code extra}) of the compressed graph. */
+  private int[][] predecessors(int n, int[][] extra) {
     int[] deg = new int[n];
     for (int s = 0; s < n; s++) {
       for (int t : epsIds[s]) {
@@ -640,6 +785,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       if (markerById[s]) {
         deg[mBodyEntry[s]]++;
         deg[mStop[s]]++;
+      }
+      for (int t : extra[s]) {
+        deg[t]++;
       }
     }
     int[][] preds = new int[n][];
@@ -657,6 +805,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       if (markerById[s]) {
         preds[mBodyEntry[s]][deg[mBodyEntry[s]]++] = s;
         preds[mStop[s]][deg[mStop[s]]++] = s;
+      }
+      for (int t : extra[s]) {
+        preds[t][deg[t]++] = s;
       }
     }
     return preds;
@@ -678,8 +829,11 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     return cur;
   }
 
-  /** Forward reachability (eps + char + marker branches) from {@code seed} into {@code live}. */
-  private void markReachable(boolean[] live, int seed, int[] queue) {
+  /**
+   * Forward reachability (eps + char + marker branches + {@code extra}) from {@code seed} into
+   * {@code live}.
+   */
+  private void markReachable(boolean[] live, int seed, int[] queue, int[][] extra) {
     int qt = 0;
     live[seed] = true;
     queue[qt++] = seed;
@@ -705,6 +859,12 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         if (!live[mStop[u]]) {
           live[mStop[u]] = true;
           queue[qt++] = mStop[u];
+        }
+      }
+      for (int t : extra[u]) {
+        if (!live[t]) {
+          live[t] = true;
+          queue[qt++] = t;
         }
       }
     }
@@ -752,8 +912,8 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   }
 
   /**
-   * Parallel primitive stacks: (state, pos, caps, loops, progress, arena mark) per slot; caps and
-   * loops are {@link IntArena} offsets. No per-push object allocation.
+   * Parallel primitive stacks: (state, pos, caps, loops, progress, call context, arena mark) per
+   * slot; caps and loops are {@link IntArena} offsets. No per-push object allocation.
    */
   private static final class FrameStack {
     private final IntArena arena;
@@ -762,6 +922,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     private int[] capsStack = new int[64];
     private int[] loopsStack = new int[64];
     private long[] progress = new long[64];
+    private int[] ctxs = new int[64];
     private int[] marks = new int[64];
     private int size;
 
@@ -773,7 +934,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       return size == 0;
     }
 
-    void push(int state, int pos, int caps, int loops, long prog) {
+    void push(int state, int pos, int caps, int loops, long prog, int ctx) {
       if (size == states.length) {
         int n = states.length * 2;
         states = Arrays.copyOf(states, n);
@@ -781,6 +942,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         capsStack = Arrays.copyOf(capsStack, n);
         loopsStack = Arrays.copyOf(loopsStack, n);
         progress = Arrays.copyOf(progress, n);
+        ctxs = Arrays.copyOf(ctxs, n);
         marks = Arrays.copyOf(marks, n);
       }
       states[size] = state;
@@ -788,6 +950,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       capsStack[size] = caps;
       loopsStack[size] = loops;
       progress[size] = prog;
+      ctxs[size] = ctx;
       marks[size] = arena.top;
       size++;
     }
@@ -927,6 +1090,160 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
   }
 
   /**
+   * Call contexts and their results for one public matcher call. A context is one evaluation of a
+   * subroutine call, interned by its key (target, entry position, spans of the read groups); index
+   * 0 is the top level. Plain arrays grown on demand and retained across calls; {@link #reset}
+   * clears everything in O(1).
+   */
+  private static final class CallStore {
+    static final int NEW = 0;
+    static final int RUNNING = 1;
+    static final int DONE = 2;
+
+    int count; // contexts in use; 0 is the top level
+    int nextInst;
+    int[] target = new int[16]; // dense call-target index
+    int[] pos = new int[16]; // entry position
+    int[] inst = new int[16]; // instance id: memo rows of this evaluation carry it
+    int[] status = new int[16];
+    int[] parent = new int[16];
+    int[] level = new int[16]; // call depth; the top level is 0
+    int[] minHit = new int[16]; // lowest level a recursion guard hit inside this evaluation
+    int[] head = new int[16]; // newest result, -1 = none
+    int[] keyOff = new int[16]; // key offset in keys, -1 = transient (not interned)
+    long[] entryMask = new long[16]; // targets called at the entry position (see call())
+    int[] base = new int[16]; // stack index of an atomic context's sentinel frame
+    int lastInterned; // highest interned context index; 0 = none
+    int[] keys = new int[64];
+    int keyTop;
+    int[] results = new int[48]; // (retPos, kStart, next) triples
+    int resultTop;
+    int[] scratch = EMPTY; // key under construction
+    // Interner: open addressing over context indexes, generation-stamped.
+    int[] slots = new int[64];
+    long[] stamps = new long[64];
+    long gen = 1;
+    int used;
+
+    void reset() {
+      count = 1;
+      nextInst = 1;
+      keyTop = 0;
+      resultTop = 0;
+      gen++;
+      used = 0;
+      lastInterned = 0;
+      inst[0] = 0;
+      level[0] = 0;
+    }
+
+    int[] scratch(int width) {
+      if (scratch.length < width) {
+        scratch = new int[width];
+      }
+      return scratch;
+    }
+
+    /** A fresh context record with status {@link #NEW} and no key. */
+    int create() {
+      if (count == target.length) {
+        int n = count * 2;
+        target = Arrays.copyOf(target, n);
+        pos = Arrays.copyOf(pos, n);
+        inst = Arrays.copyOf(inst, n);
+        status = Arrays.copyOf(status, n);
+        parent = Arrays.copyOf(parent, n);
+        level = Arrays.copyOf(level, n);
+        minHit = Arrays.copyOf(minHit, n);
+        head = Arrays.copyOf(head, n);
+        keyOff = Arrays.copyOf(keyOff, n);
+        entryMask = Arrays.copyOf(entryMask, n);
+        base = Arrays.copyOf(base, n);
+      }
+      int x = count++;
+      status[x] = NEW;
+      head[x] = -1;
+      keyOff[x] = -1;
+      return x;
+    }
+
+    /** The context interned under {@code key[0..width)}, created with status NEW if absent. */
+    int intern(int[] key, int width) {
+      int h = 0;
+      for (int i = 0; i < width; i++) {
+        h = (h ^ key[i]) * 0x9e3779b1;
+      }
+      int mask = slots.length - 1;
+      int idx = (h ^ (h >>> 16)) & mask;
+      while (stamps[idx] == gen) {
+        int x = slots[idx];
+        int off = keyOff[x];
+        int i = 0;
+        while (i < width && keys[off + i] == key[i]) {
+          i++;
+        }
+        if (i == width) {
+          return x;
+        }
+        idx = (idx + 1) & mask;
+      }
+      int x = create();
+      lastInterned = x;
+      if (keyTop + width > keys.length) {
+        keys = Arrays.copyOf(keys, Math.max(keys.length * 2, keyTop + width));
+      }
+      for (int i = 0; i < width; i++) {
+        keys[keyTop + i] = key[i];
+      }
+      keyOff[x] = keyTop;
+      keyTop += width;
+      stamps[idx] = gen;
+      slots[idx] = x;
+      if (++used * 3 > slots.length * 2) {
+        rehash(width);
+      }
+      return x;
+    }
+
+    private void rehash(int width) {
+      int[] oldSlots = slots;
+      long[] oldStamps = stamps;
+      slots = new int[oldSlots.length * 2];
+      stamps = new long[oldSlots.length * 2];
+      int mask = slots.length - 1;
+      for (int j = 0; j < oldSlots.length; j++) {
+        if (oldStamps[j] != gen) {
+          continue;
+        }
+        int x = oldSlots[j];
+        int h = 0;
+        for (int i = 0; i < width; i++) {
+          h = (h ^ keys[keyOff[x] + i]) * 0x9e3779b1;
+        }
+        int idx = (h ^ (h >>> 16)) & mask;
+        while (stamps[idx] == gen) {
+          idx = (idx + 1) & mask;
+        }
+        stamps[idx] = gen;
+        slots[idx] = x;
+      }
+    }
+
+    /** Prepends result (retPos, kStart) to context {@code x}'s list. */
+    void addResult(int x, int retPos, int kStart) {
+      if (resultTop + 3 > results.length) {
+        results = Arrays.copyOf(results, results.length * 2);
+      }
+      int r = resultTop;
+      results[r] = retPos;
+      results[r + 1] = kStart;
+      results[r + 2] = head[x];
+      head[x] = r;
+      resultTop = r + 3;
+    }
+  }
+
+  /**
    * Per-thread reusable workspace (stack + memo + scratch row + seed vectors), keyed on the
    * matcher's three dimensions. Sharing across matcher instances (not just calls) keeps
    * compile-per-call services from pinning one workspace per pattern; the dimension check makes a
@@ -943,9 +1260,16 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         || ws.loopSlotCount != loopSlotCount) {
       ws = new Workspace(maxRowLen, slotCount, loopSlotCount);
       WORKSPACE.set(ws);
-      return ws;
     }
     ws.memo.reset(); // generation bump: O(1) table clear
+    ws.callSteps = 0;
+    ws.callBudget = Long.MAX_VALUE;
+    if (hasContexts && ws.calls == null) {
+      ws.calls = new CallStore();
+    }
+    if (ws.calls != null) {
+      ws.calls.reset();
+    }
     return ws;
   }
 
@@ -968,6 +1292,11 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     FrameStack bodyStack;
     MemoSet bodyMemo;
     int[] bodyRow;
+    // Call contexts, created on first use by a pattern with subroutine calls.
+    CallStore calls;
+    // Frames popped by the failed starts of the current call, and the cap on their sum.
+    long callSteps;
+    long callBudget;
 
     Workspace(int maxRowLen, int slotCount, int loopSlotCount) {
       this.maxRowLen = maxRowLen;
@@ -996,6 +1325,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       return -1;
     }
     Workspace ws = acquireWorkspace();
+    ws.callBudget = MAX_MATCH_STEPS + STEPS_PER_CHAR * (len - clamped);
     for (int s = clamped; s <= len; s++) {
       s = nextStart(input, s, len);
       if (s < 0) {
@@ -1065,6 +1395,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     if (clamped > len) {
       return -1;
     }
+    ws.callBudget = MAX_MATCH_STEPS + STEPS_PER_CHAR * (len - clamped);
     for (int s = clamped; s <= len; s++) {
       s = nextStart(input, s, len);
       if (s < 0) {
@@ -1135,28 +1466,64 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     Arrays.fill(d, seed, seed + slotCount, -1);
     d[seed] = matchStart;
     Arrays.fill(d, seedLoops, seedLoops + loopSlotCount, 0);
-    stack.push(startStateId, matchStart, seed, seedLoops, PROGRESSED);
+    stack.push(startStateId, matchStart, seed, seedLoops, PROGRESSED, 0);
 
     int[] row = ws.row;
     MemoSet memo = ws.memo;
+    CallStore calls = ws.calls;
     long steps = 0;
+    // The find budget also pays for backreference compares, whose cost grows with the group span.
+    final long callLeft = ws.callBudget - ws.callSteps;
+    long compared = 0;
+    long limit = Math.min(MAX_MATCH_STEPS, callLeft);
 
     while (!stack.isEmpty()) {
-      if (++steps > MAX_MATCH_STEPS) {
-        throw new MatchBudgetExceededException(
-            "Counted-loop match step budget exceeded ("
-                + MAX_MATCH_STEPS
-                + " frames; tune via -Dreggie.countedloop.maxSteps) — input is too ambiguous for"
-                + " bounded exploration");
+      if (++steps > limit) {
+        throw steps > MAX_MATCH_STEPS
+            ? new MatchBudgetExceededException(
+                "Counted-loop match step budget exceeded ("
+                    + MAX_MATCH_STEPS
+                    + " frames; tune via -Dreggie.countedloop.maxSteps) — input is too ambiguous"
+                    + " for bounded exploration")
+            : new MatchBudgetExceededException(
+                "Counted-loop find step budget exceeded ("
+                    + ws.callBudget
+                    + " frames and compared characters over all match starts; tune via"
+                    + " -Dreggie.countedloop.stepsPerChar) — input is too ambiguous for bounded"
+                    + " exploration");
       }
-      final int state = stack.states[stack.size - 1];
+      final int top = stack.states[stack.size - 1];
       final int pos = stack.positions[stack.size - 1];
       final int caps = stack.capsStack[stack.size - 1];
       final int loops = stack.loopsStack[stack.size - 1];
+      final int ctx = stack.ctxs[stack.size - 1];
+      if (top < 0) {
+        // Sentinel of context ctx, pushed beneath its body: the body has run to exhaustion.
+        final long callProg = stack.progress[stack.size - 1];
+        stack.pop();
+        if (calls.target[ctx] < 0) {
+          leaveAtomic(calls, ctx); // no exit reached: the atomic group fails on this path
+        } else {
+          completeCall(ws, stack, ~top, pos, caps, loops, callProg, ctx);
+        }
+        continue;
+      }
+      final int state = top;
       // Entering a loop head starts a new iteration of that loop: nothing consumed yet.
       final long prog = stack.progress[stack.size - 1] & ~headBit[state];
       stack.pop();
       d = arena.data;
+
+      // End of a called body: record the return position (and the \K start, if one ran).
+      if (ctx != 0
+          && (!hasAtomics || calls.target[ctx] >= 0)
+          && (returnTargets[state] & (1L << calls.target[ctx])) != 0) {
+        row[0] = calls.inst[ctx];
+        if (memo.add(stateCount, pos, row, 1)) {
+          calls.addResult(ctx, pos, d[caps]);
+        }
+        continue;
+      }
 
       // Memo checkpoint: only join points (>=2 in-edges or the start) can be re-reached by a
       // distinct configuration; straight-line states are re-explored at most once per distinct
@@ -1177,6 +1544,9 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
           row[k++] = (int) pm;
           row[k++] = (int) (pm >>> 32);
         }
+        if (hasContexts) {
+          row[k++] = calls.inst[ctx];
+        }
         if (!memo.add(state, pos, row, k)) {
           continue; // first (higher-priority) arrival already explored this configuration
         }
@@ -1184,7 +1554,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
 
       // Accept check (first accept popped in preorder == highest-priority match). Mutating
       // group 0's end in place is safe: the stack is dead on return and no later read happens.
-      if (acceptById[state] && (!wholeInput || pos == regionEnd)) {
+      if (acceptById[state] && ctx == 0 && (!wholeInput || pos == regionEnd)) {
         d[caps + 1] = pos; // group-0 end
         if (pinBase >= 0) {
           applyPins(d, caps, -1);
@@ -1199,14 +1569,21 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         int slot = mSlot[state];
         // Stopping after a tail pass ends an invocation that ran more than min times.
         int stopCaps = caps;
-        if (mPinGroup[state] >= 0 && d[loops + slot] > 0) {
-          stopCaps = pin(arena, caps, mPinGroup[state]);
+        int stopLoops = loops;
+        if (d[loops + slot] > 0) {
+          if (mPinGroup[state] >= 0) {
+            stopCaps = pin(arena, caps, mPinGroup[state]);
+          }
+          // Every exit from the loop passes here: a loop that is not open has count 0, so a
+          // later entry (the loop inside an outer repetition) starts a fresh budget.
+          stopLoops = arena.copy(loops, loopSlotCount);
           d = arena.data;
+          d[stopLoops + slot] = 0;
         }
         if (d[loops + slot] < mTailMax[state]) {
-          // Only the iterate branch diverges: copy the counter vector for it (the stop branch
-          // and all frames below the stack still share the parent's vector). Entering the body
-          // resets nested loops' counters — each outer iteration gets a fresh inner budget.
+          // The iterate branch gets its own counter vector (frames below the stack still share
+          // the parent's). Entering the body resets nested loops' counters — each outer
+          // iteration gets a fresh inner budget.
           int iterLoops = arena.copy(loops, loopSlotCount);
           d = arena.data;
           d[iterLoops + slot]++;
@@ -1214,14 +1591,14 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
             d[iterLoops + nested] = 0;
           }
           if (mLazy[state]) {
-            stack.push(mBodyEntry[state], pos, caps, iterLoops, prog);
-            stack.push(mStop[state], pos, stopCaps, loops, prog);
+            stack.push(mBodyEntry[state], pos, caps, iterLoops, prog, ctx);
+            stack.push(mStop[state], pos, stopCaps, stopLoops, prog, ctx);
           } else {
-            stack.push(mStop[state], pos, stopCaps, loops, prog);
-            stack.push(mBodyEntry[state], pos, caps, iterLoops, prog);
+            stack.push(mStop[state], pos, stopCaps, stopLoops, prog, ctx);
+            stack.push(mBodyEntry[state], pos, caps, iterLoops, prog, ctx);
           }
         } else {
-          stack.push(mStop[state], pos, stopCaps, loops, prog);
+          stack.push(mStop[state], pos, stopCaps, stopLoops, prog, ctx);
         }
         continue;
       }
@@ -1255,21 +1632,42 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         if (gs >= 0) {
           int l = ge - gs;
           if (l == 0) {
-            pushEpsilons(stack, state, pos, c, loops, prog);
-          } else if (l > 0
-              && pos + l <= regionEnd
-              && input.regionMatches(caseInsensitive, pos, input, gs, l)) {
-            pushEpsilons(stack, state, pos + l, c, loops, PROGRESSED);
+            pushEpsilons(stack, state, pos, c, loops, prog, ctx);
+          } else if (l > 0 && pos + l <= regionEnd) {
+            compared += l;
+            limit = Math.min(limit, callLeft - compared);
+            if (input.regionMatches(caseInsensitive, pos, input, gs, l)) {
+              pushEpsilons(stack, state, pos + l, c, loops, PROGRESSED, ctx);
+            }
           }
+        }
+      } else if (hasAtomics && atomicById[state] != 0) {
+        if (atomicById[state] > 0) {
+          enterAtomic(ws, stack, state, pos, c, loops, prog, ctx);
+        } else if (ctx != 0 && calls.target[ctx] == atomicById[state]) {
+          exitAtomic(ws, stack, state, pos, c, loops, prog, ctx);
+        } else {
+          pushEpsilons(stack, state, pos, c, loops, prog, ctx); // exit states consume nothing
+        }
+      } else if (callTargetIdx[state] >= 0) {
+        call(ws, stack, state, pos, c, loops, prog, ctx, seedLoops);
+      } else if (condGroupById[state] >= 0) {
+        // (?(g)then|else): group g has matched iff its end is set.
+        if (d[c + 2 * condGroupById[state] + 1] >= 0) {
+          stack.push(condThen[state], pos, c, loops, prog, ctx);
+        } else if (condElse[state] >= 0) {
+          stack.push(condElse[state], pos, c, loops, prog, ctx);
+        } else {
+          pushEpsilons(stack, state, pos, c, loops, prog, ctx);
         }
       } else if (assertTypeById[state] != null) {
         if (assertNeedsCaps[state]) {
           int ac = assertionCaptures(ws, input, state, pos, regionEnd, c);
           if (ac >= 0) {
-            pushEpsilons(stack, state, pos, ac, loops, prog);
+            pushEpsilons(stack, state, pos, ac, loops, prog, ctx);
           }
         } else if (assertionHolds(ws, input, state, pos, regionEnd)) {
-          pushEpsilons(stack, state, pos, c, loops, prog);
+          pushEpsilons(stack, state, pos, c, loops, prog, ctx);
         }
       } else if (anchorById[state] == NFA.AnchorType.RESET_MATCH) {
         // \K moves group 0's start; successors inherit it through a copy like a group write.
@@ -1277,26 +1675,266 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         c = arena.copy(c, slotCount);
         d = arena.data;
         d[c] = pos;
-        pushEpsilons(stack, state, pos, c, loops, prog);
+        pushEpsilons(stack, state, pos, c, loops, prog, ctx);
       } else if (anchorById[state] != null) {
         if (checkAnchor(anchorById[state], input, pos, regionStart, regionEnd)) {
-          pushEpsilons(stack, state, pos, c, loops, prog);
+          pushEpsilons(stack, state, pos, c, loops, prog, ctx);
         }
       } else {
-        pushEpsilons(stack, state, pos, c, loops, prog);
+        pushEpsilons(stack, state, pos, c, loops, prog, ctx);
         if (pos < regionEnd) {
           char ch = input.charAt(pos);
           int[] targets = charTargetIds[state];
           CharSet[] sets = charSets[state];
           for (int i = targets.length - 1; i >= 0; i--) {
             if (sets[i].contains(ch)) {
-              stack.push(targets[i], pos + 1, c, loops, PROGRESSED);
+              stack.push(targets[i], pos + 1, c, loops, PROGRESSED, ctx);
             }
           }
         }
       }
     }
+    ws.callSteps += steps + compared;
     return -1;
+  }
+
+  /**
+   * Call state {@code state} popped at {@code pos} in context {@code ctx}. A call of a target
+   * already running at {@code pos} in the call chain fails (it would recurse without consuming).
+   * Otherwise the context for (target, pos, read spans) supplies the returns: a completed one is
+   * reused unless a target it called at its entry position is running now (the recursion guard
+   * would cut paths inside it), in which case a transient context is evaluated; a new one is
+   * started: a sentinel frame beneath the callee frame completes it once the callee has run to
+   * exhaustion. The callee starts from the caller's captures with group 0's start cleared (its
+   * writes are discarded on return), zeroed counters and all progress bits set.
+   */
+  private void call(
+      Workspace ws,
+      FrameStack stack,
+      int state,
+      int pos,
+      int caps,
+      int loops,
+      long prog,
+      int ctx,
+      int zeroLoops) {
+    CallStore cs = ws.calls;
+    int t = callTargetIdx[state];
+    if (ctx != 0 && cs.pos[ctx] == pos) {
+      cs.entryMask[ctx] |= 1L << t;
+    }
+    for (int y = ctx; y != 0 && cs.pos[y] == pos; y = cs.parent[y]) {
+      if (cs.target[y] == t) {
+        if (cs.level[y] < cs.minHit[ctx]) {
+          cs.minHit[ctx] = cs.level[y];
+        }
+        return;
+      }
+    }
+    IntArena arena = ws.arena;
+    int[] d = arena.data;
+    int[] key = cs.scratch(contextKeyWidth);
+    key[0] = t;
+    key[1] = pos;
+    for (int i = 0; i < readGroups.length; i++) {
+      key[2 + 2 * i] = d[caps + 2 * readGroups[i]];
+      key[3 + 2 * i] = d[caps + 2 * readGroups[i] + 1];
+    }
+    int x = cs.intern(key, contextKeyWidth);
+    if (cs.status[x] == CallStore.DONE) {
+      if (!runningAt(cs, ctx, pos, cs.entryMask[x])) {
+        if (ctx != 0 && cs.pos[ctx] == pos) {
+          cs.entryMask[ctx] |= cs.entryMask[x];
+        }
+        pushReturns(ws, stack, state, x, pos, caps, loops, prog, ctx);
+        return;
+      }
+      x = cs.create();
+    } else if (cs.status[x] == CallStore.RUNNING) {
+      return; // not reached: a running context with this key is in the chain the guard walked
+    }
+    cs.status[x] = CallStore.RUNNING;
+    cs.target[x] = t;
+    cs.pos[x] = pos;
+    cs.parent[x] = ctx;
+    cs.level[x] = cs.level[ctx] + 1;
+    cs.minHit[x] = cs.level[x];
+    cs.entryMask[x] = 0;
+    cs.head[x] = -1;
+    cs.inst[x] = cs.nextInst++;
+    stack.push(~state, pos, caps, loops, prog, x);
+    int cc = arena.copy(caps, slotCount);
+    arena.data[cc] = -1;
+    stack.push(callEntryById[state], pos, cc, zeroLoops, PROGRESSED, x);
+  }
+
+  /**
+   * True when a context running at {@code pos} in the chain from {@code ctx} has a target in mask.
+   */
+  private static boolean runningAt(CallStore cs, int ctx, int pos, long mask) {
+    for (int y = ctx; y != 0 && cs.pos[y] == pos; y = cs.parent[y]) {
+      if (cs.target[y] >= 0 && (mask & (1L << cs.target[y])) != 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Sentinel of context {@code x} popped: its callee has run to exhaustion. Folds its guard hits
+   * and entry targets into the caller's context and continues the caller after each return. A
+   * context whose guard hit an older running context depends on the call chain, and a transient one
+   * was computed for this chain only: either is evaluated afresh by the next call with its key.
+   */
+  private void completeCall(
+      Workspace ws,
+      FrameStack stack,
+      int state,
+      int callPos,
+      int caps,
+      int loops,
+      long prog,
+      int x) {
+    CallStore cs = ws.calls;
+    int p = cs.parent[x];
+    foldGuard(cs, x, p);
+    pushReturns(ws, stack, state, x, callPos, caps, loops, prog, p);
+    if (cs.minHit[x] < cs.level[x] || cs.keyOff[x] < 0) {
+      cs.status[x] = CallStore.NEW;
+      cs.head[x] = -1;
+    } else {
+      cs.status[x] = CallStore.DONE;
+    }
+  }
+
+  /** Folds the guard hits and entry targets of context {@code x} into its parent {@code p}. */
+  private static void foldGuard(CallStore cs, int x, int p) {
+    if (p != 0) {
+      if (cs.minHit[x] < cs.minHit[p]) {
+        cs.minHit[p] = cs.minHit[x];
+      }
+      if (cs.pos[p] == cs.pos[x]) {
+        cs.entryMask[p] |= cs.entryMask[x];
+      }
+    }
+  }
+
+  /**
+   * Atomic group entry {@code state} popped at {@code pos} in context {@code ctx}: runs the group's
+   * body in a fresh context beneath which a sentinel frame records the stack depth. The body keeps
+   * the frame's captures, counters and progress, as inline. Its target {@code -(id + 1)} is never a
+   * call target, and it sits at its parent's call level, so the recursion guard of a call in the
+   * body walks through it as through inline code.
+   */
+  private void enterAtomic(
+      Workspace ws, FrameStack stack, int state, int pos, int caps, int loops, long prog, int ctx) {
+    CallStore cs = ws.calls;
+    int x = cs.create();
+    cs.status[x] = CallStore.RUNNING;
+    cs.target[x] = -atomicById[state];
+    cs.pos[x] = pos;
+    cs.parent[x] = ctx;
+    cs.level[x] = cs.level[ctx];
+    cs.minHit[x] = cs.level[x];
+    cs.entryMask[x] = 0;
+    cs.inst[x] = cs.nextInst++;
+    cs.base[x] = stack.size;
+    stack.push(~state, pos, caps, loops, prog, x);
+    pushEpsilons(stack, state, pos, caps, loops, prog, x);
+  }
+
+  /**
+   * Exit {@code state} of the atomic group run by context {@code x}, popped at {@code pos}: the
+   * first body match in priority order. Drops the sentinel and every frame above it — the body's
+   * other alternatives — and continues after the group in the parent context with this match's
+   * captures, counters and progress. The memo rows of {@code x} carry its instance id, which is
+   * never reused, so the abandoned rows are never read again. Every frame above the sentinel
+   * belongs to {@code x}'s evaluation: a context's continuations are pushed into its parent only
+   * when its sentinel pops.
+   */
+  private void exitAtomic(
+      Workspace ws, FrameStack stack, int state, int pos, int caps, int loops, long prog, int x) {
+    CallStore cs = ws.calls;
+    int p = cs.parent[x];
+    foldGuard(cs, x, p);
+    int b = cs.base[x];
+    IntArena arena = ws.arena;
+    int mark = stack.marks[b];
+    stack.size = b;
+    // Vectors of the frames below lie under mark; move this match's vectors that lie above it
+    // down to it, lower source first (each destination is at or below its source).
+    arena.top = mark;
+    int c = caps;
+    int l = loops;
+    if (caps >= mark && loops >= mark && loops < caps) {
+      l = moveDown(arena, loops, loopSlotCount);
+      c = moveDown(arena, caps, slotCount);
+    } else {
+      if (caps >= mark) {
+        c = moveDown(arena, caps, slotCount);
+      }
+      if (loops >= mark) {
+        l = moveDown(arena, loops, loopSlotCount);
+      }
+    }
+    releaseContexts(cs, x);
+    pushEpsilons(stack, state, pos, c, l, prog, p);
+  }
+
+  /** Sentinel of atomic context {@code x} popped: the body has no match from its entry. */
+  private static void leaveAtomic(CallStore cs, int x) {
+    foldGuard(cs, x, cs.parent[x]);
+    releaseContexts(cs, x);
+  }
+
+  /**
+   * Frees context {@code x} and every context created after it when none of them is interned: all
+   * of them belong to {@code x}'s finished evaluation and nothing refers to them.
+   */
+  private static void releaseContexts(CallStore cs, int x) {
+    if (cs.lastInterned < x) {
+      cs.count = x;
+    }
+  }
+
+  /** Copies the {@code len} ints at {@code from} to the arena top, which is at or below it. */
+  private static int moveDown(IntArena arena, int from, int len) {
+    int off = arena.top;
+    int[] d = arena.data;
+    for (int i = 0; i < len; i++) {
+      d[off + i] = d[from + i];
+    }
+    arena.top = off + len;
+    return off;
+  }
+
+  /**
+   * Pushes the continuations of call state {@code state} after each return of context {@code x},
+   * lowest priority first: the caller's captures (group 0's start moved by a {@code \K} in the
+   * callee), counters and progress, in context {@code ctx}.
+   */
+  private void pushReturns(
+      Workspace ws,
+      FrameStack stack,
+      int state,
+      int x,
+      int callPos,
+      int caps,
+      int loops,
+      long prog,
+      int ctx) {
+    CallStore cs = ws.calls;
+    IntArena arena = ws.arena;
+    for (int r = cs.head[x]; r >= 0; r = cs.results[r + 2]) {
+      int retPos = cs.results[r];
+      int kStart = cs.results[r + 1];
+      int c = caps;
+      if (kStart >= 0) {
+        c = arena.copy(caps, slotCount);
+        arena.data[c] = kStart;
+      }
+      pushEpsilons(stack, state, retPos, c, loops, retPos > callPos ? PROGRESSED : prog, ctx);
+    }
   }
 
   /**
@@ -1304,14 +1942,15 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
    * when its loop's current iteration consumed nothing: that iteration's captures stand and only
    * the exit path continues (java.util.regex {@code Loop}).
    */
-  private void pushEpsilons(FrameStack stack, int state, int pos, int c, int loops, long prog) {
+  private void pushEpsilons(
+      FrameStack stack, int state, int pos, int c, int loops, long prog, int ctx) {
     int[] t = epsIds[state];
     boolean[] back = epsIsBack[state];
     for (int i = t.length - 1; i >= 0; i--) {
       if (back != null && back[i] && (prog & headBit[t[i]]) == 0) {
         continue;
       }
-      stack.push(t[i], pos, c, loops, prog);
+      stack.push(t[i], pos, c, loops, prog, ctx);
     }
   }
 
@@ -1384,7 +2023,7 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
     stack.size = 0;
     memo.reset();
     int limit = mustEnd < 0 ? regionEnd : mustEnd;
-    stack.push(assertStartById[owner], from, caps, 0, PROGRESSED); // bodies have no counted loops
+    stack.push(assertStartById[owner], from, caps, 0, PROGRESSED, 0); // no counted loops or calls
     long steps = 0;
     while (!stack.isEmpty()) {
       if (++steps > MAX_MATCH_STEPS) {
@@ -1449,11 +2088,11 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
         if (gs >= 0) {
           int l = ge - gs;
           if (l == 0) {
-            pushEpsilons(stack, state, pos, c, 0, prog);
+            pushEpsilons(stack, state, pos, c, 0, prog, 0);
           } else if (l > 0
               && pos + l <= limit
               && input.regionMatches(caseInsensitive, pos, input, gs, l)) {
-            pushEpsilons(stack, state, pos + l, c, 0, PROGRESSED);
+            pushEpsilons(stack, state, pos + l, c, 0, PROGRESSED, 0);
           }
         }
         continue;
@@ -1461,23 +2100,23 @@ public final class BackrefBacktrackMatcher extends ReggieMatcher {
       if (anchorById[state] != null) {
         if (checkAnchor(anchorById[state], input, pos, 0, regionEnd)) {
           if (accepts) {
-            stack.push(~state, pos, c, 0, prog);
+            stack.push(~state, pos, c, 0, prog, 0);
           }
-          pushEpsilons(stack, state, pos, c, 0, prog);
+          pushEpsilons(stack, state, pos, c, 0, prog, 0);
         }
         continue;
       }
       if (accepts) {
-        stack.push(~state, pos, c, 0, prog);
+        stack.push(~state, pos, c, 0, prog, 0);
       }
-      pushEpsilons(stack, state, pos, c, 0, prog);
+      pushEpsilons(stack, state, pos, c, 0, prog, 0);
       if (pos < limit) {
         char ch = input.charAt(pos);
         int[] targets = charTargetIds[state];
         CharSet[] sets = charSets[state];
         for (int i = targets.length - 1; i >= 0; i--) {
           if (sets[i].contains(ch)) {
-            stack.push(targets[i], pos + 1, c, 0, PROGRESSED);
+            stack.push(targets[i], pos + 1, c, 0, PROGRESSED, 0);
           }
         }
       }

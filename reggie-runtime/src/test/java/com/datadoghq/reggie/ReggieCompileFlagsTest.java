@@ -29,7 +29,9 @@ class ReggieCompileFlagsTest {
   void caseInsensitiveMatches() {
     assertMatches("abc", ReggieFlags.CASE_INSENSITIVE, "AbC", true);
     assertMatches("\\x61", ReggieFlags.CASE_INSENSITIVE, "A", true);
-    assertMatches("\\a", ReggieFlags.CASE_INSENSITIVE, "A", true);
+    // \a is BEL (U+0007), as in java.util.regex, not a literal "a".
+    assertMatches("\\a", ReggieFlags.CASE_INSENSITIVE, "A", false);
+    assertMatches("\\a", ReggieFlags.CASE_INSENSITIVE, "\u0007", true);
     assertMatches("abc", 0, "AbC", false);
   }
 

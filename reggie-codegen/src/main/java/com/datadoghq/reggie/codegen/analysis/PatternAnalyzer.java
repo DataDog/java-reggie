@@ -4307,8 +4307,14 @@ public class PatternAnalyzer {
       }
     }
 
-    // Must have found both group and quantified backref
-    if (groupIndex == -1 || backrefIndex == -1 || groupIndex >= backrefIndex) {
+    // Must have found both group and quantified backref, adjacent: the info carries only a prefix
+    // and a suffix, so nodes between them would be dropped ((q)x\1+ must not match "qq")
+    if (groupIndex == -1 || backrefIndex != groupIndex + 1) {
+      return null;
+    }
+    // The bytecode generator never matches the prefix, so a prefix would be dropped
+    // (^(a)\1{2} must not find "aaa" in "baaa")
+    if (groupIndex != 0) {
       return null;
     }
 
@@ -8964,6 +8970,9 @@ public class PatternAnalyzer {
       GroupNode group = (GroupNode) node;
       int groupNum = currentGroup;
       if (group.capturing) {
+        if (currentGroup != -1) {
+          return null; // an element carries one group: the outer group's span would be lost
+        }
         // Preserve original group number (set by the parser) when available; a sequential
         // counter would renumber named groups when NAMED_ONLY strips unnamed ones.
         groupNum = group.groupNumber > 0 ? group.groupNumber : ++groupCounter[0];
@@ -8974,8 +8983,8 @@ public class PatternAnalyzer {
       return elem; // Return whatever the child analysis found
     }
 
-    // Handle LiteralNode
-    if (node instanceof LiteralNode) {
+    // Handle LiteralNode; an EpsilonNode (a LiteralNode subclass) matches no char
+    if (node instanceof LiteralNode && !(node instanceof EpsilonNode)) {
       LiteralNode literal = (LiteralNode) node;
       return new LiteralElement(literal.ch, currentGroup);
     }
@@ -9332,10 +9341,21 @@ public class PatternAnalyzer {
       GroupNode group = (GroupNode) node;
       int groupNum = currentGroup;
       if (group.capturing) {
+        if (currentGroup != -1) {
+          return false; // an element carries one group: the outer group's span would be lost
+        }
         groupNum = group.groupNumber > 0 ? group.groupNumber : ++groupCounter[0];
         groupCounter[0] = Math.max(groupCounter[0], groupNum);
       }
-      return flattenElement(group.child, groupNum, groupCounter, out);
+      int before = out.size();
+      if (!flattenElement(group.child, groupNum, groupCounter, out)) {
+        return false;
+      }
+      // An empty capturing group has no element to carry its span
+      return !group.capturing || out.size() > before;
+    }
+    if (node instanceof EpsilonNode) {
+      return true; // matches nothing; EpsilonNode extends LiteralNode, so test it first
     }
     if (node instanceof ConcatNode) {
       for (RegexNode child : ((ConcatNode) node).children) {

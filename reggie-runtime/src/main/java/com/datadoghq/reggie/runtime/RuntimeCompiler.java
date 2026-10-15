@@ -36,6 +36,7 @@ import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.PatternCategorizer;
 import com.datadoghq.reggie.codegen.analysis.PinnedBackreferenceInfo;
 import com.datadoghq.reggie.codegen.analysis.QuantifiedGroupInfo;
+import com.datadoghq.reggie.codegen.analysis.RecursiveDescentChoiceAnalysis;
 import com.datadoghq.reggie.codegen.analysis.RequiredLiteralAnalyzer;
 import com.datadoghq.reggie.codegen.analysis.SpecializedOptionalGroupInfo;
 import com.datadoghq.reggie.codegen.analysis.StrategyJdkClassifier;
@@ -70,11 +71,13 @@ import com.datadoghq.reggie.codegen.codegen.OnePassBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.OptionalGroupBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.PinnedBackreferenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.QuantifiedGroupBytecodeGenerator;
+import com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.SpecializedOptionalGroupBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.StatelessLoopBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.SuffixSequenceBytecodeGenerator;
 import com.datadoghq.reggie.codegen.codegen.VariableCaptureBackrefBytecodeGenerator;
 import com.datadoghq.reggie.codegen.parsing.GroupCounter;
+import com.datadoghq.reggie.codegen.parsing.PatternLexer;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
 import java.io.PrintWriter;
 import java.lang.invoke.MethodHandle;
@@ -91,7 +94,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import java.util.regex.PatternSyntaxException;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassTooLargeException;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.MethodTooLargeException;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.util.TraceClassVisitor;
 
@@ -825,7 +830,13 @@ public class RuntimeCompiler {
     }
     try {
       RegexNode ast = new RegexParser().parse(pattern);
-      NFA nfa = new ThompsonBuilder(true).build(ast, GroupCounter.count(pattern));
+      NFA nfa;
+      try {
+        nfa = new ThompsonBuilder(true, true).build(ast, GroupCounter.count(pattern));
+      } catch (UnsupportedOperationException e) {
+        throw new UnsupportedPatternException(
+            "backtracking engine cannot build /" + pattern + "/: " + e.getMessage());
+      }
       String unsupported = BacktrackSupport.unsupportedFeature(nfa);
       if (unsupported != null) {
         throw new UnsupportedPatternException(
@@ -837,6 +848,39 @@ public class RuntimeCompiler {
     } catch (RegexParser.ParseException e) {
       throw new PatternSyntaxException(e.getMessage(), pattern, -1);
     }
+  }
+
+  /**
+   * Test hook: compiles a RECURSIVE_DESCENT pattern with the recursive-descent generator's
+   * choice-point code (not one-way), which {@link #compile} does not use (step 5.5 refuses such
+   * patterns). Uncached.
+   *
+   * @throws IllegalArgumentException when the analyzer does not select RECURSIVE_DESCENT
+   */
+  static ReggieMatcher compileRecursiveDescentForTest(String pattern) throws Exception {
+    RegexParser parser = new RegexParser();
+    RegexNode ast = parser.parse(pattern);
+    NFA nfa =
+        PatternAnalyzer.requiresRecursiveDescent(ast)
+            ? null
+            : new ThompsonBuilder().build(ast, GroupCounter.count(pattern));
+    PatternAnalyzer.MatchingStrategyResult result =
+        new PatternAnalyzer(ast, nfa).analyzeAndRecommend();
+    if (result.strategy != PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT) {
+      throw new IllegalArgumentException(pattern + " -> " + result.strategy);
+    }
+    byte[] bytecode =
+        generateBytecode(pattern, result, nfa, ast, isCaseInsensitive(pattern), false);
+    Class<? extends ReggieMatcher> matcherClass =
+        LOOKUP
+            .defineHiddenClass(bytecode, true, MethodHandles.Lookup.ClassOption.NESTMATE)
+            .lookupClass()
+            .asSubclass(ReggieMatcher.class);
+    ReggieMatcher matcher = instantiateFromClass(matcherClass, pattern);
+    if (!parser.getGroupNameMap().isEmpty()) {
+      matcher.setNameToIndex(parser.getGroupNameMap());
+    }
+    return matcher;
   }
 
   /**
@@ -1040,14 +1084,13 @@ public class RuntimeCompiler {
   }
 
   /**
-   * Intentionally re-implements a minimal lexical scan (character-class, {@code \Q...\E}, and
-   * {@code (?#...)}-comment awareness) independently of {@link RegexParser}'s tokenizer, purely to
-   * gate native-route admission. Any future change to how {@link RegexParser} recognizes character
-   * classes, quoting, or comment groups must be mirrored here, or admission can silently diverge
-   * from the real parser.
+   * Intentionally re-implements a minimal lexical scan ({@code \Q...\E} and {@code (?#...)}-comment
+   * awareness, with class boundaries from {@link PatternLexer#skipClass}) independently of {@link
+   * RegexParser}'s tokenizer, purely to gate native-route admission. Any future change to how
+   * {@link RegexParser} recognizes character classes, quoting, or comment groups must be mirrored
+   * here, or admission can silently diverge from the real parser.
    */
   static boolean hasSourceInlineModifier(String source) {
-    boolean inCharacterClass = false;
     int index = 0;
     while (index < source.length()) {
       char ch = source.charAt(index);
@@ -1068,16 +1111,9 @@ public class RuntimeCompiler {
         }
         continue;
       }
-      if (inCharacterClass) {
-        if (ch == ']') {
-          inCharacterClass = false;
-        }
-        index++;
-        continue;
-      }
       if (ch == '[') {
-        inCharacterClass = true;
-        index++;
+        // Comment mode is taken as off: the scan stops at the first inline modifier.
+        index = PatternLexer.skipClass(source, index, false);
         continue;
       }
       if (ch == '(' && index + 1 < source.length() && source.charAt(index + 1) == '?') {
@@ -1195,8 +1231,14 @@ public class RuntimeCompiler {
     if (!options.has(ReggieOption.ALLOW_JDK_FALLBACK)) {
       throw new UnsupportedPatternException(reason);
     }
+    ReggieMatcher fallback;
+    try {
+      fallback = new JavaRegexFallbackMatcher(pattern, reason);
+    } catch (PatternSyntaxException e) {
+      // Recursive-descent syntax ((?|, (?(1), (?N)) the JDK cannot parse: no fallback exists
+      throw new UnsupportedPatternException(reason, e);
+    }
     noteRouting("JAVA_FALLBACK: " + reason);
-    ReggieMatcher fallback = new JavaRegexFallbackMatcher(pattern, reason);
     if (nameMap != null && !nameMap.isEmpty()) {
       fallback.setNameToIndex(nameMap);
     }
@@ -1209,9 +1251,9 @@ public class RuntimeCompiler {
    * HotSpot's HugeMethodLimit: methods whose bytecode exceeds this are not JIT-compiled and run
    * interpreted (measured 20.8x/17.8x penalty via -XX:-DontCompileHugeMethods on identical code —
    * see doc find-jit-hugemethodlimit). Generated classes whose largest method exceeds it are
-   * declined to the JDK fallback when allowed (see the generation gate in compileInternal), keeping
-   * the strict-compile contract unchanged: without ALLOW_JDK_FALLBACK the generated (interpreted
-   * but correct) matcher is still returned.
+   * declined to the JDK fallback when allowed and the JDK can parse the pattern (see the generation
+   * gate in compileInternal), keeping the strict-compile contract unchanged: without
+   * ALLOW_JDK_FALLBACK the generated (interpreted but correct) matcher is still returned.
    */
   static final int JIT_HUGE_METHOD_LIMIT = 8000;
 
@@ -1522,12 +1564,35 @@ public class RuntimeCompiler {
       // produce incorrect results for these shapes. This runs BEFORE the hybrid check and
       // BEFORE the PIKEVM/BITSTATE early returns, so it also catches DFA_*_WITH_GROUPS
       // patterns that usePosixLastMatch routes into hybrid.
-      // A lookaround pattern step 4.5 runs on the backtracker is checked as such.
+      // A pattern step 4.5 runs on the backtracker is checked as such.
       NFA backtrackNfa = null;
-      if (nfa != null && BacktrackSupport.routesToBacktracker(result.strategy, nfa)) {
-        backtrackNfa = new ThompsonBuilder(true).build(ast, groupCount);
-        if (BacktrackSupport.unsupportedFeature(backtrackNfa) != null) {
+      String backtrackRefusal = null; // why the backtracker cannot run a RECURSIVE_DESCENT pattern
+      boolean recursiveDescent =
+          result.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT;
+      // A one-way pattern (no choice point the generator would have to retry) stays on the
+      // recursive-descent generator: it skips the backtracker (4.5) and the hybrid (5).
+      boolean rdOneWay =
+          recursiveDescent
+              && RecursiveDescentChoiceAnalysis.isOneWay(ast)
+              && FallbackPatternDetector.needsFallback(ast, result.strategy, false) == null;
+      if (!rdOneWay
+          && (nfa != null || recursiveDescent)
+          && BacktrackSupport.routesToBacktracker(result.strategy, nfa)) {
+        try {
+          backtrackNfa = new ThompsonBuilder(true, true).build(ast, groupCount);
+        } catch (UnsupportedOperationException e) {
+          // RECURSIVE_DESCENT is refused after the hybrid attempt (5.5) when the backtracker NFA
+          // cannot be built (the state cap, or a call to a missing group)
+          if (!recursiveDescent) {
+            throw e;
+          }
+          backtrackRefusal = "the backtracking engine cannot build it: " + e.getMessage();
+        }
+        String unsupported =
+            backtrackNfa == null ? null : BacktrackSupport.unsupportedFeature(backtrackNfa);
+        if (unsupported != null) {
           backtrackNfa = null;
+          backtrackRefusal = "the backtracking engine does not execute " + unsupported;
         }
       }
       String fallbackReason =
@@ -1546,11 +1611,11 @@ public class RuntimeCompiler {
       // longest match end ((?<=a|a).(?:(?:[ab]|[ab][^a])|[ab][ab](?=c+)) on "aaab": JDK 1..3,
       // hybrid 1..4). SPECIALIZED_MULTIPLE_LOOKAHEADS and SPECIALIZED_LITERAL_LOOKAHEADS share the
       // generated NFA and its longest end ((?=.*a)(?=.*b)(?:x|xy) on "xy ab": JDK 0..1, generated
-      // 0..2). The RECURSIVE_DESCENT generator does not evaluate assertions at all ((a)(?=b)\1?
-      // never matches).
+      // 0..2). The RECURSIVE_DESCENT generator commits to the first successful choice of most
+      // choice points ((a|ab)\1+c on "ababc": JDK matches at 0, the generator finds nothing).
       if (backtrackNfa != null) {
         BACKTRACK_NFA_CACHE.putIfAbsent(cacheKey, new BacktrackEntry(backtrackNfa, nameMap));
-        noteRouting("BACKREF_BACKTRACK (backreference or lookaround pattern)");
+        noteRouting("BACKREF_BACKTRACK (backreference, lookaround or recursive-descent pattern)");
         return BACKTRACK_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -1561,7 +1626,7 @@ public class RuntimeCompiler {
       // serve the boolean methods and the NFA serve match/findMatch. When no DFA is available
       // (dfaResult.dfa == null && result.dfa == null) or the DFA is anchor-diluted, hybrid is
       // skipped and the PIKEVM/BITSTATE early returns handle the pattern as before.
-      if (groupCount > 0 && shouldUseHybrid(result)) {
+      if (!rdOneWay && groupCount > 0 && shouldUseHybrid(result)) {
         // Admission rule for PIKEVM/BITSTATE patterns (measured, RealCorpusScanBenchmark +
         // per-pattern sweeps, workspace-jb): \b/\B patterns stay out: the subset construction
         // drops per-position boundary context (SubsetConstructor.isPositionAnchor excludes
@@ -1638,6 +1703,20 @@ public class RuntimeCompiler {
         }
         // skipHybrid: fall through to PIKEVM/BITSTATE early returns below.
       }
+      // 5.5. A RECURSIVE_DESCENT pattern with choice points that neither the backtracker (4.5) nor
+      // the hybrid (5) runs is refused: the generator does not retry an alternation when the rest
+      // of the pattern fails after it ((x)?(a|ab)c(?(1)y)(?>q)? on "abc": PCRE matches 0..3, the
+      // generator finds nothing).
+      if (recursiveDescent && !rdOneWay) {
+        return fallbackOrThrow(
+            pattern,
+            "recursive-descent pattern with choice points in /"
+                + pattern
+                + "/: "
+                + backtrackRefusal,
+            nameMap,
+            options);
+      }
       // 3.6. PIKEVM_CAPTURE: cache the NFA + name map so every compile() call produces a fresh,
       // correctly-enriched PikeVMMatcher without re-parsing the pattern.
       // B16 guard: nullable group content under a nullable outer quantifier diverges even in PikeVM
@@ -1682,9 +1761,11 @@ public class RuntimeCompiler {
       }
 
       // 6. Check structural cache (level 2), verifying the hit before trusting it.
-      CachedStructure cached = STRUCTURE_CACHE.get(structHash);
+      // One-way RD classes are generated per pattern: the RD structural hash collides on
+      // distinct patterns (epsilon vs \0, Group without atomic, Subroutine without the name).
+      CachedStructure cached = rdOneWay ? null : STRUCTURE_CACHE.get(structHash);
       Class<? extends ReggieMatcher> matcherClass = null;
-      boolean cacheable = true;
+      boolean cacheable = !rdOneWay;
       if (cached != null) {
         if (cached.verify == verifyHash) {
           if (options.has(ReggieOption.ALLOW_JDK_FALLBACK)
@@ -1722,22 +1803,62 @@ public class RuntimeCompiler {
         if (totalDeadlineExceeded()) {
           return fallbackOrThrow(pattern, totalDeadlineReason(), nameMap, options);
         }
-        byte[] bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive);
-        int largestMethod = largestMethodBytecodes(bytecode);
-        if (options.has(ReggieOption.ALLOW_JDK_FALLBACK) && largestMethod > JIT_HUGE_METHOD_LIMIT) {
+        byte[] bytecode;
+        IndexOutOfBoundsException tooLarge = null;
+        try {
+          bytecode = generateBytecode(pattern, result, nfa, ast, caseInsensitive, rdOneWay);
+        } catch (MethodTooLargeException | ClassTooLargeException e) {
+          if (!rdOneWay) {
+            throw e;
+          }
+          tooLarge = e;
+          bytecode = null;
+        }
+        int largestMethod = bytecode == null ? Integer.MAX_VALUE : largestMethodBytecodes(bytecode);
+        boolean overJitLimit =
+            options.has(ReggieOption.ALLOW_JDK_FALLBACK) && largestMethod > JIT_HUGE_METHOD_LIMIT;
+        if (rdOneWay && (tooLarge != null || overJitLimit)) {
+          // Too large for one generated method or class, or too large to JIT where the JDK would be
+          // used
+          // instead: the JDK cannot parse a recursive-descent pattern, so run on the backtracker,
+          // as without the one-way route (steps 3.5 and 4.5)
+          BacktrackEntry entry = null;
+          try {
+            backtrackNfa = new ThompsonBuilder(true, true).build(ast, groupCount);
+            if (BacktrackSupport.unsupportedFeature(backtrackNfa) == null
+                && FallbackPatternDetector.needsFallback(ast, result.strategy, true) == null) {
+              entry = new BacktrackEntry(backtrackNfa, nameMap);
+            }
+          } catch (UnsupportedOperationException buildFailure) {
+            // A call target with no built instance, or the state cap: the backtracker cannot run it
+          }
+          if (entry != null) {
+            BACKTRACK_NFA_CACHE.putIfAbsent(cacheKey, entry);
+            noteRouting("BACKREF_BACKTRACK (recursive-descent method too large)");
+            return BACKTRACK_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+          }
+          if (tooLarge != null) {
+            throw tooLarge;
+          }
+          // Otherwise keep the generated (interpreted) matcher
+        } else if (overJitLimit) {
           // Generated method exceeds HotSpot's HugeMethodLimit (8000 bytecodes): the matcher
           // would run INTERPRETED (find-jit-hugemethodlimit: measured 20.8x/17.8x penalty via
           // -XX:-DontCompileHugeMethods on the same code). With JDK fallback allowed, the JDK
           // matcher is faster than an interpreted generated one; without the option we keep
           // the generated (correct, interpreted) matcher — the strict-compile contract
           // (native-or-throw) is unchanged and the refusal set does not grow.
-          return fallbackOrThrow(
-              pattern,
-              "generated method exceeds HotSpot's JIT method-size limit ("
-                  + JIT_HUGE_METHOD_LIMIT
-                  + " bytecodes) — interpreted execution would be slower than the JDK",
-              nameMap,
-              options);
+          try {
+            return fallbackOrThrow(
+                pattern,
+                "generated method exceeds HotSpot's JIT method-size limit ("
+                    + JIT_HUGE_METHOD_LIMIT
+                    + " bytecodes) — interpreted execution would be slower than the JDK",
+                nameMap,
+                options);
+          } catch (UnsupportedPatternException jdkCannotParse) {
+            // Keep the generated (interpreted) matcher, as without the option
+          }
         }
 
         MethodHandles.Lookup hiddenLookup =
@@ -1786,7 +1907,7 @@ public class RuntimeCompiler {
 
       return matcher;
 
-    } catch (org.objectweb.asm.MethodTooLargeException e) {
+    } catch (MethodTooLargeException e) {
       // Very large patterns can exceed the JVM 64 KB per-method limit. DFASwitchBytecodeGenerator
       // mitigates this via STATE_SPLIT_THRESHOLD bucket-helper splitting; hitting this path for a
       // DFA_SWITCH* strategy indicates a STATE_SPLIT_THRESHOLD bug in DFASwitchBytecodeGenerator.
@@ -1803,6 +1924,17 @@ public class RuntimeCompiler {
               + e.getDescriptor()
               + " codeSize="
               + e.getCodeSize(),
+          null,
+          options);
+    } catch (ClassTooLargeException e) {
+      // One method per node (RecursiveDescentBytecodeGenerator) can overflow the class constant
+      // pool even when every method is within the limit
+      return fallbackOrThrow(
+          pattern,
+          "generated class too large: "
+              + e.getClassName()
+              + " constantPoolCount="
+              + e.getConstantPoolCount(),
           null,
           options);
     } catch (OutOfMemoryError oom) {
@@ -2365,13 +2497,26 @@ public class RuntimeCompiler {
     }
   }
 
-  /** Generate bytecode for the matcher class using the selected strategy. */
   private static byte[] generateBytecode(
       String pattern,
       PatternAnalyzer.MatchingStrategyResult result,
       NFA nfa,
       RegexNode ast,
       boolean caseInsensitive) {
+    return generateBytecode(pattern, result, nfa, ast, caseInsensitive, false);
+  }
+
+  /**
+   * Generate bytecode for the matcher class using the selected strategy. {@code rdOneWay} drops the
+   * backtracking limits of the recursive-descent generator.
+   */
+  private static byte[] generateBytecode(
+      String pattern,
+      PatternAnalyzer.MatchingStrategyResult result,
+      NFA nfa,
+      RegexNode ast,
+      boolean caseInsensitive,
+      boolean rdOneWay) {
     // Generate unique class name (UUID-based to avoid conflicts)
     String className = "ReggieMatcher$" + UUID.randomUUID().toString().replace("-", "");
 
@@ -2379,9 +2524,18 @@ public class RuntimeCompiler {
 
     // Class declaration: public final class XXX extends ReggieMatcher [implements NfaStep]
     String[] ifaces =
-        result.strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA
-            ? new String[] {"com/datadoghq/reggie/runtime/NfaStep"}
-            : null;
+        switch (result.strategy) {
+          case LAZY_DFA -> new String[] {"com/datadoghq/reggie/runtime/NfaStep"};
+          // linStep/linStartAccepts for DFALinearFind (emitted with matchesAtStart)
+          case DFA_UNROLLED,
+              DFA_UNROLLED_WITH_ASSERTIONS,
+              DFA_UNROLLED_WITH_GROUPS,
+              DFA_SWITCH,
+              DFA_SWITCH_WITH_ASSERTIONS,
+              DFA_SWITCH_WITH_GROUPS ->
+              new String[] {"com/datadoghq/reggie/runtime/DFALinearFind$Stepper"};
+          default -> null;
+        };
     cw.visit(
         V21,
         ACC_PUBLIC | ACC_FINAL | ACC_SUPER,
@@ -2611,15 +2765,16 @@ public class RuntimeCompiler {
               cw, "com/datadoghq/reggie/runtime/" + className);
         }
         unrolled.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        // Static lookup tables for range-heavy charsets (>= LOOKUP_TABLE_RANGE_THRESHOLD ranges,
-        // e.g. \\p{IsAlphabetic}): replaces the inline cascade that could exceed the 64 KB
-        // per-method limit. No-op when no charset crossed the threshold.
-        unrolled.generateLookupTables(cw);
         unrolled.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindLongestMatchEndMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         unrolled.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
+        // Static lookup tables for range-heavy charsets (>= LOOKUP_TABLE_RANGE_THRESHOLD ranges,
+        // e.g. \\p{IsAlphabetic}): replaces the inline cascade that could exceed the 64 KB
+        // per-method limit. Emitted after every method that may reference a table. No-op when no
+        // charset crossed the threshold.
+        unrolled.generateLookupTables(cw);
         break;
 
       case DFA_SWITCH:
@@ -2930,8 +3085,8 @@ public class RuntimeCompiler {
       case RECURSIVE_DESCENT:
         // Context-free patterns: subroutines, conditionals, branch reset
         // Requires specialized recursive descent parser
-        com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator recursiveGen =
-            new com.datadoghq.reggie.codegen.codegen.RecursiveDescentBytecodeGenerator(ast, nfa);
+        RecursiveDescentBytecodeGenerator recursiveGen =
+            new RecursiveDescentBytecodeGenerator(ast, nfa, rdOneWay);
 
         // IMPORTANT: Generate parser methods FIRST (parseRoot and AST parsers)
         // The public API methods depend on these parser methods being present
@@ -2946,7 +3101,6 @@ public class RuntimeCompiler {
         recursiveGen.generateFindMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        recursiveGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         recursiveGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);

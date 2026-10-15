@@ -148,52 +148,23 @@ public final class DFATableRuntime {
     if (from > length) {
       return -1;
     }
-
     if (startState < accepting.length && accepting[startState]) {
       return from;
     }
-
-    for (int candidate = from; candidate < length; candidate++) {
-      char first = input.charAt(candidate);
-      if (first < 128 && !startAscii[first]) {
-        continue;
-      }
-      int state =
-          nextState(
-              startState,
-              first,
-              classCount,
-              transitions,
-              asciiClasses,
-              rangeStarts,
-              rangeEnds,
-              rangeClasses);
-      if (state < 0) {
-        continue;
-      }
-      if (state < accepting.length && accepting[state]) {
-        return candidate;
-      }
-      for (int pos = candidate + 1; pos < length; pos++) {
-        state =
-            nextState(
-                state,
-                input.charAt(pos),
-                classCount,
-                transitions,
-                asciiClasses,
-                rangeStarts,
-                rangeEnds,
-                rangeClasses);
-        if (state < 0) {
-          break;
-        }
-        if (state < accepting.length && accepting[state]) {
-          return candidate;
-        }
-      }
-    }
-    return -1;
+    return leftmostStart(
+        input,
+        from,
+        length,
+        startState,
+        classCount,
+        transitions,
+        accepting,
+        asciiClasses,
+        startAscii,
+        rangeStarts,
+        rangeEnds,
+        rangeClasses,
+        null);
   }
 
   public static boolean findBoundsFrom(
@@ -224,26 +195,59 @@ public final class DFATableRuntime {
       return true;
     }
 
+    int candidate =
+        leftmostStart(
+            input,
+            from,
+            length,
+            startState,
+            classCount,
+            transitions,
+            accepting,
+            asciiClasses,
+            startAscii,
+            rangeStarts,
+            rangeEnds,
+            rangeClasses,
+            bounds);
+    if (candidate < 0) {
+      return false;
+    }
+    bounds[0] = candidate;
+    return true;
+  }
+
+  /**
+   * Smallest start in [{@code from}, {@code length}) of a non-empty match (the start state is not
+   * accepting), or -1. Runs the DFA once per candidate start; once the characters consumed by
+   * failed runs exceed {@link DFALinearFind#workLimit}, finishes in {@link DFALinearFind#findFrom}.
+   * If {@code bounds} is not null and a start is found, stores the end of the longest match from
+   * that start in {@code bounds[1]}; otherwise leaves {@code bounds} unchanged.
+   */
+  private static int leftmostStart(
+      CharSequence input,
+      int from,
+      int length,
+      int startState,
+      int classCount,
+      int[] transitions,
+      boolean[] accepting,
+      int[] asciiClasses,
+      boolean[] startAscii,
+      char[] rangeStarts,
+      char[] rangeEnds,
+      int[] rangeClasses,
+      int[] bounds) {
+    int work = 0;
     for (int candidate = from; candidate < length; candidate++) {
       char first = input.charAt(candidate);
       if (first < 128 && !startAscii[first]) {
         continue;
       }
-      int state =
-          nextState(
-              startState,
-              first,
-              classCount,
-              transitions,
-              asciiClasses,
-              rangeStarts,
-              rangeEnds,
-              rangeClasses);
-      if (state < 0) {
-        continue;
-      }
-      int lastAcceptEnd = (state < accepting.length && accepting[state]) ? candidate + 1 : -1;
-      for (int pos = candidate + 1; pos < length; pos++) {
+      int pos = candidate;
+      int state = startState;
+      int end = -1;
+      while (true) {
         state =
             nextState(
                 state,
@@ -254,20 +258,233 @@ public final class DFATableRuntime {
                 rangeStarts,
                 rangeEnds,
                 rangeClasses);
+        pos++;
         if (state < 0) {
           break;
         }
         if (state < accepting.length && accepting[state]) {
-          lastAcceptEnd = pos + 1;
+          if (bounds == null) {
+            return candidate;
+          }
+          end = pos;
+        }
+        if (pos >= length) {
+          break;
         }
       }
-      if (lastAcceptEnd >= 0) {
-        bounds[0] = candidate;
-        bounds[1] = lastAcceptEnd;
-        return true;
+      if (end >= 0) {
+        bounds[1] = end;
+        return candidate;
+      }
+      work += pos - candidate;
+      if (work > DFALinearFind.workLimit(length - from)) {
+        DFALinearFind.Stepper stepper =
+            new TableStepper(
+                input,
+                classCount,
+                transitions,
+                accepting,
+                asciiClasses,
+                rangeStarts,
+                rangeEnds,
+                rangeClasses);
+        int found =
+            DFALinearFind.findFrom(
+                stepper,
+                null,
+                candidate + 1,
+                length,
+                startState,
+                transitions.length / classCount,
+                false);
+        if (found < 0 || bounds == null) {
+          return found;
+        }
+        // The run from found accepts, so this returns found and sets bounds[1]
+        return leftmostStart(
+            input,
+            found,
+            length,
+            startState,
+            classCount,
+            transitions,
+            accepting,
+            asciiClasses,
+            startAscii,
+            rangeStarts,
+            rangeEnds,
+            rangeClasses,
+            bounds);
       }
     }
-    return false;
+    return -1;
+  }
+
+  /**
+   * Table DFA step for {@link DFALinearFind}. Ignores the String argument: it reads the {@code
+   * CharSequence} it was built with (DFALinearFind passes no input, and no multiline start: table
+   * DFAs carry no anchors or assertions).
+   */
+  private static final class TableStepper implements DFALinearFind.Stepper {
+    private final CharSequence input;
+    private final int classCount;
+    private final int[] transitions;
+    private final boolean[] accepting;
+    private final int[] asciiClasses;
+    private final char[] rangeStarts;
+    private final char[] rangeEnds;
+    private final int[] rangeClasses;
+
+    TableStepper(
+        CharSequence input,
+        int classCount,
+        int[] transitions,
+        boolean[] accepting,
+        int[] asciiClasses,
+        char[] rangeStarts,
+        char[] rangeEnds,
+        int[] rangeClasses) {
+      this.input = input;
+      this.classCount = classCount;
+      this.transitions = transitions;
+      this.accepting = accepting;
+      this.asciiClasses = asciiClasses;
+      this.rangeStarts = rangeStarts;
+      this.rangeEnds = rangeEnds;
+      this.rangeClasses = rangeClasses;
+    }
+
+    @Override
+    public Object linPrepare(String ignored, int from, int len) {
+      return null;
+    }
+
+    @Override
+    public int linStep(String ignored, int state, int pos, Object prepared) {
+      if (state < accepting.length && accepting[state]) {
+        return DFALinearFind.ACCEPT;
+      }
+      if (pos >= input.length()) {
+        return DFALinearFind.DEAD;
+      }
+      int next =
+          nextState(
+              state,
+              input.charAt(pos),
+              classCount,
+              transitions,
+              asciiClasses,
+              rangeStarts,
+              rangeEnds,
+              rangeClasses);
+      return next < 0 ? DFALinearFind.DEAD : next;
+    }
+
+    @Override
+    public boolean linStartAccepts(String ignored, int pos, Object prepared) {
+      return false; // findFrom/findBoundsFrom return before searching when the start accepts
+    }
+  }
+
+  /**
+   * DFA of a variable-width lookahead body, decoded from the string the DFA generators emit: chars
+   * {@code startState, stateSlots, classCount, rangeCount}, then one accepting flag (0/1) per
+   * state, the transitions (target + 1, 0 for none) indexed {@code state * classCount + class}, the
+   * 128 ASCII classes, and the range starts, range ends and range classes. Each of these chars is
+   * stored as two string chars, its high byte then its low byte.
+   */
+  public static final class GateTable {
+    final int startState;
+    final int stateSlots;
+    final int classCount;
+    final long accepting;
+    final int[] transitions;
+    final int[] asciiClasses;
+    final char[] rangeStarts;
+    final char[] rangeEnds;
+    final int[] rangeClasses;
+
+    private GateTable(String bytes) {
+      char[] e = new char[bytes.length() / 2];
+      for (int i = 0; i < e.length; i++) {
+        e[i] = (char) (bytes.charAt(2 * i) << 8 | bytes.charAt(2 * i + 1));
+      }
+      startState = e[0];
+      stateSlots = e[1];
+      classCount = e[2];
+      int rangeCount = e[3];
+      int at = 4;
+      long acc = 0;
+      for (int s = 0; s < stateSlots; s++) {
+        if (e[at++] != 0) acc |= 1L << s;
+      }
+      accepting = acc;
+      transitions = new int[stateSlots * classCount];
+      for (int i = 0; i < transitions.length; i++) {
+        transitions[i] = e[at++] - 1;
+      }
+      asciiClasses = new int[128];
+      for (int i = 0; i < 128; i++) {
+        asciiClasses[i] = e[at++];
+      }
+      rangeStarts = new char[rangeCount];
+      rangeEnds = new char[rangeCount];
+      rangeClasses = new int[rangeCount];
+      for (int i = 0; i < rangeCount; i++) rangeStarts[i] = e[at++];
+      for (int i = 0; i < rangeCount; i++) rangeEnds[i] = e[at++];
+      for (int i = 0; i < rangeCount; i++) rangeClasses[i] = e[at++];
+    }
+  }
+
+  /** Decodes the gate tables of one matcher (at most 64 states each). */
+  public static GateTable[] gateTables(String[] encoded) {
+    GateTable[] tables = new GateTable[encoded.length];
+    for (int i = 0; i < encoded.length; i++) {
+      tables[i] = new GateTable(encoded[i]);
+    }
+    return tables;
+  }
+
+  /**
+   * For each gate, whether its DFA run anchored at {@code p} reaches an accepting state before it
+   * dies or reaches the end of {@code input}, for every p in [{@code from}, input.length()]. Read
+   * the result with {@link #gateBit}.
+   */
+  public static Object gateBits(GateTable[] gates, String input, int from) {
+    int len = input.length();
+    long[][] bits = new long[gates.length][];
+    for (int g = 0; g < gates.length; g++) {
+      GateTable t = gates[g];
+      // b[0] = from; bit i of words 1.. is position from + i
+      long[] b = new long[2 + ((len - from) >>> 6)];
+      b[0] = from;
+      // live: states whose run from the current position accepts (at len, only accepting ones)
+      long live = t.accepting;
+      for (int p = len; ; p--) {
+        if ((live >>> t.startState & 1) != 0) {
+          b[1 + ((p - from) >>> 6)] |= 1L << (p - from);
+        }
+        if (p == from) break;
+        int cls =
+            charClass(
+                input.charAt(p - 1), t.asciiClasses, t.rangeStarts, t.rangeEnds, t.rangeClasses);
+        long next = t.accepting;
+        for (int s = 0, i = cls; s < t.stateSlots; s++, i += t.classCount) {
+          int target = t.transitions[i];
+          if (target >= 0 && (live >>> target & 1) != 0) next |= 1L << s;
+        }
+        live = next;
+      }
+      bits[g] = b;
+    }
+    return bits;
+  }
+
+  /** Bit of {@link #gateBits} for gate {@code gate} at {@code pos}. */
+  public static boolean gateBit(Object bits, int gate, int pos) {
+    long[] b = ((long[][]) bits)[gate];
+    int i = pos - (int) b[0];
+    return (b[1 + (i >>> 6)] >>> i & 1) != 0;
   }
 
   private static int nextState(

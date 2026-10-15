@@ -18,6 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -35,6 +37,17 @@ class ParserExceptionTest {
     assertFalse(
         ex instanceof StringIndexOutOfBoundsException,
         "Should not be StringIndexOutOfBoundsException; got " + ex.getClass().getName());
+  }
+
+  /**
+   * A leading {@code ]} is a literal, so {@code []} and {@code [[]} are unclosed, as in the JDK.
+   */
+  @Test
+  void compile_unclosedClassWithLeadingBracket_throwsPatternSyntaxException() {
+    for (String p : new String[] {"[]", "[[]", "[^]"}) {
+      assertThrows(PatternSyntaxException.class, () -> Pattern.compile(p), p);
+      assertThrows(PatternSyntaxException.class, () -> Reggie.compile(p), p);
+    }
   }
 
   /** Reggie.compile("(?") must not throw a raw StringIndexOutOfBoundsException. */
@@ -74,6 +87,23 @@ class ParserExceptionTest {
         RuntimeException.class,
         () -> Reggie.compile("(?(2)a|b)"),
         "Compiling (?(2)a|b) with no group 2 must throw");
+  }
+
+  /** A reversed class range is a syntax error on every entry point, as in the JDK. */
+  @Test
+  void reversedClassRange_throwsPatternSyntaxException() {
+    String p = "[z-a]";
+    assertThrows(PatternSyntaxException.class, () -> Reggie.compile(p));
+    assertThrows(PatternSyntaxException.class, () -> RuntimeCompiler.compilePikeVm(p, ""));
+    assertThrows(
+        PatternSyntaxException.class, () -> RuntimeCompiler.compileBackrefBacktrack(p, ""));
+    assertThrows(PatternSyntaxException.class, () -> RuntimeCompiler.createChainFallback(p, null));
+    assertEquals(
+        RuntimeCompiler.FullCaptureLtsRejection.PARSE_FAILURE,
+        RuntimeCompiler.tryCompileFullCaptureLinearTokenSequence(p, 0).rejection());
+    assertEquals(
+        RuntimeCompiler.NamedOnlyLtsRejection.PARSE_FAILURE,
+        RuntimeCompiler.tryCompileNamedOnlyLinearTokenSequence(p, 0).rejection());
   }
 
   // ==================== F17.3: \x{NNNN} braced hex ====================

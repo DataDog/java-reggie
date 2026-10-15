@@ -32,7 +32,7 @@ import java.util.Objects;
  *
  * <p>Algorithm (longest-first backtracking): 1. Try maximum possible group capture (greedy) 2.
  * Check if separator matches at current position 3. Check if backreference matches captured content
- * 4. If fail, shrink group capture by 1 and retry 5. Respect BacktrackConfig.MAX_ITERATIONS limit
+ * 4. If fail, shrink group capture by 1 and retry
  */
 public class VariableCaptureBackrefInfo implements PatternInfo {
 

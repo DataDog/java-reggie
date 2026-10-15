@@ -14,7 +14,11 @@ Reggie is a high-performance Java regex library that provides **two complementar
 Both approaches analyze each pattern and route it to one of three strategy families —
 DFA-backed (deterministic, longest-match), NFA/PikeVM-backed (Thompson construction, leftmost-first),
 or bounded-backtracking bytecode (shape-restricted, still O(n)) — then generate specialized
-bytecode for **guaranteed linear-time matching** without ReDoS vulnerabilities.
+bytecode. For patterns without backreferences, lookaround, atomic groups, possessive quantifiers,
+conditionals or recursion, one match or find call takes **linear time** in the input length.
+Patterns with those features have no linear-time guarantee. The ones that no specialized strategy
+can run go to a memoized backtracker whose work is polynomial, with step budgets that throw
+`MatchBudgetExceededException` instead of hanging. See [Known Limitations](#known-limitations).
 
 ## Table of Contents
 
@@ -52,7 +56,7 @@ Reggie solves these problems:
 | Feature | JDK Pattern | Reggie (Compile-Time) | Reggie (Runtime) |
 |---------|-------------|----------------------|------------------|
 | **Compilation overhead** | Every startup | Zero (at build time) | First use only (~5-10ms) |
-| **ReDoS protection** | ❌ No | ✅ Yes (linear time) | ✅ Yes (linear time) |
+| **ReDoS protection** | ❌ No | ✅ Yes (linear or step-bounded²) | ✅ Yes (linear or step-bounded²) |
 | **Error detection** | Runtime | **Compile time** | Runtime |
 | **Performance** | Good | **Excellent (10-20x)** | **Excellent (10-20x)** |
 | **JIT optimization** | Limited | **Maximum** | **Maximum** |
@@ -151,17 +155,19 @@ categories.
 2. **Specialized bytecode**: Each pattern gets custom-generated code, not a generic interpreter loop
 3. **Maximum JIT optimization**: HotSpot can fully inline specialized matchers
 4. **No interpreter**: Direct execution, no generic pattern interpreter
-5. **Linear-time matching**: strategy selection picks a DFA, NFA/PikeVM, or bounded-backtracking
-   bytecode strategy per pattern — each is O(n) by construction, so none can degrade into
-   unbounded backtracking
+5. **Bounded matching cost**: for patterns without backreferences, lookaround, atomic groups,
+   possessive quantifiers, conditionals or recursion, strategy selection picks a DFA,
+   NFA/PikeVM, or bounded-backtracking bytecode strategy whose match or find call is O(n). Patterns
+   with those features that no specialized strategy can run go to a memoized backtracker whose
+   work is polynomial and capped by step budgets²
 
 ### Engine Comparison
 
 | Feature | Reggie | JDK Pattern | RE2J |
 |---------|--------|-------------|------|
-| Time Complexity | O(n) guaranteed¹ | O(2^n) worst case | O(n) guaranteed |
+| Time Complexity | O(n) per call for regular patterns³; not guaranteed otherwise²¹ | O(2^n) worst case | O(n) guaranteed |
 | Implementation | JIT-compiled bytecode | Interpreted backtracking | NFA simulation |
-| ReDoS Safe | ✅ Yes¹ | ❌ No | ✅ Yes |
+| ReDoS Safe | ✅ Yes¹ ² ³ | ❌ No | ✅ Yes |
 | Backreferences | ✅ Yes | ✅ Yes | ❌ No |
 | Lookahead/Lookbehind | ✅ Yes | ✅ Yes | ❌ No |
 
@@ -169,6 +175,22 @@ categories.
 rather than silently degrading). Opting into `compileAllowingFallback()` /
 `ReggieOption.ALLOW_JDK_FALLBACK` delegates unsupported patterns to `java.util.regex`, which
 inherits JDK's backtracking worst case and is **not** ReDoS-safe. See
+[doc/agents-fallback-and-limitations.md](doc/agents-fallback-and-limitations.md).
+
+² Patterns with backreferences, lookaround, atomic groups, possessive quantifiers, conditionals or
+recursion that no linear strategy can run go to `BackrefBacktrackMatcher`, a backtracker memoized
+on (state, position, referenced group spans, loop counters). Its work is polynomial in the input
+length, not linear. Each match attempt stops after 2,000,000 steps
+(`-Dreggie.countedloop.maxSteps`). The attempts of one find call share a second budget of
+2,000,000 plus 16,384 per searched character (`-Dreggie.countedloop.stepsPerChar`), which counts
+both steps and backreference characters compared. Both throw
+`MatchBudgetExceededException`, so an adversarial input ends in bounded time with an exception
+instead of a match result. RE2J accepts none of these
+features. `ReDoSLinearityBenchmark` measures how find() time grows with input length for Reggie,
+RE2J and java.util.regex.
+
+³ The bound holds for one call. Iterating m matches over one input (`findAll`, repeated
+`findFrom`) can cost O(n · m) on the DFA strategies; see
 [doc/agents-fallback-and-limitations.md](doc/agents-fallback-and-limitations.md).
 
 ## Performance Tuning
@@ -588,7 +610,7 @@ evaluate; the remaining 102 entries use PCRE features not yet implemented (see
   - Whitespace inside quantifiers: `{ 3, 5 }`, `{ 3 }` (PCRE compatible)
 - **Escape sequences**:
   - Basic: `\n`, `\t`, `\r`, `\\`, `\/`
-  - Octal: `\100` (octal 100 = '@'), `\377`
+  - Octal: `\0100` (octal 100 = '@'), `\0377`; `\1`-`\9` start a backreference, as in java.util.regex
   - Hex: `\x40` (hex 40 = '@'), `\xFF`
 - **Alternation**: `|`
 - **Groups**:
@@ -649,8 +671,7 @@ evaluate; the remaining 102 entries use PCRE features not yet implemented (see
 ### Recent Improvements
 
 - ✅ Whitespace in quantifiers (PCRE compatible)
-- ✅ Octal escape sequences (`\100`, `\377`); note `(abc)\100` immediately after a captured group is
-  a known parsing bug (ambiguity with backreference `\1` followed by digits `00`)
+- ✅ Octal escape sequences (`\0100`, `\0377`)
 - ✅ Hex escape sequences (`\x40`, `\xFF`)
 - ✅ Dotall mode `(?s)` - dot matches newlines
 - ✅ Absolute string anchors `\A` and `\Z`
@@ -902,9 +923,21 @@ Based on extensive research, Reggie's hybrid compile-time/runtime approach is **
 - Combines .NET's source generation concept with Java annotation processing
 - Unified codegen for both compile-time and runtime paths
 - Industry-proven hybrid DFA/NFA strategy
-- High PCRE compatibility (98.1% of evaluable corpus cases) with linear-time guarantees
+- High PCRE compatibility (98.1% of evaluable corpus cases) without exponential backtracking
 
 ## Known Limitations
+
+### Complexity limits
+
+- Linear time holds per call. Iterating m matches over one input can cost O(n · m) on the DFA
+  strategies.
+- Backreferences, lookaround, atomic groups, possessive quantifiers, conditionals and recursion
+  have no linear-time guarantee. On the memoized backtracker they are polynomial and capped by
+  step budgets². A lookahead whose DFA has more than 64 states keeps an O(n²) find on the DFA
+  strategies.
+
+See "Performance known gaps" in
+[doc/agents-fallback-and-limitations.md](doc/agents-fallback-and-limitations.md).
 
 ### Known correctness gaps on adversarial degenerate inputs
 
@@ -917,9 +950,8 @@ between Reggie and JDK on adversarial degenerate inputs:
   `OPTIMIZED_NFA_WITH_BACKREFS`; `\A` anchor enforcement in `DFA_SWITCH`; backref/anchor-combo
   patterns.
 
-All affected patterns are O(n) / ReDoS-safe. These gaps affect adversarial or synthetically
-generated patterns; typical production patterns are unlikely to trigger them. The budget ratchets
-down as each root-cause class is fixed (`-Dreggie.fuzz.maxFindings=N` overrides the gate; see
+These gaps affect adversarial or synthetically generated patterns; typical production patterns
+are unlikely to trigger them. The budget ratchets down as each root-cause class is fixed (`-Dreggie.fuzz.maxFindings=N` overrides the gate; see
 [doc/agents-fallback-and-limitations.md](doc/agents-fallback-and-limitations.md) for the
 authoritative, currently-maintained breakdown).
 

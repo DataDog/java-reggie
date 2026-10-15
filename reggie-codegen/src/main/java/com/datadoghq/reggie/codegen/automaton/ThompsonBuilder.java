@@ -55,6 +55,20 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private final boolean lazyAware;
 
   /**
+   * Build subroutine calls as call states ({@link NFA.NFAState#callTarget}) instead of throwing.
+   * Only BackrefBacktrackMatcher executes call states.
+   */
+  private final boolean callStates;
+
+  /** Call states and their AST nodes, resolved to targets at the end of {@link #build}. */
+  private final List<NFA.NFAState> calls = new ArrayList<>();
+
+  private final List<SubroutineNode> callNodes = new ArrayList<>();
+
+  /** Every built instance of each capturing group (call-state builds only). */
+  private final Map<GroupNode, List<NFAFragment>> groupInstances = new IdentityHashMap<>();
+
+  /**
    * Number of enclosing quantifiers that can repeat (max &gt; 1), outside lookaround bodies and
    * possessive repeats.
    */
@@ -67,11 +81,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private RegexNode atomicBody;
 
   public ThompsonBuilder() {
-    this.lazyAware = false;
+    this(false, false);
   }
 
   public ThompsonBuilder(boolean lazyAware) {
+    this(lazyAware, false);
+  }
+
+  public ThompsonBuilder(boolean lazyAware, boolean callStates) {
     this.lazyAware = lazyAware;
+    this.callStates = callStates;
   }
 
   /**
@@ -104,7 +123,96 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       exit.addEpsilonTransition(acceptState);
     }
 
+    if (!calls.isEmpty()) {
+      resolveCalls(ast, fragment.entry, acceptState);
+    }
     return new NFA(allStates, fragment.entry, Set.of(acceptState), groupCount);
+  }
+
+  /**
+   * Sets each call state's target, entry and return states. The target is the first capturing group
+   * in pattern order with the call's number, or with the named group's number when the call is
+   * named; the call runs its instance reachable from the start with the lowest entry id (a
+   * quantifier builds one instance per copy). A target with no such instance ({@code
+   * (?:(a)){0}(?1)}, or a group inside a lookaround) gets one call-only instance, built here and
+   * entered by calls alone; calls inside it are resolved by the same loop.
+   *
+   * @throws UnsupportedOperationException when the target does not exist
+   */
+  private void resolveCalls(RegexNode ast, NFA.NFAState start, NFA.NFAState accept) {
+    Set<NFA.NFAState> reachable = reachableFrom(start);
+    Map<GroupNode, NFAFragment> callOnly = new IdentityHashMap<>();
+    for (int i = 0; i < calls.size(); i++) {
+      NFA.NFAState call = calls.get(i);
+      SubroutineNode node = callNodes.get(i);
+      if (node.name == null && node.groupNumber <= 0) {
+        call.callTarget = 0;
+        call.callEntry = start;
+        call.callReturns = Set.of(accept);
+        continue;
+      }
+      GroupNode group = ast.accept(new GroupFinder(node.groupNumber, node.name));
+      if (group != null && node.name != null) {
+        // A name stands for its number: in a branch reset (?&n) calls the first group numbered as n
+        group = ast.accept(new GroupFinder(group.groupNumber, null));
+      }
+      NFAFragment instance = null;
+      if (group != null) {
+        for (NFAFragment f : groupInstances.getOrDefault(group, List.of())) {
+          if (reachable.contains(f.entry) && (instance == null || f.entry.id < instance.entry.id)) {
+            instance = f;
+          }
+        }
+      }
+      if (instance == null && group != null) {
+        instance = callOnly.get(group);
+        if (instance == null) {
+          instance = group.accept(this);
+          callOnly.put(group, instance);
+        }
+      }
+      if (instance == null) {
+        throw new UnsupportedOperationException("Subroutine call to a missing group: " + node);
+      }
+      call.callTarget = group.groupNumber;
+      call.callEntry = instance.entry.getEpsilonTransitions().get(0);
+      call.callReturns = instance.exits;
+    }
+  }
+
+  /**
+   * States reachable from {@code start} outside lookaround bodies: epsilon, character, counted-loop
+   * and conditional edges.
+   */
+  private Set<NFA.NFAState> reachableFrom(NFA.NFAState start) {
+    NFA.NFAState[] byId = allStates.toArray(new NFA.NFAState[0]);
+    Set<NFA.NFAState> seen = new HashSet<>();
+    ArrayDeque<NFA.NFAState> queue = new ArrayDeque<>();
+    seen.add(start);
+    queue.add(start);
+    while (!queue.isEmpty()) {
+      NFA.NFAState s = queue.poll();
+      List<NFA.NFAState> next = new ArrayList<>(s.getEpsilonTransitions());
+      for (NFA.Transition t : s.getTransitions()) {
+        next.add(t.target);
+      }
+      if (s.countedLoopId != null) {
+        next.add(byId[s.countedLoopBodyEntryId]);
+        next.add(byId[s.countedLoopStopId]);
+      }
+      if (s.thenBranch != null) {
+        next.add(s.thenBranch);
+      }
+      if (s.elseBranch != null) {
+        next.add(s.elseBranch);
+      }
+      for (NFA.NFAState t : next) {
+        if (seen.add(t)) {
+          queue.add(t);
+        }
+      }
+    }
+    return seen;
   }
 
   private NFA.NFAState createState() {
@@ -566,7 +674,6 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     marker.countedLoopId = id;
     marker.countedLoopTailMax = tailCopies;
     marker.countedLoopLazy = lazy;
-    marker.countedLoopBodyEntryId = body.entry.id;
     marker.countedLoopStopId = stop.id;
     marker.countedLoopPinGroup = pinGroup != null ? pinGroup : -1;
 
@@ -583,6 +690,8 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     for (NFA.NFAState exit : last.exits) {
       exit.addEpsilonTransition(marker);
     }
+    // A tail pass re-runs only the last copy, the one whose exits reach the marker.
+    marker.countedLoopBodyEntryId = last.entry.id;
 
     NFA.NFAState entry = (min == 0) ? marker : body.entry;
     return new NFAFragment(entry, Set.of(stop));
@@ -630,7 +739,11 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
         groupExits.add(groupExit);
       }
 
-      return new NFAFragment(groupEntry, groupExits);
+      NFAFragment fragment = new NFAFragment(groupEntry, groupExits);
+      if (callStates) {
+        groupInstances.computeIfAbsent(node, k -> new ArrayList<>()).add(fragment);
+      }
+      return fragment;
     }
 
     return child;
@@ -725,9 +838,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   @Override
   public NFAFragment visitSubroutine(SubroutineNode node) {
-    // Not yet implemented - Phase 4: Subroutine support
-    throw new UnsupportedOperationException(
-        "Subroutine patterns not yet supported: (?R), (?1), etc.");
+    if (!callStates) {
+      throw new UnsupportedOperationException(
+          "Subroutine patterns not yet supported: (?R), (?1), etc.");
+    }
+    // Target, entry and returns are set by resolveCalls; the epsilons added to this state by the
+    // enclosing construct are the continuation after the call.
+    NFA.NFAState call = createState();
+    calls.add(call);
+    callNodes.add(node);
+    return new NFAFragment(call, call);
   }
 
   @Override
@@ -770,5 +890,90 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     }
 
     return new NFAFragment(entry, allExits);
+  }
+
+  /** First capturing group in pattern order with the given number, or name when non-null. */
+  public static final class GroupFinder implements RegexVisitor<GroupNode> {
+    private final int number;
+    private final String name;
+
+    public GroupFinder(int number, String name) {
+      this.number = number;
+      this.name = name;
+    }
+
+    private GroupNode first(List<RegexNode> nodes) {
+      for (RegexNode n : nodes) {
+        GroupNode g = n.accept(this);
+        if (g != null) {
+          return g;
+        }
+      }
+      return null;
+    }
+
+    @Override
+    public GroupNode visitLiteral(LiteralNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitCharClass(CharClassNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitConcat(ConcatNode node) {
+      return first(node.children);
+    }
+
+    @Override
+    public GroupNode visitAlternation(AlternationNode node) {
+      return first(node.alternatives);
+    }
+
+    @Override
+    public GroupNode visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public GroupNode visitGroup(GroupNode node) {
+      if (node.capturing && (name != null ? name.equals(node.name) : node.groupNumber == number)) {
+        return node;
+      }
+      return node.child.accept(this);
+    }
+
+    @Override
+    public GroupNode visitAnchor(AnchorNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitBackreference(BackreferenceNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitAssertion(AssertionNode node) {
+      return node.subPattern.accept(this);
+    }
+
+    @Override
+    public GroupNode visitSubroutine(SubroutineNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitConditional(ConditionalNode node) {
+      GroupNode g = node.thenBranch.accept(this);
+      return g != null || node.elseBranch == null ? g : node.elseBranch.accept(this);
+    }
+
+    @Override
+    public GroupNode visitBranchReset(BranchResetNode node) {
+      return first(node.alternatives);
+    }
   }
 }

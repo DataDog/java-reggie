@@ -103,7 +103,7 @@ class StrategySelectionTest {
   @Test
   void testNamedSubroutine() throws Exception {
     // (?&foo) - call to named group
-    PatternAnalyzer.MatchingStrategyResult result = analyze("a(?&foo)b");
+    PatternAnalyzer.MatchingStrategyResult result = analyze("a(?&foo)b(?<foo>c)");
 
     assertEquals(
         PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT,
