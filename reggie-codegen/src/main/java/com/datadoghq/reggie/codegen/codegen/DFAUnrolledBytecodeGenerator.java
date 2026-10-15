@@ -158,6 +158,12 @@ public class DFAUnrolledBytecodeGenerator {
    */
   private int gateFarVar = -1;
 
+  /**
+   * Slot of {@code input.length()} while matchesAtStart or findLongestMatchEnd is emitted, else -1.
+   * Their per-state bound tests read it instead of calling {@code length()} on every character.
+   */
+  private int lenVar = -1;
+
   /** {@link #collectBitGates} of the DFA, computed on first use. */
   private List<DFA> bitGates;
 
@@ -1647,6 +1653,12 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ISTORE, posVar);
 
+    // int len = input.length();
+    lenVar = allocator.allocate();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
     // int far = startPos; a dying run returns max(pos, far)
     if (!bitGates().isEmpty()) {
       gateFarVar = allocator.allocate();
@@ -1684,6 +1696,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitMaxs(0, 0);
     mv.visitEnd();
     gateFarVar = -1;
+    lenVar = -1;
 
     generateLinearStepMethods(cw);
   }
@@ -1783,7 +1796,16 @@ public class DFAUnrolledBytecodeGenerator {
     // For accepting states, assertions gate acceptance only. If they fail, the DFA must still try
     // outgoing transitions: e.g. (?<=\\[)[^\\]]+(?=\\]) should not reject after seeing just "v"
     // in "[value]" because the trailing lookahead fails there; it should keep consuming until ']'.
-    if (state.accepting && state != dfa.getStartState()) {
+    // An end-class condition holds before input end only at a line terminator. When no transition
+    // consumes one, a taken transition implies the condition fails at pos: check it only where the
+    // state is left without a transition (as in generateGreedyStateCode).
+    boolean deferAcceptance =
+        state.accepting
+            && state != dfa.getStartState()
+            && state.assertionChecks.isEmpty()
+            && hasEndClassCondition(state.acceptanceAnchorConditions)
+            && !consumesLineTerminator(state);
+    if (state.accepting && state != dfa.getStartState() && !deferAcceptance) {
       Label continueMatching = new Label();
       for (AssertionCheck assertion : state.assertionChecks) {
         generateAssertionCheck(mv, assertion, posVar, continueMatching, allocator);
@@ -1799,10 +1821,9 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
 
-    // if (pos >= input.length()) goto endOfInput
+    // if (pos >= len) goto endOfInput
     mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    emitInputLength(mv);
     mv.visitJumpInsn(IF_ICMPGE, endOfInput);
 
     // char ch = input.charAt(pos);
@@ -1817,6 +1838,16 @@ public class DFAUnrolledBytecodeGenerator {
 
     // Check transitions
     emitTransitionChecks(mv, state, stateLabels, chVar, posVar);
+
+    if (deferAcceptance) {
+      // No transition taken: evaluate the deferred acceptance at the state's position.
+      Label notAccepted = new Label();
+      mv.visitIincInsn(posVar, -1);
+      emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, notAccepted);
+      emitAccept(mv, stepMode);
+      mv.visitLabel(notAccepted);
+      mv.visitIincInsn(posVar, 1);
+    }
 
     // No transition - reject
     mv.visitJumpInsn(GOTO, reject);
@@ -1845,6 +1876,16 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
     mv.visitInsn(IRETURN);
+  }
+
+  /** Pushes {@code input.length()}: the {@link #lenVar} local when set, else a call. */
+  private void emitInputLength(MethodVisitor mv) {
+    if (lenVar >= 0) {
+      mv.visitVarInsn(ILOAD, lenVar);
+    } else {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    }
   }
 
   private static void emitAccept(MethodVisitor mv, boolean stepMode) {
@@ -2758,6 +2799,12 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ISTORE, posVar);
 
+    // int len = input.length();
+    lenVar = allocator.allocate();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+
     // Create labels for all states
     Map<DFA.DFAState, Label> stateLabels = new HashMap<>();
     for (DFA.DFAState state : dfa.getAllStates()) {
@@ -2778,6 +2825,7 @@ public class DFAUnrolledBytecodeGenerator {
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
+    lenVar = -1;
   }
 
   /**
@@ -2880,10 +2928,9 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
 
-    // if (pos >= input.length()) goto endOfInput
+    // if (pos >= len) goto endOfInput
     mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    emitInputLength(mv);
     mv.visitJumpInsn(IF_ICMPGE, endOfInput);
 
     // \Z-before-terminator acceptance needs no special case here: the accepting-state record
