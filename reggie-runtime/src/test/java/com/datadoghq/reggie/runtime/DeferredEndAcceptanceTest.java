@@ -26,9 +26,10 @@ import org.junit.jupiter.api.Test;
 /**
  * JDK-differential check for DFA_UNROLLED accepting states whose end-class condition ({@code $},
  * {@code \Z}, {@code \z}, multiline {@code $}) is checked where the state is left without a
- * transition instead of on every entry (matchesAtStart, linStep, findLongestMatchEnd). Inputs place
- * each java.util.regex line terminator before, after and between the consumed runs; the long inputs
- * make the find loop switch to {@link DFALinearFind}, which runs the states through linStep.
+ * transition instead of on every entry (matchesAtStart, linStep, findLongestMatchEnd), and whose
+ * match end matchesAtStart then reports to findMatchFrom and findBoundsFrom. Inputs place each
+ * java.util.regex line terminator before, after and between the consumed runs; the long inputs make
+ * the find loop switch to {@link DFALinearFind}, which runs the states through linStep.
  */
 public class DeferredEndAcceptanceTest {
 
@@ -112,6 +113,40 @@ public class DeferredEndAcceptanceTest {
                   + "("
                   + r.findFrom(in, 0)
                   + ")");
+        }
+      }
+    }
+    assertEquals(List.of(), mismatches);
+  }
+
+  @Test
+  void findBoundsAgreesWithJdk() {
+    List<String> inputs = inputs();
+    inputs.addAll(longInputs());
+    List<String> mismatches = new ArrayList<>();
+    int[] bounds = new int[2];
+    for (String p : patterns()) {
+      ReggieMatcher r = Reggie.compile(p);
+      Pattern j = Pattern.compile(p);
+      for (String in : inputs) {
+        for (int start = 0; start <= in.length(); start++) {
+          java.util.regex.Matcher m = j.matcher(in);
+          String jdk = m.find(start) ? m.start() + "-" + m.end() : "-";
+          String reggie = r.findBoundsFrom(in, start, bounds) ? bounds[0] + "-" + bounds[1] : "-";
+          if (!jdk.equals(reggie)) {
+            mismatches.add(
+                "/"
+                    + p
+                    + "/ findBoundsFrom("
+                    + start
+                    + ") on \""
+                    + DotLineTerminatorTest.escape(in)
+                    + "\": jdk="
+                    + jdk
+                    + " reggie="
+                    + reggie);
+            break;
+          }
         }
       }
     }

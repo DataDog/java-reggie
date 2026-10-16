@@ -1004,7 +1004,7 @@ public class DFAUnrolledBytecodeGenerator {
    *         if (!validFirstChars.contains(ch)) continue;
    *
    *         // Try matching from this position using unrolled DFA
-   *         int r = matchesAtStart(input, tryPos);  // -1 = match, else where the run died
+   *         int r = matchesAtStart(input, tryPos);  // < 0 = match, else where the run died
    *         if (r < 0) return tryPos;  // Found match
    *
    *         // counted: past the limit, search the rest in one pass
@@ -1031,7 +1031,21 @@ public class DFAUnrolledBytecodeGenerator {
    */
   public void generateFindFromMethod(ClassWriter cw, String className) {
     this.ownerInternalName = className;
-    MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
+    generateFindFromMethod(cw, className, false);
+    if (hasDeferredAcceptance()) {
+      generateFindFromMethod(cw, className, true);
+    }
+  }
+
+  /**
+   * Emits {@code findFrom}, or with {@code packed} the private {@code findStartEnd(input, start)}:
+   * the same search returning {@link #FIND_START_END_DESC}'s packed start and end.
+   */
+  private void generateFindFromMethod(ClassWriter cw, String className, boolean packed) {
+    MethodVisitor mv =
+        packed
+            ? cw.visitMethod(ACC_PRIVATE, "findStartEnd", FIND_START_END_DESC, null, null)
+            : cw.visitMethod(ACC_PUBLIC, "findFrom", "(Ljava/lang/String;I)I", null, null);
     mv.visitCode();
 
     // if (input == null || start < 0 || start > input.length()) return -1;
@@ -1056,8 +1070,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitJumpInsn(IF_ICMPLE, checksPass);
 
     mv.visitLabel(returnMinusOne);
-    mv.visitInsn(ICONST_M1);
-    mv.visitInsn(IRETURN);
+    emitNoMatch(mv, packed);
 
     mv.visitLabel(checksPass);
 
@@ -1067,7 +1080,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ISTORE, 3); // len
 
     if (requiresStartAnchor) {
-      emitFindLoop(mv, className, false);
+      emitFindLoop(mv, className, false, packed);
     } else {
       // Short ranges get a loop copy without the work count: a value live across the loop makes
       // C2 spill the run's registers, and failed runs here consume at most span*(span+1)/2 chars.
@@ -1078,9 +1091,9 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitInsn(ISUB);
       mv.visitFieldInsn(GETSTATIC, LINEAR_FIND, "SHORT_SPAN", "I");
       mv.visitJumpInsn(IF_ICMPGT, counted);
-      emitFindLoop(mv, className, false);
+      emitFindLoop(mv, className, false, packed);
       mv.visitLabel(counted);
-      emitFindLoop(mv, className, true);
+      emitFindLoop(mv, className, true, packed);
     }
 
     mv.visitMaxs(0, 0);
@@ -1092,8 +1105,10 @@ public class DFAUnrolledBytecodeGenerator {
    *
    * @param linearFallback count the characters failed runs consume and switch to {@link
    *     #emitLinearFallback} past the limit
+   * @param packed return {@link #FIND_START_END_DESC}'s packed start and end instead of the start
    */
-  private void emitFindLoop(MethodVisitor mv, String className, boolean linearFallback) {
+  private void emitFindLoop(
+      MethodVisitor mv, String className, boolean linearFallback, boolean packed) {
     // int tryPos = start;
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ISTORE, 4); // tryPos
@@ -1135,8 +1150,7 @@ public class DFAUnrolledBytecodeGenerator {
       Label validPosition = new Label();
       mv.visitVarInsn(ILOAD, 4);
       mv.visitJumpInsn(IFEQ, validPosition);
-      mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IRETURN);
+      emitNoMatch(mv, packed);
       mv.visitLabel(validPosition);
     } else if (hasMultilineStart) {
       // Multiline ^: Only try positions where it can match
@@ -1190,7 +1204,7 @@ public class DFAUnrolledBytecodeGenerator {
     }
 
     // Try DFA matching from tryPos using unrolled state machine
-    // int r = matchesAtStart(input, tryPos);  (-1 = match, else the position the run died at)
+    // int r = matchesAtStart(input, tryPos);  (< 0 = match, else the position the run died at)
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 4);
@@ -1207,12 +1221,26 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitJumpInsn(IFGE, noMatchHere);
 
     // Match found at tryPos
-    mv.visitVarInsn(ILOAD, 4);
-    mv.visitInsn(IRETURN);
+    if (packed) {
+      // return (long) tryPos << 32 | (-1 - r);  (-1 - r: the end + 1 matchesAtStart reports, or 0)
+      mv.visitVarInsn(ILOAD, 4);
+      mv.visitInsn(I2L);
+      pushInt(mv, 32);
+      mv.visitInsn(LSHL);
+      mv.visitInsn(ICONST_M1);
+      mv.visitVarInsn(ILOAD, FIND_RESULT_VAR);
+      mv.visitInsn(ISUB);
+      mv.visitInsn(I2L);
+      mv.visitInsn(LOR);
+      mv.visitInsn(LRETURN);
+    } else {
+      mv.visitVarInsn(ILOAD, 4);
+      mv.visitInsn(IRETURN);
+    }
 
     mv.visitLabel(noMatchHere);
     if (linearFallback) {
-      emitLinearFallback(mv, 4, 2, 3, FIND_RESULT_VAR, FIND_WORK_VAR, outerLoopEnd);
+      emitLinearFallback(mv, 4, 2, 3, FIND_RESULT_VAR, FIND_WORK_VAR, outerLoopEnd, packed);
     }
     mv.visitIincInsn(4, 1); // tryPos++
     mv.visitJumpInsn(GOTO, outerLoopStart);
@@ -1240,18 +1268,91 @@ public class DFAUnrolledBytecodeGenerator {
             false);
         Label assertionFailed = new Label();
         mv.visitJumpInsn(IFGE, assertionFailed);
-        mv.visitVarInsn(ILOAD, 4);
-        mv.visitInsn(IRETURN);
+        emitEmptyMatchAtEnd(mv, packed);
         mv.visitLabel(assertionFailed);
       } else {
-        mv.visitVarInsn(ILOAD, 4);
-        mv.visitInsn(IRETURN);
+        emitEmptyMatchAtEnd(mv, packed);
       }
       mv.visitLabel(notAtEnd);
     }
 
-    mv.visitInsn(ICONST_M1);
-    mv.visitInsn(IRETURN);
+    emitNoMatch(mv, packed);
+  }
+
+  /**
+   * findStartEnd descriptor: (input, start) -> -1 when no match, else {@code (long) start << 32 |
+   * (end + 1)}, the low word 0 when the end is not known (the caller runs findLongestMatchEnd).
+   */
+  private static final String FIND_START_END_DESC = "(Ljava/lang/String;I)J";
+
+  /** Returns findFrom's or findStartEnd's no-match value. */
+  private static void emitNoMatch(MethodVisitor mv, boolean packed) {
+    if (packed) {
+      mv.visitLdcInsn(-1L);
+      mv.visitInsn(LRETURN);
+    } else {
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+    }
+  }
+
+  /**
+   * Stores {@code findFrom(input, start)} (args in slots 1, 2) into {@code startVar}. With {@link
+   * #hasDeferredAcceptance} it calls findStartEnd instead and also stores the end + 1 it reports (0
+   * when not known) into {@code endVar}, for {@link #emitSkipLongestEndIfKnown}.
+   */
+  private void emitFindStart(MethodVisitor mv, String className, int startVar, int endVar) {
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    if (!hasDeferredAcceptance()) {
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, className.replace('.', '/'), "findFrom", "(Ljava/lang/String;I)I", false);
+      mv.visitVarInsn(ISTORE, startVar);
+      return;
+    }
+    mv.visitMethodInsn(
+        INVOKEVIRTUAL, className.replace('.', '/'), "findStartEnd", FIND_START_END_DESC, false);
+    mv.visitInsn(DUP2);
+    mv.visitInsn(L2I);
+    mv.visitVarInsn(ISTORE, endVar);
+    pushInt(mv, 32);
+    mv.visitInsn(LSHR);
+    mv.visitInsn(L2I);
+    mv.visitVarInsn(ISTORE, startVar);
+  }
+
+  /**
+   * After {@link #emitFindStart}: {@code if (endVar != 0) { endVar--; goto haveEnd; }}. No-op
+   * without findStartEnd.
+   */
+  private void emitSkipLongestEndIfKnown(MethodVisitor mv, int endVar, Label haveEnd) {
+    if (!hasDeferredAcceptance()) return;
+    Label unknown = new Label();
+    mv.visitVarInsn(ILOAD, endVar);
+    mv.visitJumpInsn(IFEQ, unknown);
+    mv.visitIincInsn(endVar, -1);
+    mv.visitJumpInsn(GOTO, haveEnd);
+    mv.visitLabel(unknown);
+  }
+
+  /** Returns the empty match at {@code tryPos == len}; its end is known: {@code len}. */
+  private static void emitEmptyMatchAtEnd(MethodVisitor mv, boolean packed) {
+    mv.visitVarInsn(ILOAD, 4);
+    if (packed) {
+      // return (long) tryPos << 32 | (tryPos + 1);
+      mv.visitInsn(I2L);
+      pushInt(mv, 32);
+      mv.visitInsn(LSHL);
+      mv.visitVarInsn(ILOAD, 4);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      mv.visitInsn(I2L);
+      mv.visitInsn(LOR);
+      mv.visitInsn(LRETURN);
+    } else {
+      mv.visitInsn(IRETURN);
+    }
   }
 
   // findFrom locals past len(3), tryPos(4), ch(5) and the indexOf scratch (6, 7)
@@ -1419,6 +1520,37 @@ public class DFAUnrolledBytecodeGenerator {
       int startStateId,
       int stateCount,
       boolean multilineStart) {
+    emitLinearFallback(
+        mv,
+        tryPosVar,
+        fromVar,
+        lenVar,
+        resultVar,
+        workVar,
+        loopEnd,
+        startStateId,
+        stateCount,
+        multilineStart,
+        false);
+  }
+
+  /**
+   * {@link #emitLinearFallback(MethodVisitor, int, int, int, int, int, Label, int, int, boolean)};
+   * with {@code packed} the start found is returned as findStartEnd's {@code (long) start << 32}
+   * (end not known).
+   */
+  private static void emitLinearFallback(
+      MethodVisitor mv,
+      int tryPosVar,
+      int fromVar,
+      int lenVar,
+      int resultVar,
+      int workVar,
+      Label loopEnd,
+      int startStateId,
+      int stateCount,
+      boolean multilineStart,
+      boolean packed) {
     Label underLimit = new Label();
     mv.visitVarInsn(ILOAD, workVar);
     mv.visitVarInsn(ILOAD, resultVar);
@@ -1455,7 +1587,14 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ILOAD, resultVar);
     mv.visitJumpInsn(IFLT, notFound);
     mv.visitVarInsn(ILOAD, resultVar);
-    mv.visitInsn(IRETURN);
+    if (packed) {
+      mv.visitInsn(I2L);
+      pushInt(mv, 32);
+      mv.visitInsn(LSHL);
+      mv.visitInsn(LRETURN);
+    } else {
+      mv.visitInsn(IRETURN);
+    }
     mv.visitLabel(notFound);
     mv.visitVarInsn(ILOAD, lenVar);
     mv.visitVarInsn(ISTORE, tryPosVar);
@@ -1470,7 +1609,8 @@ public class DFAUnrolledBytecodeGenerator {
       int lenVar,
       int resultVar,
       int workVar,
-      Label loopEnd) {
+      Label loopEnd,
+      boolean packed) {
     emitLinearFallback(
         mv,
         tryPosVar,
@@ -1481,7 +1621,8 @@ public class DFAUnrolledBytecodeGenerator {
         loopEnd,
         dfa.getStartState().id,
         dfa.getAllStates().size(),
-        hasMultilineStart);
+        hasMultilineStart,
+        packed);
   }
 
   /**
@@ -1589,8 +1730,9 @@ public class DFAUnrolledBytecodeGenerator {
   /**
    * Generates helper method that checks if DFA matches and accepts at some point. This is used by
    * findFrom() to detect partial matches. Takes starting position to avoid substring allocations.
-   * Returns -1 on a match, else the position at which the run died (findFrom sums these to decide
-   * when to switch to DFALinearFind). Also emits the DFALinearFind.Stepper methods.
+   * Returns {@code -2 - end} on a match whose end is known (accepted where the run ends, see {@link
+   * #emitFinalAccept}), -1 on another match, else the position at which the run died (findFrom sums
+   * these to decide when to switch to DFALinearFind). Also emits the DFALinearFind.Stepper methods.
    *
    * <h3>Generated Algorithm</h3>
    *
@@ -1779,8 +1921,9 @@ public class DFAUnrolledBytecodeGenerator {
 
   /**
    * Similar to generateStateCode but accepts on any accept state. matchesAtStart mode returns -1 on
-   * accept and {@code pos} when the run dies; {@code stepMode} (linStep) returns -2 on accept and
-   * -1 when the run dies, and its {@code stateLabels} return the target id.
+   * accept ({@code -2 - pos} where the run ends) and {@code pos} when the run dies; {@code
+   * stepMode} (linStep) returns -2 on accept and -1 when the run dies, and its {@code stateLabels}
+   * return the target id.
    */
   private void generateMatchAtStartStateCode(
       MethodVisitor mv,
@@ -1799,12 +1942,7 @@ public class DFAUnrolledBytecodeGenerator {
     // An end-class condition holds before input end only at a line terminator. When no transition
     // consumes one, a taken transition implies the condition fails at pos: check it only where the
     // state is left without a transition (as in generateGreedyStateCode).
-    boolean deferAcceptance =
-        state.accepting
-            && state != dfa.getStartState()
-            && state.assertionChecks.isEmpty()
-            && hasEndClassCondition(state.acceptanceAnchorConditions)
-            && !consumesLineTerminator(state);
+    boolean deferAcceptance = defersAcceptance(state);
     if (state.accepting && state != dfa.getStartState() && !deferAcceptance) {
       Label continueMatching = new Label();
       for (AssertionCheck assertion : state.assertionChecks) {
@@ -1844,7 +1982,7 @@ public class DFAUnrolledBytecodeGenerator {
       Label notAccepted = new Label();
       mv.visitIincInsn(posVar, -1);
       emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, notAccepted);
-      emitAccept(mv, stepMode);
+      emitFinalAccept(mv, stepMode, posVar);
       mv.visitLabel(notAccepted);
       mv.visitIincInsn(posVar, 1);
     }
@@ -1860,7 +1998,7 @@ public class DFAUnrolledBytecodeGenerator {
       if (!state.acceptanceAnchorConditions.isEmpty()) {
         emitAcceptanceAnchorChecks(mv, state.acceptanceAnchorConditions, posVar, reject);
       }
-      emitAccept(mv, stepMode);
+      emitFinalAccept(mv, stepMode, posVar);
     }
 
     // Assertion failed or no transition - reject
@@ -1891,6 +2029,42 @@ public class DFAUnrolledBytecodeGenerator {
   private static void emitAccept(MethodVisitor mv, boolean stepMode) {
     pushInt(mv, stepMode ? -2 : -1);
     mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Accept where the run ends (no transition taken, or end of input), so {@code pos} is the end
+   * findLongestMatchEnd reports: matchesAtStart returns {@code -2 - pos}, linStep -2.
+   */
+  private static void emitFinalAccept(MethodVisitor mv, boolean stepMode, int posVar) {
+    if (stepMode) {
+      emitAccept(mv, true);
+      return;
+    }
+    pushInt(mv, -2);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(ISUB);
+    mv.visitInsn(IRETURN);
+  }
+
+  /**
+   * Whether matchesAtStart checks the state's end-class condition only where the state is left
+   * without a transition: an end-class condition holds before input end only at a line terminator,
+   * so when no transition consumes one, a taken transition implies the condition fails at pos.
+   */
+  private boolean defersAcceptance(DFA.DFAState state) {
+    return state.accepting
+        && state != dfa.getStartState()
+        && state.assertionChecks.isEmpty()
+        && hasEndClassCondition(state.acceptanceAnchorConditions)
+        && !consumesLineTerminator(state);
+  }
+
+  /** Whether some state defers acceptance, so matchesAtStart can report a match end. */
+  private boolean hasDeferredAcceptance() {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (defersAcceptance(state)) return true;
+    }
+    return false;
   }
 
   /**
@@ -2563,12 +2737,9 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitCode();
 
     // int matchStart = findFrom(input, start);
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, className.replace('.', '/'), "findFrom", "(Ljava/lang/String;I)I", false);
-    mv.visitVarInsn(ISTORE, 3); // matchStart
+    // (or both bounds from findStartEnd: int longestEnd = findLongestMatchEnd(...) below)
+    Label haveEnd = new Label();
+    emitFindStart(mv, className, 3, 4);
 
     // if (matchStart < 0) return null;
     Label found = new Label();
@@ -2578,6 +2749,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ARETURN);
 
     mv.visitLabel(found);
+    emitSkipLongestEndIfKnown(mv, 4, haveEnd);
 
     // OPTIMIZATION: Use greedy DFA matching instead of trying all lengths (eliminates O(N²) loop)
     // Call a helper method that runs DFA greedily and returns longest match end
@@ -2592,6 +2764,7 @@ public class DFAUnrolledBytecodeGenerator {
         "(Ljava/lang/String;I)I",
         false);
     mv.visitVarInsn(ISTORE, 4); // longestEnd in var 4
+    mv.visitLabel(haveEnd);
 
     // if (longestEnd < 0) return null; (no match found)
     Label hasMatch = new Label();
@@ -3705,13 +3878,9 @@ public class DFAUnrolledBytecodeGenerator {
     int matchStartVar = allocator.allocate();
     int longestEndVar = allocator.allocate();
 
-    // int matchStart = findFrom(input, start);
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, className.replace('.', '/'), "findFrom", "(Ljava/lang/String;I)I", false);
-    mv.visitVarInsn(ISTORE, matchStartVar);
+    // int matchStart = findFrom(input, start);  (or both bounds from findStartEnd)
+    Label haveEnd = new Label();
+    emitFindStart(mv, className, matchStartVar, longestEndVar);
 
     // if (matchStart < 0) return false;
     Label found = new Label();
@@ -3721,6 +3890,7 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(IRETURN);
 
     mv.visitLabel(found);
+    emitSkipLongestEndIfKnown(mv, longestEndVar, haveEnd);
 
     // int longestEnd = findLongestMatchEnd(input, matchStart);
     mv.visitVarInsn(ALOAD, 0);
@@ -3733,6 +3903,7 @@ public class DFAUnrolledBytecodeGenerator {
         "(Ljava/lang/String;I)I",
         false);
     mv.visitVarInsn(ISTORE, longestEndVar);
+    mv.visitLabel(haveEnd);
 
     // if (longestEnd < 0) return false;
     Label hasMatch = new Label();
