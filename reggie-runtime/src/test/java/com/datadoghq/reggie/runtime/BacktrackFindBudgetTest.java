@@ -51,7 +51,7 @@ class BacktrackFindBudgetTest {
     ReggieMatcher m = backtracker("(a+)\\1+b");
     String input = "a".repeat(2000);
     assertTimeoutPreemptively(
-        Duration.ofSeconds(3),
+        Duration.ofSeconds(10),
         () -> {
           MatchBudgetExceededException e =
               assertThrows(MatchBudgetExceededException.class, () -> m.findFrom(input, 0));

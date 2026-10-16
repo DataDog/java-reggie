@@ -2541,10 +2541,15 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitIincInsn(ctx.posVar, 1);
   }
 
+  /** The five line terminators, a loop exit set {@link #emitGreedyLoop} can scan for. */
+  private static final CharSet LINE_TERMINATOR_CHARS = CharSet.ANY_EXCEPT_NEWLINE.complement();
+
   /**
    * Emits the greedy no-give-back loop: consume the maximal run, then check min (0 or 1). The
    * detector's disjointness admission guarantees the loop class and the rest of the chain share no
-   * first char, so the maximal run is the only candidate — no position restore, no give-back.
+   * first char, so the maximal run is the only candidate — no position restore, no give-back. An
+   * unbounded loop whose complement is empty, one char or the five line terminators consumes the
+   * run in one scan instead of char by char.
    */
   private void emitGreedyLoop(EmitCtx ctx, CharSet cs, int min, int max, Label failLabel) {
     MethodVisitor mv = ctx.mv;
@@ -2555,9 +2560,37 @@ public class DeterministicChainBytecodeGenerator {
     }
     Label loopStart = new Label();
     Label loopEnd = new Label();
-    if (max < 0 && cs.isAnyChar()) {
+    CharSet exit = max < 0 ? cs.complement() : null;
+    if (exit != null && exit.isEmpty()) {
       // An unbounded loop over every char consumes the rest of the input.
       mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      mv.visitJumpInsn(GOTO, loopEnd);
+    } else if (exit != null && exit.isSingleChar()) {
+      // An unbounded loop over every char but c runs to the next c: pos = indexOf(c, pos, len),
+      // or len if there is none.
+      mv.visitVarInsn(ALOAD, ctx.inputVar);
+      pushInt(mv, exit.getSingleChar());
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(III)I", false);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitJumpInsn(IFGE, loopEnd);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      mv.visitJumpInsn(GOTO, loopEnd);
+    } else if (exit != null && exit.equals(LINE_TERMINATOR_CHARS)) {
+      // An unbounded loop over every char but the five line terminators runs to the next one.
+      mv.visitVarInsn(ALOAD, ctx.inputVar);
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "com/datadoghq/reggie/runtime/LineTerminators",
+          "indexOfTerminator",
+          "(Ljava/lang/String;II)I",
+          false);
       mv.visitVarInsn(ISTORE, ctx.posVar);
       mv.visitJumpInsn(GOTO, loopEnd);
     }
