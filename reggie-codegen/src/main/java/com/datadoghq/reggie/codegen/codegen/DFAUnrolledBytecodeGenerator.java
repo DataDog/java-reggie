@@ -1006,6 +1006,7 @@ public class DFAUnrolledBytecodeGenerator {
    *         // Try matching from this position using unrolled DFA
    *         int r = matchesAtStart(input, tryPos);  // < 0 = match, else where the run died
    *         if (r < 0) return tryPos;  // Found match
+   *         // deadSpanSkippable(): the next start is r instead of tryPos + 1
    *
    *         // counted: past the limit, search the rest in one pass
    *         work += r - tryPos;
@@ -1242,7 +1243,13 @@ public class DFAUnrolledBytecodeGenerator {
     if (linearFallback) {
       emitLinearFallback(mv, 4, 2, 3, FIND_RESULT_VAR, FIND_WORK_VAR, outerLoopEnd, packed);
     }
-    mv.visitIincInsn(4, 1); // tryPos++
+    if (deadSpanSkippable()) {
+      // tryPos = r;  (every start in (tryPos, r) dies like this run; r > tryPos: it read a char)
+      mv.visitVarInsn(ILOAD, FIND_RESULT_VAR);
+      mv.visitVarInsn(ISTORE, 4);
+    } else {
+      mv.visitIincInsn(4, 1); // tryPos++
+    }
     mv.visitJumpInsn(GOTO, outerLoopStart);
 
     mv.visitLabel(outerLoopEnd);
@@ -1287,6 +1294,40 @@ public class DFAUnrolledBytecodeGenerator {
 
   /** The five line terminators, a self-loop exit set {@link #emitSelfLoopSkip} can scan for. */
   private static final CharSet LINE_TERMINATOR_CHARS = CharSet.ANY_EXCEPT_NEWLINE.complement();
+
+  /**
+   * True when a failed matchesAtStart run from {@code s} returning {@code r} rules out every start
+   * in {@code (s, r)}: the DFA is a non-accepting start state and one loop state, every start
+   * transition goes to the loop state on chars its self-loop also takes, the loop state has no
+   * other transition, and there are no assertion checks, entry guards, bit gates or {@code \K}. A
+   * run from a start in {@code (s, r)} is then in the loop state at the same positions as the run
+   * from {@code s}, where acceptance depends on the position only, and dies at the same char.
+   */
+  private boolean deadSpanSkippable() {
+    List<DFA.DFAState> states = dfa.getAllStates();
+    DFA.DFAState start = dfa.getStartState();
+    if (states.size() != 2 || start.accepting || !bitGates().isEmpty()) return false;
+    DFA.DFAState loop = states.get(0) == start ? states.get(1) : states.get(0);
+    if (!start.assertionChecks.isEmpty()
+        || !loop.assertionChecks.isEmpty()
+        || loop.acceptanceAnchorConditions.contains(NFA.AnchorType.RESET_MATCH)) {
+      return false;
+    }
+    CharSet startChars = CharSet.empty();
+    CharSet loopChars = CharSet.empty();
+    for (DFA.DFAState state : states) {
+      for (Map.Entry<CharSet, DFA.DFATransition> e : state.transitions.entrySet()) {
+        DFA.DFATransition t = e.getValue();
+        if (t.target != loop || !t.entryGuard.isEmpty()) return false;
+        if (state == start) {
+          startChars = startChars.union(e.getKey());
+        } else {
+          loopChars = loopChars.union(e.getKey());
+        }
+      }
+    }
+    return !startChars.isEmpty() && startChars.minus(loopChars).isEmpty();
+  }
 
   /** Returns findFrom's or findStartEnd's no-match value. */
   private static void emitNoMatch(MethodVisitor mv, boolean packed) {
