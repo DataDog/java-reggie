@@ -31,6 +31,24 @@ public final class LineTerminators {
   }
 
   /**
+   * Index of the first line terminator in {@code s} at or after {@code from} and before {@code
+   * len}, or {@code len} if there is none.
+   */
+  public static int indexOfTerminator(String s, int from, int len) {
+    int e = s.indexOf('\n', from, len);
+    if (e < 0) e = len;
+    int r = s.indexOf('\r', from, e);
+    if (r >= 0) e = r;
+    r = s.indexOf('\u0085', from, e);
+    if (r >= 0) e = r;
+    r = s.indexOf('\u2028', from, e);
+    if (r >= 0) e = r;
+    r = s.indexOf('\u2029', from, e);
+    if (r >= 0) e = r;
+    return e;
+  }
+
+  /**
    * Multiline {@code ^} at {@code pos}. Same rules as java.util.regex: never at {@code end}; always
    * at {@code start}; otherwise after a line terminator, but not between {@code \r} and {@code \n}.
    *

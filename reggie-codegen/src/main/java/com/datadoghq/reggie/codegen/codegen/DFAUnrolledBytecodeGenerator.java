@@ -1285,6 +1285,9 @@ public class DFAUnrolledBytecodeGenerator {
    */
   private static final String FIND_START_END_DESC = "(Ljava/lang/String;I)J";
 
+  /** The five line terminators, a self-loop exit set {@link #emitSelfLoopSkip} can scan for. */
+  private static final CharSet LINE_TERMINATOR_CHARS = CharSet.ANY_EXCEPT_NEWLINE.complement();
+
   /** Returns findFrom's or findStartEnd's no-match value. */
   private static void emitNoMatch(MethodVisitor mv, boolean packed) {
     if (packed) {
@@ -1974,8 +1977,21 @@ public class DFAUnrolledBytecodeGenerator {
     // pos++;
     mv.visitIincInsn(posVar, 1);
 
-    // Check transitions
-    emitTransitionChecks(mv, state, stateLabels, chVar, posVar);
+    // Check transitions. Entering a non-accepting or deferring state has no effect, so its
+    // self-loop can scan to the first char that leaves it.
+    CharSet loopExit =
+        !stepMode && (!state.accepting || deferAcceptance) && bitGates().isEmpty()
+            ? selfLoopExit(state)
+            : null;
+    Label loopSkip = null;
+    if (loopExit != null) {
+      loopSkip = new Label();
+      Map<DFA.DFAState, Label> targets = new HashMap<>(stateLabels);
+      targets.put(state, loopSkip);
+      emitTransitionChecks(mv, state, targets, chVar, posVar);
+    } else {
+      emitTransitionChecks(mv, state, stateLabels, chVar, posVar);
+    }
 
     if (deferAcceptance) {
       // No transition taken: evaluate the deferred acceptance at the state's position.
@@ -2014,6 +2030,66 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
     mv.visitInsn(IRETURN);
+
+    if (loopSkip != null) {
+      emitSelfLoopSkip(mv, loopExit, posVar, loopSkip, stateLabels.get(state));
+    }
+  }
+
+  /**
+   * The chars that leave {@code state}'s self-loop (the complement of the loop's charset) when the
+   * loop can run as one scan to the next such char: the state has no assertion checks, the loop has
+   * no entry guard, and the complement is empty, one char or the five line terminators. {@code
+   * null} otherwise. Callers also require that entering the state at each position has no effect.
+   */
+  private static CharSet selfLoopExit(DFA.DFAState state) {
+    if (!state.assertionChecks.isEmpty()) return null;
+    for (TransGroup group : transitionGroups(state)) {
+      if (group.target != state) continue;
+      if (!group.sameGuard || !group.members.get(0).entryGuard.isEmpty()) return null;
+      CharSet exit = group.mergedChars().complement();
+      return exit.isEmpty() || exit.isSingleChar() || exit.equals(LINE_TERMINATOR_CHARS)
+          ? exit
+          : null;
+    }
+    return null;
+  }
+
+  /**
+   * {@code loopSkip:} the self-loop was taken at {@code pos - 1}; set pos to the first char of
+   * {@code exit} in [pos, len), or len if there is none, and enter the state there.
+   */
+  private void emitSelfLoopSkip(
+      MethodVisitor mv, CharSet exit, int posVar, Label loopSkip, Label stateLabel) {
+    mv.visitLabel(loopSkip);
+    if (exit.isEmpty()) {
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitVarInsn(ISTORE, posVar);
+    } else if (exit.isSingleChar()) {
+      // pos = input.indexOf(c, pos, len); if (pos < 0) pos = len;
+      mv.visitVarInsn(ALOAD, 1);
+      pushInt(mv, exit.getSingleChar());
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(III)I", false);
+      mv.visitVarInsn(ISTORE, posVar);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitJumpInsn(IFGE, stateLabel);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitVarInsn(ISTORE, posVar);
+    } else {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "com/datadoghq/reggie/runtime/LineTerminators",
+          "indexOfTerminator",
+          "(Ljava/lang/String;II)I",
+          false);
+      mv.visitVarInsn(ISTORE, posVar);
+    }
+    mv.visitJumpInsn(GOTO, stateLabel);
   }
 
   /** Pushes {@code input.length()}: the {@link #lenVar} local when set, else a call. */
@@ -3123,8 +3199,23 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitIincInsn(posVar, 1);
 
     // Generate transition checks (this path emits no entry guards; merge by target alone —
-    // see emitTransitionChecks).
-    emitTransitionChecks(mv, state, stateLabels, chVar, posVar, null, null);
+    // see emitTransitionChecks). When entering the state only records pos (or does nothing), its
+    // self-loop can scan to the first char that leaves it: the last record is the scan's end.
+    CharSet loopExit =
+        !state.accepting
+                || (!state.acceptIsPriorityCut
+                    && (state.acceptanceAnchorConditions.isEmpty() || deferAcceptance))
+            ? selfLoopExit(state)
+            : null;
+    Label loopSkip = null;
+    if (loopExit != null) {
+      loopSkip = new Label();
+      Map<DFA.DFAState, Label> targets = new HashMap<>(stateLabels);
+      targets.put(state, loopSkip);
+      emitTransitionChecks(mv, state, targets, chVar, posVar, null, null);
+    } else {
+      emitTransitionChecks(mv, state, stateLabels, chVar, posVar, null, null);
+    }
 
     // No transition matched — return the best match seen so far. The lookahead (if any) was already
     // checked eagerly at state entry and gated longestMatchEnd; no re-evaluation needed here.
@@ -3159,6 +3250,10 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitLabel(assertionFailed);
       mv.visitVarInsn(ILOAD, longestMatchEndVar);
       mv.visitInsn(IRETURN);
+    }
+
+    if (loopSkip != null) {
+      emitSelfLoopSkip(mv, loopExit, posVar, loopSkip, stateLabels.get(state));
     }
   }
 
@@ -3961,9 +4056,9 @@ public class DFAUnrolledBytecodeGenerator {
     // scanComplete), so its record is the last chance to report the longest accepting end.
     // Priority-cut states record and stop scanning immediately.
     if (state.accepting) {
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ISTORE, lastAcceptingVar);
       if (state.acceptIsPriorityCut) {
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitVarInsn(ISTORE, lastAcceptingVar);
         mv.visitJumpInsn(GOTO, scanComplete);
       } else {
         mv.visitVarInsn(ILOAD, posVar);

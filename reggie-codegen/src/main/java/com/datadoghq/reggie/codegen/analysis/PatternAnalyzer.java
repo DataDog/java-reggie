@@ -10334,7 +10334,7 @@ public class PatternAnalyzer {
     // the branch), then the branch first-consumed-char set (left-to-right — only elements every
     // element to the left of which can match empty contribute, which is exactly the set the
     // generated find() scan gates positions on).
-    if (!checkChainDisjoint(seq, new boolean[128], false)) {
+    if (!checkChainDisjoint(seq, new boolean[128], false, false)) {
       return null;
     }
     boolean[] firstSet = new boolean[128];
@@ -10761,18 +10761,28 @@ public class PatternAnalyzer {
    * Walks {@code seq} right-to-left, threading the first-set of the remainder (plus whatever
    * follows the seq in the parent, {@code after}/{@code afterNonAscii}) into each element. Enforces
    * the greedy-loop no-give-back admission (loopClass ∩ first(rest) = ∅) at every GREEDY_LOOP,
-   * recursing into OPT/CAPTURE nested seqs with the correct suffix.
+   * recursing into OPT/CAPTURE nested seqs with the correct suffix. A loop followed by {@code \b}
+   * through elements that can match empty ({@code wordbAfterIn} at the seq end) also gives back
+   * when {@code \b} can fail at the run end but hold at an earlier boundary: the class has both
+   * word and non-word chars ({@code a.*\b} on "ab "), or it has non-word chars and the loop can
+   * stop before its first iteration, where the previous char comes from before the loop ({@code
+   * a\s*\b} on "a\n"). A run of word chars only always ends at a boundary.
    *
    * @return false when a greedy loop would need give-back (decline)
    */
   private boolean checkChainDisjoint(
-      DeterministicChainInfo.ChainSeq seq, boolean[] afterIn, boolean afterNonAsciiIn) {
+      DeterministicChainInfo.ChainSeq seq,
+      boolean[] afterIn,
+      boolean afterNonAsciiIn,
+      boolean wordbAfterIn) {
     boolean[] after = afterIn.clone();
     boolean afterNonAscii = afterNonAsciiIn;
+    boolean wordbAfter = wordbAfterIn;
     for (int i = seq.elems.size() - 1; i >= 0; i--) {
       DeterministicChainInfo.ChainElem e = seq.elems.get(i);
       boolean[] elemFirst = new boolean[128];
       boolean[] elemNonAscii = new boolean[1];
+      boolean elemEmpty = false; // the element can match empty
       switch (e.kind) {
         case LITERAL:
           addChainFirstChar(elemFirst, e.literal.charAt(0), elemNonAscii);
@@ -10787,17 +10797,23 @@ public class PatternAnalyzer {
           // bounded give-back retry (one boundary at a time, JDK give-back order, work-budget
           // charged per retry, PikeVM fallback at overflow). A disjoint loop keeps the single
           // scan — the giveBack flag stays false and the emission is the plain loop.
-          if (chainClassIntersects(e.charSet, after, afterNonAscii)) {
+          if (chainClassIntersects(e.charSet, after, afterNonAscii)
+              || (wordbAfter
+                  && !e.charSet.minus(CharSet.WORD).isEmpty()
+                  && (e.min == 0 || e.charSet.intersects(CharSet.WORD)))) {
             e.giveBack = true;
           }
           addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
           if (e.min == 0) {
             orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii); // can match empty
+            elemEmpty = true;
           }
           break;
         case WORDB:
           // Zero-width: transparent to the remainder walk.
           orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+          wordbAfter = true;
+          elemEmpty = true;
           break;
         case ALT_CHAIN:
           {
@@ -10809,7 +10825,7 @@ public class PatternAnalyzer {
             for (DeterministicChainInfo.ChainSeq alt : e.alts) {
               boolean[] altFirst = new boolean[128];
               boolean[] altNonAscii = new boolean[1];
-              if (!checkChainDisjoint(alt, after, afterNonAscii)) {
+              if (!checkChainDisjoint(alt, after, afterNonAscii, wordbAfter)) {
                 return false;
               }
               computeChainFirst(alt, altFirst, altNonAscii);
@@ -10820,6 +10836,7 @@ public class PatternAnalyzer {
             }
             if (anyAltEmpty) {
               orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+              elemEmpty = true;
             }
             break;
           }
@@ -10833,7 +10850,9 @@ public class PatternAnalyzer {
             for (DeterministicChainInfo.ChainSeq alt : e.alts) {
               computeChainFirst(alt, elemFirst, elemNonAscii);
             }
-            if (chainSetIntersects(elemFirst, after, afterNonAscii)) {
+            // A body can end on a word or a non-word char whatever its first char is: a \b ahead
+            // always needs the boundary retry.
+            if (chainSetIntersects(elemFirst, after, afterNonAscii) || wordbAfter) {
               e.giveBack = true;
             }
             // v2-gamma: overlapping bodies (one can match a proper prefix of another) make the
@@ -10846,6 +10865,7 @@ public class PatternAnalyzer {
             }
             if (e.min == 0) {
               orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+              elemEmpty = true;
             }
             break;
           }
@@ -10855,6 +10875,7 @@ public class PatternAnalyzer {
           addChainFirstSet(elemFirst, e.charSet, elemNonAscii);
           if (e.min == 0) {
             orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+            elemEmpty = true;
           }
           break;
         case LIT_ALT:
@@ -10865,25 +10886,27 @@ public class PatternAnalyzer {
         case OPT:
           {
             boolean[] nestedFirst = new boolean[128];
-            if (!checkChainDisjoint(e.nested, after, afterNonAscii)) {
+            if (!checkChainDisjoint(e.nested, after, afterNonAscii, wordbAfter)) {
               return false;
             }
             computeChainFirst(e.nested, nestedFirst, elemNonAscii);
             // The optional sub-chain can be skipped: its first-set union the suffix's.
             orChainFirst(elemFirst, elemNonAscii, nestedFirst, elemNonAscii[0]);
             orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii);
+            elemEmpty = true;
             break;
           }
         case CAPTURE:
           {
             boolean[] nestedFirst = new boolean[128];
-            if (!checkChainDisjoint(e.nested, after, afterNonAscii)) {
+            if (!checkChainDisjoint(e.nested, after, afterNonAscii, wordbAfter)) {
               return false;
             }
             computeChainFirst(e.nested, nestedFirst, elemNonAscii);
             orChainFirst(elemFirst, elemNonAscii, nestedFirst, elemNonAscii[0]);
             if (chainSeqMinWidth(e.nested) == 0) {
               orChainFirst(elemFirst, elemNonAscii, after, afterNonAscii); // empty content possible
+              elemEmpty = true;
             }
             break;
           }
@@ -10892,6 +10915,7 @@ public class PatternAnalyzer {
       }
       after = elemFirst;
       afterNonAscii = elemNonAscii[0];
+      wordbAfter &= elemEmpty;
     }
     return true;
   }
