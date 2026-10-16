@@ -148,6 +148,18 @@ public class HybridMatcher extends ReggieMatcher {
     return new OffsetMatchResult(input, enrich(spanMatch), dfaResult.start());
   }
 
+  @Override
+  public boolean findMatchInto(String input, int start, int[] groupStarts, int[] groupEnds) {
+    // findMatchFrom's search without the MatchResult: the NFA half searches from the DFA's
+    // leftmost start. On an NFA miss, the default path takes findMatchFrom's span re-match.
+    int dfaStart = dfaMatcher.findFrom(input, Math.max(0, start));
+    if (dfaStart < 0) {
+      return false;
+    }
+    return nfaMatcher.findMatchInto(input, dfaStart, groupStarts, groupEnds)
+        || super.findMatchInto(input, start, groupStarts, groupEnds);
+  }
+
   private MatchResult enrich(MatchResult r) {
     if (!nameToIndex.isEmpty() && r instanceof MatchResultImpl) {
       return ((MatchResultImpl) r).withNames(nameToIndex);

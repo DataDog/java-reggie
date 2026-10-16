@@ -225,19 +225,31 @@ public class RuntimeCompiler {
    * backreference and lookaround patterns): immutable NFA + name map. BackrefBacktrackMatcher is
    * stateless per call (all instance state is final; per-call search structures live in a
    * per-thread workspace), but we keep the PikeVM cache shape — fresh matcher per compile, shared
-   * NFA — for consistency and to leave room for per-call buffers later.
+   * NFA — for consistency and to leave room for per-call buffers later. {@code dfaMatcher} is the
+   * optional stateless captureless DFA half (see {@link #backtrackDfaHalf}): when present, each
+   * matcher is a {@link HybridMatcher} whose DFA answers the boolean methods and whose backtracker
+   * computes the spans.
    */
   private static final class BacktrackEntry {
     final NFA nfa;
+    final ReggieMatcher dfaMatcher; // shared; null when the pattern has no DFA half
     final Map<String, Integer> nameMap;
 
     BacktrackEntry(NFA nfa, Map<String, Integer> nameMap) {
+      this(nfa, null, nameMap);
+    }
+
+    BacktrackEntry(NFA nfa, ReggieMatcher dfaMatcher, Map<String, Integer> nameMap) {
       this.nfa = nfa;
+      this.dfaMatcher = dfaMatcher;
       this.nameMap = nameMap;
     }
 
     ReggieMatcher newMatcher(String pattern) {
       ReggieMatcher m = new BackrefBacktrackMatcher(nfa, pattern);
+      if (dfaMatcher != null) {
+        m = new HybridMatcher(pattern, dfaMatcher, m);
+      }
       if (!nameMap.isEmpty()) {
         m.setNameToIndex(nameMap);
         if (!m.embedsNameMap()) {
@@ -1614,8 +1626,16 @@ public class RuntimeCompiler {
       // 0..2). The RECURSIVE_DESCENT generator commits to the first successful choice of most
       // choice points ((a|ab)\1+c on "ababc": JDK matches at 0, the generator finds nothing).
       if (backtrackNfa != null) {
-        BACKTRACK_NFA_CACHE.putIfAbsent(cacheKey, new BacktrackEntry(backtrackNfa, nameMap));
-        noteRouting("BACKREF_BACKTRACK (backreference, lookaround or recursive-descent pattern)");
+        ReggieMatcher dfaHalf =
+            recursiveDescent
+                ? backtrackDfaHalf(pattern, analyzer, nfa, backtrackNfa, ast, caseInsensitive)
+                : null;
+        BACKTRACK_NFA_CACHE.putIfAbsent(
+            cacheKey, new BacktrackEntry(backtrackNfa, dfaHalf, nameMap));
+        noteRouting(
+            dfaHalf != null
+                ? "BACKREF_BACKTRACK with DFA half (DFA boolean + backtracker spans)"
+                : "BACKREF_BACKTRACK (backreference, lookaround or recursive-descent pattern)");
         return BACKTRACK_NFA_CACHE.get(cacheKey).newMatcher(pattern);
       }
 
@@ -2211,6 +2231,54 @@ public class RuntimeCompiler {
       return true;
     }
     return false;
+  }
+
+  /**
+   * The captureless DFA half for a recursive-descent pattern routed to the backtracker, or null.
+   * Such patterns reach the backtracker only because their capture spans need give-back; whether
+   * and where a match starts does not depend on the spans, so a DFA over the same language answers
+   * matches()/find()/findFrom() while the backtracker keeps computing the spans. Returns null when
+   * the backtracker NFA carries a construct a DFA does not express (backreference, lookaround,
+   * conditional, subroutine call, atomic group or possessive quantifier), when the pattern has a
+   * word boundary (the subset construction drops the boundary context, see the hybrid admission
+   * rule in compileInternal), when the captureless analysis yields no DFA strategy or an
+   * anchor-diluted one, and when the generated class has a method over {@link
+   * #JIT_HUGE_METHOD_LIMIT}.
+   */
+  private static ReggieMatcher backtrackDfaHalf(
+      String pattern,
+      PatternAnalyzer analyzer,
+      NFA nfa,
+      NFA backtrackNfa,
+      RegexNode ast,
+      boolean caseInsensitive)
+      throws Exception {
+    if (nfa == null || nfa.hasWordBoundaryAnchor()) {
+      return null;
+    }
+    for (NFA.NFAState s : backtrackNfa.getStates()) {
+      if (s.backrefCheck != null
+          || s.assertionType != null
+          || s.conditionalGroup != null
+          || s.callTarget >= 0
+          || s.atomicEntry >= 0
+          || s.atomicExit >= 0) {
+        return null;
+      }
+    }
+    PatternAnalyzer.MatchingStrategyResult dfaResult = analyzer.analyzeAndRecommend(true);
+    if (dfaResult.dfa == null
+        || dfaResult.anchorConditionDiluted
+        || dfaResult.dfa.isLeftmostFirstPruned()
+        || dfaResult.strategy == PatternAnalyzer.MatchingStrategy.RECURSIVE_DESCENT
+        || isNfaBacked(dfaResult.strategy)) {
+      return null;
+    }
+    byte[] bytecode = generateBytecode(pattern, dfaResult, nfa, ast, caseInsensitive);
+    if (largestMethodBytecodes(bytecode) > JIT_HUGE_METHOD_LIMIT) {
+      return null;
+    }
+    return instantiateMatcher(bytecode, pattern);
   }
 
   /** Compile a hybrid matcher: DFA for fast matching, NFA for group extraction. */
