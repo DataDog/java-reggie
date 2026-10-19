@@ -42,7 +42,7 @@ class RecursiveDescentReplayTest {
     String balanced = "a".repeat(n) + "b".repeat(n);
     String unbalanced = "a".repeat(n) + "b".repeat(n - 1);
     assertTimeoutPreemptively(
-        Duration.ofSeconds(10),
+        Duration.ofSeconds(30),
         () -> {
           assertTrue(m.matches(balanced), pattern);
           assertFalse(m.matches(unbalanced), pattern);

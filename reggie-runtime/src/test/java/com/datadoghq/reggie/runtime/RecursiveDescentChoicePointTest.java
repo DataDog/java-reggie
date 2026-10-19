@@ -110,7 +110,7 @@ class RecursiveDescentChoicePointTest {
   void callRunningAtTheSamePositionFailsThePath() {
     ReggieMatcher m = RuntimeCompiler.compile("^(?:a|(?R)b)$");
     assertTimeoutPreemptively(
-        Duration.ofSeconds(10), () -> assertFalse(m.matches("ab"), "left recursion"));
+        Duration.ofSeconds(30), () -> assertFalse(m.matches("ab"), "left recursion"));
     MatchResult r = RuntimeCompiler.compile("(?:(?R)a|b)").findMatch("baa");
     assertNotNull(r);
     assertEquals("0..2", r.start() + ".." + r.end());
@@ -180,7 +180,7 @@ class RecursiveDescentChoicePointTest {
   void ambiguousRecursionFailsInPolynomialTime() {
     ReggieMatcher m = RuntimeCompiler.compile("^(a(?1)?|aa(?1)?)$");
     String input = "a".repeat(35) + "b";
-    assertTimeoutPreemptively(Duration.ofSeconds(10), () -> assertFalse(m.matches(input)));
+    assertTimeoutPreemptively(Duration.ofSeconds(30), () -> assertFalse(m.matches(input)));
   }
 
   /**

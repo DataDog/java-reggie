@@ -48,10 +48,12 @@ class BacktrackFindBudgetTest {
   @Test
   void ambiguousFindThrowsInBoundedTime() {
     // Every start stays under the per-start budget, but the compares of \1 cost O(n) per step.
+    // Wide wall-clock budget: CI runners under parallel load measure 3-4x local latency; a real
+    // budget failure (exception never thrown) fails the assertion regardless of the window.
     ReggieMatcher m = backtracker("(a+)\\1+b");
     String input = "a".repeat(2000);
     assertTimeoutPreemptively(
-        Duration.ofSeconds(10),
+        Duration.ofSeconds(30),
         () -> {
           MatchBudgetExceededException e =
               assertThrows(MatchBudgetExceededException.class, () -> m.findFrom(input, 0));

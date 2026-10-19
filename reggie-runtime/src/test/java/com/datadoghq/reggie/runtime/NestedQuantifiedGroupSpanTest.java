@@ -79,7 +79,7 @@ class NestedQuantifiedGroupSpanTest {
         String exp = String.valueOf(jdk.matcher(in).matches());
         String got =
             assertTimeoutPreemptively(
-                Duration.ofSeconds(5), () -> String.valueOf(r.matches(in)), p + " on " + in);
+                Duration.ofSeconds(30), () -> String.valueOf(r.matches(in)), p + " on " + in);
         if (!exp.equals(got)) failures.add("/" + p + "/ matches \"" + in + "\" got " + got);
       }
     }

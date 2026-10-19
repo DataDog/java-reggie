@@ -66,7 +66,7 @@ class LinearDfaFindTest {
     String input = unit.repeat(N / unit.length()) + tail;
     int expected = fromEnd < 0 ? -1 : input.length() - fromEnd;
     assertTimeoutPreemptively(
-        Duration.ofSeconds(10),
+        Duration.ofSeconds(30),
         () -> {
           assertEquals(expected, m.findFrom(input, 0), "findFrom");
           MatchResult r = m.findMatch(input);

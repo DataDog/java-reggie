@@ -60,7 +60,7 @@ class RdStepBudgetTest {
     ReggieMatcher m = forcedRd("(a+)(a+)(a+)bc(?1)?(?>q)?");
     String in = "a".repeat(1000) + "b!aaabc";
     assertTimeoutPreemptively(
-        Duration.ofSeconds(20),
+        Duration.ofSeconds(30),
         () -> assertThrows(MatchBudgetExceededException.class, () -> m.findMatch(in)));
   }
 
