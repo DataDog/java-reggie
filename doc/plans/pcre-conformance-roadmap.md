@@ -64,12 +64,11 @@ families:
   construction simulated without backtracking (Pike's algorithm — parallel thread simulation, or
   bitset-based state tracking); naturally leftmost-first, supports lazy quantifiers and capture
   groups that DFA determinization can't represent.
-- **Bounded-backtracking bytecode generators** (`GREEDY_BACKTRACK`, `RECURSIVE_DESCENT`,
-  `OPTIMIZED_NFA_WITH_BACKREFS`, `PINNED_BACKREFERENCE`, ...): generate backtracking *bytecode*,
-  but only for pattern shapes `PatternAnalyzer` has proven have bounded retry counts (e.g.
-  `(.*)suffix`, fixed-arity backreferences) — this is why these strategies can still claim O(n) /
-  ReDoS-safety despite the name "backtrack": the backtracking is shape-restricted at compile time,
-  not the general unbounded kind PCRE's interpreter does.
+- **Bounded-backtracking bytecode generators** (`RECURSIVE_DESCENT`, `OPTIMIZED_NFA_WITH_BACKREFS`,
+  `PINNED_BACKREFERENCE`, ...): generate backtracking *bytecode*, but only for pattern shapes
+  `PatternAnalyzer` has proven have bounded retry counts (e.g. fixed-arity backreferences) — this is why these strategies can still claim
+  O(n) / ReDoS-safety despite the name "backtrack": the backtracking is shape-restricted at
+  compile time, not the general unbounded kind PCRE's interpreter does.
 
 Full strategy list and dispatch flow: `AGENTS.md` → `doc/ARCHITECTURE.md` (Component Details) and
 `doc/agents-fallback-and-limitations.md` (fallback trigger conditions). When triaging a failure
@@ -433,7 +432,6 @@ Mark items `[x]` when completed. Add commit hash in parentheses.
 |------|---------|
 | `PatternAnalyzer.java` | Strategy selection and pattern detection |
 | `OptionalGroupBackrefBytecodeGenerator.java` | Empty alternation + backref patterns |
-| `GreedyBacktrackBytecodeGenerator.java` | `(.*)suffix` patterns |
 | `RecursiveDescentBytecodeGenerator.java` | Recursive patterns, subroutines |
 | `NFABytecodeGenerator.java` | Complex patterns with backtracking |
 | `LinearPatternBytecodeGenerator.java` | Simple linear patterns with backrefs |
@@ -444,7 +442,6 @@ Mark items `[x]` when completed. Add commit hash in parentheses.
 Pattern → PatternAnalyzer.analyzeStrategy()
   ├─ Has backrefs + quantified? → OPTIONAL_GROUP_BACKREF / FIXED_REPETITION_BACKREF
   ├─ Has subroutines/conditionals? → RECURSIVE_DESCENT
-  ├─ Has greedy + suffix? → GREEDY_BACKTRACK
   ├─ Has lookaround? → DFA_*_WITH_ASSERTIONS / HYBRID_DFA_LOOKAHEAD
   ├─ Simple with groups? → DFA_UNROLLED_WITH_GROUPS
   └─ Complex? → OPTIMIZED_NFA / OPTIMIZED_NFA_WITH_BACKREFS

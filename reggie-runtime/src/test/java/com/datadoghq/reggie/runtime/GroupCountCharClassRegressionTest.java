@@ -51,6 +51,12 @@ class GroupCountCharClassRegressionTest {
     {"([(]y)", "((y)"},
     {"[(a](b?)c", "ac"},
     {"(?>[(])(z)", "((z)"},
+    {"[](]", "("},
+    {"[a[(]](b)", "ab"},
+    {"(?x)a#(\n", "a"},
+    {"(?x:a#(\n)(b)", "ab"},
+    {"((?x)a)#(b)", "a#b"},
+    {"(?x)[#(]\n a](c)", "ac"},
   };
 
   @Test
@@ -65,6 +71,18 @@ class GroupCountCharClassRegressionTest {
           jdk,
           result.groupCount(),
           "groupCount mismatch for pattern " + pattern + " (paren inside a character class?)");
+    }
+  }
+
+  /** A {@code (} in a (?x) comment opens no group, so {@code \\2} refers to a missing group. */
+  @Test
+  void backrefPastCommentedParenEqualsJdk() {
+    String pattern = "(?x)#(\n(a)\\2|b";
+    for (String input : new String[] {"aa", "a", "b"}) {
+      assertEquals(
+          Pattern.compile(pattern).matcher(input).matches(),
+          Reggie.compile(pattern).matches(input),
+          input);
     }
   }
 

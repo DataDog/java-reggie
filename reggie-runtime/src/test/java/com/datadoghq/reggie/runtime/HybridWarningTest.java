@@ -149,10 +149,9 @@ class HybridWarningTest {
       "([a-z]+)@([a-z]+)\\.com", // SPECIALIZED_MULTI_GROUP_GREEDY
       "\\d{3}-\\d{3}-\\d{4}", // SPECIALIZED_FIXED_SEQUENCE
       "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}", // SPECIALIZED_BOUNDED_QUANTIFIERS
-      "([a-z]{3}).*\\1", // LINEAR_BACKREFERENCE
+      "([a-z]{3})-\\1", // LINEAR_BACKREFERENCE
       "<(\\w+)>.*</\\1>", // SPECIALIZED_BACKREFERENCE
       "abc", // DFA_UNROLLED
-      "(.*)bar", // GREEDY_BACKTRACK
       "foo|bar|baz|qux|quux", // SPECIALIZED_LITERAL_ALTERNATION
       "(a)\\1{8,}", // FIXED_REPETITION_BACKREF
     };

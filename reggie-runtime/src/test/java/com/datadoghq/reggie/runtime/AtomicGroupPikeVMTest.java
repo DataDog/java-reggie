@@ -18,6 +18,10 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -93,5 +97,120 @@ public class AtomicGroupPikeVMTest {
     assertTrue(Reggie.compile("a*+b").matches("b"));
     assertTrue(Reggie.compile("a*+b").matches("ab"));
     assertTrue(Reggie.compile("a*+b").matches("aaab"));
+  }
+
+  /**
+   * An atomic group commits to its body's first match in priority order, not its longest one
+   * ({@code (?>a|ab)c} cannot match "abc"). A possessive group quantifier also makes each iteration
+   * atomic, as JDK does ({@code (?:a+){2,3}+b} cannot match "aab").
+   */
+  @Test
+  void atomicCommitAgreesWithJdk() {
+    List<String> inputs = TrailingLookaheadDifferentialTest.inputs(new char[] {'a', 'b', 'c'}, 5);
+    List<String> failures = new ArrayList<>();
+    for (String p :
+        new String[] {
+          "(?>a|ab)c",
+          "((?>a|ab))c",
+          "x?(?>a|ab)c",
+          "(?>ab|a)c",
+          "(?>a|ab)+c",
+          "(?>(?:a|ab)+)c",
+          "(?:a|ab)++c",
+          "(?:a|ab)?+c",
+          "(?:a?b?)++b",
+          "(?>(?:a?b?)+)b",
+          "(?>a(?>b|bc)|abc)c",
+          "(?>(a|ab)(c|bcd))(d*)",
+          "(?:a+){2,3}+b",
+          "(?:(a){1,2}){2,3}+b",
+          "(a|ab){2}+c",
+          "(?>a*)(?>b|bc)c"
+        }) {
+      ReggieMatcher r = Reggie.compile(p);
+      Pattern jdk = Pattern.compile(p);
+      for (String in : inputs) {
+        Matcher m = jdk.matcher(in);
+        String exp = m.find() ? spans(m) : "null";
+        String got = spans(r.findMatch(in));
+        if (!exp.equals(got))
+          failures.add("findMatch /" + p + "/ " + in + " exp " + exp + " got " + got);
+        m = jdk.matcher(in);
+        exp = m.matches() ? spans(m) : "null";
+        got = spans(r.match(in));
+        if (!exp.equals(got))
+          failures.add("match /" + p + "/ " + in + " exp " + exp + " got " + got);
+      }
+    }
+    assertEquals(List.of(), failures);
+  }
+
+  /**
+   * A group repeat inside an atomic body finishes against the body's own accept, so an enclosing
+   * repeat does not pin its group to an earlier atomic invocation ({@code (?:(?>(b)*c)a)+} on
+   * "bcabca": JDK group 1 = [3,4)).
+   */
+  @Test
+  void atomicBodyGroupRepeatIsNotPinnedByEnclosingRepeat() {
+    List<String> failures = new ArrayList<>();
+    for (String p : new String[] {"(?:(?>(b)*c)a)+"}) {
+      ReggieMatcher r = Reggie.compile(p);
+      Pattern jdk = Pattern.compile(p);
+      for (String in : new String[] {"bcabca", "bbcabca", "bcabbca", "bcabcabbbca", "xbcabca"}) {
+        Matcher m = jdk.matcher(in);
+        String exp = m.find() ? spans(m) : "null";
+        String got = spans(r.findMatch(in));
+        if (!exp.equals(got))
+          failures.add("findMatch /" + p + "/ " + in + " exp " + exp + " got " + got);
+        m = jdk.matcher(in);
+        exp = m.matches() ? spans(m) : "null";
+        got = spans(r.match(in));
+        if (!exp.equals(got))
+          failures.add("match /" + p + "/ " + in + " exp " + exp + " got " + got);
+      }
+    }
+    assertEquals(List.of(), failures);
+  }
+
+  /**
+   * A nullable capture repeated inside an atomic group keeps the capture of an abandoned atomic
+   * attempt in JDK ({@code (?>(a?)*)*a} on "a": group 1 = [1,1)); whatever engine runs it must
+   * agree.
+   */
+  @Test
+  void nullableCaptureInAtomicRepeatAgreesWithJdk() {
+    List<String> failures = new ArrayList<>();
+    for (String p : new String[] {"(?>(a?)*)*a", "(?>(a?)*)b|a"}) {
+      ReggieMatcher r = Reggie.compileAllowingFallback(p);
+      Pattern jdk = Pattern.compile(p);
+      for (String in : new String[] {"a", "aa", "ab", "b", ""}) {
+        Matcher m = jdk.matcher(in);
+        String exp = m.find() ? spans(m) : "null";
+        String got = spans(r.findMatch(in));
+        if (!exp.equals(got))
+          failures.add("findMatch /" + p + "/ " + in + " exp " + exp + " got " + got);
+        m = jdk.matcher(in);
+        exp = m.matches() ? spans(m) : "null";
+        got = spans(r.match(in));
+        if (!exp.equals(got))
+          failures.add("match /" + p + "/ " + in + " exp " + exp + " got " + got);
+      }
+    }
+    assertEquals(List.of(), failures);
+  }
+
+  private static String spans(Matcher m) {
+    StringBuilder sb = new StringBuilder();
+    for (int g = 0; g <= m.groupCount(); g++)
+      sb.append(m.start(g)).append("..").append(m.end(g)).append(' ');
+    return sb.toString();
+  }
+
+  private static String spans(MatchResult m) {
+    if (m == null) return "null";
+    StringBuilder sb = new StringBuilder();
+    for (int g = 0; g <= m.groupCount(); g++)
+      sb.append(m.start(g)).append("..").append(m.end(g)).append(' ');
+    return sb.toString();
   }
 }

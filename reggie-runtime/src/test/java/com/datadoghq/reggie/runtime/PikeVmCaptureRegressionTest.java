@@ -107,10 +107,13 @@ public class PikeVmCaptureRegressionTest {
   // ---- B16 PIKEVM_CAPTURE bypass regression ----
 
   @Test
-  void b16NullableContent_pikeVmCapture_throwsWithoutFallback() {
-    // ((x*){0,}|a)(c|bcd): nullable group content (x*) under nullable outer quantifier ({0,})
-    // triggers B16. Must throw UnsupportedPatternException, not silently route to PikeVM.
-    assertThrows(UnsupportedPatternException.class, () -> Reggie.compile("((x*){0,}|a)(c|bcd)"));
+  void b16NullableContent_pikeVmCapture_compilesWithoutFallback() throws Exception {
+    // ((x*){0,}|a)(c|bcd): nullable group content (x*) under nullable outer quantifier ({0,}).
+    // PikeVM reports JDK's spans for this B16 sub-case, so it compiles natively.
+    assertRoute("((x*){0,}|a)(c|bcd)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE);
+    for (String input : new String[] {"xbc", "ac", "abcd", "", "bcd", "xc"}) {
+      assertAgrees("((x*){0,}|a)(c|bcd)", input);
+    }
   }
 
   @Test
@@ -323,8 +326,7 @@ public class PikeVmCaptureRegressionTest {
 
   @Test
   void nullableBodyLazyMin1() throws Exception {
-    // (a?)+? on "aaa": nullable capturing group under lazy repeatable quantifier. B16 guard routes
-    // this to JDK fallback (same as greedy equivalent), so fallback must be allowed.
+    // (a?)+? on "aaa": nullable capturing group under lazy repeatable quantifier.
     ReggieOptions opts = ReggieOptions.builder().allowJdkFallback().build();
     Pattern jdk = Pattern.compile("(a?)+?");
     ReggieMatcher reggie = Reggie.compile("(a?)+?", opts);

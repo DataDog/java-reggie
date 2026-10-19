@@ -490,20 +490,7 @@ public class ConcatQuantifiedGroupsBytecodeGenerator {
       pushInt(mv, (int) max); // S: [I] -> [I, I]
       mv.visitJumpInsn(IF_ICMPGT, exitLabel);
     } else {
-      // Multiple ranges
-      Label matched = new Label();
-      for (CharSet.Range range : charset.getRanges()) {
-        Label nextRange = new Label();
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, matched);
-        mv.visitLabel(nextRange);
-      }
-      mv.visitJumpInsn(GOTO, exitLabel);
-      mv.visitLabel(matched);
+      BytecodeUtil.emitCharSetCheck(mv, charset, charVar, exitLabel);
     }
   }
 

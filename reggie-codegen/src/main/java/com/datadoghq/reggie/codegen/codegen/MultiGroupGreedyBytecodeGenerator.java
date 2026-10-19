@@ -541,41 +541,8 @@ public class MultiGroupGreedyBytecodeGenerator {
         mv.visitJumpInsn(IF_ICMPGT, failLabel);
       }
     } else {
-      // Multiple ranges
-      if (negated) {
-        // Negated: if ANY range matches, fail
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          // if (c < range.start) goto tryNext;
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          // if (c <= range.end) fail;
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, failLabel);
-          mv.visitLabel(tryNext);
-        }
-        // No range matched - continue (success for negated)
-      } else {
-        // Normal: if NO range matches, fail
-        Label matchFound = new Label();
-        for (CharSet.Range range : charset.getRanges()) {
-          Label tryNext = new Label();
-          // if (c < range.start) goto tryNext;
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.start);
-          mv.visitJumpInsn(IF_ICMPLT, tryNext);
-          // if (c <= range.end) goto matchFound (success);
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, (int) range.end);
-          mv.visitJumpInsn(IF_ICMPLE, matchFound);
-          mv.visitLabel(tryNext);
-        }
-        // No range matched - fail
-        mv.visitJumpInsn(GOTO, failLabel);
-        mv.visitLabel(matchFound);
-      }
+      BytecodeUtil.emitCharSetCheck(
+          mv, negated ? charset.complement() : charset, charVar, failLabel);
     }
   }
 
@@ -1986,32 +1953,7 @@ public class MultiGroupGreedyBytecodeGenerator {
       pushInt(mv, range.end);
       mv.visitJumpInsn(IF_ICMPGT, notInSetLabel);
     } else {
-      // Multiple ranges: check each range, if any matches, continue; else goto notInSet
-      Label inSet = new Label(); // If we find a match, jump here to continue
-
-      for (CharSet.Range range : charSet.getRanges()) {
-        // For each range, check: if (c >= start && c <= end) goto inSet
-        Label nextRange = new Label();
-
-        // Check c < start: if true, try next range
-        mv.visitVarInsn(ILOAD, charVarSlot); // c
-        pushInt(mv, range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-
-        // Check c <= end: if true, we're in this range, goto inSet
-        mv.visitVarInsn(ILOAD, charVarSlot); // c
-        pushInt(mv, range.end);
-        mv.visitJumpInsn(IF_ICMPLE, inSet); // c is in range!
-
-        // Not in this range, try next
-        mv.visitLabel(nextRange);
-      }
-
-      // Checked all ranges, none matched: goto notInSet
-      mv.visitJumpInsn(GOTO, notInSetLabel);
-
-      // Character is in one of the ranges: continue
-      mv.visitLabel(inSet);
+      BytecodeUtil.emitCharSetCheck(mv, charSet, charVarSlot, notInSetLabel);
     }
   }
 

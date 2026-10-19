@@ -15,6 +15,9 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -51,12 +54,9 @@ import org.objectweb.asm.MethodVisitor;
  * boolean matches(String input) {
  *     int len = input.length();
  *     int groupEnd = len;  // Start with longest possible capture
- *     int iterations = 0;
  *
  *     // Backtrack loop: try shorter captures until match found
  *     while (groupEnd >= groupMinLen) {
- *         if (BacktrackConfig.checkLimit(iterations++)) return false;
- *
  *         String captured = input.substring(0, groupEnd);
  *         int sepStart = groupEnd;
  *
@@ -123,7 +123,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
     int backrefEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
 
     Label returnNull = new Label();
 
@@ -155,10 +154,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
-    // int iterations = 0;
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
-
     Label loopStart = new Label();
     Label loopEnd = new Label();
     Label continueLoop = new Label();
@@ -172,13 +167,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, loopEnd);
 
-    // BacktrackConfig.checkLimit(iterations++)
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnNull);
-    mv.visitIincInsn(iterationsVar, 1);
-
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueLoop, alloc);
 
@@ -188,6 +176,9 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     // Match separator
     generateSeparatorMatch(mv, sepStartVar, sepEndVar, lenVar, continueLoop, alloc);
+    Label retrySep = new Label();
+    mv.visitLabel(retrySep);
+    Label sepFail = separatorNeedsGiveBack() ? new Label() : continueLoop;
 
     // int groupLen = groupEnd - groupStart;
     int groupLenVar = alloc.allocate();
@@ -201,7 +192,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitInsn(IADD);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGT, continueLoop);
+    mv.visitJumpInsn(IF_ICMPGT, sepFail);
 
     // backrefEnd = sepEnd + groupLen
     mv.visitVarInsn(ILOAD, sepEndVar);
@@ -217,7 +208,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     // generator does not emit).
     mv.visitVarInsn(ILOAD, backrefEndVar);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPNE, continueLoop);
+    mv.visitJumpInsn(IF_ICMPNE, sepFail);
 
     // Match backref: input.regionMatches(sepEnd, input, groupStart, groupLen)
     mv.visitVarInsn(ALOAD, 1);
@@ -227,7 +218,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-    mv.visitJumpInsn(IFEQ, continueLoop);
+    mv.visitJumpInsn(IFEQ, sepFail);
 
     // Match found — build MatchResultImpl
     // int[] starts = new int[totalGroupCount + 1]
@@ -290,6 +281,8 @@ public class VariableCaptureBackrefBytecodeGenerator {
         "(Ljava/lang/String;[I[II)V",
         false);
     mv.visitInsn(ARETURN);
+
+    emitSeparatorGiveBack(mv, sepFail, retrySep, sepStartVar, sepEndVar, continueLoop);
 
     // Continue backtracking: groupEnd--
     mv.visitLabel(continueLoop);
@@ -527,10 +520,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int groupEndVar = alloc.allocate();
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
     int groupStartVar = alloc.allocate();
-
-    Label returnNull = new Label();
 
     // Null check
     Label notNull = new Label();
@@ -573,14 +563,11 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     // Initialize groupStart from start, then advance past prefix
     Label innerEnd = new Label();
+    emitStartAnchorGate(mv, startVar, lenVar, innerEnd, outerEnd);
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitVarInsn(ISTORE, groupStartVar);
     emitPrefixMatch(mv, groupStartVar, lenVar, innerEnd, alloc);
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
-
-    // iterations = 0
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
 
     Label innerLoop = new Label();
     Label continueInner = new Label();
@@ -594,13 +581,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, innerEnd);
 
-    // BacktrackConfig.checkLimit
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnNull);
-    mv.visitIincInsn(iterationsVar, 1);
-
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueInner, alloc);
 
@@ -610,6 +590,9 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     // Match separator
     generateSeparatorMatch(mv, sepStartVar, sepEndVar, lenVar, continueInner, alloc);
+    Label retrySep = new Label();
+    mv.visitLabel(retrySep);
+    Label sepFail = separatorNeedsGiveBack() ? new Label() : continueInner;
 
     int groupLenVar = alloc.allocate();
     mv.visitVarInsn(ILOAD, groupEndVar);
@@ -622,7 +605,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitInsn(IADD);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGT, continueInner);
+    mv.visitJumpInsn(IF_ICMPGT, sepFail);
 
     // Match backref
     mv.visitVarInsn(ALOAD, 1);
@@ -632,7 +615,8 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-    mv.visitJumpInsn(IFEQ, continueInner);
+    mv.visitJumpInsn(IFEQ, sepFail);
+    emitEndAnchorCheck(mv, sepEndVar, groupLenVar, lenVar, sepFail);
 
     // Found — build MatchResultImpl
     // matchEnd = sepEnd + groupLen
@@ -702,6 +686,8 @@ public class VariableCaptureBackrefBytecodeGenerator {
         false);
     mv.visitInsn(ARETURN);
 
+    emitSeparatorGiveBack(mv, sepFail, retrySep, sepStartVar, sepEndVar, continueInner);
+
     // Continue inner backtrack
     mv.visitLabel(continueInner);
     mv.visitIincInsn(groupEndVar, -1);
@@ -714,12 +700,58 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitJumpInsn(GOTO, outerLoop);
 
     mv.visitLabel(outerEnd);
-    mv.visitLabel(returnNull);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
 
     mv.visitMaxs(6, alloc.peek());
     mv.visitEnd();
+  }
+
+  /**
+   * Find-loop gate for a leading anchor: {@code ^} and {@code \A} admit only start 0 (a later start
+   * ends the search); multiline {@code ^} skips starts that are not at a line start.
+   */
+  private void emitStartAnchorGate(
+      MethodVisitor mv, int startVar, int lenVar, Label nextStart, Label searchEnd) {
+    if (!info.hasStartAnchor) {
+      return;
+    }
+    if (info.startAnchorMultiline) {
+      // if (!LineTerminators.isMultilineStart(input, start, 0, len)) try next start;
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, startVar);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, lenVar);
+      invokeMultilineStart(mv);
+      mv.visitJumpInsn(IFEQ, nextStart);
+    } else {
+      // if (start != 0) stop searching;
+      mv.visitVarInsn(ILOAD, startVar);
+      mv.visitJumpInsn(IFNE, searchEnd);
+    }
+  }
+
+  /**
+   * Find-path check for a trailing anchor at {@code sepEnd + groupLen}: {@code $} and {@code \Z}
+   * use {@code LineTerminators.isEnd}, multiline {@code $} uses {@code isMultilineEnd}. Jumps to
+   * {@code failLabel} when the anchor does not hold.
+   */
+  private void emitEndAnchorCheck(
+      MethodVisitor mv, int sepEndVar, int groupLenVar, int lenVar, Label failLabel) {
+    if (!info.hasEndAnchor) {
+      return;
+    }
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ILOAD, groupLenVar);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ILOAD, lenVar);
+    if (info.endAnchorMultiline) {
+      invokeMultilineEnd(mv);
+    } else {
+      invokeEnd(mv);
+    }
+    mv.visitJumpInsn(IFEQ, failLabel);
   }
 
   private int getPrefixLength() {
@@ -754,44 +786,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
   private void emitCharSetCheck(
       MethodVisitor mv, int charVar, CharSet cs, boolean negated, Label failLabel) {
-    if (!negated) {
-      Label inSet = new Label();
-      for (CharSet.Range r : cs.getRanges()) {
-        if (r.start == r.end) {
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, r.start);
-          mv.visitJumpInsn(IF_ICMPEQ, inSet);
-        } else {
-          Label nextRange = new Label();
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, r.start);
-          mv.visitJumpInsn(IF_ICMPLT, nextRange);
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, r.end);
-          mv.visitJumpInsn(IF_ICMPLE, inSet);
-          mv.visitLabel(nextRange);
-        }
-      }
-      mv.visitJumpInsn(GOTO, failLabel);
-      mv.visitLabel(inSet);
-    } else {
-      for (CharSet.Range r : cs.getRanges()) {
-        if (r.start == r.end) {
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, r.start);
-          mv.visitJumpInsn(IF_ICMPEQ, failLabel);
-        } else {
-          Label notInRange = new Label();
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, r.start);
-          mv.visitJumpInsn(IF_ICMPLT, notInRange);
-          mv.visitVarInsn(ILOAD, charVar);
-          pushInt(mv, r.end);
-          mv.visitJumpInsn(IF_ICMPLE, failLabel);
-          mv.visitLabel(notInRange);
-        }
-      }
-    }
+    BytecodeUtil.emitCharSetCheck(mv, negated ? cs.complement() : cs, charVar, failLabel);
   }
 
   private void emitPrefixNode(
@@ -903,7 +898,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
     int backrefEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
 
     Label returnFalse = new Label();
 
@@ -936,10 +930,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     // int groupEnd = len - separatorMinLen - groupMinLen;  (start with longest possible)
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
 
-    // int iterations = 0;
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
-
     // Backtrack loop
     Label loopStart = new Label();
     Label loopEnd = new Label();
@@ -954,13 +944,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, loopEnd);
 
-    // Check backtrack limit: if (BacktrackConfig.checkLimit(iterations++)) return false;
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnFalse);
-    mv.visitIincInsn(iterationsVar, 1);
-
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueLoop, alloc);
 
@@ -970,6 +953,9 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     // Match separator and get sepEnd
     generateSeparatorMatch(mv, sepStartVar, sepEndVar, lenVar, continueLoop, alloc);
+    Label retrySep = new Label();
+    mv.visitLabel(retrySep);
+    Label sepFail = separatorNeedsGiveBack() ? new Label() : continueLoop;
 
     // Match backreference: captured content from groupStart to groupEnd
     // Backref must match input[sepEnd..sepEnd+groupLen]
@@ -987,7 +973,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitInsn(IADD);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGT, continueLoop);
+    mv.visitJumpInsn(IF_ICMPGT, sepFail);
 
     // backrefEnd = sepEnd + groupLen
     mv.visitVarInsn(ILOAD, sepEndVar);
@@ -1000,7 +986,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     // final line terminator: Pattern.matches("a+$", "aa\\n") is false).
     mv.visitVarInsn(ILOAD, backrefEndVar);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPNE, continueLoop);
+    mv.visitJumpInsn(IF_ICMPNE, sepFail);
 
     // Match backref: input.regionMatches(sepEnd, input, groupStart, groupLen)
     mv.visitVarInsn(ALOAD, 1); // input
@@ -1010,11 +996,13 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar); // len
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-    mv.visitJumpInsn(IFEQ, continueLoop);
+    mv.visitJumpInsn(IFEQ, sepFail);
 
     // Match found!
     mv.visitInsn(ICONST_1);
     mv.visitInsn(IRETURN);
+
+    emitSeparatorGiveBack(mv, sepFail, retrySep, sepStartVar, sepEndVar, continueLoop);
 
     // Continue backtracking: groupEnd--
     mv.visitLabel(continueLoop);
@@ -1210,6 +1198,13 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, lenVar);
     mv.visitJumpInsn(IF_ICMPGE, matchEnd);
 
+    // Check: count < maxCount (bounded separators such as [bc] or \d{2})
+    if (info.separatorMaxCount >= 0) {
+      mv.visitVarInsn(ILOAD, countVar);
+      pushInt(mv, info.separatorMaxCount);
+      mv.visitJumpInsn(IF_ICMPGE, matchEnd);
+    }
+
     // char c = input.charAt(pos); store in local for stack safety
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, posVar);
@@ -1237,86 +1232,54 @@ public class VariableCaptureBackrefBytecodeGenerator {
   }
 
   /**
+   * True when the separator is a variable-length char-class run whose set intersects the group set.
+   * Only then can the backreference start inside the greedy run, so the run must give back chars.
+   * With disjoint sets the backreference's first char ends the run, which fixes the separator end.
+   */
+  private boolean separatorNeedsGiveBack() {
+    switch (info.separatorType) {
+      case DIGIT_SEQ:
+      case WORD_SEQ:
+      case WHITESPACE_SEQ:
+      case CHAR_CLASS_SEQ:
+        return info.separatorMinCount != info.separatorMaxCount
+            && (info.groupCharSet == null || info.separatorCharSet.intersects(info.groupCharSet));
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Emits the separator give-back step at {@code sepFail}: {@code if (sepEnd <= sepStart + min)
+   * goto failLabel; sepEnd--; goto retrySep;}. No-op when {@code sepFail == failLabel}.
+   */
+  private void emitSeparatorGiveBack(
+      MethodVisitor mv,
+      Label sepFail,
+      Label retrySep,
+      int sepStartVar,
+      int sepEndVar,
+      Label failLabel) {
+    if (sepFail == failLabel) {
+      return;
+    }
+    mv.visitLabel(sepFail);
+    mv.visitVarInsn(ILOAD, sepEndVar);
+    mv.visitVarInsn(ILOAD, sepStartVar);
+    pushInt(mv, info.separatorMinCount);
+    mv.visitInsn(IADD);
+    mv.visitJumpInsn(IF_ICMPLE, failLabel);
+    mv.visitIincInsn(sepEndVar, -1);
+    mv.visitJumpInsn(GOTO, retrySep);
+  }
+
+  /**
    * Generate charset membership check from a local variable. Stack-safe: reads from local var,
    * doesn't leave anything on stack. Jumps to failLabel if char is NOT in charset.
    */
   private void generateCharSetCheckFromLocal(
       MethodVisitor mv, int charVar, CharSet charSet, Label failLabel) {
-    if (charSet.equals(CharSet.DIGIT)) {
-      // c >= '0' && c <= '9'
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '0');
-      mv.visitJumpInsn(IF_ICMPLT, failLabel);
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '9');
-      mv.visitJumpInsn(IF_ICMPGT, failLabel);
-    } else if (charSet.equals(CharSet.WHITESPACE)) {
-      // c == ' ' || c == '\t' || c == '\n' || c == '\r'
-      Label ok = new Label();
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, ' ');
-      mv.visitJumpInsn(IF_ICMPEQ, ok);
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '\t');
-      mv.visitJumpInsn(IF_ICMPEQ, ok);
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPEQ, ok);
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPEQ, ok);
-      mv.visitJumpInsn(GOTO, failLabel);
-      mv.visitLabel(ok);
-    } else if (charSet.equals(CharSet.WORD)) {
-      // a-z, A-Z, 0-9, _
-      Label ok = new Label();
-
-      // Check a-z
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, 'a');
-      mv.visitJumpInsn(IF_ICMPLT, ok); // Skip to next check if < 'a'
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, 'z');
-      Label notLower = new Label();
-      mv.visitJumpInsn(IF_ICMPGT, notLower);
-      mv.visitJumpInsn(GOTO, ok); // Is lowercase, success
-
-      mv.visitLabel(notLower);
-      // Check A-Z
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, 'A');
-      Label notUpperStart = new Label();
-      mv.visitJumpInsn(IF_ICMPLT, notUpperStart);
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, 'Z');
-      Label notUpper = new Label();
-      mv.visitJumpInsn(IF_ICMPGT, notUpper);
-      mv.visitJumpInsn(GOTO, ok); // Is uppercase, success
-
-      mv.visitLabel(notUpperStart);
-      mv.visitLabel(notUpper);
-      // Check 0-9
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '0');
-      Label notDigitStart = new Label();
-      mv.visitJumpInsn(IF_ICMPLT, notDigitStart);
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '9');
-      Label notDigit = new Label();
-      mv.visitJumpInsn(IF_ICMPGT, notDigit);
-      mv.visitJumpInsn(GOTO, ok); // Is digit, success
-
-      mv.visitLabel(notDigitStart);
-      mv.visitLabel(notDigit);
-      // Check _
-      mv.visitVarInsn(ILOAD, charVar);
-      pushInt(mv, '_');
-      mv.visitJumpInsn(IF_ICMPNE, failLabel);
-      // Is underscore, fall through to ok
-
-      mv.visitLabel(ok);
-    }
-    // General case (CharSet.ANY or unknown): no check needed, always passes
+    BytecodeUtil.emitCharSetCheck(mv, charSet, charVar, failLabel);
   }
 
   /** Generate find() method - delegates to findFrom(input, 0). */
@@ -1353,10 +1316,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     int groupEndVar = alloc.allocate();
     int sepStartVar = alloc.allocate();
     int sepEndVar = alloc.allocate();
-    int iterationsVar = alloc.allocate();
     int groupStartVar = alloc.allocate();
-
-    Label returnNotFound = new Label();
 
     // Null check
     Label notNull = new Label();
@@ -1401,14 +1361,11 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     // Initialize groupStart from start, then advance past prefix
     Label innerEnd = new Label();
+    emitStartAnchorGate(mv, startVar, lenVar, innerEnd, outerEnd);
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitVarInsn(ISTORE, groupStartVar);
     emitPrefixMatch(mv, groupStartVar, lenVar, innerEnd, alloc);
     emitGroupEndInit(mv, groupEndVar, lenVar, groupStartVar);
-
-    // iterations = 0
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ISTORE, iterationsVar);
 
     // Inner backtrack loop
     Label innerLoop = new Label();
@@ -1423,13 +1380,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitInsn(IADD);
     mv.visitJumpInsn(IF_ICMPLT, innerEnd);
 
-    // Check backtrack limit
-    mv.visitVarInsn(ILOAD, iterationsVar);
-    mv.visitMethodInsn(
-        INVOKESTATIC, "com/datadoghq/reggie/runtime/BacktrackConfig", "checkLimit", "(I)Z", false);
-    mv.visitJumpInsn(IFNE, returnNotFound);
-    mv.visitIincInsn(iterationsVar, 1);
-
     // Validate group content matches groupCharSet (if specified)
     generateGroupCharSetValidation(mv, groupStartVar, groupEndVar, continueInner, alloc);
 
@@ -1439,6 +1389,9 @@ public class VariableCaptureBackrefBytecodeGenerator {
 
     // Match separator
     generateSeparatorMatch(mv, sepStartVar, sepEndVar, lenVar, continueInner, alloc);
+    Label retrySep = new Label();
+    mv.visitLabel(retrySep);
+    Label sepFail = separatorNeedsGiveBack() ? new Label() : continueInner;
 
     // Match backreference
     int groupLenVar = alloc.allocate();
@@ -1452,7 +1405,7 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitInsn(IADD);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGT, continueInner);
+    mv.visitJumpInsn(IF_ICMPGT, sepFail);
 
     // Match backref
     mv.visitVarInsn(ALOAD, 1);
@@ -1462,11 +1415,14 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitVarInsn(ILOAD, groupLenVar);
     mv.visitMethodInsn(
         INVOKEVIRTUAL, "java/lang/String", "regionMatches", "(ILjava/lang/String;II)Z", false);
-    mv.visitJumpInsn(IFEQ, continueInner);
+    mv.visitJumpInsn(IFEQ, sepFail);
+    emitEndAnchorCheck(mv, sepEndVar, groupLenVar, lenVar, sepFail);
 
     // Found! Return start position (outer loop counter, before prefix)
     mv.visitVarInsn(ILOAD, startVar);
     mv.visitInsn(IRETURN);
+
+    emitSeparatorGiveBack(mv, sepFail, retrySep, sepStartVar, sepEndVar, continueInner);
 
     // Continue inner backtrack
     mv.visitLabel(continueInner);
@@ -1480,7 +1436,6 @@ public class VariableCaptureBackrefBytecodeGenerator {
     mv.visitJumpInsn(GOTO, outerLoop);
 
     mv.visitLabel(outerEnd);
-    mv.visitLabel(returnNotFound);
     mv.visitInsn(ICONST_M1);
     mv.visitInsn(IRETURN);
 

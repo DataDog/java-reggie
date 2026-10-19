@@ -32,7 +32,7 @@ import java.util.Objects;
  *
  * <p>Algorithm (longest-first backtracking): 1. Try maximum possible group capture (greedy) 2.
  * Check if separator matches at current position 3. Check if backreference matches captured content
- * 4. If fail, shrink group capture by 1 and retry 5. Respect BacktrackConfig.MAX_ITERATIONS limit
+ * 4. If fail, shrink group capture by 1 and retry
  */
 public class VariableCaptureBackrefInfo implements PatternInfo {
 
@@ -79,6 +79,9 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
   /** Minimum repetitions for separator (1 for +, 0 for *, etc.) */
   public final int separatorMinCount;
 
+  /** Maximum repetitions for separator (-1 for unbounded). */
+  public final int separatorMaxCount;
+
   /** Group number of separator if it's a capturing group (-1 if not). */
   public final int separatorGroupNumber;
 
@@ -103,6 +106,12 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
   /** Whether pattern has end anchor ($). */
   public final boolean hasEndAnchor;
 
+  /** Whether the start anchor is a multiline {@code ^} (line start) rather than input start. */
+  public final boolean startAnchorMultiline;
+
+  /** Whether the end anchor is a multiline {@code $} (line end) rather than input end. */
+  public final boolean endAnchorMultiline;
+
   /** Total number of capturing groups in the pattern. */
   public final int totalGroupCount;
 
@@ -116,6 +125,7 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
       String separatorLiteral,
       CharSet separatorCharSet,
       int separatorMinCount,
+      int separatorMaxCount,
       int separatorGroupNumber,
       int backrefGroupNumber,
       int backrefMinCount,
@@ -123,6 +133,8 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
       List<RegexNode> suffix,
       boolean hasStartAnchor,
       boolean hasEndAnchor,
+      boolean startAnchorMultiline,
+      boolean endAnchorMultiline,
       int totalGroupCount) {
     this.prefix = Objects.requireNonNull(prefix);
     this.groupNumber = groupNumber;
@@ -133,6 +145,7 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
     this.separatorLiteral = separatorLiteral;
     this.separatorCharSet = separatorCharSet;
     this.separatorMinCount = separatorMinCount;
+    this.separatorMaxCount = separatorMaxCount;
     this.separatorGroupNumber = separatorGroupNumber;
     this.backrefGroupNumber = backrefGroupNumber;
     this.backrefMinCount = backrefMinCount;
@@ -140,6 +153,8 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
     this.suffix = Objects.requireNonNull(suffix);
     this.hasStartAnchor = hasStartAnchor;
     this.hasEndAnchor = hasEndAnchor;
+    this.startAnchorMultiline = startAnchorMultiline;
+    this.endAnchorMultiline = endAnchorMultiline;
     this.totalGroupCount = totalGroupCount;
   }
 
@@ -181,6 +196,7 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
     hash = 31 * hash + (separatorLiteral != null ? separatorLiteral.hashCode() : 0);
     hash = 31 * hash + (separatorCharSet != null ? separatorCharSet.hashCode() : 0);
     hash = 31 * hash + separatorMinCount;
+    hash = 31 * hash + separatorMaxCount;
     hash = 31 * hash + separatorGroupNumber;
     hash = 31 * hash + backrefGroupNumber;
     hash = 31 * hash + backrefMinCount;
@@ -188,6 +204,8 @@ public class VariableCaptureBackrefInfo implements PatternInfo {
     hash = 31 * hash + suffix.size();
     hash = 31 * hash + (hasStartAnchor ? 1 : 0);
     hash = 31 * hash + (hasEndAnchor ? 1 : 0);
+    hash = 31 * hash + (startAnchorMultiline ? 1 : 0);
+    hash = 31 * hash + (endAnchorMultiline ? 1 : 0);
     hash = 31 * hash + totalGroupCount;
     return hash;
   }

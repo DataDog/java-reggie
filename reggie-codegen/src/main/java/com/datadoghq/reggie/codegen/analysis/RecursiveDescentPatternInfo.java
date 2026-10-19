@@ -49,8 +49,9 @@ public class RecursiveDescentPatternInfo implements PatternInfo {
 
   /**
    * Visitor that computes structural hash for AST nodes. Includes all properties that affect
-   * bytecode generation: - Node types - Quantifier min/max/greedy (CRITICAL for correct caching) -
-   * Group types and numbers - CharClass negation and range count - Anchor and assertion types
+   * bytecode generation: - Node types - Quantifier min/max/greedy/possessive (CRITICAL for correct
+   * caching) - Group types, numbers and atomicity - CharClass negation and range count - Anchor and
+   * assertion types
    */
   private static class ASTStructuralHashVisitor implements RegexVisitor<Integer> {
 
@@ -104,6 +105,7 @@ public class RecursiveDescentPatternInfo implements PatternInfo {
       hash = 31 * hash + node.min;
       hash = 31 * hash + node.max;
       hash = 31 * hash + (node.greedy ? 1 : 0);
+      hash = 31 * hash + (node.possessive ? 1 : 0);
       hash = 31 * hash + node.child.accept(this);
       return hash;
     }
@@ -114,6 +116,7 @@ public class RecursiveDescentPatternInfo implements PatternInfo {
       hash = 31 * hash + "Group".hashCode();
       hash = 31 * hash + (node.capturing ? 1 : 0);
       hash = 31 * hash + node.groupNumber;
+      hash = 31 * hash + (node.atomic ? 1 : 0);
       if (node.child != null) {
         hash = 31 * hash + node.child.accept(this);
       }

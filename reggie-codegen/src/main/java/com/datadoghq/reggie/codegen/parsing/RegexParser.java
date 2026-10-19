@@ -20,8 +20,10 @@ import com.datadoghq.reggie.codegen.automaton.CharSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Recursive descent parser for regex patterns. Converts pattern strings into AST.
@@ -32,10 +34,15 @@ import java.util.Map;
  */
 public class RegexParser {
 
+  // Highest group number PCRE2 accepts in a subroutine call
+  private static final int MAX_GROUP_NUMBER = 65535;
+
   private String pattern;
   private int pos;
   private int groupCount;
   private int totalGroupCount;
+  private int maxCalledGroup; // Highest group number called by (?N)
+  private Set<String> calledNames; // Group names called by (?&name), null if none
   private Map<String, Integer> groupNameMap; // Maps group names to group numbers
   private RegexModifiers currentModifiers;
 
@@ -43,17 +50,31 @@ public class RegexParser {
     // Note: We don't validate with JDK Pattern.compile() because we support
     // additional syntax like (?#...) comments that JDK doesn't support
 
-    this.pattern = pattern;
+    this.pattern = removeQeQuoting(pattern);
     this.pos = 0;
     this.groupCount = 0;
-    this.totalGroupCount = countCapturingGroups(pattern);
+    this.totalGroupCount = countCapturingGroups(this.pattern);
     this.groupNameMap = new HashMap<>();
     this.currentModifiers = new RegexModifiers();
+    this.maxCalledGroup = 0;
+    this.calledNames = null;
 
     RegexNode result = parseAlternation();
 
     if (hasMore()) {
       throw new ParseException("Unexpected character at position " + pos + ": " + peek());
+    }
+    // Subroutine calls may refer forward, so they are checked once all groups are known
+    if (maxCalledGroup > groupCount) {
+      throw new ParseException(
+          "Subroutine call (?" + maxCalledGroup + ") refers to non-existent group");
+    }
+    if (calledNames != null) {
+      for (String name : calledNames) {
+        if (!groupNameMap.containsKey(name)) {
+          throw new ParseException("Subroutine call (?&" + name + ") refers to undefined group");
+        }
+      }
     }
 
     return result;
@@ -88,7 +109,12 @@ public class RegexParser {
   private RegexNode parseConcatenation() throws ParseException {
     List<RegexNode> items = new ArrayList<>();
 
-    while (hasMore() && !isAlternationOrGroupEnd()) {
+    while (true) {
+      // Skip first: a whitespace- or comment-only alternative is empty, as in java.util.regex.
+      skipExtendedWhitespace();
+      if (!hasMore() || isAlternationOrGroupEnd()) {
+        break;
+      }
       RegexNode node = parseQuantified();
       // Filter out epsilon nodes (from global modifiers and comments)
       if (!(node instanceof EpsilonNode)) {
@@ -124,15 +150,15 @@ public class RegexParser {
         {
           consume();
           int suffix = checkQuantifierSuffix();
-          QuantifierNode q = new QuantifierNode(base, 0, -1, suffix != 1);
-          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+          if (suffix == 2) return possessive(base, 0, -1);
+          return new QuantifierNode(base, 0, -1, suffix != 1);
         }
       case '+':
         {
           consume();
           int suffix = checkQuantifierSuffix();
-          QuantifierNode q = new QuantifierNode(base, 1, -1, suffix != 1);
-          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+          if (suffix == 2) return possessive(base, 1, -1);
+          return new QuantifierNode(base, 1, -1, suffix != 1);
         }
       case '?':
         consume();
@@ -147,8 +173,8 @@ public class RegexParser {
         }
         {
           int suffix = checkQuantifierSuffix();
-          QuantifierNode q = new QuantifierNode(base, 0, 1, suffix != 1);
-          return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+          if (suffix == 2) return possessive(base, 0, 1);
+          return new QuantifierNode(base, 0, 1, suffix != 1);
         }
       case '{':
         return parseCountedQuantifier(base);
@@ -205,8 +231,21 @@ public class RegexParser {
     }
 
     int suffix = checkQuantifierSuffix();
-    QuantifierNode q = new QuantifierNode(base, min, max, suffix != 1);
-    return suffix == 2 ? new GroupNode(q, 0, false, null, true) : q;
+    if (suffix == 2) return possessive(base, min, max);
+    return new QuantifierNode(base, min, max, suffix != 1);
+  }
+
+  /**
+   * Possessive quantifier, built the way JDK runs one: the repeat never gives back, and when the
+   * base is a group each iteration is atomic too ({@code (?:a+){2}+b} cannot match "aab"). Builds
+   * {@code (?>(?>X){min,max})} for a non-atomic group base X, {@code (?>X{min,max})} otherwise.
+   */
+  private static RegexNode possessive(RegexNode base, int min, int max) {
+    RegexNode iteration =
+        base instanceof GroupNode && !((GroupNode) base).atomic
+            ? new GroupNode(base, 0, false, null, true)
+            : base;
+    return new GroupNode(new QuantifierNode(iteration, min, max, true, true), 0, false, null, true);
   }
 
   private int parseNumber() throws ParseException {
@@ -384,85 +423,229 @@ public class RegexParser {
     return name.toString();
   }
 
+  /**
+   * Parses a character class at {@code [} the way java.util.regex {@code clazz()} does: a {@code ]}
+   * is a literal while the class is empty, a nested {@code [..]} is a union, {@code &&} intersects
+   * with everything up to the next {@code ]} or {@code &&}, and under (?x) whitespace and comments
+   * are skipped. A {@code ^} right after the {@code [} negates.
+   */
   private RegexNode parseCharClass() throws ParseException {
-    consume('[');
-
-    boolean negated = false;
-    if (peek() == '^') {
-      consume();
-      negated = true;
-    }
-
-    List<CharSet.Range> ranges = new ArrayList<>();
-
-    while (hasMore() && peek() != ']') {
-      // Check for character class escapes like \d, \w, \s, \p{...}, \P{...}
-      if (peek() == '\\' && hasMore() && pos + 1 < pattern.length()) {
-        char nextChar = pattern.charAt(pos + 1);
-        if (nextChar == 'd'
-            || nextChar == 'D'
-            || nextChar == 'w'
-            || nextChar == 'W'
-            || nextChar == 's'
-            || nextChar == 'S') {
-          // Handle character class escape
-          consume(); // consume '\'
-          consume(); // consume the class character
-          CharSet charSet = getCharSetForEscape(nextChar);
-          ranges.addAll(charSet.getRanges());
-          continue;
-        }
-        if (nextChar == 'p' || nextChar == 'P') {
-          consume(); // consume '\'
-          consume(); // consume 'p' or 'P'
-          boolean propNegated = nextChar == 'P';
-          CharSet propSet = parseUnicodeCategoryRanges(propNegated);
-          ranges.addAll(propSet.getRanges());
-          continue;
-        }
-      }
-
-      if (peek() == '\\' && pos + 1 < pattern.length() && pattern.charAt(pos + 1) == 'Q') {
-        consume(); // consume '\\'
-        consume(); // consume 'Q'
-        ranges.addAll(parseQuotedCharClassRanges());
-        continue;
-      }
-
-      char start = parseCharClassChar();
-
-      if (peek() == '-' && peekNext() != ']') {
-        consume('-');
-        char end = parseCharClassChar();
-        ranges.add(new CharSet.Range(start, end));
-      } else {
-        ranges.add(new CharSet.Range(start, start));
-      }
-    }
-
-    consume(']');
-
-    // Apply case-insensitive modifier if active
-    if (currentModifiers.isCaseInsensitive()) {
-      checkUnicodeCaseFold();
-      ranges = applyCaseInsensitiveToRanges(ranges);
-    }
-
-    CharSet charset = CharSet.fromRanges(ranges);
-    return new CharClassNode(charset, negated);
+    boolean negated = peekNext() == '^';
+    return new CharClassNode(parseClassBody(true), negated);
   }
 
-  private List<CharSet.Range> parseQuotedCharClassRanges() throws ParseException {
-    List<CharSet.Range> quotedRanges = new ArrayList<>();
-    while (hasMore()) {
-      char ch = consume();
-      if (ch == '\\' && hasMore() && peek() == 'E') {
-        consume(); // consume 'E'
-        break;
-      }
-      quotedRanges.add(new CharSet.Range(ch, ch));
+  /** Parses a class nested in another class, at its {@code [}; negation is a complement. */
+  private CharSet parseNestedClass() throws ParseException {
+    boolean negated = peekNext() == '^';
+    CharSet set = parseClassBody(true);
+    return negated ? set.complement() : set;
+  }
+
+  /**
+   * A class operand. java.util.regex adds every single character below U+0100 to one mutable set
+   * per class and reads it only when the class closes, so characters added after an {@code &&} also
+   * join its left operand; an operand therefore takes the final set of those characters.
+   */
+  private interface ClassOperand {
+    CharSet of(CharSet bits);
+  }
+
+  private static final ClassOperand BITS = bits -> bits;
+
+  private static ClassOperand leaf(CharSet set) {
+    return bits -> set;
+  }
+
+  private static ClassOperand union(ClassOperand a, ClassOperand b) {
+    return bits -> a.of(bits).union(b.of(bits));
+  }
+
+  private static ClassOperand intersection(ClassOperand a, ClassOperand b) {
+    return bits -> a.of(bits).intersection(b.of(bits));
+  }
+
+  /**
+   * The body of java.util.regex {@code clazz(consume)}: with {@code consume} it starts at the
+   * {@code [} and consumes the closing {@code ]}; without it, it parses the right operand of an
+   * {@code &&} from the current position and stops at the {@code ]}. Returns the set without the
+   * leading-{@code ^} negation, which the callers apply.
+   */
+  private CharSet parseClassBody(boolean consume) throws ParseException {
+    ClassOperand prev = null;
+    ClassOperand curr = null;
+    List<CharSet.Range> bits = new ArrayList<>();
+    boolean hasBits = false;
+    if (consume) {
+      pos++;
     }
-    return quotedRanges;
+    char ch = classPeek();
+    if (consume && ch == '^' && pattern.charAt(pos - 1) == '[') {
+      pos++;
+      ch = classPeek();
+    }
+    for (; ; ) {
+      switch (ch) {
+        case '[':
+          curr = leaf(parseNestedClass());
+          prev = prev == null ? curr : union(prev, curr);
+          ch = classPeek();
+          continue;
+        case '&':
+          pos++;
+          ch = classPeek();
+          if (ch != '&') {
+            // A literal '&'. Like the JDK, step back one character only: under (?x) whitespace
+            // after the '&' lands the next item on the whitespace and the '&' is dropped.
+            pos--;
+            break;
+          }
+          pos++;
+          ch = classPeek();
+          ClassOperand right = null;
+          while (ch != ']' && ch != '&') {
+            ClassOperand operand = leaf(ch == '[' ? parseNestedClass() : parseClassBody(false));
+            right = right == null ? operand : union(right, operand);
+            ch = classPeek();
+          }
+          if (hasBits) {
+            if (prev == null) {
+              prev = curr = BITS;
+            } else {
+              prev = union(prev, BITS);
+            }
+            hasBits = false;
+          }
+          if (right != null) {
+            curr = right;
+          }
+          if (prev == null) {
+            if (right == null) {
+              throw new ParseException("Bad class syntax");
+            }
+            prev = right;
+          } else {
+            if (curr == null) {
+              throw new ParseException("Bad intersection syntax");
+            }
+            prev = intersection(prev, curr);
+          }
+          continue;
+        case 0:
+          if (!hasMore()) {
+            throw new ParseException("Unclosed character class");
+          }
+          break;
+        case ']':
+          if (prev != null || hasBits) {
+            if (consume) {
+              pos++;
+            }
+            ClassOperand result = prev == null ? BITS : hasBits ? union(prev, BITS) : prev;
+            return result.of(foldClassLeaf(CharSet.fromRanges(bits)));
+          }
+          break;
+        default:
+          break;
+      }
+      CharSet range = parseClassRange(bits);
+      if (range == null) {
+        hasBits = true;
+        curr = null;
+      } else {
+        curr = leaf(range);
+        prev = prev == null ? curr : union(prev, curr);
+      }
+      ch = classPeek();
+    }
+  }
+
+  /**
+   * java.util.regex {@code range(bits)}: parses one class item. A single character below U+0100 is
+   * added to {@code bits} and null is returned; any other item is returned as a set. As in the JDK,
+   * a {@code -} before {@code [} or {@code ]} is not a range.
+   */
+  private CharSet parseClassRange(List<CharSet.Range> bits) throws ParseException {
+    if (classPeek() == '\\') {
+      CharSet set = parseClassEscapeSet(peekNext());
+      if (set != null) {
+        return set;
+      }
+    }
+    char start = parseCharClassChar();
+    if (classPeek() == '-') {
+      char endRange = peekNext();
+      if (endRange != '[' && endRange != ']') {
+        pos++;
+        char end;
+        if (classPeek() == '\\') {
+          end = parseCharClassChar();
+        } else {
+          end = hasMore() ? consume() : 0;
+        }
+        if (end < start) {
+          throw new ParseException("Illegal character range");
+        }
+        return foldClassLeaf(CharSet.range(start, end));
+      }
+    }
+    if (start < 0x100) {
+      bits.add(new CharSet.Range(start, start));
+      return null;
+    }
+    return foldClassLeaf(CharSet.of(start));
+  }
+
+  /**
+   * Consumes a set escape at a backslash in a class ({@code \d \D \w \W \s \S \h \H \V \p \P}, and
+   * {@code \v} unless a {@code -} follows, which makes it the VT range bound) and returns its set,
+   * or returns null without consuming for any other escape.
+   */
+  private CharSet parseClassEscapeSet(char e) throws ParseException {
+    switch (e) {
+      case 'd':
+      case 'D':
+      case 'w':
+      case 'W':
+      case 's':
+      case 'S':
+        pos += 2;
+        return getCharSetForEscape(e);
+      case 'v':
+        if (pos + 2 < pattern.length() && pattern.charAt(pos + 2) == '-') {
+          return null;
+        }
+      // fall through
+      case 'h':
+      case 'H':
+      case 'V':
+        pos += 2;
+        CharSet ws = e == 'h' || e == 'H' ? CharSet.HORIZONTAL_WS : CharSet.VERTICAL_WS;
+        return Character.isUpperCase(e) ? ws.complement() : ws;
+      case 'p':
+      case 'P':
+        pos += 2;
+        CharSet property = foldClassLeaf(parseUnicodeCategoryRanges(false));
+        return e == 'P' ? property.complement() : property;
+      default:
+        return null;
+    }
+  }
+
+  /** Under (?i), adds the case-folded characters of a literal, range or property set. */
+  private CharSet foldClassLeaf(CharSet set) throws ParseException {
+    if (!currentModifiers.isCaseInsensitive() || set.isEmpty()) {
+      return set;
+    }
+    checkUnicodeCaseFold();
+    return CharSet.fromRanges(applyCaseInsensitiveToRanges(set.getRanges()));
+  }
+
+  /**
+   * java.util.regex {@code peek()} in a class: skips (?x) whitespace and comments; 0 at the end.
+   */
+  private char classPeek() {
+    skipExtendedWhitespace();
+    return hasMore() ? pattern.charAt(pos) : 0;
   }
 
   /**
@@ -531,10 +714,38 @@ public class RegexParser {
         case 'b':
           // \b inside a character class is backspace (U+0008), not a word-boundary anchor
           return (char) 8;
+        case 'e':
+          return '\u001B';
+        case 'a':
+          return '\u0007';
+        case 'c':
+          return parseControlChar();
+        case 'v':
+          // Reached only as a range bound (parseCharClass takes any other \v as a set)
+          return '\u000B';
+        case 'd':
+        case 'D':
+        case 'w':
+        case 'W':
+        case 's':
+        case 'S':
+        case 'h':
+        case 'H':
+        case 'V':
+        case 'p':
+        case 'P':
+          // parseCharClass consumes these as sets before a range start, so this is a range end
+          throw new ParseException("Illegal character range");
+        case 'R':
+        case 'X':
+          throw new ParseException("Illegal/unsupported escape sequence \\" + ch + " in class");
         case 'x':
           // Hex escape: \xhh
           return parseCharFromHexEscape();
+        case 'u':
+          return parseUnicodeEscape();
         case '0':
+          return parseOctalAfterZero();
         case '1':
         case '2':
         case '3':
@@ -542,7 +753,7 @@ public class RegexParser {
         case '5':
         case '6':
         case '7':
-          // Octal escape: \nnn (up to 3 octal digits)
+          // Octal escape: \nnn (up to 3 octal digits); java.util.regex rejects these in a class
           pos--; // Back up to the digit
           return parseCharFromOctalEscape();
         default:
@@ -601,13 +812,40 @@ public class RegexParser {
         return new LiteralNode('\r');
       case 'f':
         return new LiteralNode('\f');
+      case 'e':
+        return new LiteralNode('\u001B');
+      case 'a':
+        return new LiteralNode('\u0007');
+      case 'c':
+        return literalNode(parseControlChar());
+      case 'h':
+        return new CharClassNode(CharSet.HORIZONTAL_WS, false);
+      case 'H':
+        return new CharClassNode(CharSet.HORIZONTAL_WS, true);
+      case 'v':
+        return new CharClassNode(CharSet.VERTICAL_WS, false);
+      case 'V':
+        return new CharClassNode(CharSet.VERTICAL_WS, true);
+      case 'R':
+        {
+          // java.util.regex: ordered, non-atomic (?:\r\n|[\n\x0B\f\r\x85 U+2028 U+2029])
+          List<RegexNode> crlf = new ArrayList<>();
+          crlf.add(new LiteralNode('\r'));
+          crlf.add(new LiteralNode('\n'));
+          List<RegexNode> alternatives = new ArrayList<>();
+          alternatives.add(new ConcatNode(crlf));
+          alternatives.add(new CharClassNode(CharSet.VERTICAL_WS, false));
+          return new GroupNode(new AlternationNode(alternatives), 0, false, null, false);
+        }
+      case 'X':
+        throw new UnsupportedPatternException("\\X (grapheme cluster) is not supported");
       case 'x':
         // Hex escape: \xhh
         return parseHexEscape();
+      case 'u':
+        return literalNode(parseUnicodeEscape());
       case '0':
-        // \0 followed by octal digits is always octal
-        pos--; // Back up to the digit
-        return parseOctalEscape();
+        return literalNode(parseOctalAfterZero());
       case '1':
       case '2':
       case '3':
@@ -617,39 +855,22 @@ public class RegexParser {
       case '7':
       case '8':
       case '9':
-        // JDK-compatible backref/octal semantics for \N where N starts with digit 1-9:
-        // JDK stops extending the digit sequence as soon as the running value exceeds the
-        // group count (java.util.regex.Pattern.ref()). This means \10 with groupCount=1 yields
-        // backref \1 + literal '0', NOT octal char(8) as PCRE would. We follow JDK here because
-        // the fuzz oracle cross-checks against java.util.regex.Pattern.
+        // java.util.regex.Pattern.ref(): \1-\9 always start a backreference. The number is
+        // extended digit by digit while it stays within the groups opened so far, so \10 after
+        // one group is backref \1 followed by literal '0'.
         {
-          // pos is now one past the first digit (ch). posBeforeFirst points to the first digit.
-          int posBeforeFirst = pos - 1;
-          int firstDigit = ch - '0';
-
-          // Collect digits only while the running value stays within the group count (JDK rule).
-          int refNum = firstDigit;
-          while (hasMore() && Character.isDigit(peek())) {
+          int refNum = ch - '0';
+          while (hasMore() && peek() >= '0' && peek() <= '9') {
             int next = refNum * 10 + (peek() - '0');
-            if (next > totalGroupCount) break;
+            if (next > groupCount) break;
             refNum = next;
             consume();
           }
-
-          if (refNum > 0 && refNum <= totalGroupCount) {
-            return new BackreferenceNode(refNum);
+          if (refNum > totalGroupCount) {
+            // A group that does not exist is never set, so the reference never matches.
+            return new CharClassNode(CharSet.fromRanges(new ArrayList<>()), false);
           }
-
-          // No valid backref found. Try octal if first digit is 1-7:
-          if (firstDigit <= 7) {
-            // Backtrack to the first digit and re-parse as octal (up to 3 octal digits)
-            pos = posBeforeFirst;
-            return parseOctalEscape();
-          }
-
-          // First digit is 8 or 9 and no valid backref: treat as literal character '8' or '9'.
-          pos = posBeforeFirst + 1; // restore to position just after the first digit
-          return literalNode((char) ('0' + firstDigit));
+          return new BackreferenceNode(refNum);
         }
       case 'k':
         // Named backreference: \k<name> or \k'name'
@@ -657,9 +878,6 @@ public class RegexParser {
       case 'g':
         // PCRE backreference: \g{N}, \g{-N}, or \g{name}
         return parseGBackreference();
-      case 'Q':
-        // Quoted literal: \Q...\E
-        return parseQuotedLiteral();
       case 'p':
         return parseUnicodeProperty(false);
       case 'P':
@@ -697,6 +915,32 @@ public class RegexParser {
     return new CharClassNode(cs, negated);
   }
 
+  /**
+   * java.util.regex.Pattern.o() for the digits after {@code \0} (already consumed): one to three
+   * octal digits, a third only when the first is at most 3. With no octal digit this returns NUL,
+   * where the JDK rejects the pattern.
+   */
+  private char parseOctalAfterZero() throws ParseException {
+    int value = 0;
+    int digits = 0;
+    while (hasMore() && digits < 3 && peek() >= '0' && peek() <= '7') {
+      if (digits == 2 && value > 3 * 8 + 7) {
+        break; // the first digit is above 3
+      }
+      value = value * 8 + (consume() - '0');
+      digits++;
+    }
+    return (char) value;
+  }
+
+  /** Parse the X of {@code \cX} (the '\' and 'c' have already been consumed): X ^ 64. */
+  private char parseControlChar() throws ParseException {
+    if (!hasMore()) {
+      throw new ParseException("Illegal control escape sequence");
+    }
+    return (char) (consume() ^ 64);
+  }
+
   /** Parse hex escape in character class context and return the character. */
   private char parseCharFromHexEscape() throws ParseException {
     RegexNode node = parseHexEscapeInternal();
@@ -704,6 +948,28 @@ public class RegexParser {
       return ((LiteralNode) node).ch;
     }
     throw new ParseException("Invalid hex escape in character class at position " + pos);
+  }
+
+  /**
+   * Parse a Unicode escape {@code \}{@code uhhhh} (the '\' and 'u' have already been consumed):
+   * exactly four hex digits, as in java.util.regex. Surrogate values are rejected because
+   * java.util.regex pairs them into a supplementary code point, which Reggie does not support.
+   */
+  private char parseUnicodeEscape() throws ParseException {
+    int value = 0;
+    for (int i = 0; i < 4; i++) {
+      int digit = hasMore() ? Character.digit(peek(), 16) : -1;
+      if (digit == -1) {
+        throw new ParseException("Illegal Unicode escape sequence at position " + pos);
+      }
+      value = value * 16 + digit;
+      consume();
+    }
+    if (Character.isSurrogate((char) value)) {
+      throw new UnsupportedPatternException(
+          "Surrogate Unicode escape \\u" + Integer.toHexString(value) + " is not supported");
+    }
+    return (char) value;
   }
 
   /** Parse octal escape in character class context and return the character. */
@@ -778,18 +1044,6 @@ public class RegexParser {
     }
 
     return new LiteralNode((char) value);
-  }
-
-  /**
-   * Parse octal escape sequence: \nnn where n is an octal digit (0-7). Handles up to 3 octal
-   * digits.
-   *
-   * <p>PCRE rules: - \0nn is always octal (starts with 0) - \1nn to \7nn could be backreference or
-   * octal: - If result <= 99 and within group count, it's a backreference - Otherwise, it's octal
-   */
-  private RegexNode parseOctalEscape() throws ParseException {
-    RegexNode node = parseOctalEscapeInternal();
-    return node instanceof LiteralNode ? literalNode(((LiteralNode) node).ch) : node;
   }
 
   /** Internal implementation of octal escape parsing. */
@@ -911,27 +1165,6 @@ public class RegexParser {
 
       return new BackreferenceNode(groupNum, name);
     }
-  }
-
-  /**
-   * Parse a quoted literal sequence: \Q...\E. Consumes all characters until \E (or end of pattern)
-   * and returns them as literal AST nodes.
-   */
-  private RegexNode parseQuotedLiteral() throws ParseException {
-    List<RegexNode> parts = new ArrayList<>();
-    while (hasMore()) {
-      char ch = consume();
-      if (ch == '\\' && hasMore() && peek() == 'E') {
-        consume(); // consume 'E'
-        break;
-      }
-      parts.add(literalNode(ch));
-    }
-
-    if (parts.isEmpty()) {
-      return EpsilonNode.INSTANCE;
-    }
-    return parts.size() == 1 ? parts.get(0) : new ConcatNode(parts);
   }
 
   private RegexNode parseAnchor() throws ParseException {
@@ -1255,33 +1488,21 @@ public class RegexParser {
   }
 
   /**
-   * Skip whitespace and comments if in extended mode (?x). Extended mode ignores: - Unescaped
-   * whitespace characters (space, tab, newline, etc.) - Comments starting with # until end of line
-   * This does NOT apply inside character classes [].
+   * Skip whitespace and comments if in extended mode (?x), as java.util.regex does, also inside
+   * character classes: unescaped ASCII whitespace ({@code [ \t\n\x0B\f\r]}) and comments from
+   * {@code #} up to, not including, a line terminator ({@code \n \r U+0085 U+2028 U+2029}) or NUL.
    */
   private void skipExtendedWhitespace() {
     if (!currentModifiers.isExtended()) {
       return;
     }
-
     while (hasMore()) {
       char ch = pattern.charAt(pos);
-
-      if (Character.isWhitespace(ch)) {
-        // Skip whitespace
+      if (PatternLexer.isSpace(ch)) {
         pos++;
       } else if (ch == '#') {
-        // Skip comment until end of line
-        pos++;
-        while (hasMore() && pattern.charAt(pos) != '\n') {
-          pos++;
-        }
-        // Skip the newline too if present
-        if (hasMore() && pattern.charAt(pos) == '\n') {
-          pos++;
-        }
+        pos = PatternLexer.skipComment(pattern, pos);
       } else {
-        // Not whitespace or comment, stop skipping
         break;
       }
     }
@@ -1443,6 +1664,10 @@ public class RegexParser {
     }
 
     consume(')');
+    if (calledNames == null) {
+      calledNames = new HashSet<>();
+    }
+    calledNames.add(name.toString());
     return new SubroutineNode(name.toString());
   }
 
@@ -1454,9 +1679,13 @@ public class RegexParser {
     int number = 0;
     while (hasMore() && Character.isDigit(peek())) {
       number = number * 10 + (consume() - '0');
+      if (number > MAX_GROUP_NUMBER) {
+        throw new ParseException("Subroutine group number is too big at position " + pos);
+      }
     }
 
     consume(')');
+    maxCalledGroup = Math.max(maxCalledGroup, number);
     return new SubroutineNode(number);
   }
 
@@ -1483,6 +1712,10 @@ public class RegexParser {
 
     consume(')');
 
+    // Group 0 is not a capturing group (PCRE2 rejects (?(0)...))
+    if (conditionGroup == 0) {
+      throw new ParseException("Invalid condition (?(0) at position " + pos);
+    }
     // Validate that the referenced group exists
     if (conditionGroup > groupCount) {
       throw new ParseException(
@@ -1553,80 +1786,77 @@ public class RegexParser {
   }
 
   /**
-   * Pre-scans the pattern to count the total number of capturing groups. This is used to implement
-   * PCRE semantics for multi-digit backreferences: \NN where NN >= 10 is a backref when the total
-   * group count is at least NN, otherwise it is an octal escape.
+   * Port of java.util.regex.Pattern.RemoveQEQuoting: rewrites every {@code \Q..\E} span as plain
+   * pattern text, so a quantifier after {@code \E} applies to the last quoted character only.
+   * Inside a quote, ASCII letters, digits and non-ASCII characters are copied, a backslash becomes
+   * an escaped backslash, and any other character gets a backslash. A digit directly after {@code
+   * \Q} is written as {@code \x3} followed by the digit, so it cannot extend a preceding escape.
+   * Returns {@code pat} itself when it contains no {@code \Q}.
    */
-  private static int countCapturingGroups(String pat) {
-    int count = 0;
-    int i = 0;
+  private static String removeQeQuoting(String pat) {
     int len = pat.length();
-    while (i < len) {
-      char c = pat.charAt(i);
-      if (c == '\\' && i + 1 < len && pat.charAt(i + 1) == 'Q') {
+    int i = 0;
+    while (i < len - 1) {
+      if (pat.charAt(i) != '\\') {
+        i += 1;
+      } else if (pat.charAt(i + 1) != 'Q') {
         i += 2;
-        while (i + 1 < len && !(pat.charAt(i) == '\\' && pat.charAt(i + 1) == 'E')) {
-          i++;
-        }
-        if (i + 1 < len) {
-          i += 2; // skip \E
-        } else {
-          // Unterminated \Q...: quote extends to end of pattern (PCRE semantics).
-          i = len;
-        }
-      } else if (c == '\\') {
-        i += 2; // skip escaped character
-      } else if (c == '[') {
-        // skip character class
-        i++;
-        while (i < len && pat.charAt(i) != ']') {
-          if (pat.charAt(i) == '\\') i++;
-          i++;
-        }
-        i++; // skip ']'
-      } else if (c == '(') {
-        i++;
-        if (i < len && pat.charAt(i) == '?') {
-          i++;
-          if (i < len) {
-            char next = pat.charAt(i);
-            if (next == ':'
-                || next == '='
-                || next == '!'
-                || next == '>'
-                || next == '|'
-                || next == '#'
-                || next == 'R'
-                || next == '&') {
-              // non-capturing: (?:), (?=), (?!), (?>), (?|), (?#), (?R), (?&name)
-            } else if (next == '<') {
-              i++;
-              if (i < len && (pat.charAt(i) == '=' || pat.charAt(i) == '!')) {
-                // lookbehind (?<= or (?<!
-              } else {
-                // named group (?<name>
-                count++;
-              }
-            } else if (next == '\'') {
-              // named group (?'name'
-              count++;
-            } else if (next == '(') {
-              // conditional (?(...)
-            } else if (Character.isDigit(next) || next == '-') {
-              // subroutine (?1) or (?-1)
-            } else {
-              // modifier group (?i etc.) - non-capturing
-            }
-          }
-        } else {
-          // plain capturing group
-          count++;
-        }
       } else {
-        i++;
+        break;
       }
     }
-    return count;
+    if (i >= len - 1) {
+      return pat;
+    }
+    StringBuilder sb = new StringBuilder(len + 16);
+    sb.append(pat, 0, i);
+    i += 2;
+    boolean inQuote = true;
+    boolean beginQuote = true;
+    while (i < len) {
+      char c = pat.charAt(i++);
+      if (c > 0x7F || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        sb.append(c);
+      } else if (c >= '0' && c <= '9') {
+        if (beginQuote) {
+          sb.append("\\x3");
+        }
+        sb.append(c);
+      } else if (c != '\\') {
+        if (inQuote) {
+          sb.append('\\');
+        }
+        sb.append(c);
+      } else if (inQuote) {
+        if (i < len && pat.charAt(i) == 'E') {
+          i++;
+          inQuote = false;
+        } else {
+          sb.append("\\\\");
+        }
+      } else {
+        if (i < len && pat.charAt(i) == 'Q') {
+          i++;
+          inQuote = true;
+          beginQuote = true;
+          continue;
+        }
+        sb.append(c);
+        if (i < len) {
+          sb.append(pat.charAt(i++));
+        }
+      }
+      beginQuote = false;
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Pre-scans the pattern to count the total number of capturing groups. A numeric backreference
+   * above this count refers to a group that does not exist and never matches.
+   */
+  private static int countCapturingGroups(String pat) {
+    return GroupCounter.count(pat);
   }
 
   // Exception classes

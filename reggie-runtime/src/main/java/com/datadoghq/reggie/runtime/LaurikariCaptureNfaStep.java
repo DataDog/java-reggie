@@ -68,7 +68,7 @@ import java.util.List;
  * start state with {@code blockStartAnchor=true}): {@code ^}/{@code \A} must never re-fire from any
  * position other than the true start of input, exactly as {@code PikeVMMatcher.reinjectClosureIds}
  * excludes those branches. {@code (?m)^} additionally depends on whether the character just
- * consumed by <em>this</em> step was {@code '\n'} — see {@link #reinjectAfterNlStates}/{@link
+ * consumed by <em>this</em> step was a line terminator — see {@link #reinjectAfterNlStates}/{@link
  * #reinjectAfterNlRegs} and {@code PikeVMMatcher.reinjectAfterNlClosureIds}'s identical split. The
  * existing {@code totalConsumed - age} formula in {@link #absolutePositions} needs no
  * special-casing for reinjected candidates: age is still "characters consumed since tag 0 was set,"
@@ -86,16 +86,17 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
   /**
    * Anchor-blocked closure of the start state, for reinjection mid-scan (blocks every start anchor,
    * including {@code (?m)^} — safe to use unconditionally when the pattern has no multiline anchor,
-   * and as the "previous char wasn't '\n'" case when it does.
+   * and as the "previous char wasn't a line terminator" case when it does.
    */
   private final int[] reinjectStates;
 
   private final int[][] reinjectRegs;
 
   /**
-   * Reinjection closure for the "previous consumed char was '\n'" case: crosses {@code (?m)^}
-   * (which fires at every line start) but still blocks {@code ^}/{@code \A}. {@code null} when the
-   * pattern has no {@code START_MULTILINE} anchor (then {@link #reinjectStates} covers every case).
+   * Reinjection closure for the "previous consumed char was a line terminator" case: crosses {@code
+   * (?m)^} (which fires at every line start) but still blocks {@code ^}/{@code \A}. {@code null}
+   * when the pattern has no {@code START_MULTILINE} anchor (then {@link #reinjectStates} covers
+   * every case).
    */
   private final int[] reinjectAfterNlStates;
 
@@ -396,9 +397,9 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
   }
 
   /**
-   * @return {@link #reinjectClosure}'s "previous character was '\n'" variant (crosses {@code
-   *     (?m)^}), or {@code null} if the pattern has no {@code START_MULTILINE} anchor (then {@link
-   *     #reinjectClosure} covers every case).
+   * @return {@link #reinjectClosure}'s "previous character was a line terminator" variant (crosses
+   *     {@code (?m)^}), or {@code null} if the pattern has no {@code START_MULTILINE} anchor (then
+   *     {@link #reinjectClosure} covers every case).
    */
   LaurikariStepResult reinjectAfterNlClosure() {
     return reinjectAfterNlStates == null
@@ -489,7 +490,8 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
       int[] rStates;
       int[][] rRegs;
       if (hasNewAnchor) {
-        boolean afterNl = reinjectAfterNlStates != null && c == '\n';
+        boolean afterNl =
+            reinjectAfterNlStates != null && LineTerminators.isLineTerminator((char) c);
         LaurikariStepResult live =
             afterNl
                 ? reinjectAfterNlClosure(input, pos, regionEnd)
@@ -497,9 +499,10 @@ final class LaurikariCaptureNfaStep implements LaurikariNfaStep {
         rStates = live.states;
         rRegs = live.regs;
       } else {
-        rStates =
-            (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlStates : reinjectStates;
-        rRegs = (reinjectAfterNlStates != null && c == '\n') ? reinjectAfterNlRegs : reinjectRegs;
+        boolean afterNl =
+            reinjectAfterNlStates != null && LineTerminators.isLineTerminator((char) c);
+        rStates = afterNl ? reinjectAfterNlStates : reinjectStates;
+        rRegs = afterNl ? reinjectAfterNlRegs : reinjectRegs;
       }
       for (int i = 0; i < rStates.length; i++) {
         int id = rStates[i];

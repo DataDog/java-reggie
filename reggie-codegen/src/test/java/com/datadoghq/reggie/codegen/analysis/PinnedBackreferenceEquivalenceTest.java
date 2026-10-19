@@ -154,15 +154,19 @@ class PinnedBackreferenceEquivalenceTest {
         });
   }
 
-  /** Same shape with a restricted tag-name charset - same disagreement, for the same reason. */
+  /**
+   * Same shape with a restricted tag-name charset - both reject: the general detector for the
+   * multi-node separator, the hardcoded detector because its generator only matches {@code \w} tag
+   * names.
+   */
   @TestFactory
-  DynamicTest htmlRestrictedCharsetDisagreement() {
+  DynamicTest htmlRestrictedCharsetBothReject() {
     return DynamicTest.dynamicTest(
-        "<([a-zA-Z]+)>.*</\\1> : same multi-node-separator disagreement",
+        "<([a-zA-Z]+)>.*</\\1> : both reject (multi-node separator / non-\\w tag name)",
         () -> {
           Eligibility e = eligibilityForTag("<([a-zA-Z]+)>.*</\\1>");
           assertEquals(false, e.pinned);
-          assertEquals(true, e.hardcoded);
+          assertEquals(false, e.hardcoded);
         });
   }
 
@@ -214,15 +218,18 @@ class PinnedBackreferenceEquivalenceTest {
         });
   }
 
-  /** Restricted word-charset variant - same divergence, for the same reason. */
+  /**
+   * Restricted word-charset variant - both reject: the general detector for the anchors outside the
+   * group/backref span, the hardcoded detector because its generator only matches {@code \w} words.
+   */
   @TestFactory
-  DynamicTest repeatedWordRestrictedCharsetDivergence() {
+  DynamicTest repeatedWordRestrictedCharsetBothReject() {
     return DynamicTest.dynamicTest(
-        "\\b([a-z]+)\\s+\\1\\b : pinned rejects (anchors outside group/backref span), hardcoded accepts",
+        "\\b([a-z]+)\\s+\\1\\b : both reject (anchors outside span / non-\\w word)",
         () -> {
           Eligibility e = eligibilityForWord("\\b([a-z]+)\\s+\\1\\b");
           assertEquals(false, e.pinned);
-          assertEquals(true, e.hardcoded);
+          assertEquals(false, e.hardcoded);
         });
   }
 

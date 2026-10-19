@@ -22,7 +22,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
- * Patterns with nested and combined quantified groups, exercising NestedQuantifiedGroups and
+ * Patterns with nested and combined quantified groups, exercising the nested-repeated-capture and
  * ConcatQuantifiedGroups analysis paths in PatternAnalyzer.
  */
 class NestedQuantifiedGroupsTest {

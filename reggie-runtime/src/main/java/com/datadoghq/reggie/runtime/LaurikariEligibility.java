@@ -105,7 +105,8 @@ final class LaurikariEligibility {
         if (reached.add(e.id)) q.add(e);
       }
     }
-    return true;
+    // (?m)^ uses the same after-terminator re-injection model as PikeVMMatcher's lazy DFA.
+    return PikeVMMatcher.multilineReinjectExact(nfa);
   }
 
   /**

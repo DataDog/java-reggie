@@ -17,8 +17,12 @@ package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /** Tests for MatchResult API on fixed-length sequence patterns. */
 public class FixedSequenceMatchResultTest {
@@ -119,5 +123,31 @@ public class FixedSequenceMatchResultTest {
         matcher.matchesBounded("xxx123-456-7890yyy", 0, 12), "Should not match (starts with xxx)");
     assertFalse(
         matcher.matchesBounded("xxx123-456-7890yyy", 3, 12), "Should not match (too short)");
+  }
+
+  /** Empty and nested capturing groups have no element of their own to carry their spans. */
+  @ParameterizedTest
+  @CsvSource({
+    "()b,b",
+    "()(a),a",
+    "(?:)ab,ab",
+    "c((b)),cb",
+    "c(((a))),ca",
+    "(a(b))c,abc",
+    "(([ab]{2})),aa",
+    "((\\d{3})),123",
+    "((?:([ab]{2}))),aa",
+    "(?:(([ab]{2}))),aa",
+    "(((?:[ab]{2}))),aa"
+  })
+  public void testEmptyAndNestedGroupsMatchJdk(String pattern, String input) {
+    MatchResult result = RuntimeCompiler.compile(pattern).match(input);
+    Matcher jdk = Pattern.compile(pattern).matcher(input);
+    assertTrue(jdk.matches());
+    assertNotNull(result, pattern);
+    for (int g = 1; g <= jdk.groupCount(); g++) {
+      assertEquals(jdk.start(g), result.start(g), pattern + " start " + g);
+      assertEquals(jdk.end(g), result.end(g), pattern + " end " + g);
+    }
   }
 }

@@ -15,6 +15,7 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -107,19 +108,7 @@ public class BitStateBytecodeGenerator {
       pushInt(mv, range.end);
       mv.visitJumpInsn(IF_ICMPGT, exitLabel);
     } else {
-      Label matches = new Label();
-      for (CharSet.Range range : charSet.getRanges()) {
-        Label tryNext = new Label();
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, range.start);
-        mv.visitJumpInsn(IF_ICMPLT, tryNext);
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, range.end);
-        mv.visitJumpInsn(IF_ICMPLE, matches);
-        mv.visitLabel(tryNext);
-      }
-      mv.visitJumpInsn(GOTO, exitLabel);
-      mv.visitLabel(matches);
+      BytecodeUtil.emitCharSetCheck(mv, charSet, charVar, exitLabel);
     }
   }
 
@@ -659,8 +648,8 @@ public class BitStateBytecodeGenerator {
    * point (line start under {@code multiline}, else only position 0) at or after {@code start}
    * where {@code tryMatchAt} succeeds, or {@code -1}.
    *
-   * <p>Advance under {@code multiline}: the next candidate anchor is normally the line start after
-   * the next {@code '\n'} at/after {@code lineStart}. When the pattern has the optional keyword
+   * <p>Advance under {@code multiline}: the next candidate anchor is normally the next position
+   * where {@code LineTerminators.isMultilineStart} holds. When the pattern has the optional keyword
    * prefix, a failed attempt's {@code skipLeadingWs} scan already walked every character from
    * {@code lineStart} up to the first non-ws position {@code wsRunEnd}, so every line start
    * strictly between {@code lineStart} and {@code wsRunEnd} is provably dead and the loop jumps to
@@ -741,66 +730,35 @@ public class BitStateBytecodeGenerator {
     } else {
       int lineStartVar = allocator.allocate();
       int resVar = allocator.allocateWide();
-      int nlVar = allocator.allocate();
 
-      // int lineStart;
-      // if (start <= 0) lineStart = 0;
-      // else if (input.charAt(start - 1) == '\n') lineStart = start;
-      // else { nl = input.indexOf('\n', start); if (nl < 0) return -1; lineStart = nl + 1; }
-      Label startLeZero = new Label();
-      Label afterNewline = new Label();
-      Label searchNewline = new Label();
-      Label lineStartSet = new Label();
-
-      mv.visitVarInsn(ILOAD, startVar);
-      mv.visitJumpInsn(IFLE, startLeZero);
-
-      mv.visitVarInsn(ALOAD, inputVar);
-      mv.visitVarInsn(ILOAD, startVar);
-      pushInt(mv, 1);
-      mv.visitInsn(ISUB);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPNE, searchNewline);
-
-      mv.visitJumpInsn(GOTO, afterNewline);
-
-      mv.visitLabel(searchNewline);
-      mv.visitVarInsn(ALOAD, inputVar);
-      pushInt(mv, '\n');
-      mv.visitVarInsn(ILOAD, startVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-      mv.visitVarInsn(ISTORE, nlVar);
-      Label nlFound = new Label();
-      mv.visitVarInsn(ILOAD, nlVar);
-      mv.visitJumpInsn(IFGE, nlFound);
-      mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IRETURN);
-      mv.visitLabel(nlFound);
-      mv.visitVarInsn(ILOAD, nlVar);
-      pushInt(mv, 1);
-      mv.visitInsn(IADD);
-      mv.visitVarInsn(ISTORE, lineStartVar);
-      mv.visitJumpInsn(GOTO, lineStartSet);
-
-      mv.visitLabel(afterNewline);
+      // for (int lineStart = start; lineStart < n; ) {
+      //   if (LineTerminators.isMultilineStart(input, lineStart, 0, n)) {
+      //     if (tryMatchAt(input, lineStart, n) != -1) return lineStart;
+      //     if (hasOptionalPrefix) {
+      //       int wsRunEnd = skipLeadingWs(input, lineStart, n);
+      //       if (wsRunEnd > lineStart) { lineStart = wsRunEnd; continue; }
+      //     }
+      //   }
+      //   lineStart++;
+      // }
+      // (^ never matches at n, so the loop stops before it.)
       mv.visitVarInsn(ILOAD, startVar);
       mv.visitVarInsn(ISTORE, lineStartVar);
-      mv.visitJumpInsn(GOTO, lineStartSet);
 
-      mv.visitLabel(startLeZero);
-      mv.visitInsn(ICONST_0);
-      mv.visitVarInsn(ISTORE, lineStartVar);
-
-      mv.visitLabel(lineStartSet);
-
-      // while (lineStart <= n) { try; advance past next '\n' or break; }
       Label loop = new Label();
       Label loopEnd = new Label();
+      Label next = new Label();
       mv.visitLabel(loop);
       mv.visitVarInsn(ILOAD, lineStartVar);
       mv.visitVarInsn(ILOAD, nVar);
-      mv.visitJumpInsn(IF_ICMPGT, loopEnd);
+      mv.visitJumpInsn(IF_ICMPGE, loopEnd);
+
+      mv.visitVarInsn(ALOAD, inputVar);
+      mv.visitVarInsn(ILOAD, lineStartVar);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, nVar);
+      invokeMultilineStart(mv);
+      mv.visitJumpInsn(IFEQ, next);
 
       mv.visitVarInsn(ALOAD, inputVar);
       mv.visitVarInsn(ILOAD, lineStartVar);
@@ -819,22 +777,8 @@ public class BitStateBytecodeGenerator {
       mv.visitInsn(IRETURN);
       mv.visitLabel(noMatch);
 
-      // int searchFrom = lineStart;
-      // if (hasOptionalPrefix) {
-      //   int wsRunEnd = skipLeadingWs(input, lineStart, n);
-      //   if (wsRunEnd > lineStart) searchFrom = wsRunEnd - 1;
-      // }
-      // (searchFrom - 1 is a ws char when the run is non-empty, so indexOf('\n', searchFrom) + 1
-      // is exactly the first line start at or after wsRunEnd; the empty-run case keeps the
-      // plain advance and still makes progress.)
-      int searchFromVar = allocator.allocate();
-      mv.visitVarInsn(ILOAD, lineStartVar);
-      mv.visitVarInsn(ISTORE, searchFromVar);
       if (info.hasOptionalPrefix()) {
         int wsRunEndVar = allocator.allocate();
-        Label shortRun = new Label();
-        Label searchFromSet = new Label();
-
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitVarInsn(ILOAD, lineStartVar);
         mv.visitVarInsn(ILOAD, nVar);
@@ -844,29 +788,14 @@ public class BitStateBytecodeGenerator {
 
         mv.visitVarInsn(ILOAD, wsRunEndVar);
         mv.visitVarInsn(ILOAD, lineStartVar);
-        mv.visitJumpInsn(IF_ICMPLE, shortRun);
+        mv.visitJumpInsn(IF_ICMPLE, next);
         mv.visitVarInsn(ILOAD, wsRunEndVar);
-        pushInt(mv, 1);
-        mv.visitInsn(ISUB);
-        mv.visitVarInsn(ISTORE, searchFromVar);
-        mv.visitJumpInsn(GOTO, searchFromSet);
-        mv.visitLabel(shortRun);
-        mv.visitVarInsn(ILOAD, lineStartVar);
-        mv.visitVarInsn(ISTORE, searchFromVar);
-        mv.visitLabel(searchFromSet);
+        mv.visitVarInsn(ISTORE, lineStartVar);
+        mv.visitJumpInsn(GOTO, loop);
       }
 
-      mv.visitVarInsn(ALOAD, inputVar);
-      pushInt(mv, '\n');
-      mv.visitVarInsn(ILOAD, searchFromVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-      mv.visitVarInsn(ISTORE, nlVar);
-      mv.visitVarInsn(ILOAD, nlVar);
-      mv.visitJumpInsn(IFLT, loopEnd);
-      mv.visitVarInsn(ILOAD, nlVar);
-      pushInt(mv, 1);
-      mv.visitInsn(IADD);
-      mv.visitVarInsn(ISTORE, lineStartVar);
+      mv.visitLabel(next);
+      mv.visitIincInsn(lineStartVar, 1);
       mv.visitJumpInsn(GOTO, loop);
 
       mv.visitLabel(loopEnd);

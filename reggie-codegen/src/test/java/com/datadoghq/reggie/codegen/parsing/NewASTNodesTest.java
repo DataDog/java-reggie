@@ -77,11 +77,11 @@ class NewASTNodesTest {
   @Test
   void testParseNamedSubroutine() throws Exception {
     // (?&foo) - call to named group
-    RegexNode node = parse("a(?&foo)b");
+    RegexNode node = parse("a(?&foo)b(?<foo>c)");
 
     assertInstanceOf(ConcatNode.class, node);
     ConcatNode concat = (ConcatNode) node;
-    assertEquals(3, concat.children.size());
+    assertEquals(4, concat.children.size());
 
     assertInstanceOf(SubroutineNode.class, concat.children.get(1));
     SubroutineNode sub = (SubroutineNode) concat.children.get(1);

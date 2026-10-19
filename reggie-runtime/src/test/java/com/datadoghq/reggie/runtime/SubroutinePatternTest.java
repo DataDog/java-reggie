@@ -120,12 +120,28 @@ class SubroutinePatternTest {
   }
 
   @Test
-  void testRecursionDepthLimit() {
+  void testNamedCallInBranchResetCallsFirstGroupWithItsNumber() {
+    // (?&n) stands for group 1, and the first group numbered 1 is (a) (PCRE2: "aa" matches, "ab"
+    // does not)
+    String pattern = "(?|(a)|(?<n>b))(?&n)";
+    for (ReggieMatcher m :
+        new ReggieMatcher[] {
+          Reggie.compile(pattern), RuntimeCompiler.compileBackrefBacktrack(pattern, "")
+        }) {
+      assertTrue(m.matches("aa"));
+      assertTrue(m.matches("ba"));
+      assertFalse(m.matches("ab"));
+      assertFalse(m.matches("bb"));
+    }
+  }
+
+  @Test
+  void testDeepRecursion() {
     // Pattern: a(?R)?b
-    // Test that deep recursion throws StackOverflowError
+    // The backtracker keeps call contexts on its own frame stack, so nesting depth is not bounded
+    // by the Java stack.
     ReggieMatcher m = Reggie.compile("a(?R)?b");
 
-    // Create a deeply nested pattern (more than MAX_RECURSION_DEPTH)
     StringBuilder sb = new StringBuilder();
     for (int i = 0; i < 110; i++) {
       sb.append('a');
@@ -135,13 +151,8 @@ class SubroutinePatternTest {
     }
     String deeplyNested = sb.toString();
 
-    // Should throw StackOverflowError due to recursion limit (max 100)
-    assertThrows(
-        StackOverflowError.class,
-        () -> {
-          m.matches(deeplyNested);
-        },
-        "Should throw StackOverflowError for deep recursion");
+    assertTrue(m.matches(deeplyNested), "Should match 110 nested levels");
+    assertFalse(m.matches(deeplyNested + "b"), "Should not match an unbalanced input");
   }
 
   @Test

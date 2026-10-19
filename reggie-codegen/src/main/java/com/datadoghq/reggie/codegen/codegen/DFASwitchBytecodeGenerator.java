@@ -15,6 +15,8 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -148,6 +150,19 @@ public class DFASwitchBytecodeGenerator {
    * bucket split (e.g. generateMatchesMethod and generateMatchMethod both overflow).
    */
   private final Set<String> emittedBucketHelpers = new HashSet<>();
+
+  /** Slot of linPrepare's result while a Stepper method or its helper is emitted, else -1. */
+  private int gatePreparedVar = -1;
+
+  /**
+   * Slot of the furthest position matchesAtStart's gate scans read, while matchesAtStart is emitted
+   * for a DFA with {@link #bitGates}, else -1. Gates checked inside helper methods set it to the
+   * input length before the call.
+   */
+  private int gateFarVar = -1;
+
+  /** {@code DFAUnrolledBytecodeGenerator.collectBitGates} of the DFA, computed on first use. */
+  private List<DFA> bitGates;
 
   /**
    * @param nfa required, not optional: DFA_SWITCH emits no per-transition anchor guards, so the
@@ -395,7 +410,7 @@ public class DFASwitchBytecodeGenerator {
 
     // Generate switch statement for state transitions
     // Note: pos has been incremented, so pass posVar for assertion checking
-    generateStateSwitch(mv, stateVar, chVar, posVar, loopStart, allocator);
+    generateStateSwitch(mv, stateVar, chVar, posVar, loopStart, allocator, -1);
 
     // End of input - check if in accept state, including zero-width assertions attached to the
     // accepting DFA state.
@@ -410,6 +425,8 @@ public class DFASwitchBytecodeGenerator {
    * Generate switch statement that handles all state transitions. Uses tableswitch for O(1)
    * dispatch. When the DFA state count exceeds {@link #STATE_SPLIT_THRESHOLD}, splits the per-state
    * case logic into private bucket-helper methods to stay under the JVM 64 KB per-method limit.
+   * When no transition matches, returns false ({@code deathPosVar} -1) or the int in {@code
+   * deathPosVar}.
    */
   private void generateStateSwitch(
       MethodVisitor mv,
@@ -417,7 +434,8 @@ public class DFASwitchBytecodeGenerator {
       int chVar,
       int posVar,
       Label loopStart,
-      LocalVarAllocator allocator) {
+      LocalVarAllocator allocator,
+      int deathPosVar) {
 
     int stateCount = dfa.getAllStates().size();
 
@@ -452,6 +470,9 @@ public class DFASwitchBytecodeGenerator {
       for (int b = 0; b < numBuckets; b++) {
         mv.visitLabel(bucketLabels[b]);
         String helperName = "$ng_step_" + b;
+        if (gateFarVar >= 0 && bucketHasGate(buckets.get(b)[0], buckets.get(b)[1])) {
+          emitFarToEnd(mv);
+        }
         mv.visitVarInsn(ALOAD, 0); // this
         mv.visitVarInsn(ALOAD, 1); // input (String) — must be slot 1 in the calling method
         mv.visitVarInsn(ILOAD, stateVar);
@@ -466,15 +487,13 @@ public class DFASwitchBytecodeGenerator {
         mv.visitInsn(ICONST_M1);
         mv.visitJumpInsn(IF_ICMPNE, notReject);
         // helper returned -1: no transition matched -> return false
-        mv.visitInsn(ICONST_0);
-        mv.visitInsn(IRETURN);
+        emitDeathReturn(mv, deathPosVar);
         mv.visitLabel(notReject);
         mv.visitJumpInsn(GOTO, loopStart);
       }
 
       mv.visitLabel(defaultLabel);
-      mv.visitInsn(ICONST_0);
-      mv.visitInsn(IRETURN);
+      emitDeathReturn(mv, deathPosVar);
       return;
     }
 
@@ -498,8 +517,63 @@ public class DFASwitchBytecodeGenerator {
 
     // Default case: invalid state, return false
     mv.visitLabel(defaultLabel);
-    mv.visitInsn(ICONST_0);
+    emitDeathReturn(mv, deathPosVar);
+  }
+
+  private void emitDeathReturn(MethodVisitor mv, int deathPosVar) {
+    if (deathPosVar < 0) {
+      mv.visitInsn(ICONST_0);
+    } else {
+      mv.visitVarInsn(ILOAD, deathPosVar);
+      if (gateFarVar >= 0) {
+        mv.visitVarInsn(ILOAD, gateFarVar);
+        mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "max", "(II)I", false);
+      }
+    }
     mv.visitInsn(IRETURN);
+  }
+
+  /** Emits {@code far = input.length()}: a gate in a helper method may read to the end. */
+  private void emitFarToEnd(MethodVisitor mv) {
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, gateFarVar);
+  }
+
+  private List<DFA> bitGates() {
+    if (bitGates == null) bitGates = DFAUnrolledBytecodeGenerator.collectBitGates(dfa);
+    return bitGates;
+  }
+
+  /** True if a state in [lo, hi] carries a gate DFA check. */
+  private boolean bucketHasGate(int lo, int hi) {
+    List<DFA.DFAState> states = dfa.getAllStates();
+    for (int id = lo; id <= hi; id++) {
+      if (hasGateDfa(states.get(id))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * True while a Stepper method is emitted and {@code state} checks a gate that reads linPrepare's
+   * result: its helpers then take that result as an extra last parameter.
+   */
+  private boolean usesPrepared(DFA.DFAState state) {
+    if (gatePreparedVar < 0) return false;
+    for (AssertionCheck a : state.assertionChecks) {
+      if (a.isGateDfa() && DFAUnrolledBytecodeGenerator.gateIndex(bitGates(), a.gateDfa) >= 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean bucketUsesPrepared(int lo, int hi) {
+    List<DFA.DFAState> states = dfa.getAllStates();
+    for (int id = lo; id <= hi; id++) {
+      if (usesPrepared(states.get(id))) return true;
+    }
+    return false;
   }
 
   /**
@@ -643,20 +717,31 @@ public class DFASwitchBytecodeGenerator {
    * @param hi last state ID handled by this bucket (inclusive)
    */
   private void emitNonGroupBucketHelperFull(int bucketIndex, int lo, int hi) {
-    String helperName = "$ng_step_" + bucketIndex;
+    // Stepper variant: (String input, int state, int ch, int pos, Object prepared) -> int
+    boolean prepared = bucketUsesPrepared(lo, hi);
+    String helperName = (prepared ? "$ng_lstep_" : "$ng_step_") + bucketIndex;
     if (!emittedBucketHelpers.add(helperName)) {
       return; // already emitted for this ClassWriter instance
     }
     // (String input, int state, int ch, int pos) -> int
     MethodVisitor hv =
-        activeCw.visitMethod(ACC_PRIVATE, helperName, "(Ljava/lang/String;III)I", null, null);
+        activeCw.visitMethod(
+            ACC_PRIVATE,
+            helperName,
+            prepared ? "(Ljava/lang/String;IIILjava/lang/Object;)I" : "(Ljava/lang/String;III)I",
+            null,
+            null);
     hv.visitCode();
+    int savedPrepared = gatePreparedVar;
+    int savedFar = gateFarVar;
+    gatePreparedVar = prepared ? 5 : -1;
+    gateFarVar = -1;
 
-    // Slot layout: 0=this, 1=input (String), 2=state, 3=ch, 4=pos; allocator starts at 5 for temps
+    // Slot layout: 0=this, 1=input (String), 2=state, 3=ch, 4=pos[, 5=prepared]; allocator after
     int stateSlot = 2;
     int chSlot = 3;
     int posSlot = 4;
-    LocalVarAllocator helperAlloc = new LocalVarAllocator(5);
+    LocalVarAllocator helperAlloc = new LocalVarAllocator(prepared ? 6 : 5);
 
     int bucketSize = hi - lo + 1;
     Label defaultLabel = new Label();
@@ -691,6 +776,8 @@ public class DFASwitchBytecodeGenerator {
 
     hv.visitMaxs(0, 0);
     hv.visitEnd();
+    gatePreparedVar = savedPrepared;
+    gateFarVar = savedFar;
   }
 
   /**
@@ -829,28 +916,7 @@ public class DFASwitchBytecodeGenerator {
       pushInt(mv, (int) range.end);
       mv.visitJumpInsn(IF_ICMPGT, noMatch);
     } else {
-      // Multiple ranges: unroll into sequential checks
-      Label match = new Label();
-
-      for (CharSet.Range range : chars.getRanges()) {
-        Label nextRange = new Label();
-
-        // if (ch < start) goto nextRange
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-
-        // if (ch <= end) goto match
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, match);
-
-        mv.visitLabel(nextRange);
-      }
-
-      // No range matched
-      mv.visitJumpInsn(GOTO, noMatch);
-      mv.visitLabel(match);
+      BytecodeUtil.emitCharSetCheck(mv, chars, chVar, noMatch);
     }
   }
 
@@ -926,12 +992,7 @@ public class DFASwitchBytecodeGenerator {
       // $-anchor alternation families (interpreted under HugeMethodLimit) — keep this body small.
       if (!acceptState.assertionChecks.isEmpty()
           || !acceptState.acceptanceAnchorConditions.isEmpty()) {
-        String helper = emitStringAcceptHelper(acceptState);
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitMethodInsn(
-            INVOKESPECIAL, activeInternalClassName, helper, "(Ljava/lang/String;I)Z", false);
+        emitStringAcceptHelperCall(mv, acceptState, posVar);
         mv.visitJumpInsn(IFEQ, checkNext);
       }
       mv.visitInsn(ICONST_1);
@@ -956,6 +1017,15 @@ public class DFASwitchBytecodeGenerator {
       int posVar,
       Label assertionFailed,
       LocalVarAllocator allocator) {
+    int gate =
+        gatePreparedVar >= 0
+            ? DFAUnrolledBytecodeGenerator.gateIndex(bitGates(), assertion.gateDfa)
+            : -1;
+    if (gate >= 0) {
+      DFAUnrolledBytecodeGenerator.emitGateBitTest(
+          mv, gatePreparedVar, gate, posVar, assertion.isPositive(), assertionFailed);
+      return;
+    }
     generateGateDfaCheckInto(
         mv,
         assertion,
@@ -986,6 +1056,10 @@ public class DFASwitchBytecodeGenerator {
     Label gatePassed = new Label();
     Label gateAccept = positive ? gatePassed : assertionFailed;
     Label gateDead = positive ? assertionFailed : gatePassed;
+    // matchesAtStart: both exits record how far the scan read (for findFrom's work count)
+    boolean trackFar = gateFarVar >= 0 && boundVar < 0 && !charSeqInput;
+    Label scanAccept = trackFar ? new Label() : gateAccept;
+    Label scanDead = trackFar ? new Label() : gateDead;
 
     mv.visitVarInsn(ILOAD, peekStartVar);
     mv.visitVarInsn(ISTORE, gatePosSlot);
@@ -1002,7 +1076,7 @@ public class DFASwitchBytecodeGenerator {
       // Accepting gate state: the lookahead body matched (anchored at the peek start) - the
       // lookahead's decision point (existence semantics: no need to try longer gate matches).
       if (st.accepting) {
-        mv.visitJumpInsn(GOTO, gateAccept);
+        mv.visitJumpInsn(GOTO, scanAccept);
         continue;
       }
       // gatePos >= scan bound: scan exhausted without acceptance.
@@ -1013,7 +1087,7 @@ public class DFASwitchBytecodeGenerator {
         mv.visitVarInsn(ALOAD, 1); // input
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
       }
-      mv.visitJumpInsn(IF_ICMPGE, gateDead);
+      mv.visitJumpInsn(IF_ICMPGE, scanDead);
       // ch = input.charAt(gatePos); gatePos++
       mv.visitVarInsn(ALOAD, 1);
       mv.visitVarInsn(ILOAD, gatePosSlot);
@@ -1031,6 +1105,14 @@ public class DFASwitchBytecodeGenerator {
         mv.visitLabel(nextCheck);
       }
       // No transition: gate DFA died.
+      mv.visitJumpInsn(GOTO, scanDead);
+    }
+    if (trackFar) {
+      mv.visitLabel(scanAccept);
+      DFAUnrolledBytecodeGenerator.emitRaiseFar(mv, gateFarVar, gatePosSlot);
+      mv.visitJumpInsn(GOTO, gateAccept);
+      mv.visitLabel(scanDead);
+      DFAUnrolledBytecodeGenerator.emitRaiseFar(mv, gateFarVar, gatePosSlot);
       mv.visitJumpInsn(GOTO, gateDead);
     }
     mv.visitLabel(gatePassed);
@@ -1293,8 +1375,8 @@ public class DFASwitchBytecodeGenerator {
    *         // ANCHOR OPTIMIZATION: For ^ or \A, only try position 0
    *         if (requiresStartAnchor && tryPos != 0) return -1;
    *
-   *         // MULTILINE ^: Only try position 0 or after '\n'
-   *         if (hasMultilineStart && tryPos != 0 && input.charAt(tryPos-1) != '\n') {
+   *         // MULTILINE ^: Only try positions where it can match
+   *         if (hasMultilineStart && !LineTerminators.isMultilineStart(input, tryPos, 0, len)) {
    *             continue;
    *         }
    *
@@ -1360,6 +1442,15 @@ public class DFASwitchBytecodeGenerator {
     mv.visitVarInsn(ILOAD, 2);
     mv.visitVarInsn(ISTORE, tryPosVar);
 
+    // int work = 0;  (characters consumed by failed runs; past the limit the search goes linear)
+    boolean linearFallback = !requiresStartAnchor;
+    int resultVar = allocator.allocate();
+    int workVar = allocator.allocate();
+    if (linearFallback) {
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ISTORE, workVar);
+    }
+
     // OPTIMIZATION: Analyze first-character filtering at compile time
     com.datadoghq.reggie.codegen.codegen.swar.SWAROptimization swarOpt = analyzeFirstCharFilter();
     CharSet validFirstChars = computeValidFirstChars();
@@ -1393,26 +1484,17 @@ public class DFASwitchBytecodeGenerator {
       mv.visitInsn(IRETURN);
       mv.visitLabel(validPosition);
     } else if (hasMultilineStart) {
-      // Multiline ^: Only try position 0 or positions after '\n'
-      // if (tryPos != 0 && input.charAt(tryPos-1) != '\n') goto nextPosition;
+      // Multiline ^: Only try positions where it can match
+      // if (!LineTerminators.isMultilineStart(input, tryPos, 0, len)) goto next position;
       Label validPosition = new Label();
-      Label nextPosition = new Label();
-
-      // if (tryPos == 0) goto validPosition;
-      mv.visitVarInsn(ILOAD, tryPosVar);
-      mv.visitJumpInsn(IFEQ, validPosition);
-
-      // if (input.charAt(tryPos-1) == '\n') goto validPosition;
       mv.visitVarInsn(ALOAD, 1);
       mv.visitVarInsn(ILOAD, tryPosVar);
-      pushInt(mv, 1);
-      mv.visitInsn(ISUB);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPEQ, validPosition);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, lenVar);
+      invokeMultilineStart(mv);
+      mv.visitJumpInsn(IFNE, validPosition);
 
       // Not a valid anchor position - skip to next
-      mv.visitLabel(nextPosition);
       mv.visitIincInsn(tryPosVar, 1); // tryPos++
       mv.visitJumpInsn(GOTO, outerLoopStart);
 
@@ -1473,6 +1555,7 @@ public class DFASwitchBytecodeGenerator {
     }
 
     // Try matching from tryPos
+    // int r = matchesAtStart(input, tryPos);  (-1 = match, else the position the run died at)
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, tryPosVar);
@@ -1480,17 +1563,32 @@ public class DFASwitchBytecodeGenerator {
         INVOKEVIRTUAL,
         className.replace('.', '/'),
         "matchesAtStart",
-        "(Ljava/lang/String;I)Z",
+        "(Ljava/lang/String;I)I",
         false);
+    mv.visitVarInsn(ISTORE, resultVar);
 
     Label noMatchHere = new Label();
-    mv.visitJumpInsn(IFEQ, noMatchHere);
+    mv.visitVarInsn(ILOAD, resultVar);
+    mv.visitJumpInsn(IFGE, noMatchHere);
 
     // Match found - return tryPos
     mv.visitVarInsn(ILOAD, tryPosVar);
     mv.visitInsn(IRETURN);
 
     mv.visitLabel(noMatchHere);
+    if (linearFallback) {
+      DFAUnrolledBytecodeGenerator.emitLinearFallback(
+          mv,
+          tryPosVar,
+          2,
+          lenVar,
+          resultVar,
+          workVar,
+          outerLoopEnd,
+          dfa.getStartState().id,
+          dfa.getAllStates().size(),
+          hasMultilineStart);
+    }
     mv.visitIincInsn(tryPosVar, 1); // tryPos++
     mv.visitJumpInsn(GOTO, outerLoopStart);
 
@@ -1502,6 +1600,9 @@ public class DFASwitchBytecodeGenerator {
       mv.visitVarInsn(ILOAD, lenVar);
       Label notAtEnd = new Label();
       mv.visitJumpInsn(IF_ICMPNE, notAtEnd);
+      // The start state's anchor conditions (e.g. multiline ^, which never holds at the end)
+      emitAcceptanceAnchorChecks(
+          mv, dfa.getStartState().acceptanceAnchorConditions, tryPosVar, notAtEnd);
       mv.visitVarInsn(ILOAD, tryPosVar);
       mv.visitInsn(IRETURN);
       mv.visitLabel(notAtEnd);
@@ -1620,64 +1721,48 @@ public class DFASwitchBytecodeGenerator {
    */
   private void generateFirstCharFilterCheck(
       MethodVisitor mv, CharSet chars, int chVar, Label matchLabel) {
-    for (CharSet.Range range : chars.getRanges()) {
-      if (range.start == range.end) {
-        // Single character check
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPEQ, matchLabel);
-      } else {
-        // Range check: if (ch >= start && ch <= end) goto matchLabel
-        Label nextRange = new Label();
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, matchLabel);
-        mv.visitLabel(nextRange);
-      }
-    }
-    // Falls through if no range matched
+    Label noMatch = new Label();
+    BytecodeUtil.emitCharSetCheck(mv, chars, chVar, noMatch);
+    mv.visitJumpInsn(GOTO, matchLabel);
+    mv.visitLabel(noMatch);
   }
 
   /**
-   * Generate matchesAtStart() helper using switch-based state machine. Returns true as soon as an
-   * accept state is reached.
+   * Generate matchesAtStart() helper using switch-based state machine. Returns -1 as soon as an
+   * accept state is reached, else the position at which the run died (findFrom sums these to decide
+   * when to switch to DFALinearFind). Also emits the DFALinearFind.Stepper methods.
    */
   public void generateMatchesAtStartMethod(ClassWriter cw) {
     if (activeCw == null) activeCw = cw;
     MethodVisitor mv =
-        cw.visitMethod(ACC_PRIVATE, "matchesAtStart", "(Ljava/lang/String;I)Z", null, null);
+        cw.visitMethod(ACC_PRIVATE, "matchesAtStart", "(Ljava/lang/String;I)I", null, null);
     mv.visitCode();
 
     // Create allocator: slots 0=this, 1=input, 2=startPos
     LocalVarAllocator allocator = new LocalVarAllocator(3);
 
-    // if (input == null) return false;
+    // if (input == null) return startPos;
     Label notNull = new Label();
     mv.visitVarInsn(ALOAD, 1);
     mv.visitJumpInsn(IFNONNULL, notNull);
-    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, 2);
     mv.visitInsn(IRETURN);
     mv.visitLabel(notNull);
+
+    // int far = startPos; a dying run returns max(pos, far)
+    if (!bitGates().isEmpty()) {
+      gateFarVar = allocator.allocate();
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitVarInsn(ISTORE, gateFarVar);
+    }
 
     // Check if start state is accepting (per-state assertions/anchor conditions gate the
     // empty-match path)
     if (dfa.getStartState().accepting) {
       Label continueMatching = new Label();
-      for (AssertionCheck assertion : dfa.getStartState().assertionChecks) {
-        generateAssertionCheckAtCurrentPosition(mv, assertion, 2, continueMatching, allocator);
-      }
-      if (dfa.getStartState().acceptanceAnchorConditions.isEmpty()) {
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IRETURN);
-      } else {
-        emitAcceptanceAnchorChecks(
-            mv, dfa.getStartState().acceptanceAnchorConditions, 2, continueMatching);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IRETURN);
-      }
+      emitStartAcceptChecks(mv, continueMatching, allocator);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
       mv.visitLabel(continueMatching);
     }
 
@@ -1698,44 +1783,7 @@ public class DFASwitchBytecodeGenerator {
     mv.visitLabel(loopStart);
 
     // Check if current state is accepting (for partial matches)
-    Label notAccepting = new Label();
-    for (DFA.DFAState acceptState : dfa.getAcceptStates()) {
-      if (acceptState == dfa.getStartState()) continue;
-
-      Label checkNext = new Label();
-      mv.visitVarInsn(ILOAD, stateVar);
-      pushInt(mv, acceptState.id);
-      mv.visitJumpInsn(IF_ICMPNE, checkNext);
-
-      // Found accepting state — gate acceptance on per-state assertions/anchor conditions via the
-      // $ng_accA helper (checks both lookbehind and lookahead assertions: the accepting state was
-      // the TARGET of the previous transition, so generateStateCaseCode has not yet run its case
-      // — none of its assertions were checked as transition guards). On failure, continue
-      // matching: the assertion may be satisfied at a later position (e.g. a lookahead that needs
-      // more context or a lookbehind whose required predecessor character may appear at the end
-      // of a longer match).
-      if (!acceptState.assertionChecks.isEmpty()
-          || !acceptState.acceptanceAnchorConditions.isEmpty()) {
-        String helper = emitStringAcceptHelper(acceptState);
-        Label continueMatching = new Label();
-        mv.visitVarInsn(ALOAD, 0);
-        mv.visitVarInsn(ALOAD, 1);
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitMethodInsn(
-            INVOKESPECIAL, activeInternalClassName, helper, "(Ljava/lang/String;I)Z", false);
-        mv.visitJumpInsn(IFEQ, continueMatching);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IRETURN);
-        mv.visitLabel(continueMatching);
-        mv.visitJumpInsn(GOTO, notAccepting);
-      } else {
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(IRETURN);
-      }
-
-      mv.visitLabel(checkNext);
-    }
-    mv.visitLabel(notAccepting);
+    emitLoopHeadAccept(mv, stateVar, posVar, -1);
 
     // Check if at end of input
     mv.visitVarInsn(ILOAD, posVar);
@@ -1755,15 +1803,229 @@ public class DFASwitchBytecodeGenerator {
 
     // Generate switch for state transitions
     // Note: pos has been incremented, so pass posVar for assertion checking
-    generateStateSwitch(mv, stateVar, chVar, posVar, loopStart, allocator);
+    generateStateSwitch(mv, stateVar, chVar, posVar, loopStart, allocator, posVar);
 
     // End of input - check if accepting, including zero-width assertions attached to the accepting
-    // DFA state.
+    // DFA state: return linEnd(input, state, pos) ? -1 : pos;
     mv.visitLabel(loopEnd);
-    generateAcceptCheckWithAssertions(mv, stateVar, posVar, allocator);
+    Label rejectAtEnd = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, stateVar);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitMethodInsn(
+        INVOKESPECIAL, activeInternalClassName, "linEnd", "(Ljava/lang/String;II)Z", false);
+    mv.visitJumpInsn(IFEQ, rejectAtEnd);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(rejectAtEnd);
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitInsn(IRETURN);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
+    gateFarVar = -1;
+
+    generateLinearStepMethods(cw);
+  }
+
+  /** Start-state assertions and anchor conditions gating the empty match at slot 2. */
+  private void emitStartAcceptChecks(
+      MethodVisitor mv, Label conditionFailed, LocalVarAllocator allocator) {
+    for (AssertionCheck assertion : dfa.getStartState().assertionChecks) {
+      generateAssertionCheckAtCurrentPosition(mv, assertion, 2, conditionFailed, allocator);
+    }
+    if (!dfa.getStartState().acceptanceAnchorConditions.isEmpty()) {
+      emitAcceptanceAnchorChecks(
+          mv, dfa.getStartState().acceptanceAnchorConditions, 2, conditionFailed);
+    }
+  }
+
+  /**
+   * matchesAtStart's loop-head acceptance: when {@code stateVar} is an accepting non-start state
+   * whose assertions and anchor conditions hold at {@code posVar}, returns {@code acceptValue};
+   * otherwise falls through.
+   */
+  private void emitLoopHeadAccept(MethodVisitor mv, int stateVar, int posVar, int acceptValue) {
+    Label notAccepting = new Label();
+    for (DFA.DFAState acceptState : dfa.getAcceptStates()) {
+      if (acceptState == dfa.getStartState()) continue;
+
+      Label checkNext = new Label();
+      mv.visitVarInsn(ILOAD, stateVar);
+      pushInt(mv, acceptState.id);
+      mv.visitJumpInsn(IF_ICMPNE, checkNext);
+
+      // Found accepting state — gate acceptance on per-state assertions/anchor conditions via the
+      // $ng_accA helper (checks both lookbehind and lookahead assertions: the accepting state was
+      // the TARGET of the previous transition, so generateStateCaseCode has not yet run its case
+      // — none of its assertions were checked as transition guards). On failure, continue
+      // matching: the assertion may be satisfied at a later position (e.g. a lookahead that needs
+      // more context or a lookbehind whose required predecessor character may appear at the end
+      // of a longer match).
+      if (!acceptState.assertionChecks.isEmpty()
+          || !acceptState.acceptanceAnchorConditions.isEmpty()) {
+        Label continueMatching = new Label();
+        if (gateFarVar >= 0 && hasGateDfa(acceptState)) {
+          emitFarToEnd(mv);
+        }
+        emitStringAcceptHelperCall(mv, acceptState, posVar);
+        mv.visitJumpInsn(IFEQ, continueMatching);
+        pushInt(mv, acceptValue);
+        mv.visitInsn(IRETURN);
+        mv.visitLabel(continueMatching);
+        mv.visitJumpInsn(GOTO, notAccepting);
+      } else {
+        pushInt(mv, acceptValue);
+        mv.visitInsn(IRETURN);
+      }
+
+      mv.visitLabel(checkNext);
+    }
+    mv.visitLabel(notAccepting);
+  }
+
+  /**
+   * Emits the {@code DFALinearFind.Stepper} methods and their end-of-input helpers: {@code
+   * linStep(input, state, pos, prepared)} runs one iteration of matchesAtStart's loop at {@code
+   * pos} and returns ACCEPT (-2), DEAD (-1) or the next state; {@code linStartAccepts(input, pos,
+   * prepared)} is matchesAtStart's empty-match check; {@code linEnd(input, state, pos)} is
+   * matchesAtStart's end-of-input acceptance check, and {@code linEndL} the same for linStep when
+   * the DFA has {@link #bitGates}; {@code linPrepare} computes the gate results these read.
+   */
+  private void generateLinearStepMethods(ClassWriter cw) {
+    DFAUnrolledBytecodeGenerator.emitLinPrepare(cw, activeInternalClassName, bitGates());
+    // linEnd: slots 0=this, 1=input, 2=state, 3=pos
+    MethodVisitor mv = cw.visitMethod(ACC_PRIVATE, "linEnd", "(Ljava/lang/String;II)Z", null, null);
+    mv.visitCode();
+    generateAcceptCheckWithAssertions(mv, 2, 3, new LocalVarAllocator(4));
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+
+    // linEndL: slots 0=this, 1=input, 2=state, 3=pos, 4=prepared
+    boolean endL = !bitGates().isEmpty();
+    String linEndDesc = "(Ljava/lang/String;IILjava/lang/Object;)Z";
+    gatePreparedVar = 4;
+    if (endL) {
+      mv = cw.visitMethod(ACC_PRIVATE, "linEndL", linEndDesc, null, null);
+      mv.visitCode();
+      generateAcceptCheckWithAssertions(mv, 2, 3, new LocalVarAllocator(5));
+      mv.visitMaxs(0, 0);
+      mv.visitEnd();
+    }
+
+    // linStep: slots 0=this, 1=input, 2=state, 3=pos, 4=prepared
+    mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "linStep", DFAUnrolledBytecodeGenerator.LIN_STEP_DESC, null, null);
+    mv.visitCode();
+    LocalVarAllocator allocator = new LocalVarAllocator(5);
+    emitLoopHeadAccept(mv, 2, 3, -2);
+
+    // if (pos >= input.length()) return linEnd(input, state, pos) ? ACCEPT : DEAD;
+    Label notAtEnd = new Label();
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitJumpInsn(IF_ICMPLT, notAtEnd);
+    Label dead = new Label();
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
+    if (endL) {
+      mv.visitVarInsn(ALOAD, 4);
+      mv.visitMethodInsn(INVOKESPECIAL, activeInternalClassName, "linEndL", linEndDesc, false);
+    } else {
+      mv.visitMethodInsn(
+          INVOKESPECIAL, activeInternalClassName, "linEnd", "(Ljava/lang/String;II)Z", false);
+    }
+    mv.visitJumpInsn(IFEQ, dead);
+    pushInt(mv, -2);
+    mv.visitInsn(IRETURN);
+    mv.visitLabel(notAtEnd);
+
+    // char ch = input.charAt(pos); pos++;
+    int chVar = allocator.allocate();
+    int nextPosVar = allocator.allocate();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitVarInsn(ISTORE, chVar);
+    mv.visitVarInsn(ILOAD, 3);
+    mv.visitInsn(ICONST_1);
+    mv.visitInsn(IADD);
+    mv.visitVarInsn(ISTORE, nextPosVar);
+
+    // Transitions in helper mode: return the next state id, or -1
+    int stateCount = dfa.getAllStates().size();
+    Label[] cases = new Label[stateCount];
+    if (shouldSplitStateSwitch()) {
+      List<int[]> buckets = planStateBuckets();
+      Label[] bucketLabels = new Label[buckets.size()];
+      for (int b = 0; b < buckets.size(); b++) {
+        emitNonGroupBucketHelperFull(b, buckets.get(b)[0], buckets.get(b)[1]);
+        bucketLabels[b] = new Label();
+      }
+      for (int id = 0; id < stateCount; id++) {
+        cases[id] = bucketLabels[bucketIndexFor(buckets, id)];
+      }
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitTableSwitchInsn(0, stateCount - 1, dead, cases);
+      for (int b = 0; b < buckets.size(); b++) {
+        boolean prepared = bucketUsesPrepared(buckets.get(b)[0], buckets.get(b)[1]);
+        mv.visitLabel(bucketLabels[b]);
+        mv.visitVarInsn(ALOAD, 0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, 2);
+        mv.visitVarInsn(ILOAD, chVar);
+        mv.visitVarInsn(ILOAD, nextPosVar);
+        if (prepared) {
+          mv.visitVarInsn(ALOAD, 4);
+        }
+        mv.visitMethodInsn(
+            INVOKESPECIAL,
+            activeInternalClassName,
+            (prepared ? "$ng_lstep_" : "$ng_step_") + b,
+            prepared ? "(Ljava/lang/String;IIILjava/lang/Object;)I" : "(Ljava/lang/String;III)I",
+            false);
+        mv.visitInsn(IRETURN);
+      }
+    } else {
+      for (int id = 0; id < stateCount; id++) {
+        cases[id] = new Label();
+      }
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitTableSwitchInsn(0, stateCount - 1, dead, cases);
+      for (DFA.DFAState state : dfa.getAllStates()) {
+        mv.visitLabel(cases[state.id]);
+        generateStateCaseCode(mv, state, 2, chVar, nextPosVar, null, null, allocator, true);
+      }
+    }
+    mv.visitLabel(dead);
+    mv.visitInsn(ICONST_M1);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+
+    // linStartAccepts: slots 0=this, 1=input, 2=pos, 3=prepared
+    gatePreparedVar = 3;
+    mv =
+        cw.visitMethod(
+            ACC_PUBLIC, "linStartAccepts", DFAUnrolledBytecodeGenerator.LIN_START_DESC, null, null);
+    mv.visitCode();
+    if (dfa.getStartState().accepting) {
+      Label conditionFailed = new Label();
+      emitStartAcceptChecks(mv, conditionFailed, new LocalVarAllocator(4));
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(conditionFailed);
+    }
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IRETURN);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+    gatePreparedVar = -1;
   }
 
   /**
@@ -2925,34 +3187,38 @@ public class DFASwitchBytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(hasMatch);
 
-    // String substring = input.substring(matchStart, matchEnd);
-    int substringVar = allocator.allocate();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, matchStartVar);
-    mv.visitVarInsn(ILOAD, matchEndVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", false);
-    mv.visitVarInsn(ASTORE, substringVar);
-
-    // MatchResult subResult = match(substring);
+    // Group spans come from match() on the matched substring. Without groups there is nothing to
+    // collect, and the substring would drop the context that lookbehind/lookahead read.
     int subResultVar = allocator.allocate();
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, substringVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitVarInsn(ASTORE, subResultVar);
+    if (groupCount > 0) {
+      // String substring = input.substring(matchStart, matchEnd);
+      int substringVar = allocator.allocate();
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, matchStartVar);
+      mv.visitVarInsn(ILOAD, matchEndVar);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", false);
+      mv.visitVarInsn(ASTORE, substringVar);
 
-    // if (subResult == null) return null;
-    Label hasSubResult = new Label();
-    mv.visitVarInsn(ALOAD, subResultVar);
-    mv.visitJumpInsn(IFNONNULL, hasSubResult);
-    mv.visitInsn(ACONST_NULL);
-    mv.visitInsn(ARETURN);
-    mv.visitLabel(hasSubResult);
+      // MatchResult subResult = match(substring);
+      mv.visitVarInsn(ALOAD, 0);
+      mv.visitVarInsn(ALOAD, substringVar);
+      mv.visitMethodInsn(
+          INVOKEVIRTUAL,
+          className.replace('.', '/'),
+          "match",
+          "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
+          false);
+      mv.visitVarInsn(ASTORE, subResultVar);
+
+      // if (subResult == null) return null;
+      Label hasSubResult = new Label();
+      mv.visitVarInsn(ALOAD, subResultVar);
+      mv.visitJumpInsn(IFNONNULL, hasSubResult);
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+      mv.visitLabel(hasSubResult);
+    }
 
     // Create starts[] array
     int startsVar = allocator.allocate();
@@ -3757,35 +4023,24 @@ public class DFASwitchBytecodeGenerator {
           break;
         }
       case END_MULTILINE:
-        {
-          Label ok = new Label();
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
-          mv.visitJumpInsn(IF_ICMPEQ, ok);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitMethodInsn(invoke, owner, "charAt", "(I)C", isIface);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, failed);
-          mv.visitLabel(ok);
-          break;
-        }
+        // if (!LineTerminators.isMultilineEnd(input, pos, input.length())) goto failed;
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+        invokeMultilineEnd(mv);
+        mv.visitJumpInsn(IFEQ, failed);
+        break;
       case START_MULTILINE:
-        {
-          Label ok = new Label();
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitJumpInsn(IFEQ, ok);
-          mv.visitVarInsn(ALOAD, 1);
-          mv.visitVarInsn(ILOAD, posVar);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(ISUB);
-          mv.visitMethodInsn(invoke, owner, "charAt", "(I)C", isIface);
-          pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, failed);
-          mv.visitLabel(ok);
-          break;
-        }
+        // if (!LineTerminators.isMultilineStart(input, pos, 0, input.length())) goto failed;
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitVarInsn(ILOAD, posVar);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ALOAD, 1);
+        mv.visitMethodInsn(invoke, owner, "length", "()I", isIface);
+        invokeMultilineStart(mv);
+        mv.visitJumpInsn(IFEQ, failed);
+        break;
       default:
         break;
     }
@@ -3818,14 +4073,20 @@ public class DFASwitchBytecodeGenerator {
    * hybrid dfa-half and ran interpreted.
    */
   private String emitStringAcceptHelper(DFA.DFAState acceptState) {
-    String name = "$ng_accA_" + acceptState.id;
+    // Stepper variant $ng_laccA_<id>(String input, int pos, Object prepared)
+    boolean prepared = usesPrepared(acceptState);
+    String name = (prepared ? "$ng_laccA_" : "$ng_accA_") + acceptState.id;
     if (!emittedBucketHelpers.add(name)) {
       return name;
     }
     MethodVisitor hv =
-        activeCw.visitMethod(ACC_PRIVATE, name, "(Ljava/lang/String;I)Z", null, null);
+        activeCw.visitMethod(ACC_PRIVATE, name, acceptHelperDesc(prepared), null, null);
     hv.visitCode();
-    LocalVarAllocator alloc = new LocalVarAllocator(3);
+    int savedPrepared = gatePreparedVar;
+    int savedFar = gateFarVar;
+    gatePreparedVar = prepared ? 3 : -1;
+    gateFarVar = -1;
+    LocalVarAllocator alloc = new LocalVarAllocator(prepared ? 4 : 3);
     Label failed = new Label();
     for (AssertionCheck assertion : acceptState.assertionChecks) {
       generateAssertionCheckAtCurrentPosition(hv, assertion, 2, failed, alloc);
@@ -3840,7 +4101,27 @@ public class DFASwitchBytecodeGenerator {
     hv.visitInsn(IRETURN);
     hv.visitMaxs(0, 0);
     hv.visitEnd();
+    gatePreparedVar = savedPrepared;
+    gateFarVar = savedFar;
     return name;
+  }
+
+  private static String acceptHelperDesc(boolean prepared) {
+    return prepared ? "(Ljava/lang/String;ILjava/lang/Object;)Z" : "(Ljava/lang/String;I)Z";
+  }
+
+  /** Emits the call of {@link #emitStringAcceptHelper} at {@code posVar}; leaves its result. */
+  private void emitStringAcceptHelperCall(MethodVisitor mv, DFA.DFAState acceptState, int posVar) {
+    boolean prepared = usesPrepared(acceptState);
+    String helper = emitStringAcceptHelper(acceptState);
+    mv.visitVarInsn(ALOAD, 0);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, posVar);
+    if (prepared) {
+      mv.visitVarInsn(ALOAD, gatePreparedVar);
+    }
+    mv.visitMethodInsn(
+        INVOKESPECIAL, activeInternalClassName, helper, acceptHelperDesc(prepared), false);
   }
 
   /**

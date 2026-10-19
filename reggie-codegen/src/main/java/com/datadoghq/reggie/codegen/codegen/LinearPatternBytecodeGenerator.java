@@ -690,68 +690,35 @@ public class LinearPatternBytecodeGenerator {
         mv.visitJumpInsn(IFNE, ctx.failLabel);
         break;
       case END:
-        {
-          // $ (non-multiline): same as \Z — pos == len OR (pos == len-1 AND charAt(pos) == '\n')
-          Label endPassLabel = new Label();
-          mv.visitVarInsn(ILOAD, ctx.posVar);
-          mv.visitVarInsn(ILOAD, ctx.lenVar);
-          mv.visitJumpInsn(IF_ICMPEQ, endPassLabel);
-          mv.visitVarInsn(ILOAD, ctx.posVar);
-          mv.visitVarInsn(ILOAD, ctx.lenVar);
-          mv.visitInsn(ICONST_1);
-          mv.visitInsn(ISUB);
-          mv.visitJumpInsn(IF_ICMPNE, ctx.failLabel);
-          mv.visitVarInsn(ALOAD, ctx.inputVar);
-          mv.visitVarInsn(ILOAD, ctx.posVar);
-          mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-          BytecodeUtil.pushInt(mv, '\n');
-          mv.visitJumpInsn(IF_ICMPNE, ctx.failLabel);
-          mv.visitLabel(endPassLabel);
-          break;
-        }
-      case START_MULTILINE:
-        // if (pos != 0 && (pos == 0 || input.charAt(pos-1) != '\n')) fail;
-        // Simplified: if (pos == 0 || input.charAt(pos-1) == '\n') pass; else fail;
-        Label startOk = new Label();
-
-        // if (pos == 0) goto startOk;
-        mv.visitVarInsn(ILOAD, ctx.posVar);
-        mv.visitJumpInsn(IFEQ, startOk);
-
-        // if (input.charAt(pos-1) == '\n') goto startOk;
+        // if (!LineTerminators.isEnd(input, pos, len)) fail;
         mv.visitVarInsn(ALOAD, ctx.inputVar);
-        mv.visitVarInsn(ILOAD, ctx.posVar);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(ISUB);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        BytecodeUtil.pushInt(mv, '\n');
-        mv.visitJumpInsn(IF_ICMPEQ, startOk);
-
-        // fail;
-        mv.visitJumpInsn(GOTO, ctx.failLabel);
-
-        mv.visitLabel(startOk);
-        break;
-      case END_MULTILINE:
-        // if (pos == len || input.charAt(pos) == '\n') pass; else fail;
-        Label endOk = new Label();
-
-        // if (pos == len) goto endOk;
         mv.visitVarInsn(ILOAD, ctx.posVar);
         mv.visitVarInsn(ILOAD, ctx.lenVar);
-        mv.visitJumpInsn(IF_ICMPEQ, endOk);
-
-        // if (input.charAt(pos) == '\n') goto endOk;
+        BytecodeUtil.invokeEnd(mv);
+        mv.visitJumpInsn(IFEQ, ctx.failLabel);
+        break;
+      case START_MULTILINE:
+        // if (!LineTerminators.isMultilineStart(input, pos, 0, len)) fail;
         mv.visitVarInsn(ALOAD, ctx.inputVar);
         mv.visitVarInsn(ILOAD, ctx.posVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        BytecodeUtil.pushInt(mv, '\n');
-        mv.visitJumpInsn(IF_ICMPEQ, endOk);
-
-        // fail;
-        mv.visitJumpInsn(GOTO, ctx.failLabel);
-
-        mv.visitLabel(endOk);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ILOAD, ctx.lenVar);
+        BytecodeUtil.invokeMultilineStart(mv);
+        mv.visitJumpInsn(IFEQ, ctx.failLabel);
+        break;
+      case END_ABSOLUTE:
+        // if (pos != len) fail;
+        mv.visitVarInsn(ILOAD, ctx.posVar);
+        mv.visitVarInsn(ILOAD, ctx.lenVar);
+        mv.visitJumpInsn(IF_ICMPNE, ctx.failLabel);
+        break;
+      case END_MULTILINE:
+        // if (!LineTerminators.isMultilineEnd(input, pos, len)) fail;
+        mv.visitVarInsn(ALOAD, ctx.inputVar);
+        mv.visitVarInsn(ILOAD, ctx.posVar);
+        mv.visitVarInsn(ILOAD, ctx.lenVar);
+        BytecodeUtil.invokeMultilineEnd(mv);
+        mv.visitJumpInsn(IFEQ, ctx.failLabel);
         break;
     }
   }
@@ -903,29 +870,7 @@ public class LinearPatternBytecodeGenerator {
       // \s: whitespace
       generateWhitespaceCheck(mv, chVar, failLabel);
     } else {
-      // Generic character set check - generate range checks for all ranges in the CharSet
-      // TODO: Optimize this for performance (e.g., bitmap-based checks for small ranges)
-      Label matched = new Label();
-
-      // For each range in the character set, check if ch is in range
-      for (CharSet.Range range : charSet.getRanges()) {
-        // if (ch >= range.start && ch <= range.end) goto matched;
-        mv.visitVarInsn(ILOAD, chVar);
-        BytecodeUtil.pushInt(mv, range.start);
-        Label notInRange = new Label();
-        mv.visitJumpInsn(IF_ICMPLT, notInRange);
-
-        mv.visitVarInsn(ILOAD, chVar);
-        BytecodeUtil.pushInt(mv, range.end);
-        mv.visitJumpInsn(IF_ICMPLE, matched);
-
-        mv.visitLabel(notInRange);
-      }
-
-      // No range matched - fail
-      mv.visitJumpInsn(GOTO, failLabel);
-
-      mv.visitLabel(matched);
+      BytecodeUtil.emitCharSetCheck(mv, charSet, chVar, failLabel);
     }
   }
 
@@ -1043,64 +988,93 @@ public class LinearPatternBytecodeGenerator {
             null);
     mv.visitCode();
 
-    // if (!matches(input)) return null;
-    Label matchSuccess = new Label();
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, className.replace('.', '/'), "matches", "(Ljava/lang/String;)Z", false);
-    mv.visitJumpInsn(IFNE, matchSuccess);
+    // if (input == null) return null;
+    Label notNull = new Label();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitJumpInsn(IFNONNULL, notNull);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
+    mv.visitLabel(notNull);
 
-    mv.visitLabel(matchSuccess);
+    Label fail = new Label();
+    LocalVarAllocator allocator = new LocalVarAllocator(2);
+    int groupStartsVar = allocator.allocate();
+    int groupEndsVar = allocator.allocate();
+    emitFullMatch(mv, 1, groupStartsVar, groupEndsVar, allocator, fail);
 
-    // new MatchResultImpl(input, new int[]{0, ...}, new int[]{input.length(), ...}, groupCount)
+    // return new MatchResultImpl(input, groupStarts, groupEnds, groupCount);
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
     mv.visitInsn(DUP);
-    mv.visitVarInsn(ALOAD, 1); // input
-
-    // starts array
-    BytecodeUtil.pushInt(mv, patternInfo.groupCount + 1);
-    mv.visitIntInsn(NEWARRAY, T_INT);
-    mv.visitInsn(DUP);
-    mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0);
-    mv.visitInsn(IASTORE);
-    for (int i = 1; i <= patternInfo.groupCount; i++) {
-      mv.visitInsn(DUP);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IASTORE);
-    }
-
-    // ends array
-    BytecodeUtil.pushInt(mv, patternInfo.groupCount + 1);
-    mv.visitIntInsn(NEWARRAY, T_INT);
-    mv.visitInsn(DUP);
-    mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitInsn(IASTORE);
-    for (int i = 1; i <= patternInfo.groupCount; i++) {
-      mv.visitInsn(DUP);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IASTORE);
-    }
-
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitVarInsn(ALOAD, groupEndsVar);
     BytecodeUtil.pushInt(mv, patternInfo.groupCount);
-
     mv.visitMethodInsn(
         INVOKESPECIAL,
         "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
         "(Ljava/lang/String;[I[II)V",
         false);
+    mv.visitInsn(ARETURN);
 
+    mv.visitLabel(fail);
+    mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
+  }
+
+  /**
+   * Emits the operations as a full match of the String in {@code inputVar}, with the spans of every
+   * group (group 0 = {@code 0..length}) in two new arrays stored in {@code groupStartsVar} and
+   * {@code groupEndsVar}. Jumps to {@code fail} if the input does not match.
+   */
+  private void emitFullMatch(
+      MethodVisitor mv,
+      int inputVar,
+      int groupStartsVar,
+      int groupEndsVar,
+      LocalVarAllocator allocator,
+      Label fail) {
+    int lenVar = allocator.allocate();
+    int posVar = allocator.allocate();
+
+    // int len = input.length(); int pos = 0;
+    mv.visitVarInsn(ALOAD, inputVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    mv.visitVarInsn(ISTORE, lenVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, posVar);
+
+    // groupStarts = new int[groupCount + 1]; groupEnds = new int[groupCount + 1]; both -1
+    for (int var : new int[] {groupStartsVar, groupEndsVar}) {
+      BytecodeUtil.pushInt(mv, patternInfo.groupCount + 1);
+      mv.visitIntInsn(NEWARRAY, T_INT);
+      mv.visitInsn(DUP);
+      mv.visitVarInsn(ASTORE, var);
+      mv.visitInsn(ICONST_M1);
+      mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "fill", "([II)V", false);
+    }
+
+    VarContext ctx =
+        new VarContext(
+            inputVar, lenVar, posVar, groupStartsVar, groupEndsVar, allocator.peek(), fail);
+    generateOperations(mv, patternInfo.operations, ctx);
+
+    // if (pos != len) fail;
+    mv.visitVarInsn(ILOAD, posVar);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitJumpInsn(IF_ICMPNE, fail);
+
+    // groupStarts[0] = 0; groupEnds[0] = len;
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(ICONST_0);
+    mv.visitInsn(IASTORE);
+    mv.visitVarInsn(ALOAD, groupEndsVar);
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitInsn(IASTORE);
   }
 
   /** Generate matchesBounded() method. */
@@ -1130,7 +1104,7 @@ public class LinearPatternBytecodeGenerator {
     mv.visitEnd();
   }
 
-  /** Generate matchBounded() method. */
+  /** Generate matchBounded() method: match() of the region, with spans shifted by start. */
   public void generateMatchBoundedMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
         cw.visitMethod(
@@ -1141,68 +1115,76 @@ public class LinearPatternBytecodeGenerator {
             null);
     mv.visitCode();
 
-    // if (!matchesBounded(input, start, end)) return null;
-    Label matchSuccess = new Label();
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitVarInsn(ILOAD, 2); // start
-    mv.visitVarInsn(ILOAD, 3); // end
+    // String region = input.subSequence(start, end).toString();
+    LocalVarAllocator allocator = new LocalVarAllocator(4);
+    int regionVar = allocator.allocate();
+    int groupStartsVar = allocator.allocate();
+    int groupEndsVar = allocator.allocate();
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ILOAD, 3);
     mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "matchesBounded",
-        "(Ljava/lang/CharSequence;II)Z",
-        false);
-    mv.visitJumpInsn(IFNE, matchSuccess);
-    mv.visitInsn(ACONST_NULL);
-    mv.visitInsn(ARETURN);
+        INVOKEINTERFACE,
+        "java/lang/CharSequence",
+        "subSequence",
+        "(II)Ljava/lang/CharSequence;",
+        true);
+    mv.visitMethodInsn(
+        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
+    mv.visitVarInsn(ASTORE, regionVar);
 
-    mv.visitLabel(matchSuccess);
+    int iVar = allocator.allocate();
+    Label fail = new Label();
+    emitFullMatch(mv, regionVar, groupStartsVar, groupEndsVar, allocator, fail);
 
-    // new MatchResultImpl(input.toString(), starts, ends, groupCount)
+    // for (i = 0; i <= groupCount; i++) if (groupStarts[i] >= 0) { groupStarts[i] += start;
+    // groupEnds[i] += start; }
+    Label loop = new Label();
+    Label next = new Label();
+    Label done = new Label();
+    mv.visitInsn(ICONST_0);
+    mv.visitVarInsn(ISTORE, iVar);
+    mv.visitLabel(loop);
+    mv.visitVarInsn(ILOAD, iVar);
+    BytecodeUtil.pushInt(mv, patternInfo.groupCount);
+    mv.visitJumpInsn(IF_ICMPGT, done);
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitVarInsn(ILOAD, iVar);
+    mv.visitInsn(IALOAD);
+    mv.visitJumpInsn(IFLT, next);
+    for (int var : new int[] {groupStartsVar, groupEndsVar}) {
+      mv.visitVarInsn(ALOAD, var);
+      mv.visitVarInsn(ILOAD, iVar);
+      mv.visitInsn(DUP2);
+      mv.visitInsn(IALOAD);
+      mv.visitVarInsn(ILOAD, 2);
+      mv.visitInsn(IADD);
+      mv.visitInsn(IASTORE);
+    }
+    mv.visitLabel(next);
+    mv.visitIincInsn(iVar, 1);
+    mv.visitJumpInsn(GOTO, loop);
+    mv.visitLabel(done);
+
+    // return new MatchResultImpl(input.toString(), groupStarts, groupEnds, groupCount);
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
     mv.visitInsn(DUP);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitMethodInsn(
         INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-
-    // starts array
-    BytecodeUtil.pushInt(mv, patternInfo.groupCount + 1);
-    mv.visitIntInsn(NEWARRAY, T_INT);
-    mv.visitInsn(DUP);
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ILOAD, 2); // start
-    mv.visitInsn(IASTORE);
-    for (int i = 1; i <= patternInfo.groupCount; i++) {
-      mv.visitInsn(DUP);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IASTORE);
-    }
-
-    // ends array
-    BytecodeUtil.pushInt(mv, patternInfo.groupCount + 1);
-    mv.visitIntInsn(NEWARRAY, T_INT);
-    mv.visitInsn(DUP);
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ILOAD, 3); // end
-    mv.visitInsn(IASTORE);
-    for (int i = 1; i <= patternInfo.groupCount; i++) {
-      mv.visitInsn(DUP);
-      BytecodeUtil.pushInt(mv, i);
-      mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IASTORE);
-    }
-
+    mv.visitVarInsn(ALOAD, groupStartsVar);
+    mv.visitVarInsn(ALOAD, groupEndsVar);
     BytecodeUtil.pushInt(mv, patternInfo.groupCount);
-
     mv.visitMethodInsn(
         INVOKESPECIAL,
         "com/datadoghq/reggie/runtime/MatchResultImpl",
         "<init>",
         "(Ljava/lang/String;[I[II)V",
         false);
+    mv.visitInsn(ARETURN);
 
+    mv.visitLabel(fail);
+    mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -1247,31 +1229,43 @@ public class LinearPatternBytecodeGenerator {
             null,
             null);
     mv.visitCode();
+    generateFindFromSearch(mv, false);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
 
-    // if (input == null) return null;
+  /**
+   * Shared search loop of findMatchFrom ({@code boundsMode == false}: returns a MatchResult or
+   * null) and findBoundsFrom ({@code boundsMode == true}: writes {@code bounds[0..1]} from slot 3
+   * and returns a boolean).
+   */
+  private void generateFindFromSearch(MethodVisitor mv, boolean boundsMode) {
+    // if (input == null) return null / false;
     Label notNull = new Label();
     mv.visitVarInsn(ALOAD, 1);
     mv.visitJumpInsn(IFNONNULL, notNull);
-    mv.visitInsn(ACONST_NULL);
-    mv.visitInsn(ARETURN);
+    mv.visitInsn(boundsMode ? ICONST_0 : ACONST_NULL);
+    mv.visitInsn(boundsMode ? IRETURN : ARETURN);
     mv.visitLabel(notNull);
 
     // Variable slot allocation:
     // 0: this
     // 1: input (String)
     // 2: startPos (int)
+    // [3: bounds (int[]) in boundsMode; later slots shift by one]
     // 3: len (int)
     // 4: searchPos (int) - outer loop for trying different start positions
     // 5: groupStarts (int[])
     // 6: groupEnds (int[])
     // 7: pos (int) - current position during matching
     // 8+: temporaries
-    int lenVar = 3;
-    int searchPosVar = 4;
-    int groupStartsVar = 5;
-    int groupEndsVar = 6;
-    int posVar = 7;
-    int nextFreeVar = 8;
+    int base = boundsMode ? 4 : 3;
+    int lenVar = base;
+    int searchPosVar = base + 1;
+    int groupStartsVar = base + 2;
+    int groupEndsVar = base + 3;
+    int posVar = base + 4;
+    int nextFreeVar = base + 5;
 
     // int len = input.length();
     // S: [] -> [I]
@@ -1362,48 +1356,62 @@ public class LinearPatternBytecodeGenerator {
         new VarContext(1, lenVar, posVar, groupStartsVar, groupEndsVar, nextFreeVar, matchFailed);
     generateOperations(mv, patternInfo.operations, ctx);
 
-    // Match succeeded!
-    // Set group 0 bounds: groupStarts[0] = searchPos; groupEnds[0] = pos;
-    // S: [] -> [A:int[]]
-    mv.visitVarInsn(ALOAD, groupStartsVar);
-    // S: [A:int[]] -> [A:int[], I]
-    mv.visitInsn(ICONST_0);
-    // S: [A:int[], I] -> [A:int[], I, I]
-    mv.visitVarInsn(ILOAD, searchPosVar);
-    // S: [A:int[], I, I] -> []
-    mv.visitInsn(IASTORE);
+    if (boundsMode) {
+      // bounds[0] = searchPos; bounds[1] = pos; return true;
+      mv.visitVarInsn(ALOAD, 3);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, searchPosVar);
+      mv.visitInsn(IASTORE);
+      mv.visitVarInsn(ALOAD, 3);
+      mv.visitInsn(ICONST_1);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(IASTORE);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IRETURN);
+    } else {
+      // Match succeeded!
+      // Set group 0 bounds: groupStarts[0] = searchPos; groupEnds[0] = pos;
+      // S: [] -> [A:int[]]
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      // S: [A:int[]] -> [A:int[], I]
+      mv.visitInsn(ICONST_0);
+      // S: [A:int[], I] -> [A:int[], I, I]
+      mv.visitVarInsn(ILOAD, searchPosVar);
+      // S: [A:int[], I, I] -> []
+      mv.visitInsn(IASTORE);
 
-    // S: [] -> [A:int[]]
-    mv.visitVarInsn(ALOAD, groupEndsVar);
-    // S: [A:int[]] -> [A:int[], I]
-    mv.visitInsn(ICONST_0);
-    // S: [A:int[], I] -> [A:int[], I, I]
-    mv.visitVarInsn(ILOAD, posVar);
-    // S: [A:int[], I, I] -> []
-    mv.visitInsn(IASTORE);
+      // S: [] -> [A:int[]]
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      // S: [A:int[]] -> [A:int[], I]
+      mv.visitInsn(ICONST_0);
+      // S: [A:int[], I] -> [A:int[], I, I]
+      mv.visitVarInsn(ILOAD, posVar);
+      // S: [A:int[], I, I] -> []
+      mv.visitInsn(IASTORE);
 
-    // return new MatchResultImpl(input, groupStarts, groupEnds, groupCount);
-    // S: [] -> [A:MatchResultImpl]
-    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
-    // S: [...] -> [..., A:MatchResultImpl]
-    mv.visitInsn(DUP);
-    // S: [...] -> [..., A:String]
-    mv.visitVarInsn(ALOAD, 1); // input
-    // S: [...] -> [..., A:int[]]
-    mv.visitVarInsn(ALOAD, groupStartsVar);
-    // S: [...] -> [..., A:int[]]
-    mv.visitVarInsn(ALOAD, groupEndsVar);
-    // S: [...] -> [..., I]
-    BytecodeUtil.pushInt(mv, patternInfo.groupCount);
-    // S: [...] -> [A:MatchResultImpl]
-    mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "com/datadoghq/reggie/runtime/MatchResultImpl",
-        "<init>",
-        "(Ljava/lang/String;[I[II)V",
-        false);
-    // S: [A:MatchResultImpl] -> []
-    mv.visitInsn(ARETURN);
+      // return new MatchResultImpl(input, groupStarts, groupEnds, groupCount);
+      // S: [] -> [A:MatchResultImpl]
+      mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
+      // S: [...] -> [..., A:MatchResultImpl]
+      mv.visitInsn(DUP);
+      // S: [...] -> [..., A:String]
+      mv.visitVarInsn(ALOAD, 1); // input
+      // S: [...] -> [..., A:int[]]
+      mv.visitVarInsn(ALOAD, groupStartsVar);
+      // S: [...] -> [..., A:int[]]
+      mv.visitVarInsn(ALOAD, groupEndsVar);
+      // S: [...] -> [..., I]
+      BytecodeUtil.pushInt(mv, patternInfo.groupCount);
+      // S: [...] -> [A:MatchResultImpl]
+      mv.visitMethodInsn(
+          INVOKESPECIAL,
+          "com/datadoghq/reggie/runtime/MatchResultImpl",
+          "<init>",
+          "(Ljava/lang/String;[I[II)V",
+          false);
+      // S: [A:MatchResultImpl] -> []
+      mv.visitInsn(ARETURN);
+    }
 
     // Match failed - try next position
     mv.visitLabel(matchFailed);
@@ -1413,53 +1421,17 @@ public class LinearPatternBytecodeGenerator {
 
     // No match found
     mv.visitLabel(searchEnd);
-    // S: [] -> [A:null]
-    mv.visitInsn(ACONST_NULL);
-    // S: [A:null] -> []
-    mv.visitInsn(ARETURN);
-
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
+    // S: [] -> [A:null] / [I]
+    mv.visitInsn(boundsMode ? ICONST_0 : ACONST_NULL);
+    mv.visitInsn(boundsMode ? IRETURN : ARETURN);
   }
 
-  /** Generate findBoundsFrom() method. */
+  /** Generate findBoundsFrom() method: findMatchFrom's search, writing bounds instead. */
   public void generateFindBoundsFromMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
         cw.visitMethod(ACC_PUBLIC, "findBoundsFrom", "(Ljava/lang/String;I[I)Z", null, null);
     mv.visitCode();
-
-    // int pos = findFrom(input, start);
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitVarInsn(ILOAD, 2); // start
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, className.replace('.', '/'), "findFrom", "(Ljava/lang/String;I)I", false);
-    mv.visitVarInsn(ISTORE, 4); // pos
-
-    // if (pos < 0) return false;
-    Label found = new Label();
-    mv.visitVarInsn(ILOAD, 4);
-    mv.visitJumpInsn(IFGE, found);
-    mv.visitInsn(ICONST_0);
-    mv.visitInsn(IRETURN);
-
-    mv.visitLabel(found);
-
-    // bounds[0] = pos;
-    mv.visitVarInsn(ALOAD, 3); // bounds
-    mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ILOAD, 4); // pos
-    mv.visitInsn(IASTORE);
-
-    // bounds[1] = input.length(); // TODO: calculate actual end
-    mv.visitVarInsn(ALOAD, 3); // bounds
-    mv.visitInsn(ICONST_1);
-    mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-    mv.visitInsn(IASTORE);
-
-    mv.visitInsn(ICONST_1);
-    mv.visitInsn(IRETURN);
+    generateFindFromSearch(mv, true);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
   }

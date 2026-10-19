@@ -15,6 +15,8 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -1007,9 +1009,9 @@ public class DeterministicChainBytecodeGenerator {
 
   /**
    * Emits the per-position branch tries in pattern (priority) order. Each branch: ^ guard (p == 0
-   * for anchored branches), first-set gate (unanchored), chain try, $-check, success shape. A
-   * branch's inner retry chain is suspended (its alternatives are dead once the branch failed) and
-   * its failures flow to {@code tryFail} (the scan's advance block).
+   * for anchored branches), first-set gate (unanchored), line-start guard (multiline ^), chain try,
+   * $-check, success shape. A branch's inner retry chain is suspended (its alternatives are dead
+   * once the branch failed) and its failures flow to {@code tryFail} (the scan's advance block).
    */
   private void emitBranchTries(
       MethodVisitor mv,
@@ -1047,6 +1049,20 @@ public class DeterministicChainBytecodeGenerator {
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
         mv.visitVarInsn(ISTORE, cVar);
         emitCharInRuns(mv, cVar, runs, branchFail);
+        if (b.multilineStart) {
+          // Multiline ^: a line start at p (absolute bounds, like the p == 0 check above).
+          mv.visitVarInsn(ALOAD, ctx.inputVar);
+          mv.visitVarInsn(ILOAD, pVar);
+          mv.visitInsn(ICONST_0);
+          mv.visitVarInsn(ILOAD, ctx.lenVar);
+          mv.visitMethodInsn(
+              INVOKESTATIC,
+              "com/datadoghq/reggie/runtime/LineTerminators",
+              "isMultilineStart",
+              "(Ljava/lang/CharSequence;III)Z",
+              false);
+          mv.visitJumpInsn(IFEQ, branchFail);
+        }
       }
       // Reset the try: a failed earlier branch leaves a partially consumed pos and stale
       // capture slots (groups outside this branch must end unmatched).
@@ -1294,68 +1310,29 @@ public class DeterministicChainBytecodeGenerator {
 
   /**
    * Emits the {@code $} check on the try-end position, jumping to {@code failTarget} when the match
-   * end is not a valid {@code $} position: non-multiline = region end only; multiline = region end
-   * or immediately before a line terminator (LF, CR, NEL, LS, PS — the JDK's set).
+   * end is not a valid {@code $} position: non-multiline = {@code LineTerminators.isEnd}; multiline
+   * = {@code LineTerminators.isMultilineEnd}.
    */
   private void emitEndAnchorCheck(EmitCtx ctx, Label failTarget, boolean multilineEnd) {
     MethodVisitor mv = ctx.mv;
-    Label ok = new Label();
-    mv.visitVarInsn(ILOAD, ctx.posVar);
-    mv.visitVarInsn(ILOAD, ctx.lenVar);
-    mv.visitJumpInsn(IF_ICMPEQ, ok);
     if (!multilineEnd) {
-      // Non-multiline $ also matches just before the input's FINAL line terminator — a lone
-      // terminator at pos == len-1, or a CR-LF pair at pos == len-2 (Java Matcher semantics:
-      // "x\n" matches /x$/ at len-1, "x\r\n" matches /x$/ at len-2).
-      Label tryLastTerm = new Label();
-      mv.visitVarInsn(ILOAD, ctx.posVar);
-      mv.visitVarInsn(ILOAD, ctx.lenVar);
-      pushInt(mv, 1);
-      mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, tryLastTerm);
-      // pos == len-1: charAt(pos) must be a line terminator
-      emitCharAt(ctx, ctx.posVar, ctx.cVar);
-      int[] terminators = {'\n', '\r', '\u0085', '\u2028', '\u2029'};
-      for (int t : terminators) {
-        mv.visitVarInsn(ILOAD, ctx.cVar);
-        pushInt(mv, t);
-        mv.visitJumpInsn(IF_ICMPEQ, ok);
-      }
-      mv.visitLabel(tryLastTerm);
-      // pos == len-2: must be CR at pos followed by LF at pos+1
+      // isEnd holds only at len, len-1 or len-2: reject earlier positions without the call (a lazy
+      // loop runs this check at every scan position).
       mv.visitVarInsn(ILOAD, ctx.posVar);
       mv.visitVarInsn(ILOAD, ctx.lenVar);
       pushInt(mv, 2);
       mv.visitInsn(ISUB);
-      mv.visitJumpInsn(IF_ICMPNE, failTarget);
-      emitCharAt(ctx, ctx.posVar, ctx.cVar);
-      mv.visitVarInsn(ILOAD, ctx.cVar);
-      pushInt(mv, '\r');
-      mv.visitJumpInsn(IF_ICMPNE, failTarget);
-      mv.visitVarInsn(ALOAD, ctx.inputVar);
-      mv.visitVarInsn(ILOAD, ctx.posVar);
-      pushInt(mv, 1);
-      mv.visitInsn(IADD);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPNE, failTarget);
-      mv.visitJumpInsn(GOTO, ok);
+      mv.visitJumpInsn(IF_ICMPLT, failTarget);
     }
+    mv.visitVarInsn(ALOAD, ctx.inputVar);
+    mv.visitVarInsn(ILOAD, ctx.posVar);
+    mv.visitVarInsn(ILOAD, ctx.lenVar);
     if (multilineEnd) {
-      // pos < len here: check charAt(pos) against the JDK line-terminator set.
-      mv.visitVarInsn(ALOAD, ctx.inputVar);
-      mv.visitVarInsn(ILOAD, ctx.posVar);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      mv.visitVarInsn(ISTORE, ctx.cVar);
-      int[] terminators = {'\n', '\r', '\u0085', '\u2028', '\u2029'};
-      for (int t : terminators) {
-        mv.visitVarInsn(ILOAD, ctx.cVar);
-        pushInt(mv, t);
-        mv.visitJumpInsn(IF_ICMPEQ, ok);
-      }
+      invokeMultilineEnd(mv);
+    } else {
+      invokeEnd(mv);
     }
-    mv.visitJumpInsn(GOTO, failTarget);
-    mv.visitLabel(ok);
+    mv.visitJumpInsn(IFEQ, failTarget);
   }
 
   // =====================================================================================
@@ -2380,11 +2357,11 @@ public class DeterministicChainBytecodeGenerator {
     // slots to their pre-try state, or a rejected try leaks its writes into the next iteration
     // (e.g. ^(\S+?)(?::(\d+))?$ on "relative:12x": the k where the optional group matched ":12"
     // is rejected by the lazy predicate, but the next iteration's winning skip path restores the
-    // group to THIS try's stale write instead of unsetting it — JDK reports null). Structural
-    // tail failures already unwind through the tail's own retry/restore chains (OPT skip path);
-    // the lazy-predicate rejection (POS_EQ_LEN / END_ANCHOR) fires after the tail succeeded and
-    // bypasses them, so the snapshot/restore here is the single point that covers every failure
-    // mode of a try.
+    // group to THIS try's stale write instead of unsetting it — JDK reports null). Tail failures,
+    // including the lazy-predicate rejection (POS_EQ_LEN / END_ANCHOR), unwind through the tail's
+    // own retry/restore chains (OPT skip path) and exhaust here, but a tail without retryables
+    // jumps here directly, so the snapshot/restore here is the single point that covers every
+    // failure mode of a try.
     int snapBase = emitSaveCaptures(ctx);
     if (e.min > 0) {
       // Mandatory iterations (x+?): consume exactly min loop-class chars before the first tail
@@ -2430,16 +2407,20 @@ public class DeterministicChainBytecodeGenerator {
     // enclosing LIT_ALT/OPT/give-back retry and the scan could never advance.
     ctx.retryFail = tailFail;
     emitTailWalk(ctx, prepend(new TailLevel(seq, i + 1, closingAtEnd, null), contLevels), tailFail);
+    // A predicate rejection re-enters the tail's innermost live retry (an ALT_CHAIN's next
+    // alternative, an OPT's skip path, ...) before the scan advances: a+?(?:b?|c) on "ac" must
+    // retry c after b? matched empty. Those retries exhaust into tailFail.
+    Label predicateFail = effFail(ctx, tailFail);
     switch (ctx.lazyPredicate) {
       case NONE:
         break;
       case POS_EQ_LEN:
         mv.visitVarInsn(ILOAD, ctx.posVar);
         mv.visitVarInsn(ILOAD, ctx.lenVar);
-        mv.visitJumpInsn(IF_ICMPNE, tailFail);
+        mv.visitJumpInsn(IF_ICMPNE, predicateFail);
         break;
       case END_ANCHOR:
-        emitEndAnchorCheck(ctx, tailFail, ctx.lazyMultiline);
+        emitEndAnchorCheck(ctx, predicateFail, ctx.lazyMultiline);
         break;
     }
     mv.visitJumpInsn(GOTO, loopDone);
@@ -2560,10 +2541,15 @@ public class DeterministicChainBytecodeGenerator {
     mv.visitIincInsn(ctx.posVar, 1);
   }
 
+  /** The five line terminators, a loop exit set {@link #emitGreedyLoop} can scan for. */
+  private static final CharSet LINE_TERMINATOR_CHARS = CharSet.ANY_EXCEPT_NEWLINE.complement();
+
   /**
    * Emits the greedy no-give-back loop: consume the maximal run, then check min (0 or 1). The
    * detector's disjointness admission guarantees the loop class and the rest of the chain share no
-   * first char, so the maximal run is the only candidate — no position restore, no give-back.
+   * first char, so the maximal run is the only candidate — no position restore, no give-back. An
+   * unbounded loop whose complement is empty, one char or the five line terminators consumes the
+   * run in one scan instead of char by char.
    */
   private void emitGreedyLoop(EmitCtx ctx, CharSet cs, int min, int max, Label failLabel) {
     MethodVisitor mv = ctx.mv;
@@ -2574,6 +2560,40 @@ public class DeterministicChainBytecodeGenerator {
     }
     Label loopStart = new Label();
     Label loopEnd = new Label();
+    CharSet exit = max < 0 ? cs.complement() : null;
+    if (exit != null && exit.isEmpty()) {
+      // An unbounded loop over every char consumes the rest of the input.
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      mv.visitJumpInsn(GOTO, loopEnd);
+    } else if (exit != null && exit.isSingleChar()) {
+      // An unbounded loop over every char but c runs to the next c: pos = indexOf(c, pos, len),
+      // or len if there is none.
+      mv.visitVarInsn(ALOAD, ctx.inputVar);
+      pushInt(mv, exit.getSingleChar());
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(III)I", false);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitJumpInsn(IFGE, loopEnd);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      mv.visitJumpInsn(GOTO, loopEnd);
+    } else if (exit != null && exit.equals(LINE_TERMINATOR_CHARS)) {
+      // An unbounded loop over every char but the five line terminators runs to the next one.
+      mv.visitVarInsn(ALOAD, ctx.inputVar);
+      mv.visitVarInsn(ILOAD, ctx.posVar);
+      mv.visitVarInsn(ILOAD, ctx.lenVar);
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "com/datadoghq/reggie/runtime/LineTerminators",
+          "indexOfTerminator",
+          "(Ljava/lang/String;II)I",
+          false);
+      mv.visitVarInsn(ISTORE, ctx.posVar);
+      mv.visitJumpInsn(GOTO, loopEnd);
+    }
     mv.visitLabel(loopStart);
     if (max >= 0) {
       // Bounded loop ({5} / {2,4}): consumption caps at max — an extra compare per iteration,
@@ -2615,39 +2635,11 @@ public class DeterministicChainBytecodeGenerator {
   }
 
   /**
-   * Emits an unrolled check of the char in {@code cVar} against {@code cs} (already
-   * negation-resolved), jumping to {@code failLabel} when the char is NOT in the set: single char,
-   * single range, or unrolled multi-range.
+   * Emits a check of the char in {@code cVar} against {@code cs} (already negation-resolved),
+   * jumping to {@code failLabel} when the char is NOT in the set.
    */
   private void emitCharSetCheck(EmitCtx ctx, CharSet cs, int cVar, Label failLabel) {
-    MethodVisitor mv = ctx.mv;
-    if (cs.isSingleChar()) {
-      mv.visitVarInsn(ILOAD, cVar);
-      pushInt(mv, cs.getSingleChar());
-      mv.visitJumpInsn(IF_ICMPNE, failLabel);
-    } else if (cs.isSimpleRange()) {
-      CharSet.Range range = cs.getSimpleRange();
-      mv.visitVarInsn(ILOAD, cVar);
-      pushInt(mv, range.start);
-      mv.visitJumpInsn(IF_ICMPLT, failLabel);
-      mv.visitVarInsn(ILOAD, cVar);
-      pushInt(mv, range.end);
-      mv.visitJumpInsn(IF_ICMPGT, failLabel);
-    } else {
-      Label inSet = new Label();
-      for (CharSet.Range range : cs.getRanges()) {
-        Label tryNext = new Label();
-        mv.visitVarInsn(ILOAD, cVar);
-        pushInt(mv, range.start);
-        mv.visitJumpInsn(IF_ICMPLT, tryNext);
-        mv.visitVarInsn(ILOAD, cVar);
-        pushInt(mv, range.end);
-        mv.visitJumpInsn(IF_ICMPLE, inSet);
-        mv.visitLabel(tryNext);
-      }
-      mv.visitJumpInsn(GOTO, failLabel);
-      mv.visitLabel(inSet);
-    }
+    BytecodeUtil.emitCharSetCheck(ctx.mv, cs, cVar, failLabel);
   }
 
   // =====================================================================================

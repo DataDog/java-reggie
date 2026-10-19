@@ -15,113 +15,162 @@
  */
 package com.datadoghq.reggie.benchmark;
 
+import com.datadoghq.reggie.runtime.MatchBudgetExceededException;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
 import com.datadoghq.reggie.runtime.RuntimeCompiler;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.openjdk.jmh.annotations.*;
 
 /**
- * Demonstrates Reggie's O(n) safety guarantee against ReDoS patterns.
+ * How find() time grows with input length on ReDoS-shaped patterns, for Reggie, RE2J and
+ * java.util.regex.
  *
- * <p>Reggie converts ambiguous patterns like {@code (a+)+b} to a minimal DFA (3 states,
- * DFA_UNROLLED_WITH_GROUPS strategy) before generating bytecode. This eliminates exponential
- * backtracking entirely.
+ * <p>The input is {@code "a".repeat(n) + "!b"}. It contains every literal the patterns require, so
+ * prefilters cannot reject it, and the '!' makes every attempt that consumes the run of 'a's fail.
  *
- * <p>JDK's backtracking NFA takes exponential time on non-matching inputs for the same pattern. The
- * non-matching input {@code "aaaaaa...aac"} (long 'a' string ending in 'c') triggers worst-case
- * backtracking in JDK — the benchmark measures this difference.
- *
- * <p>Uses {@link BenchmarkPatterns#BACKTRACK_A} ({@code "a*a*a*a*b"}) and {@link
- * BenchmarkPatterns#NESTED_QUANTIFIER} ({@code "(a+)+b"}).
+ * <ul>
+ *   <li>{@link Regular}: patterns without backreferences or lookaround. Reggie and RE2J run them on
+ *       automata, so time should grow linearly with n.
+ *   <li>{@link Extended}: backreferences, lookahead, possessive quantifiers, atomic groups and
+ *       recursion. RE2J cannot parse them. Reggie runs most of them on BackrefBacktrackMatcher,
+ *       whose work is polynomial and capped per attempt by {@code reggie.countedloop.maxSteps} and
+ *       per find call by {@code reggie.countedloop.stepsPerChar}; rows that exceed a cap measure
+ *       the time to throw MatchBudgetExceededException, and setup prints which ones do.
+ *   <li>{@link Jdk}: the java.util.regex rows. Its backtracking is exponential on several of these
+ *       patterns, so n stops at 24; compare with the n=24 rows of the other engines.
+ * </ul>
  */
-@BenchmarkMode(Mode.Throughput)
-@OutputTimeUnit(TimeUnit.MILLISECONDS)
-@State(Scope.Thread)
+@BenchmarkMode(Mode.AverageTime)
+@OutputTimeUnit(TimeUnit.MICROSECONDS)
 @Warmup(iterations = 3, time = 1)
 @Measurement(iterations = 5, time = 1)
 @Fork(1)
 public class ReDoSLinearityBenchmark {
 
-  // Non-matching input: long run of 'a's ending in 'c' — no 'b' to satisfy either pattern.
-  // JDK backtracks exponentially on this; Reggie DFA rejects in O(n).
-  private static final String NON_MATCH_INPUT = "aaaaaaaaaaaaaaaaaaaac";
+  private static final Map<String, String> PATTERNS =
+      Map.ofEntries(
+          Map.entry("nested", BenchmarkPatterns.NESTED_QUANTIFIER),
+          Map.entry("star4", BenchmarkPatterns.BACKTRACK_A),
+          Map.entry("altOverlap", "(a|aa)+b"),
+          Map.entry("nestedBackref", "(a+)+\\1b"),
+          Map.entry("repeatBackref", "^(a+)\\1*b"),
+          Map.entry("singleBackref", "(a)+\\1b"),
+          Map.entry("lookaheadNested", "(?=a)(a+)+b"),
+          Map.entry("altLookahead", "(a|aa)+(?=b)"),
+          Map.entry("possessiveNested", "(a++)+b"),
+          Map.entry("recursion", "(a+)(a+)(a+)bc(?1)?(?>q)?"));
 
-  // Matching inputs used to verify correctness during setup
-  private static final String MATCH_INPUT = "ab";
+  private static String input(int n) {
+    return "a".repeat(n) + "!b";
+  }
 
-  private ReggieMatcher reggieNestedQuantifier;
-  private ReggieMatcher reggieBacktrackA;
-  private Pattern jdkNestedQuantifier;
-  private Pattern jdkBacktrackA;
+  @State(Scope.Thread)
+  public static class Regular {
+    @Param({"nested", "star4", "altOverlap"})
+    String pattern;
 
-  @Setup(Level.Trial)
-  public void setup() {
-    reggieNestedQuantifier = RuntimeCompiler.compile(BenchmarkPatterns.NESTED_QUANTIFIER);
-    reggieBacktrackA = RuntimeCompiler.compile(BenchmarkPatterns.BACKTRACK_A);
-    jdkNestedQuantifier = Pattern.compile(BenchmarkPatterns.NESTED_QUANTIFIER);
-    jdkBacktrackA = Pattern.compile(BenchmarkPatterns.BACKTRACK_A);
+    @Param({"24", "1000", "10000", "100000"})
+    int n;
 
-    // Sanity checks: both engines agree on match results
-    if (reggieNestedQuantifier.matches(MATCH_INPUT)
-        != jdkNestedQuantifier.matcher(MATCH_INPUT).matches()) {
-      throw new IllegalStateException(
-          "Result mismatch for NESTED_QUANTIFIER on matching input: " + MATCH_INPUT);
+    ReggieMatcher reggie;
+    com.google.re2j.Pattern re2j;
+    String input;
+
+    @Setup(Level.Trial)
+    public void setup() {
+      String regex = PATTERNS.get(pattern);
+      reggie = RuntimeCompiler.compile(regex);
+      re2j = com.google.re2j.Pattern.compile(regex);
+      input = input(n);
+      if (reggie.find(input) != re2j.matcher(input).find()) {
+        throw new IllegalStateException("Reggie and RE2J disagree on /" + regex + "/, n=" + n);
+      }
     }
-    if (reggieBacktrackA.matches(MATCH_INPUT) != jdkBacktrackA.matcher(MATCH_INPUT).matches()) {
-      throw new IllegalStateException(
-          "Result mismatch for BACKTRACK_A on matching input: " + MATCH_INPUT);
+  }
+
+  @State(Scope.Thread)
+  public static class Extended {
+    @Param({
+      "nestedBackref",
+      "repeatBackref",
+      "singleBackref",
+      "lookaheadNested",
+      "altLookahead",
+      "possessiveNested",
+      "recursion"
+    })
+    String pattern;
+
+    @Param({"24", "1000", "10000", "100000"})
+    int n;
+
+    ReggieMatcher reggie;
+    String input;
+
+    @Setup(Level.Trial)
+    public void setup() {
+      String regex = PATTERNS.get(pattern);
+      reggie = RuntimeCompiler.compile(regex);
+      input = input(n);
+      try {
+        reggie.find(input);
+      } catch (MatchBudgetExceededException e) {
+        System.out.println("\n[ReDoS] /" + regex + "/ n=" + n + ": step budget exceeded");
+      }
     }
   }
 
-  /** Reggie O(n) non-match for {@code (a+)+b}: DFA traversal, no backtracking. */
-  @Benchmark
-  public boolean reggieNestedQuantifierNoMatch() {
-    return reggieNestedQuantifier.matches(NON_MATCH_INPUT);
+  @State(Scope.Thread)
+  public static class Jdk {
+    @Param({
+      "nested",
+      "star4",
+      "altOverlap",
+      "nestedBackref",
+      "repeatBackref",
+      "singleBackref",
+      "lookaheadNested",
+      "altLookahead",
+      "possessiveNested"
+    })
+    String pattern;
+
+    @Param({"12", "16", "20", "24"})
+    int n;
+
+    Pattern jdk;
+    String input;
+
+    @Setup(Level.Trial)
+    public void setup() {
+      jdk = Pattern.compile(PATTERNS.get(pattern));
+      input = input(n);
+    }
   }
 
-  /**
-   * JDK non-match for {@code (a+)+b}: backtracking NFA on non-matching input — exponential in the
-   * worst case.
-   */
   @Benchmark
-  public boolean jdkNestedQuantifierNoMatch() {
-    return jdkNestedQuantifier.matcher(NON_MATCH_INPUT).matches();
+  public boolean reggieRegular(Regular s) {
+    return s.reggie.find(s.input);
   }
 
-  /** Reggie O(n) match for {@code (a+)+b}: DFA transitions. */
   @Benchmark
-  public boolean reggieNestedQuantifierMatch() {
-    return reggieNestedQuantifier.matches(MATCH_INPUT);
+  public boolean re2jRegular(Regular s) {
+    return s.re2j.matcher(s.input).find();
   }
 
-  /** JDK match for {@code (a+)+b} on short matching input. */
   @Benchmark
-  public boolean jdkNestedQuantifierMatch() {
-    return jdkNestedQuantifier.matcher(MATCH_INPUT).matches();
+  public boolean reggieExtended(Extended s) {
+    try {
+      return s.reggie.find(s.input);
+    } catch (MatchBudgetExceededException e) {
+      return false;
+    }
   }
 
-  /** Reggie O(n) non-match for {@code a*a*a*a*b}: DFA traversal. */
   @Benchmark
-  public boolean reggieBacktrackANoMatch() {
-    return reggieBacktrackA.matches(NON_MATCH_INPUT);
-  }
-
-  /** JDK non-match for {@code a*a*a*a*b}: exponential backtracking on long non-matching input. */
-  @Benchmark
-  public boolean jdkBacktrackANoMatch() {
-    return jdkBacktrackA.matcher(NON_MATCH_INPUT).matches();
-  }
-
-  /** Reggie match for {@code a*a*a*a*b}. */
-  @Benchmark
-  public boolean reggieBacktrackAMatch() {
-    return reggieBacktrackA.matches(MATCH_INPUT);
-  }
-
-  /** JDK match for {@code a*a*a*a*b}. */
-  @Benchmark
-  public boolean jdkBacktrackAMatch() {
-    return jdkBacktrackA.matcher(MATCH_INPUT).matches();
+  public boolean jdk(Jdk s) {
+    return s.jdk.matcher(s.input).find();
   }
 }

@@ -235,4 +235,67 @@ public class DfaUnrolledGroupAndFindRegressionTest {
     assertRoute(".+(0)", PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS);
     assertFindGroupsAgree(".+(0)", "_0");
   }
+
+  // ---- Fix 5: findBoundsFrom / findMatchFrom ends honor acceptance anchor conditions ----
+
+  private static final String[] END_ANCHOR_INPUTS = {
+    "",
+    "a",
+    "a\nb",
+    "a\n",
+    "aa\n\n",
+    "a\na\nb",
+    "ab\nb",
+    "a\r\nb",
+    "a\rb",
+    "a\u2028b",
+    "a\u0085",
+    "a\u2029\n",
+    "ab",
+    "\nab\n"
+  };
+
+  private static void assertEndsAgree(String pattern) {
+    Pattern jdk = Pattern.compile(pattern);
+    ReggieMatcher reggie = Reggie.compile(pattern);
+    for (String input : END_ANCHOR_INPUTS) {
+      for (int start = 0; start <= input.length(); start++) {
+        String where = "/" + pattern + "/ on \"" + input + "\" from " + start;
+        Matcher jm = jdk.matcher(input);
+        boolean jdkFind = jm.find(start);
+        int[] bounds = new int[2];
+        assertEquals(
+            jdkFind, reggie.findBoundsFrom(input, start, bounds), "findBoundsFrom " + where);
+        MatchResult rm = reggie.findMatchFrom(input, start);
+        assertEquals(jdkFind, rm != null, "findMatchFrom " + where);
+        if (jdkFind) {
+          List<Integer> expected = List.of(jm.start(), jm.end());
+          assertEquals(expected, List.of(bounds[0], bounds[1]), "findBoundsFrom " + where);
+          assertEquals(expected, List.of(rm.start(), rm.end()), "findMatchFrom " + where);
+        }
+      }
+    }
+  }
+
+  @Test
+  void e_endAnchorOnTerminatorConsumingState() throws Exception {
+    // [a\n]+ consumes terminators: the accepting state must check $ at every position.
+    assertRoute("(?m)[a\\n]+$", PatternAnalyzer.MatchingStrategy.DFA_UNROLLED);
+    assertRoute("(?m)a[a\\n]*$", PatternAnalyzer.MatchingStrategy.DFA_UNROLLED);
+    assertEndsAgree("(?m)[a\\n]+$");
+    assertEndsAgree("(?m)a[a\\n]*$");
+    assertEndsAgree("[a\\n]+$");
+  }
+
+  @Test
+  void e_endAnchorOnTerminatorFreeState() throws Exception {
+    // . and \w consume no terminator: the accepting state checks the anchor only on exit.
+    assertRoute("(?m)^.+$", PatternAnalyzer.MatchingStrategy.DFA_UNROLLED);
+    assertRoute("(?m)\\w+$", PatternAnalyzer.MatchingStrategy.DFA_UNROLLED);
+    assertEndsAgree("(?m)^.+$");
+    assertEndsAgree(".+$");
+    assertEndsAgree(".+\\Z");
+    assertEndsAgree(".+\\z");
+    assertEndsAgree("(?m)\\w+$");
+  }
 }

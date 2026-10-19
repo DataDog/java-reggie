@@ -613,44 +613,8 @@ public class ConcatGreedyGroupBytecodeGenerator {
         mv.visitLabel(done);
       }
     } else {
-      // Multiple ranges - call CharSet.contains()
-      // For now, use a simple approach checking each range
-      Label matched = new Label();
-
-      for (CharSet.Range range : charset.getRanges()) {
-        char min = range.start;
-        char max = range.end;
-
-        // if (ch >= min && ch <= max) matched
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, (int) min);
-        Label nextRange = new Label();
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-
-        mv.visitVarInsn(ILOAD, charVar);
-        pushInt(mv, (int) max);
-        mv.visitJumpInsn(IF_ICMPLE, matched);
-
-        mv.visitLabel(nextRange);
-      }
-
-      // No range matched
-      if (!negated) {
-        // Normal: character not in charset → exit
-        mv.visitJumpInsn(GOTO, exitLabel);
-      } else {
-        // Negated: character not in charset → continue (don't exit)
-        Label continueLabel = new Label();
-        mv.visitJumpInsn(GOTO, continueLabel);
-        mv.visitLabel(matched);
-        // Negated: character IN charset → exit
-        mv.visitJumpInsn(GOTO, exitLabel);
-        mv.visitLabel(continueLabel);
-        return;
-      }
-
-      // Normal case: matched label means character IS in charset → continue
-      mv.visitLabel(matched);
+      BytecodeUtil.emitCharSetCheck(
+          mv, negated ? charset.complement() : charset, charVar, exitLabel);
     }
   }
 

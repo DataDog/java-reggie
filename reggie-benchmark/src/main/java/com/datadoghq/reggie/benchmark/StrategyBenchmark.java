@@ -30,7 +30,7 @@ import org.openjdk.jmh.annotations.*;
  *       repetitions of the same content.
  *   <li><b>OPTIONAL_GROUP_BACKREF</b>: {@code (a)?\1} — backreference to an optional group; matches
  *       when the group captured a value and the backreference repeats it.
- *   <li><b>GREEDY_BACKTRACK</b>: {@code (.*)bar} — greedy {@code .*} must give back characters to
+ *   <li><b>GREEDY_SUFFIX</b>: {@code (.*)bar} — greedy {@code .*} must give back characters to
  *       allow the literal suffix to match.
  *   <li><b>ONEPASS_NFA</b>: {@code ^(a)(b)(c)$} — unambiguous single-path execution; group tracking
  *       without state copying.
@@ -67,16 +67,16 @@ public class StrategyBenchmark {
   private ReggieMatcher reggieOptGroup;
   private Pattern jdkOptGroup;
 
-  // ── GREEDY_BACKTRACK ─────────────────────────────────────────────────────────
+  // ── GREEDY_SUFFIX ─────────────────────────────────────────────────────────
   // Pattern: (.*)bar  — greedy .* must give back chars for "bar" suffix to match.
-  // Strategy confirmed: GREEDY_BACKTRACK
-  private static final String GREEDY_BT_PATTERN = "(.*)bar";
-  private static final String GREEDY_BT_MATCH = "foobar";
-  private static final String GREEDY_BT_NO_MATCH = "foocar";
-  private static final String GREEDY_BT_FIND_INPUT = "hello foobar world";
+  // Strategy confirmed: GREEDY_SUFFIX
+  private static final String GREEDY_SUFFIX_PATTERN = "(.*)bar";
+  private static final String GREEDY_SUFFIX_MATCH = "foobar";
+  private static final String GREEDY_SUFFIX_NO_MATCH = "foocar";
+  private static final String GREEDY_SUFFIX_FIND_INPUT = "hello foobar world";
 
-  private ReggieMatcher reggieGreedyBt;
-  private Pattern jdkGreedyBt;
+  private ReggieMatcher reggieGreedySuffix;
+  private Pattern jdkGreedySuffix;
 
   // ── ONEPASS_NFA ──────────────────────────────────────────────────────────────
   // Pattern: ^(a)(b)(c)$  — three disjoint capturing groups, no ambiguity.
@@ -116,8 +116,8 @@ public class StrategyBenchmark {
     reggieOptGroup = RuntimeCompiler.compile(OPT_GROUP_PATTERN);
     jdkOptGroup = Pattern.compile(OPT_GROUP_PATTERN);
 
-    reggieGreedyBt = RuntimeCompiler.compile(GREEDY_BT_PATTERN);
-    jdkGreedyBt = Pattern.compile(GREEDY_BT_PATTERN);
+    reggieGreedySuffix = RuntimeCompiler.compile(GREEDY_SUFFIX_PATTERN);
+    jdkGreedySuffix = Pattern.compile(GREEDY_SUFFIX_PATTERN);
 
     reggieOnepass = RuntimeCompiler.compile(ONEPASS_PATTERN);
     jdkOnepass = Pattern.compile(ONEPASS_PATTERN);
@@ -190,36 +190,36 @@ public class StrategyBenchmark {
     return jdkOptGroup.matcher(OPT_GROUP_MATCH).find();
   }
 
-  // ── GREEDY_BACKTRACK benchmarks ──────────────────────────────────────────────
+  // ── GREEDY_SUFFIX benchmarks ──────────────────────────────────────────────
 
   @Benchmark
-  public boolean reggieGreedyBtMatch() {
-    return reggieGreedyBt.matches(GREEDY_BT_MATCH);
+  public boolean reggieGreedySuffixMatch() {
+    return reggieGreedySuffix.matches(GREEDY_SUFFIX_MATCH);
   }
 
   @Benchmark
-  public boolean jdkGreedyBtMatch() {
-    return jdkGreedyBt.matcher(GREEDY_BT_MATCH).matches();
+  public boolean jdkGreedySuffixMatch() {
+    return jdkGreedySuffix.matcher(GREEDY_SUFFIX_MATCH).matches();
   }
 
   @Benchmark
-  public boolean reggieGreedyBtNoMatch() {
-    return reggieGreedyBt.matches(GREEDY_BT_NO_MATCH);
+  public boolean reggieGreedySuffixNoMatch() {
+    return reggieGreedySuffix.matches(GREEDY_SUFFIX_NO_MATCH);
   }
 
   @Benchmark
-  public boolean jdkGreedyBtNoMatch() {
-    return jdkGreedyBt.matcher(GREEDY_BT_NO_MATCH).matches();
+  public boolean jdkGreedySuffixNoMatch() {
+    return jdkGreedySuffix.matcher(GREEDY_SUFFIX_NO_MATCH).matches();
   }
 
   @Benchmark
-  public boolean reggieGreedyBtFind() {
-    return reggieGreedyBt.find(GREEDY_BT_FIND_INPUT);
+  public boolean reggieGreedySuffixFind() {
+    return reggieGreedySuffix.find(GREEDY_SUFFIX_FIND_INPUT);
   }
 
   @Benchmark
-  public boolean jdkGreedyBtFind() {
-    return jdkGreedyBt.matcher(GREEDY_BT_FIND_INPUT).find();
+  public boolean jdkGreedySuffixFind() {
+    return jdkGreedySuffix.matcher(GREEDY_SUFFIX_FIND_INPUT).find();
   }
 
   // ── ONEPASS_NFA benchmarks ───────────────────────────────────────────────────

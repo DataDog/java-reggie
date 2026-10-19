@@ -554,13 +554,13 @@ public class InlineModifiersTest {
 
   @Test
   public void testExtended_WithCharacterClasses() {
-    // Inside character classes, whitespace should be LITERAL
+    // As in java.util.regex, whitespace is skipped inside character classes too
     ReggieMatcher m = Reggie.compile("(?x)[a b c]");
 
     assertTrue(m.matches("a"), "Should match 'a'");
     assertTrue(m.matches("b"), "Should match 'b'");
     assertTrue(m.matches("c"), "Should match 'c'");
-    assertTrue(m.matches(" "), "Should match literal space inside []");
+    assertFalse(m.matches(" "), "Should not match a space: it is skipped inside []");
   }
 
   @Test

@@ -191,10 +191,7 @@ public class PatternRoutingPropertyTest {
         new PatternRoutingTestCase(
             "(?=\\w+@).*@example\\.com",
             STATELESS_LOOP,
-            "lookahead with greedy dot and literal suffix"),
-
-        // Greedy backtrack
-        new PatternRoutingTestCase("(.*)bar", GREEDY_BACKTRACK, "greedy .* with literal suffix"));
+            "lookahead with greedy dot and literal suffix"));
   }
 
   @Nested

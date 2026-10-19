@@ -293,13 +293,12 @@ class PikeVMRoutingTest {
   }
 
   @Test
-  void greedyDotPlusWithSuffix_routesToPikevm() throws Exception {
-    // (.+)_ has a greedy .+ group with a literal suffix — GREEDY_BACKTRACK's indexOf scan
-    // overshoots on inputs ending with '\n' (B4: greedy .+ with non-group suffix).
+  void greedyDotPlusWithSuffix_routesToGreedySuffix() throws Exception {
+    // (.+)_ has a greedy .+ group with a literal suffix.
     assertEquals(
-        PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE,
+        PatternAnalyzer.MatchingStrategy.GREEDY_SUFFIX,
         StrategyCorrectnessMetaTest.routeOf("(.+)_"),
-        "(.+)_ must route to BITSTATE_CAPTURE (B4: greedy .+ with suffix)");
+        "(.+)_ must route to GREEDY_SUFFIX");
   }
 
   @Test
@@ -321,15 +320,6 @@ class PikeVMRoutingTest {
         StrategyCorrectnessMetaTest.routeOf("((?:.+))_"),
         "((?:.+))_ must route to BITSTATE_CAPTURE (B4: non-capturing wrapper around quantifier"
             + " body)");
-  }
-
-  @Test
-  void greedyDotStarWithSuffix_staysOnGreedyBacktrack() throws Exception {
-    // (.*)_ has a greedy .* group (min=0): not affected by the B4 decline (min>=1 only).
-    assertEquals(
-        PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK,
-        StrategyCorrectnessMetaTest.routeOf("(.*)_"),
-        "(.*)_ must stay on GREEDY_BACKTRACK (B4: only declines min>=1)");
   }
 
   // ── B5: variable-length alternation group body ──────────────────────────────

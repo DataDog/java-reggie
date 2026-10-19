@@ -387,6 +387,11 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitJumpInsn(IF_ICMPLT, returnFalse);
 
+    if (patternInfo.gapStopsAtLineTerminator) {
+      // for (int i = pos; i < closeIdx; i++) if (isLineTerminator(input.charAt(i))) return false;
+      generateGapLineTerminatorScan(mv, posVar, closeStartVar, returnFalse);
+    }
+
     // if (input.charAt(closeIdx) != '<') return false;
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, closeStartVar);
@@ -458,6 +463,7 @@ public class BackreferenceBytecodeGenerator {
     int chVar = allocator.allocate();
     int closeStartVar = allocator.allocate();
     int backrefPosVar = allocator.allocate();
+    int gapLimitVar = allocator.allocate();
 
     // if (input == null) return -1;
     Label notNull = new Label();
@@ -558,6 +564,32 @@ public class BackreferenceBytecodeGenerator {
     // pos++
     mv.visitIincInsn(posVar, 1);
 
+    if (patternInfo.gapStopsAtLineTerminator) {
+      // int gapLimit = pos; while (gapLimit < len && !isLineTerminator(charAt(gapLimit)))
+      // gapLimit++; - the closing tag must start no later than the gap's first excluded char.
+      Label limitLoop = new Label();
+      Label limitEnd = new Label();
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ISTORE, gapLimitVar);
+      mv.visitLabel(limitLoop);
+      mv.visitVarInsn(ILOAD, gapLimitVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPGE, limitEnd);
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitVarInsn(ILOAD, gapLimitVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      mv.visitMethodInsn(
+          INVOKESTATIC,
+          "com/datadoghq/reggie/runtime/LineTerminators",
+          "isLineTerminator",
+          "(C)Z",
+          false);
+      mv.visitJumpInsn(IFNE, limitEnd);
+      mv.visitIincInsn(gapLimitVar, 1);
+      mv.visitJumpInsn(GOTO, limitLoop);
+      mv.visitLabel(limitEnd);
+    }
+
     // Search for closing tag
     Label searchLoop = new Label();
     Label searchEnd = new Label();
@@ -577,6 +609,13 @@ public class BackreferenceBytecodeGenerator {
     // if (closeStart < 0) break;
     mv.visitVarInsn(ILOAD, closeStartVar);
     mv.visitJumpInsn(IFLT, searchEnd);
+
+    if (patternInfo.gapStopsAtLineTerminator) {
+      // if (closeStart > gapLimit) break;
+      mv.visitVarInsn(ILOAD, closeStartVar);
+      mv.visitVarInsn(ILOAD, gapLimitVar);
+      mv.visitJumpInsn(IF_ICMPGT, searchEnd);
+    }
 
     // int backrefPos = closeStart + 2;
     mv.visitVarInsn(ILOAD, closeStartVar);
@@ -639,6 +678,50 @@ public class BackreferenceBytecodeGenerator {
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
+  }
+
+  /**
+   * Emits {@code for (int i = from; i < to; i++) if (isLineTerminator(input.charAt(i))) goto fail;}
+   * using {@code fromVar} as the loop index (its value is not preserved).
+   */
+  private void generateGapLineTerminatorScan(
+      MethodVisitor mv, int fromVar, int toVar, Label failLabel) {
+    Label loop = new Label();
+    Label done = new Label();
+    mv.visitLabel(loop);
+    mv.visitVarInsn(ILOAD, fromVar);
+    mv.visitVarInsn(ILOAD, toVar);
+    mv.visitJumpInsn(IF_ICMPGE, done);
+    mv.visitVarInsn(ALOAD, 1);
+    mv.visitVarInsn(ILOAD, fromVar);
+    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+    mv.visitMethodInsn(
+        INVOKESTATIC,
+        "com/datadoghq/reggie/runtime/LineTerminators",
+        "isLineTerminator",
+        "(C)Z",
+        false);
+    mv.visitJumpInsn(IFNE, failLabel);
+    mv.visitIincInsn(fromVar, 1);
+    mv.visitJumpInsn(GOTO, loop);
+    mv.visitLabel(done);
+  }
+
+  /** Generate {@code \s} check ({@code [ \t\n\x0B\f\r]}). Jumps to endLabel if NOT whitespace. */
+  private void generateWhitespaceCheck(MethodVisitor mv, int chVar, Label endLabel) {
+    Label isWhitespace = new Label();
+    // ch == ' '
+    mv.visitVarInsn(ILOAD, chVar);
+    mv.visitIntInsn(BIPUSH, ' ');
+    mv.visitJumpInsn(IF_ICMPEQ, isWhitespace);
+    // ch >= '\t' && ch <= '\r'
+    mv.visitVarInsn(ILOAD, chVar);
+    mv.visitIntInsn(BIPUSH, '\t');
+    mv.visitJumpInsn(IF_ICMPLT, endLabel);
+    mv.visitVarInsn(ILOAD, chVar);
+    mv.visitIntInsn(BIPUSH, '\r');
+    mv.visitJumpInsn(IF_ICMPGT, endLabel);
+    mv.visitLabel(isWhitespace);
   }
 
   /** Generate word character check (a-z, A-Z, 0-9, _). Jumps to endLabel if NOT a word char. */
@@ -793,11 +876,9 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
-    // if (!Character.isWhitespace(ch)) break;
+    // if (!isWhitespace(ch)) break;
     Label continueWS = new Label();
-    mv.visitVarInsn(ILOAD, chVar);
-    mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isWhitespace", "(C)Z", false);
-    mv.visitJumpInsn(IFEQ, endWS);
+    generateWhitespaceCheck(mv, chVar, endWS);
     // pos++;
     mv.visitIincInsn(posVar, 1);
     mv.visitJumpInsn(GOTO, scanWS);
@@ -1005,9 +1086,7 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
-    mv.visitVarInsn(ILOAD, chVar);
-    mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isWhitespace", "(C)Z", false);
-    mv.visitJumpInsn(IFEQ, endWS);
+    generateWhitespaceCheck(mv, chVar, endWS);
     mv.visitIincInsn(posVar, 1);
     mv.visitJumpInsn(GOTO, scanWS);
     mv.visitLabel(endWS);
@@ -1194,14 +1273,14 @@ public class BackreferenceBytecodeGenerator {
 
     // Match closing quote: if (pos >= len || input.charAt(pos) != '"') return false;
     Label closeQuote1OK = new Label();
+    Label returnFalse1 = new Label();
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitVarInsn(ILOAD, lenVar);
-    mv.visitJumpInsn(IF_ICMPGE, endContent1); // Reuse label for return false
+    mv.visitJumpInsn(IF_ICMPGE, returnFalse1);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitIntInsn(BIPUSH, '"');
-    Label returnFalse1 = new Label();
     mv.visitJumpInsn(IF_ICMPNE, returnFalse1);
     mv.visitJumpInsn(GOTO, closeQuote1OK);
     mv.visitLabel(returnFalse1);
@@ -1223,9 +1302,7 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
-    mv.visitVarInsn(ILOAD, chVar);
-    mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isWhitespace", "(C)Z", false);
-    mv.visitJumpInsn(IFEQ, endWS1);
+    generateWhitespaceCheck(mv, chVar, endWS1);
     mv.visitIincInsn(posVar, 1);
     mv.visitJumpInsn(GOTO, skipWS1);
     mv.visitLabel(endWS1);
@@ -1261,9 +1338,7 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
-    mv.visitVarInsn(ILOAD, chVar);
-    mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isWhitespace", "(C)Z", false);
-    mv.visitJumpInsn(IFEQ, endWS2);
+    generateWhitespaceCheck(mv, chVar, endWS2);
     mv.visitIincInsn(posVar, 1);
     mv.visitJumpInsn(GOTO, skipWS2);
     mv.visitLabel(endWS2);
@@ -1472,9 +1547,7 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
-    mv.visitVarInsn(ILOAD, chVar);
-    mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isWhitespace", "(C)Z", false);
-    mv.visitJumpInsn(IFEQ, endWS1);
+    generateWhitespaceCheck(mv, chVar, endWS1);
     mv.visitIincInsn(posVar, 1);
     mv.visitJumpInsn(GOTO, skipWS1);
     mv.visitLabel(endWS1);
@@ -1501,9 +1574,7 @@ public class BackreferenceBytecodeGenerator {
     mv.visitVarInsn(ILOAD, posVar);
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
     mv.visitVarInsn(ISTORE, chVar);
-    mv.visitVarInsn(ILOAD, chVar);
-    mv.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isWhitespace", "(C)Z", false);
-    mv.visitJumpInsn(IFEQ, endWS2);
+    generateWhitespaceCheck(mv, chVar, endWS2);
     mv.visitIincInsn(posVar, 1);
     mv.visitJumpInsn(GOTO, skipWS2);
     mv.visitLabel(endWS2);
@@ -2271,11 +2342,12 @@ public class BackreferenceBytecodeGenerator {
     BytecodeUtil.pushInt(mv, patternInfo.openSuffix.charAt(0)); // openSuffixChar
     mv.visitLdcInsn(patternInfo.closePrefix); // closePrefixStr
     BytecodeUtil.pushInt(mv, patternInfo.closeSuffix.charAt(0)); // closeSuffixChar
+    mv.visitInsn(patternInfo.gapStopsAtLineTerminator ? ICONST_1 : ICONST_0);
     mv.visitMethodInsn(
         INVOKESTATIC,
         HELPERS,
         "findHtmlTagMatchFrom",
-        "(Ljava/lang/String;IIILjava/lang/String;I)" + MATCH_RESULT_DESC,
+        "(Ljava/lang/String;IIILjava/lang/String;IZ)" + MATCH_RESULT_DESC,
         false);
     mv.visitInsn(ARETURN);
     mv.visitMaxs(0, 0);

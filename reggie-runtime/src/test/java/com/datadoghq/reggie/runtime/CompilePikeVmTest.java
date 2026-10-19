@@ -18,6 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.datadoghq.reggie.Reggie;
@@ -93,5 +95,18 @@ class CompilePikeVmTest {
     // A JDK-fallback pattern also succeeds (delegates to JDK)
     ReggieMatcher fb = Reggie.compileAllowingFallback("([a-z]{3}).*\\1");
     assertNotNull(fb);
+  }
+
+  @Test
+  void stubEntryDoesNotRerouteCompile() {
+    // Routed off PikeVM by compile() under DEFAULT, admitted by the stub's PikeVM guard.
+    String p = "(a)b";
+    RuntimeCompiler.clearCache();
+    assertNotSame(PikeVMMatcher.class, EngineRouting.engineClass(RuntimeCompiler.compile(p)));
+    RuntimeCompiler.clearCache();
+    assertSame(
+        PikeVMMatcher.class, EngineRouting.engineClass(RuntimeCompiler.compilePikeVm(p, "")));
+    assertNotSame(PikeVMMatcher.class, EngineRouting.engineClass(RuntimeCompiler.compile(p)));
+    RuntimeCompiler.clearCache();
   }
 }

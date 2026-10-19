@@ -15,6 +15,8 @@
  */
 package com.datadoghq.reggie.codegen.codegen;
 
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -609,38 +611,27 @@ public class OnePassBytecodeGenerator {
         }
 
       case START_MULTILINE:
-        // if (pos == 0 || input.charAt(pos-1) == '\n') pass; else fail;
-        // if (pos == 0) goto pass;
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitJumpInsn(IFEQ, passLabel);
-
-        // if (input.charAt(pos-1) == '\n') goto pass;
+        // if (LineTerminators.isMultilineStart(input, pos, 0, input.length())) pass; else fail;
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitVarInsn(ILOAD, posVar);
-        mv.visitInsn(ICONST_1);
-        mv.visitInsn(ISUB);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        pushInt(mv, '\n');
-        mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+        mv.visitInsn(ICONST_0);
+        mv.visitVarInsn(ALOAD, inputVar);
+        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        invokeMultilineStart(mv);
+        mv.visitJumpInsn(IFNE, passLabel);
 
         emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
         break;
 
       case END_MULTILINE:
-        // if (pos == input.length() || input.charAt(pos) == '\n') pass; else fail;
-        // if (pos == input.length()) goto pass;
+        // if (LineTerminators.isMultilineEnd(input, pos, input.length())) pass; else fail;
+        mv.visitVarInsn(ALOAD, inputVar);
         mv.visitVarInsn(ILOAD, posVar);
         mv.visitVarInsn(ALOAD, inputVar);
         mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
-        mv.visitJumpInsn(IF_ICMPEQ, passLabel);
-
-        // if (input.charAt(pos) == '\n') goto pass;
-        mv.visitVarInsn(ALOAD, inputVar);
-        mv.visitVarInsn(ILOAD, posVar);
-        mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-        pushInt(mv, '\n');
-        mv.visitJumpInsn(IF_ICMPEQ, passLabel);
+        invokeMultilineEnd(mv);
+        mv.visitJumpInsn(IFNE, passLabel);
 
         emitFailReturn(mv, returnMinusOne, returnBoolean);
         mv.visitLabel(passLabel);
@@ -825,19 +816,7 @@ public class OnePassBytecodeGenerator {
       pushInt(mv, (int) range.end);
       mv.visitJumpInsn(IF_ICMPGT, noMatch);
     } else {
-      Label match = new Label();
-      for (CharSet.Range range : chars.getRanges()) {
-        Label nextRange = new Label();
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.start);
-        mv.visitJumpInsn(IF_ICMPLT, nextRange);
-        mv.visitVarInsn(ILOAD, chVar);
-        pushInt(mv, (int) range.end);
-        mv.visitJumpInsn(IF_ICMPLE, match);
-        mv.visitLabel(nextRange);
-      }
-      mv.visitJumpInsn(GOTO, noMatch);
-      mv.visitLabel(match);
+      BytecodeUtil.emitCharSetCheck(mv, chars, chVar, noMatch);
     }
   }
 
@@ -1010,26 +989,17 @@ public class OnePassBytecodeGenerator {
       mv.visitInsn(IRETURN);
       mv.visitLabel(validPosition);
     } else if (hasMultilineStart) {
-      // Multiline ^: Only try position 0 or positions after '\n'
-      // if (tryPos != 0 && input.charAt(tryPos-1) != '\n') goto nextPosition;
+      // Multiline ^: Only try positions where it can match
+      // if (!LineTerminators.isMultilineStart(input, tryPos, 0, len)) goto next position;
       Label validPosition = new Label();
-      Label nextPosition = new Label();
-
-      // if (tryPos == 0) goto validPosition;
-      mv.visitVarInsn(ILOAD, 3);
-      mv.visitJumpInsn(IFEQ, validPosition);
-
-      // if (input.charAt(tryPos-1) == '\n') goto validPosition;
       mv.visitVarInsn(ALOAD, 1);
       mv.visitVarInsn(ILOAD, 3);
-      mv.visitInsn(ICONST_1);
-      mv.visitInsn(ISUB);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
-      pushInt(mv, '\n');
-      mv.visitJumpInsn(IF_ICMPEQ, validPosition);
+      mv.visitInsn(ICONST_0);
+      mv.visitVarInsn(ILOAD, 4);
+      invokeMultilineStart(mv);
+      mv.visitJumpInsn(IFNE, validPosition);
 
       // Not a valid anchor position - skip to next
-      mv.visitLabel(nextPosition);
       mv.visitIincInsn(3, 1); // tryPos++
       mv.visitJumpInsn(GOTO, scanLoop);
 

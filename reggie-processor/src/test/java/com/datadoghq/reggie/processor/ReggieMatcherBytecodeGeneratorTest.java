@@ -191,6 +191,28 @@ class ReggieMatcherBytecodeGeneratorTest {
     assertFalse((Boolean) find.invoke(matcher, "abc"));
   }
 
+  /**
+   * A recursive-descent pattern with choice points the backtracker cannot run (more than 64
+   * unbounded loops; an atomic group inside a lookaround) is not generated: the generator would not
+   * retry its choice points. It delegates to java.util.regex when allowed and the JDK parses it.
+   */
+  @Test
+  void testRecursiveDescentChoicePointsNotGenerated() throws Exception {
+    String jdk = "(a|ab)\\1+c" + "(?:d*e)".repeat(65);
+    ReggieMatcherBytecodeGenerator gen = new ReggieMatcherBytecodeGenerator("test", "J", jdk);
+    assertEquals(
+        ReggieMatcherBytecodeGenerator.Realization.DELEGATE_FALLBACK, gen.resolveRealization(true));
+    UnsupportedOperationException e =
+        assertThrows(UnsupportedOperationException.class, () -> gen.resolveRealization(false));
+    assertTrue(
+        e.getMessage().contains("recursive-descent pattern with choice points"), e.getMessage());
+
+    String noJdk = "(?|(a)|b)(?=(?>x))(x|xy)c";
+    ReggieMatcherBytecodeGenerator gen2 = new ReggieMatcherBytecodeGenerator("test", "N", noJdk);
+    assertThrows(UnsupportedOperationException.class, () -> gen2.resolveRealization(false));
+    assertThrows(UnsupportedOperationException.class, () -> gen2.resolveRealization(true));
+  }
+
   @Test
   void testWordBoundaryBackrefStrategyNative() throws Exception {
     // \b(\w+)\s+\1\b resolves to VARIABLE_CAPTURE_BACKREF, now NATIVE (Wave 2).
@@ -303,23 +325,13 @@ class ReggieMatcherBytecodeGeneratorTest {
   }
 
   @Test
-  void testGreedyBacktrackStrategyThrows() {
-    assertThrows(
-        IllegalStateException.class,
-        () ->
-            new ReggieMatcherBytecodeGenerator(
-                    "test.generated", "GreedyBacktrackMatcher", "(.*)end")
-                .generate());
-  }
-
-  @Test
   void testNestedQuantifiedGroupsStrategy() throws Exception {
-    Object matcher = compile("((a+)+)", "NestedQuantMatcher");
-    Method matches = matcher.getClass().getMethod("matches", String.class);
-    assertTrue((Boolean) matches.invoke(matcher, "aaa"));
-    assertTrue((Boolean) matches.invoke(matcher, "a"));
-    assertFalse((Boolean) matches.invoke(matcher, "b"));
-    assertFalse((Boolean) matches.invoke(matcher, ""));
+    // A repeated capturing group under another quantifier needs thread priority for its spans:
+    // realized as a PikeVM delegate, as in RuntimeCompiler.
+    ReggieMatcherBytecodeGenerator gen =
+        new ReggieMatcherBytecodeGenerator("test.generated", "NestedQuantMatcher", "((a+)+)");
+    assertEquals(
+        ReggieMatcherBytecodeGenerator.Realization.DELEGATE_PIKEVM, gen.resolveRealization(false));
   }
 
   @Test

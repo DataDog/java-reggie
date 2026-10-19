@@ -140,6 +140,25 @@ class CountedLoopSemanticsTest {
         "abcde".repeat(3001)); // above max: REJECT
   }
 
+  /** A tail pass re-runs one copy, not all min copies: x{2,6000} accepts three x. */
+  @Test
+  @Timeout(60)
+  void tailPassAfterSeveralRequiredCopies() {
+    assertParity("x{2,6000}", "x", "xx", "xxx", "xxxx", "xxxxx");
+    assertParity("(x){2,6000}", "xx", "xxx", "xxxxx");
+    assertParity("(?:xy){3,6000}", "xyxy", "xyxyxy", "xyxyxyxy", "xyxyxyxyxy");
+    assertParity("(?:abcde){100,3000}", "abcde".repeat(101), "abcde".repeat(2999));
+  }
+
+  /** An outer + re-entering a counted loop starts it with a fresh budget. */
+  @Test
+  @Timeout(60)
+  void reenteredLoopStartsAtZero() {
+    String two = "x".repeat(4000) + "y" + "x".repeat(2500) + "y";
+    assertParity("(?:x{0,6000}y)+", two, "x".repeat(6001) + "y", "xyxy");
+    assertParity("(?:(x){0,6000}y)*z", two + "z", "x".repeat(3000) + "yx".repeat(2) + "yz");
+  }
+
   @Test
   @Timeout(60)
   void nestedCountedLoops() {

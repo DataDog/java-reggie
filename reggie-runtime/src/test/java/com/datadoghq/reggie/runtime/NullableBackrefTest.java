@@ -18,7 +18,6 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
-import com.datadoghq.reggie.ReggieOptions;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
@@ -214,14 +213,57 @@ class NullableBackrefTest {
    * {@code \d+} suffix that follows it), so it would route to {@code PINNED_BACKREFERENCE} if the
    * B7 danger-condition guard did not also cover that strategy. Group 1 is nullable ({@code a{0,3}}
    * can match empty) and can capture strings of length &gt; 1, so {@code
-   * hasAmbiguouslyNullableBackrefGroup} must still exclude it, routing to JDK fallback instead.
+   * hasAmbiguouslyNullableBackrefGroup} must still keep it off {@code PINNED_BACKREFERENCE}; it
+   * runs on the priority-ordered backtracker instead.
    */
   @Test
-  void pinnedEligibleAmbiguouslyNullableGroup_routesToFallback_notPinnedBackreference() {
-    ReggieOptions withFallback = ReggieOptions.builder().allowJdkFallback().build();
+  void pinnedEligibleAmbiguouslyNullableGroup_routesToBacktracker_notPinnedBackreference() {
+    String pat = "(a{0,3})\\d+\\1";
+    ReggieMatcher m = Reggie.compile(pat);
     assertTrue(
-        Reggie.compile("(a{0,3})\\d+\\1", withFallback) instanceof JavaRegexFallbackMatcher,
-        "(a{0,3})\\d+\\1 must fall back to JDK: pinned-eligible boundary but ambiguously "
-            + "nullable backref group (B7 guard) must still apply");
+        m instanceof BackrefBacktrackMatcher,
+        pat + " must run on the backtracker, not PINNED_BACKREFERENCE (B7 guard)");
+    for (String input : new String[] {"1", "aa1aa", "aaa1a", "aa1a", "xaa12aay"}) {
+      Matcher jdk = Pattern.compile(pat).matcher(input);
+      MatchResult r = m.findMatch(input);
+      assertEquals(jdk.find(), r != null, input);
+      if (r != null) {
+        assertEquals(jdk.start(), r.start(), input);
+        assertEquals(jdk.end(), r.end(), input);
+        assertEquals(jdk.group(1), r.group(1), input);
+      }
+      assertEquals(Pattern.compile(pat).matcher(input).matches(), m.matches(input), input);
+    }
+  }
+
+  /**
+   * {@code (a*|b){2}\1}: group 1 is ambiguously nullable and repeated. JDK exits the repeat on a
+   * zero-length iteration, so matches("bb") is false; the backtracker would accept an empty first
+   * iteration followed by "b" and \1 = "b". Whatever engine runs it must agree with JDK.
+   */
+  @Test
+  void repeatedAmbiguouslyNullableGroup_agreesWithJdk() {
+    for (String pat : new String[] {"(a*|b){2}\\1", "(a*|b)+\\1"}) {
+      ReggieMatcher m = Reggie.compileAllowingFallback(pat);
+      for (String input : new String[] {"bb", "abab", "aa", "b", "", "aabaab"}) {
+        Matcher jdk = Pattern.compile(pat).matcher(input);
+        boolean jdkMatches = jdk.matches();
+        MatchResult whole = m.match(input);
+        assertEquals(jdkMatches, whole != null, pat + " match " + input);
+        if (whole != null) {
+          assertEquals(jdk.start(1), whole.start(1), pat + " match g1 start " + input);
+          assertEquals(jdk.end(1), whole.end(1), pat + " match g1 end " + input);
+        }
+        jdk = Pattern.compile(pat).matcher(input);
+        MatchResult r = m.findMatch(input);
+        assertEquals(jdk.find(), r != null, pat + " find " + input);
+        if (r != null) {
+          assertEquals(jdk.start(), r.start(), pat + " find start " + input);
+          assertEquals(jdk.end(), r.end(), pat + " find end " + input);
+          assertEquals(jdk.start(1), r.start(1), pat + " find g1 start " + input);
+          assertEquals(jdk.end(1), r.end(1), pat + " find g1 end " + input);
+        }
+      }
+    }
   }
 }

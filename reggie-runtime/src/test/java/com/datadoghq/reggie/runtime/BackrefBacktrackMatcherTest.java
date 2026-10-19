@@ -21,6 +21,8 @@ import com.datadoghq.reggie.codegen.ast.RegexNode;
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import com.sun.management.ThreadMXBean;
+import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -267,6 +269,84 @@ public class BackrefBacktrackMatcherTest {
         assertEquals(jb2.start(), mb.start(), "matchBounded start /" + pattern + "/");
         assertEquals(jb2.end(), mb.end(), "matchBounded end /" + pattern + "/");
       }
+    }
+  }
+
+  /**
+   * find* skips start positions whose char cannot begin a match. The filter must stay off where a
+   * match can begin without consuming a char of the start set: empty matches, and backreferences to
+   * groups captured inside a lookahead at the start.
+   */
+  @Test
+  void startFilterAgreesWithJdk() throws Exception {
+    String[] patterns = {
+      "\\d+(?=px)",
+      "(?=(\\w+))\\1=",
+      "(?=(a+))\\1b",
+      "()\\1a",
+      "a?(?=b)",
+      "(?<=a)b",
+      "\\b\\w+(?=\\s42)",
+      "(?:xy){2,3}(?=z)",
+      "(?i)ab(?=c)",
+      "^a(?=b)",
+      "(?!a)\\w(?=b)"
+    };
+    String[] inputs = {
+      "",
+      "a",
+      "ab",
+      "ab=ab",
+      "x ab=",
+      "12px",
+      "a1px 22px",
+      "aab",
+      "b",
+      "ab 42",
+      "xyxyxyz",
+      "q ABC",
+      "Abc",
+      "ab c",
+      "cb"
+    };
+    for (String pattern : patterns) {
+      for (String input : inputs) {
+        assertAgrees(pattern, input);
+      }
+    }
+  }
+
+  /**
+   * Group writes and counted-loop iterations copy their vectors into the per-thread arena, and
+   * {@code findMatchInto} copies the winning spans into caller arrays: steady-state calls allocate
+   * nothing, across many start positions (find) and lookaround sub-searches.
+   */
+  @Test
+  void steadyStateCallsDoNotAllocate() throws Exception {
+    ThreadMXBean threads = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+    String[][] cases = {
+      {"(a|b){1,3}(\\w)\\2", "abababxyzab ab cc"},
+      {"(?=(\\w+))\\1:", "abc def:"},
+      {"<(\\w+)>.*</\\1>", "xx <ab>yy</ab> zz"},
+    };
+    for (String[] pi : cases) {
+      BackrefBacktrackMatcher m = build(pi[0]);
+      String input = pi[1];
+      int[] starts = new int[8];
+      int[] ends = new int[8];
+      boolean expected = Pattern.compile(pi[0]).matcher(input).find();
+      for (int i = 0; i < 20_000; i++) { // warm the workspace and the JIT
+        m.find(input);
+        m.findMatchInto(input, 0, starts, ends);
+      }
+      int calls = 1_000;
+      long before = threads.getCurrentThreadAllocatedBytes();
+      for (int i = 0; i < calls; i++) {
+        assertEquals(expected, m.find(input));
+        assertEquals(expected, m.findMatchInto(input, 0, starts, ends));
+      }
+      long perCall = (threads.getCurrentThreadAllocatedBytes() - before) / (2L * calls);
+      assertEquals(0, perCall, "bytes per call /" + pi[0] + "/");
     }
   }
 

@@ -200,10 +200,10 @@ String userPattern = getUserInput();
 // Use custom key to control caching
 ReggieMatcher matcher = Reggie.cached("user-search-pattern", userPattern);
 
-// Even if pattern changes, same key = same cache slot
+// Same key + same pattern + same options = same instance
+// Same key with a different pattern or different options throws IllegalStateException
 String newPattern = getUserInput();
 ReggieMatcher updated = Reggie.cached("user-search-pattern", newPattern);
-// If pattern different, old one replaced
 ```
 
 #### Inspecting Cache
@@ -333,8 +333,8 @@ Reggie supports octal and hex escape sequences for matching special characters:
 ReggieMatcher atSign = Reggie.compile("\\x40");  // @ character
 assertTrue(atSign.matches("@"));
 
-// Octal escapes: \nnn (where n is 0-7)
-ReggieMatcher octal100 = Reggie.compile("\\100");  // @ character (octal 100 = decimal 64)
+// Octal escapes: \0n, \0nn, \0mnn (n is 0-7, m is 0-3)
+ReggieMatcher octal100 = Reggie.compile("\\0100");  // @ character (octal 100 = decimal 64)
 assertTrue(octal100.matches("@"));
 
 // In character classes

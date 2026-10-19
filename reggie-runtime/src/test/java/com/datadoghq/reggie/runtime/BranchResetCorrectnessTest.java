@@ -162,10 +162,10 @@ public class BranchResetCorrectnessTest {
     assertNotNull(result1, "Should match 'a'");
     assertEquals("a", result1.group(1), "Group 1 should be 'a' from first alternative");
 
-    // Input "ab" will try first alternative "(a)" which succeeds with "a",
-    // leaving "b" unmatched. Since match() requires matching entire string, it fails.
-    // This is correct behavior - alternatives don't backtrack based on match() requirements.
+    // On "ab" the first alternative leaves "b" unmatched, so match() backtracks into the second
+    // (PCRE2: group 1 = "ab").
     MatchResult result2 = m.match("ab");
-    assertNull(result2, "Should NOT match 'ab' - first alternative consumes only 'a'");
+    assertNotNull(result2, "Should match 'ab' with the second alternative");
+    assertEquals("ab", result2.group(1), "Group 1 should be 'ab' from second alternative");
   }
 }

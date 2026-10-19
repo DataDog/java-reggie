@@ -142,11 +142,15 @@ tasks.register('jacocoAggregateReport', JacocoReport) {
 
     dependsOn subprojects*.test
 
-    // Collect execution data from all subprojects except benchmark
+    // Collect execution data from all subprojects except benchmark.
+    // Filter to the canonical `test` task: withType(Test) is a live collection, so additional Test
+    // tasks (e.g. reggie-runtime:linearFindTest) would be pulled in implicitly and make this task
+    // run under `build -x test` (CodeQL), failing Gradle's implicit-dependency validation. The
+    // filtered task re-runs the same tests, so its execution data adds nothing to coverage.
     subprojects.each { subproject ->
         if (subproject.name != 'reggie-benchmark') {
             subproject.plugins.withType(JavaPlugin) {
-                executionData subproject.tasks.withType(Test)
+                executionData subproject.tasks.withType(Test).matching { it.name == 'test' }
                 sourceSets subproject.sourceSets.main
             }
         }
@@ -192,14 +196,32 @@ tasks.register('jacocoVerify', JacocoCoverageVerification) {
         }
     }
 
-    // Collect execution data from all subprojects except benchmark
+    // Collect execution data from all subprojects except benchmark.
+    // Filter to the canonical `test` task: withType(Test) is a live collection, so additional Test
+    // tasks (e.g. reggie-runtime:linearFindTest) would be pulled in implicitly and make this task
+    // run under `build -x test` (CodeQL). The filtered task re-runs the same tests, so its
+    // execution data adds nothing to coverage.
+    def verifyExecData = []
     subprojects.each { subproject ->
         if (subproject.name != 'reggie-benchmark') {
             subproject.plugins.withType(JavaPlugin) {
-                executionData subproject.tasks.withType(Test)
+                // Explicit dependency on the consumed source-set outputs: classDirectories below
+                // is built via fileTree(dir: ...), which drops the task dependency and would
+                // otherwise fail Gradle's implicit-dependency validation whenever this task runs.
+                dependsOn subproject.tasks.named('classes')
+                executionData subproject.tasks.withType(Test).matching { it.name == 'test' }
                 sourceSets subproject.sourceSets.main
+                verifyExecData << subproject.layout.buildDirectory.file('jacoco/test.exec')
             }
         }
+    }
+    // JacocoCoverageVerification errors out on missing execution data, and its classDirectories
+    // (built via fileTree(dir: ...)) carry no task dependency on the source-set outputs — so when
+    // this task executes without the test tasks having run (e.g. `build -x test`, the CodeQL
+    // build), Gradle fails it either on the implicit dependency or on the missing .exec files.
+    // There is nothing to verify without test-run data: skip instead.
+    onlyIf {
+        verifyExecData.any { it.get().asFile.exists() }
     }
 
     // Exclude test data, corpus, debug packages, and standalone debug utilities

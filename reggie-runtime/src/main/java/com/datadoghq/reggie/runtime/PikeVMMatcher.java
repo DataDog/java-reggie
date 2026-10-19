@@ -40,6 +40,13 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private final NFA nfa;
   private final int groupCount;
+
+  /**
+   * First slot of the group pins ({@link NFA.NFAState#pinGroup}): group g's pinned span lives at
+   * {@code pinBase + 2g}; -1 when the NFA has no pins.
+   */
+  private final int pinBase;
+
   private final int stateCount;
 
   // Thread-list storage: two rings of (stateId, captures[]) indexed by list-position.
@@ -51,24 +58,21 @@ public final class PikeVMMatcher extends ReggieMatcher {
   private int clistSize;
   private int nlistSize;
 
-  // Atomic group thread pruning support.
+  // Atomic group commit support.
   //
-  // atomicPos[G] encodes group G membership for a thread:
-  //   >= 0  — inside G, entered at position atomicPos[G]
-  //   == -1 — never entered G
-  //   <= -2 — exited G; original entry position = -(atomicPos[G] + 2)
-  //
-  // Pruning rule: after each stepChar, for each (G, entryPos E):
-  //   if an inside thread (atomicPos[G] == E) can consume the next input character,
-  //   all exit threads (atomicPos[G] == -(E+2)) are killed (nlistAlive[k] = false).
-  // Same rule is applied to the initial clist after initClist.
-  // This enforces greedy-commit: the extending inside path dominates a premature exit
-  // only when the greedy path can actually advance — not when it will fail next step.
+  // atomicPos[G] holds, for a thread that entered atomic group G, the end position G commits to
+  // for that entry (see atomicCommitEnd): the end of the body's first match in priority order.
+  // -1 when the thread is not inside G. A thread may leave G only at that position, so every
+  // other way through the body dies at G's exit state.
   private final int atomicGroupCount;
   private final int[][] clistAtomicPos;
   private final int[][] nlistAtomicPos;
-  // true = slot is active, false = pruned by atomic commit.
-  private boolean[] nlistAlive;
+  // Atomic entry state of each group, indexed by atomic group id.
+  private final NFA.NFAState[] atomicEntryStates;
+  // Per-nesting-level scratch for atomicCommitEnd; grown on first use of a level.
+  private AtomicSim[] atomicSims;
+  // updateAtomicTracking result for a path that cannot pass an atomic entry or exit state.
+  private static final int[] ATOMIC_DEAD = new int[0];
 
   // T1.5: index of the first (highest-priority) accepting thread currently in clist, or -1.
   // Maintained incrementally as clist is populated (resetClist / addThread leaf / swapLists) so the
@@ -92,10 +96,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
   // One per DFS depth level; bounded by stateCount.
   private final int[][] scratchCaptures;
 
-  // Scratch atomic position array for DFS atomic-group entry recording during addThread.
-  // Single array of size atomicGroupCount, passed through DFS calls analogously to how
-  // capture arrays are passed. null when atomicGroupCount == 0.
-  private final int[] scratchAtomicPos;
+  // Scratch atomicPos arrays for addThread, one per DFS depth level like scratchCaptures. null
+  // when atomicGroupCount == 0.
+  private final int[][] scratchAtomicPos;
 
   // Per-clist-slot marker: true when the slot was added via a path that passed through TWO OR
   // MORE distinct anchor states at pos=regionStart. This identifies unrolled-quantifier consuming
@@ -219,7 +222,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
     clistIds = new int[stateCount];
     nlistIds = new int[stateCount];
-    int slotCount = 2 * (groupCount + 1);
+    pinBase = nfa.hasPinnedGroups() ? 2 * (groupCount + 1) : -1;
+    int slotCount = (nfa.hasPinnedGroups() ? 4 : 2) * (groupCount + 1);
     clistCaptures = new int[stateCount][slotCount];
     nlistCaptures = new int[stateCount][slotCount];
     inClist = new boolean[stateCount];
@@ -249,14 +253,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
       this.nlistAtomicPos = new int[stateCount][atomicGroupCount];
       for (int[] row : clistAtomicPos) Arrays.fill(row, -1);
       for (int[] row : nlistAtomicPos) Arrays.fill(row, -1);
-      this.nlistAlive = new boolean[stateCount];
-      this.scratchAtomicPos = new int[atomicGroupCount];
-      Arrays.fill(scratchAtomicPos, -1);
+      this.scratchAtomicPos = new int[stateCount + 1][atomicGroupCount];
+      this.atomicEntryStates = new NFA.NFAState[atomicGroupCount];
+      for (NFA.NFAState s : statesById) {
+        if (s.atomicEntry >= 0) atomicEntryStates[s.atomicEntry] = s;
+      }
     } else {
       this.clistAtomicPos = null;
       this.nlistAtomicPos = null;
-      this.nlistAlive = null;
       this.scratchAtomicPos = null;
+      this.atomicEntryStates = null;
     }
 
     // Greedy dotall-sink fast-forward table (computed once; see computeSinkGroups()).
@@ -292,11 +298,16 @@ public final class PikeVMMatcher extends ReggieMatcher {
     rejectStartClosureIds = bundle.rejectStartClosureIds;
     if (findDfa != null) {
       if (reinjectAfterNlClosureIds != null) {
-        // After consuming '\n', inject the after-newline closure (crosses START_MULTILINE).
+        // After consuming a line terminator, inject the after-newline closure (crosses
+        // START_MULTILINE).
         findStep = (cur, c) -> findStepClosureMultiline(transitionTargets(cur, (char) c), c);
-        // matches(): after '\n', START_MULTILINE can fire; at all other positions block it.
+        // matches(): after a line terminator, START_MULTILINE can fire; elsewhere block it.
         matchesStep =
-            (cur, c) -> sortedEpsilonClosure(transitionTargets(cur, (char) c), true, c != '\n');
+            (cur, c) ->
+                sortedEpsilonClosure(
+                    transitionTargets(cur, (char) c),
+                    true,
+                    !LineTerminators.isLineTerminator((char) c));
       } else {
         // Self-anchoring find step: closureNoStart(targets) UNION reinjectClosure.
         findStep = (cur, c) -> findStepClosure(transitionTargets(cur, (char) c));
@@ -327,9 +338,10 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * Eligible for the boolean find() fast path: no anchors other than START/STRING_START/
    * START_MULTILINE, no assertions, backreferences, or atomic groups.
    *
-   * <p>START_MULTILINE ((?m)^) is handled by splitting the re-injection closure: after consuming
-   * '\n' the DFA re-injects a closure that crosses START_MULTILINE anchors; at all other positions
-   * a closure that blocks them is used. Both closures block START/STRING_START (pos-0-only).
+   * <p>START_MULTILINE ((?m)^) is handled by splitting the re-injection closure: after consuming a
+   * line terminator the DFA re-injects a closure that crosses START_MULTILINE anchors; at all other
+   * positions a closure that blocks them is used. Both closures block START/STRING_START
+   * (pos-0-only).
    */
   /**
    * NFA-derived, immutable matcher setup shared across every {@link PikeVMMatcher} built for the
@@ -365,11 +377,11 @@ public final class PikeVMMatcher extends ReggieMatcher {
         // Initial state (pos 0): all start anchors satisfied -> cross everything.
         startClosureIds = sortedEpsilonClosure(statesById, stateCount, start, false, false);
         if (hasMultiline) {
-          // Mid-line reinject (pos > 0, prev char != \n): block START, STRING_START, and
+          // Mid-line reinject (pos > 0, prev char not a terminator): block START, STRING_START, and
           // START_MULTILINE - none of the start-of-line anchors fire in mid-line positions.
           reinjectClosureIds = sortedEpsilonClosure(statesById, stateCount, start, true, true);
-          // After-newline reinject (prev char == \n): block START/STRING_START but cross
-          // START_MULTILINE - (?m)^ fires at the start of every line, i.e. after \n.
+          // After-newline reinject (prev char is a terminator): block START/STRING_START but
+          // cross START_MULTILINE - (?m)^ fires at the start of every line.
           reinjectAfterNlClosureIds =
               sortedEpsilonClosure(statesById, stateCount, start, true, false);
         } else {
@@ -517,6 +529,33 @@ public final class PikeVMMatcher extends ReggieMatcher {
         if (reached.add(e.id)) q.add(e);
       }
     }
+    return multilineReinjectExact(nfa);
+  }
+
+  /**
+   * (?m)^ is modelled by re-injecting the ^-crossing start closure after each line terminator. That
+   * cannot express two java.util.regex rules: ^ never matches at the end, and never between {@code
+   * \r} and {@code \n}. Both only matter if a state reachable from the start solely through a
+   * START_MULTILINE anchor accepts or consumes {@code '\n'}; this returns false in that case. Other
+   * anchors are crossed, so the check can only decline more patterns, never fewer.
+   */
+  static boolean multilineReinjectExact(NFA nfa) {
+    if (!nfaHasMultilineAnchor(nfa)) return true;
+    int stateCount = nfa.getStates().size();
+    NFA.NFAState[] statesById = new NFA.NFAState[stateCount];
+    for (NFA.NFAState s : nfa.getStates()) statesById[s.id] = s;
+    int[] start = {nfa.getStartState().id};
+    boolean[] midLine = new boolean[stateCount];
+    for (int id : DfaBundle.sortedEpsilonClosure(statesById, stateCount, start, true, true)) {
+      midLine[id] = true;
+    }
+    for (int id : DfaBundle.sortedEpsilonClosure(statesById, stateCount, start, true, false)) {
+      if (midLine[id]) continue;
+      if (nfa.getAcceptStates().contains(statesById[id])) return false;
+      for (NFA.Transition t : statesById[id].getTransitions()) {
+        if (t.chars.contains('\n')) return false;
+      }
+    }
     return true;
   }
 
@@ -544,7 +583,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    *   <li>{@code blockStartAnchor=true}: do not traverse through START/STRING_START anchor states
    *       (their anchor is unsatisfied at pos &gt; 0).
    *   <li>{@code blockMultilineAnchor=true}: also do not traverse through START_MULTILINE states
-   *       ((?m)^ unsatisfied when the previous char was not '\n').
+   *       ((?m)^ unsatisfied when the previous char was not a line terminator).
    * </ul>
    *
    * With both false (pos 0 / all-anchors-open) the closure crosses every anchor state.
@@ -623,13 +662,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /**
-   * The self-anchoring find() step for patterns with START_MULTILINE ((?m)^): after consuming
-   * {@code '\n'} the after-newline reinject closure is used (crosses START_MULTILINE); at all other
-   * positions the mid-line reinject closure is used (blocks START_MULTILINE).
+   * The self-anchoring find() step for patterns with START_MULTILINE ((?m)^): after consuming a
+   * line terminator the after-newline reinject closure is used (crosses START_MULTILINE); at all
+   * other positions the mid-line reinject closure is used (blocks START_MULTILINE).
    */
   private int[] findStepClosureMultiline(int[] targets, int c) {
     int[] tc = sortedEpsilonClosure(targets, true, true);
-    int[] reinject = (c == '\n') ? reinjectAfterNlClosureIds : reinjectClosureIds;
+    int[] reinject =
+        LineTerminators.isLineTerminator((char) c) ? reinjectAfterNlClosureIds : reinjectClosureIds;
     return sortedUnion(tc, reinject);
   }
 
@@ -646,28 +686,19 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /**
-   * Returns true if any line-start position (pos 0 or the char immediately after a {@code '\n'})
+   * Returns true if any line-start position (pos 0 or the char immediately after a line terminator)
    * holds an ASCII char that can begin a match per {@link #firstByteAscii}. Used as a fast-reject
-   * guard for {@code (?m)^} patterns: if no such position exists, no match is possible.
-   *
-   * <p>Uses SIMD-accelerated {@code String.indexOf('\n')} to hop between line starts in O(L/line)
-   * rather than scanning every character.
+   * guard for {@code (?m)^} patterns: if no such position exists, no match is possible. The
+   * position after the {@code \r} of a {@code \r\n} is also checked; it holds {@code \n}, which
+   * only makes the guard more permissive.
    */
   private boolean hasMultilineFirstCharCandidate(String input) {
     int len = input.length();
-    if (len == 0) return false;
-    // Check pos 0.
-    char c0 = input.charAt(0);
-    if (c0 < 128 && firstByteAscii[c0]) return true;
-    // Check each position immediately after a '\n'.
-    int nl = input.indexOf('\n');
-    while (nl >= 0) {
-      int next = nl + 1;
-      if (next < len) {
-        char c = input.charAt(next);
+    for (int i = 0; i < len; i++) {
+      if (i == 0 || LineTerminators.isLineTerminator(input.charAt(i - 1))) {
+        char c = input.charAt(i);
         if (c < 128 && firstByteAscii[c]) return true;
       }
-      nl = input.indexOf('\n', next);
     }
     return false;
   }
@@ -757,8 +788,8 @@ public final class PikeVMMatcher extends ReggieMatcher {
     if (findDfa != null) {
       // Empty-matchable patterns match (the empty string) at every position, including "".
       if (findCanMatchEmpty) return true;
-      // T1.4a: START_MULTILINE fast-reject. (?m)^ patterns can only match at pos 0 or after '\n'.
-      // Scan line-start positions using SIMD indexOf('\n') and check the first-char bitmap. If no
+      // T1.4a: START_MULTILINE fast-reject. (?m)^ patterns can only match at pos 0 or after a line
+      // terminator. Scan line-start positions and check the first-char bitmap. If no
       // line start has a valid first char, no match is possible — avoids all acquire-fenced DFA
       // reads on ARM for pure no-match inputs (e.g. all-digits input for (?m)^[a-z]+).
       if (reinjectAfterNlClosureIds != null
@@ -823,7 +854,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private boolean runMatches(String input, int regionStart, int regionEnd) {
     initClist(input, regionStart, regionStart, regionEnd);
-    pruneAtomicClistInitial(input, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       // First (highest-priority) accept thread in the current list, or -1 (O(1), see
@@ -845,7 +875,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, regionStart, regionEnd);
-      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
     }
     return false;
@@ -853,7 +882,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   private MatchResult runMatchResult(String input, int regionStart, int regionEnd) {
     initClist(input, regionStart, regionStart, regionEnd);
-    pruneAtomicClistInitial(input, regionStart, regionEnd);
 
     for (int pos = regionStart; pos <= regionEnd; pos++) {
       int t = clistFirstAccept;
@@ -873,7 +901,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, regionStart, regionEnd);
-      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
     }
     return null;
@@ -919,7 +946,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
         }
         if (!skipSeed) {
           seedStart(input, pos, regionEnd);
-          pruneAtomicClistInitial(input, pos, regionEnd);
         }
       }
 
@@ -938,7 +964,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, 0, regionEnd);
-      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
       if (bestStart >= 0 && clistSize == 0) break;
     }
@@ -1067,7 +1092,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
         }
         if (!skipSeed) {
           seedStart(input, pos, regionEnd);
-          pruneAtomicClistInitial(input, pos, regionEnd);
         }
       }
 
@@ -1117,7 +1141,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       char ch = input.charAt(pos);
       resetNlist();
       stepChar(ch, pos + 1, input, 0, regionEnd);
-      pruneAtomicNlist(pos + 1, input, regionEnd);
       swapLists();
       // Finalize only once a match is in progress: when its threads are all gone the winner is
       // final. While unmatched we must keep scanning (and re-seeding) for a start further right.
@@ -1248,7 +1271,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     int[] ownCaptures = updateCaptures(state, captures, pos, depth);
-    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos);
+    int[] ownAtomicPos =
+        updateAtomicTracking(state, atomicPos, pos, depth, input, regionStart, regionEnd);
+    if (ownAtomicPos == ATOMIC_DEAD) return;
 
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
@@ -1346,7 +1371,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
     }
 
     int[] ownCaptures = skipCaptures ? captures : updateCaptures(state, captures, pos, depth);
-    int[] ownAtomicPos = updateAtomicTracking(state, atomicPos, pos);
+    int[] ownAtomicPos =
+        updateAtomicTracking(state, atomicPos, pos, depth, input, regionStart, regionEnd);
+    if (ownAtomicPos == ATOMIC_DEAD) return;
 
     List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
     if (!epsilons.isEmpty()) {
@@ -1387,7 +1414,6 @@ public final class PikeVMMatcher extends ReggieMatcher {
       } else {
         Arrays.fill(nlistAtomicPos[k], -1);
       }
-      nlistAlive[k] = true;
     }
     nlistSize++;
   }
@@ -1397,6 +1423,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
    * markers the original array is returned unchanged; otherwise a scratch copy is used.
    */
   private int[] updateCaptures(NFA.NFAState state, int[] captures, int pos, int depth) {
+    if (state.pinGroup != null) {
+      int g = state.pinGroup;
+      if (captures[pinBase + 2 * g] != -1) return captures; // the first pin wins
+      int[] copy = scratchCaptures[Math.min(depth + 1, scratchCaptures.length - 1)];
+      System.arraycopy(captures, 0, copy, 0, captures.length);
+      copy[pinBase + 2 * g] = captures[2 * g];
+      copy[pinBase + 2 * g + 1] = captures[2 * g + 1];
+      return copy;
+    }
     if (state.enterGroup == null && state.exitGroup == null) {
       return captures;
     }
@@ -1413,35 +1448,49 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   /**
-   * Update atomic-group entry tracking for the current state. Returns the updated atomicPos array
-   * (entry positions for each atomic group, -1 if not inside). Returns the original array unchanged
-   * when the state has no atomic entry or exit annotation.
+   * Update atomic-group tracking for the current state. On an atomic entry, records the end the
+   * group commits to ({@link #atomicCommitEnd}); on an atomic exit, lets the path through only at
+   * that end and clears the group's slot; drops a consuming leaf still inside a group whose end it
+   * has reached. Returns {@link #ATOMIC_DEAD} when the path cannot pass, the original array when
+   * the state carries no atomic marker, and null for patterns without atomic groups.
    */
-  private int[] updateAtomicTracking(NFA.NFAState state, int[] atomicPos, int pos) {
+  private int[] updateAtomicTracking(
+      NFA.NFAState state,
+      int[] atomicPos,
+      int pos,
+      int depth,
+      String input,
+      int regionStart,
+      int regionEnd) {
     if (atomicGroupCount == 0) {
       return null; // fast path for non-atomic patterns
     }
-    boolean hasEntry = state.atomicEntry >= 0;
-    boolean hasExit = state.atomicExit >= 0;
-    if (!hasEntry && !hasExit) {
+    if (state.atomicExit < 0 && state.atomicEntry < 0) {
+      if (atomicPos != null && state.getEpsilonTransitions().isEmpty()) {
+        // A consuming leaf inside a group whose committed end is not ahead can never leave it;
+        // dropping the path here keeps it from claiming the state ahead of a live thread.
+        for (int g = 0; g < atomicGroupCount; g++) {
+          if (atomicPos[g] >= 0 && atomicPos[g] <= pos) return ATOMIC_DEAD;
+        }
+      }
       return atomicPos;
     }
-    int[] copyPos = scratchAtomicPos;
+    if (state.atomicExit >= 0 && (atomicPos == null || atomicPos[state.atomicExit] != pos)) {
+      return ATOMIC_DEAD;
+    }
+    int end = -1;
+    if (state.atomicEntry >= 0) {
+      end = atomicCommitEnd(state.atomicEntry, pos, input, regionStart, regionEnd, 0);
+      if (end < 0) return ATOMIC_DEAD;
+    }
+    int[] copyPos = scratchAtomicPos[Math.min(depth + 1, scratchAtomicPos.length - 1)];
     if (atomicPos != null) {
       System.arraycopy(atomicPos, 0, copyPos, 0, atomicGroupCount);
     } else {
       Arrays.fill(copyPos, -1);
     }
-    if (hasEntry) {
-      copyPos[state.atomicEntry] = pos;
-    }
-    if (hasExit) {
-      // Encode the exit: -(entryPos + 2) preserves the original entry position in a range
-      // (<= -2) distinct from -1 (never entered) and >= 0 (still inside), so post-step
-      // pruning can match exit threads back to their (group, entryPos) inside counterpart.
-      int ep = copyPos[state.atomicExit];
-      copyPos[state.atomicExit] = -(ep + 2);
-    }
+    if (state.atomicEntry >= 0) copyPos[state.atomicEntry] = end;
+    if (state.atomicExit >= 0) copyPos[state.atomicExit] = -1;
     return copyPos;
   }
 
@@ -1484,9 +1533,9 @@ public final class PikeVMMatcher extends ReggieMatcher {
         // \z matches only at the absolute end of input.
         return pos == regionEnd;
       case START_MULTILINE:
-        return pos == regionStart || (pos > 0 && input.charAt(pos - 1) == '\n');
+        return LineTerminators.isMultilineStart(input, pos, regionStart, regionEnd);
       case END_MULTILINE:
-        return pos == regionEnd || (pos < regionEnd && input.charAt(pos) == '\n');
+        return LineTerminators.isMultilineEnd(input, pos, regionEnd);
       case WORD_BOUNDARY:
         {
           boolean beforeWord = pos > 0 && isWordChar(input.charAt(pos - 1));
@@ -1507,94 +1556,138 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   // -------------------------------------------------------------------------
-  // Atomic group pruning helpers
+  // Atomic group commit
   // -------------------------------------------------------------------------
 
-  /** Returns true when the state has a character transition whose char set includes {@code ch}. */
-  private boolean stateCanConsume(int stateId, char ch) {
-    for (NFA.Transition tr : statesById[stateId].getTransitions()) {
-      if (tr.chars.contains(ch)) return true;
+  /**
+   * Scratch for one nesting level of {@link #atomicCommitEnd}: priority-ordered thread lists of
+   * state ids, each thread with the committed end of every atomic group it is inside.
+   */
+  private static final class AtomicSim {
+    int[] cur;
+    int[] nxt;
+    int[][] curCommit;
+    int[][] nxtCommit;
+    final int[][] scratch;
+    final int[] mark;
+    final int[] noCommit;
+    int stamp;
+    int curSize;
+    int nxtSize;
+    int result;
+    boolean cut;
+
+    AtomicSim(int stateCount, int groups) {
+      cur = new int[stateCount];
+      nxt = new int[stateCount];
+      curCommit = new int[stateCount][groups];
+      nxtCommit = new int[stateCount][groups];
+      scratch = new int[stateCount + 1][groups];
+      mark = new int[stateCount];
+      noCommit = new int[groups];
+      Arrays.fill(noCommit, -1);
     }
-    return false;
+
+    void swap() {
+      int[] t = cur;
+      cur = nxt;
+      nxt = t;
+      int[][] c = curCommit;
+      curCommit = nxtCommit;
+      nxtCommit = c;
+      curSize = nxtSize;
+      nxtSize = 0;
+    }
   }
 
   /**
-   * Prune premature exit threads from the initial clist after {@link #initClist}.
-   *
-   * <p>For each atomic group G and each inside thread j ({@code clistAtomicPos[j][G] >= 0}): if
-   * thread j can consume {@code input[pos]} (the first character to be processed), then all exit
-   * threads k with {@code clistAtomicPos[k][G] == -(E+2)} are dead — the greedy path will extend,
-   * so zero-length exits are premature.
-   *
-   * <p>Borrows {@link #nlistAlive} as a dead-flag scratch array; safe because nlistSize == 0
-   * immediately after {@code initClist}.
+   * End position atomic group {@code g} commits to when entered at {@code entry}: the end of the
+   * first match of its body in priority order, or -1 when the body cannot match there. Runs the
+   * body alone in lock-step, ending a thread list at the first thread that reaches g's exit (lower
+   * priority threads are dropped); a later exit can only come from a higher-priority thread, so the
+   * last exit recorded is the committed one. Nested atomic groups recurse one level deeper.
    */
-  private void pruneAtomicClistInitial(String input, int pos, int regionEnd) {
-    if (atomicGroupCount == 0 || pos >= regionEnd) return;
-    char firstCh = input.charAt(pos);
-    boolean[] dead = nlistAlive; // borrow as scratch; nlistSize == 0 here
-    Arrays.fill(dead, 0, clistSize, false);
-    boolean anyDead = false;
-    for (int G = 0; G < atomicGroupCount; G++) {
-      for (int j = 0; j < clistSize; j++) {
-        if (dead[j]) continue;
-        int ap = clistAtomicPos[j][G];
-        if (ap >= 0 && stateCanConsume(clistIds[j], firstCh)) {
-          int encoded = -(ap + 2);
-          for (int k = 0; k < clistSize; k++) {
-            if (!dead[k] && clistAtomicPos[k][G] == encoded) {
-              dead[k] = true;
-              anyDead = true;
-            }
+  private int atomicCommitEnd(
+      int g, int entry, String input, int regionStart, int regionEnd, int level) {
+    if (atomicSims == null || level >= atomicSims.length) {
+      atomicSims = Arrays.copyOf(atomicSims == null ? new AtomicSim[0] : atomicSims, level + 1);
+    }
+    AtomicSim s = atomicSims[level];
+    if (s == null) s = atomicSims[level] = new AtomicSim(stateCount, atomicGroupCount);
+    s.result = -1;
+    s.nxtSize = 0;
+    beginAtomicList(s);
+    atomicClosure(
+        s, g, atomicEntryStates[g], s.noCommit, entry, 0, input, regionStart, regionEnd, level);
+    s.swap();
+    for (int pos = entry; s.curSize > 0 && pos < regionEnd; pos++) {
+      char ch = input.charAt(pos);
+      beginAtomicList(s);
+      for (int t = 0; t < s.curSize && !s.cut; t++) {
+        for (NFA.Transition tr : statesById[s.cur[t]].getTransitions()) {
+          if (tr.chars.contains(ch)) {
+            atomicClosure(
+                s, g, tr.target, s.curCommit[t], pos + 1, 0, input, regionStart, regionEnd, level);
+            if (s.cut) break;
           }
         }
       }
+      s.swap();
     }
-    if (!anyDead) return;
-    int write = 0;
-    clistFirstAccept = -1;
-    for (int i = 0; i < clistSize; i++) {
-      if (dead[i]) {
-        inClist[clistIds[i]] = false;
-        continue;
-      }
-      if (write != i) {
-        clistIds[write] = clistIds[i];
-        System.arraycopy(clistCaptures[i], 0, clistCaptures[write], 0, clistCaptures[i].length);
-        System.arraycopy(clistAtomicPos[i], 0, clistAtomicPos[write], 0, atomicGroupCount);
-        clistViaMultipleAnchors[write] = clistViaMultipleAnchors[i];
-      }
-      if (clistFirstAccept < 0 && isAccept[clistIds[write]]) clistFirstAccept = write;
-      write++;
-    }
-    clistSize = write;
+    return s.result;
   }
 
-  /**
-   * Prune premature exit threads from nlist after {@link #stepChar}.
-   *
-   * <p>For each atomic group G and each alive inside thread j ({@code nlistAtomicPos[j][G] >= 0}):
-   * if thread j can consume {@code input[nextPos]}, all alive exit threads k with {@code
-   * nlistAtomicPos[k][G] == -(E+2)} are killed ({@code nlistAlive[k] = false}) — the greedy path
-   * will extend at the next step, so exits at the current position are premature.
-   */
-  private void pruneAtomicNlist(int nextPos, String input, int regionEnd) {
-    if (atomicGroupCount == 0 || nextPos >= regionEnd) return;
-    char nextCh = input.charAt(nextPos);
-    for (int G = 0; G < atomicGroupCount; G++) {
-      for (int j = 0; j < nlistSize; j++) {
-        if (!nlistAlive[j]) continue;
-        int ap = nlistAtomicPos[j][G];
-        if (ap >= 0 && stateCanConsume(nlistIds[j], nextCh)) {
-          int encoded = -(ap + 2);
-          for (int k = 0; k < nlistSize; k++) {
-            if (nlistAlive[k] && nlistAtomicPos[k][G] == encoded) {
-              nlistAlive[k] = false;
-            }
-          }
-        }
-      }
+  private static void beginAtomicList(AtomicSim s) {
+    s.cut = false;
+    if (++s.stamp == Integer.MAX_VALUE) {
+      Arrays.fill(s.mark, 0);
+      s.stamp = 1;
     }
+  }
+
+  /** Epsilon closure for {@link #atomicCommitEnd}, appending leaves to {@code s.nxt}. */
+  private void atomicClosure(
+      AtomicSim s,
+      int g,
+      NFA.NFAState state,
+      int[] commit,
+      int pos,
+      int depth,
+      String input,
+      int regionStart,
+      int regionEnd,
+      int level) {
+    if (s.cut || s.mark[state.id] == s.stamp) return;
+    if (state.atomicExit == g) {
+      s.result = pos;
+      s.cut = true;
+      return;
+    }
+    if (state.anchor != null && !checkAnchor(state.anchor, input, pos, regionStart, regionEnd)) {
+      return;
+    }
+    int[] own = commit;
+    // g's own entry state is where this closure starts; any other entry is a nested group.
+    if (state.atomicEntry >= 0 && state.atomicEntry != g) {
+      int end = atomicCommitEnd(state.atomicEntry, pos, input, regionStart, regionEnd, level + 1);
+      if (end < 0) return;
+      own = s.scratch[Math.min(depth + 1, s.scratch.length - 1)];
+      System.arraycopy(commit, 0, own, 0, atomicGroupCount);
+      own[state.atomicEntry] = end;
+    } else if (state.atomicExit >= 0 && commit[state.atomicExit] != pos) {
+      return;
+    }
+    s.mark[state.id] = s.stamp;
+    List<NFA.NFAState> epsilons = state.getEpsilonTransitions();
+    if (!epsilons.isEmpty()) {
+      for (NFA.NFAState next : epsilons) {
+        atomicClosure(s, g, next, own, pos, depth + 1, input, regionStart, regionEnd, level);
+      }
+      return;
+    }
+    s.nxt[s.nxtSize] = state.id;
+    System.arraycopy(own, 0, s.nxtCommit[s.nxtSize], 0, atomicGroupCount);
+    s.nxtSize++;
   }
 
   // -------------------------------------------------------------------------
@@ -1667,22 +1760,15 @@ public final class PikeVMMatcher extends ReggieMatcher {
     // inside addThreadToNlist but whose id was never appended to nlistIds.
     Arrays.fill(inNlist, false);
     nlistSize = 0;
-    // nlistAlive slots are reset to true as each new slot is committed in addThreadToNlist;
-    // no explicit reset of all slots is needed since we only read slots 0..nlistSize-1.
   }
 
   private void swapLists() {
     int len = winCaptures.length;
-    // Full reset of clist guards then re-set from nlist (skipping dead atomic-pruned slots).
+    // Full reset of clist guards then re-set from nlist.
     Arrays.fill(inClist, false);
     clistFirstAccept = -1;
     int write = 0;
     for (int i = 0; i < nlistSize; i++) {
-      if (atomicGroupCount > 0 && !nlistAlive[i]) {
-        // Slot was pruned by an atomic group exit — skip it.
-        inNlist[nlistIds[i]] = false;
-        continue;
-      }
       clistIds[write] = nlistIds[i];
       if (!skipCaptures) {
         System.arraycopy(nlistCaptures[i], 0, clistCaptures[write], 0, len);
@@ -1717,6 +1803,14 @@ public final class PikeVMMatcher extends ReggieMatcher {
   }
 
   private MatchResult buildResult(String input, int[] caps) {
+    if (pinBase >= 0) {
+      for (int g = 1; g <= groupCount; g++) {
+        if (caps[pinBase + 2 * g] != -1) {
+          caps[2 * g] = caps[pinBase + 2 * g];
+          caps[2 * g + 1] = caps[pinBase + 2 * g + 1];
+        }
+      }
+    }
     return buildCaptureResult(input, caps, groupCount);
   }
 
@@ -1728,7 +1822,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
    *
    * <ol>
    *   <li>every consuming transition of every state in {@code C} is a full dotall set ({@code
-   *       [ -￿]}, '\n' included) whose target lies back inside {@code C}, so consuming any
+   *       [
    *       character keeps the thread inside {@code C};
    *   <li>{@code C} contains at least one such consuming transition (an actual loop);
    *   <li>{@code C} contains an accept state (so it accepts at {@code regionEnd});
@@ -1817,9 +1911,7 @@ public final class PikeVMMatcher extends ReggieMatcher {
 
   /** True only for a full dotall set: the entire Unicode range including {@code '\n'}. */
   private static boolean isDotAllCharSet(CharSet cs) {
-    // isAnyChar() is also true for any-except-newline; require '\n' membership to exclude it, since
-    // a non-dotall '.' would not consume a newline and could end the greedy match early.
-    return cs.isAnyChar() && cs.contains('\n');
+    return cs.isAnyChar();
   }
 
   /**

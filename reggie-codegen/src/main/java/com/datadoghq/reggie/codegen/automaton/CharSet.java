@@ -175,10 +175,38 @@ public final class CharSet {
               new Range('\r', '\r'),
               new Range('\f', '\f')));
 
+  /**
+   * java.util.regex {@code \h}: space, tab, U+00A0, U+1680, U+180E, U+2000-U+200A, U+202F, U+205F,
+   * U+3000.
+   */
+  public static final CharSet HORIZONTAL_WS =
+      fromRanges(
+          List.of(
+              new Range(' ', ' '),
+              new Range('\t', '\t'),
+              new Range('\u00A0', '\u00A0'),
+              new Range('\u1680', '\u1680'),
+              new Range('\u180E', '\u180E'),
+              new Range('\u2000', '\u200A'),
+              new Range('\u202F', '\u202F'),
+              new Range('\u205F', '\u205F'),
+              new Range('\u3000', '\u3000')));
+
+  /** java.util.regex {@code \v}: U+000A-U+000D, U+0085, U+2028, U+2029. */
+  public static final CharSet VERTICAL_WS =
+      fromRanges(
+          List.of(
+              new Range('\n', '\r'), new Range('\u0085', '\u0085'), new Range('\u2028', '\u2029')));
+
   public static final CharSet ANY = range((char) 0, (char) 0xFFFF);
 
-  /** All characters except newline (\n). Used for . in non-dotall mode. */
-  public static final CharSet ANY_EXCEPT_NEWLINE = ANY.minus(of('\n'));
+  /**
+   * All characters except the java.util.regex line terminators: {@code \n}, {@code \r}, NEL
+   * (U+0085), LS (U+2028) and PS (U+2029). Used for . in non-dotall mode.
+   */
+  public static final CharSet ANY_EXCEPT_NEWLINE =
+      ANY.minus(
+          of('\n').union(of('\r')).union(of('\u0085')).union(of('\u2028')).union(of('\u2029')));
 
   // Unicode general category CharSets, computed from BMP (U+0000..U+FFFF)
 
@@ -653,26 +681,11 @@ public final class CharSet {
   }
 
   /**
-   * Check if this charset represents "any character" - either full Unicode range or all characters
-   * except newline (which is what '.' produces in non-DOTALL mode). This is used for detecting
-   * patterns like .* or .{n,m} in optimizations.
+   * Check if this charset is the full {@code [\u0000-\uFFFF]} range, i.e. what '.' produces in
+   * DOTALL mode. Non-DOTALL '.' ({@link #ANY_EXCEPT_NEWLINE}) is not "any character".
    */
   public boolean isAnyChar() {
-    // Check for full unicode range [\u0000-\uFFFF]
-    if (ranges.size() == 1) {
-      Range r = ranges.get(0);
-      return r.start == '\u0000' && r.end == '\uFFFF';
-    }
-    // Check for any-except-newline: [\u0000-\u0009] [\u000B-\uFFFF]
-    if (ranges.size() == 2) {
-      Range r1 = ranges.get(0);
-      Range r2 = ranges.get(1);
-      return r1.start == '\u0000'
-          && r1.end == '\u0009'
-          && r2.start == '\u000B'
-          && r2.end == '\uFFFF';
-    }
-    return false;
+    return equals(ANY);
   }
 
   // Set operations

@@ -653,7 +653,11 @@ final class LinearTokenSequenceMatcher extends ReggieMatcher {
   }
 
   private static int consumeToEndExceptNewline(CharSequence input, int pos, int regionEnd) {
-    while (pos < regionEnd && input.charAt(pos) != '\n') pos++;
+    while (pos < regionEnd) {
+      char c = input.charAt(pos);
+      if (c == '\n' || c == '\r' || c == '\u0085' || c == '\u2028' || c == '\u2029') break;
+      pos++;
+    }
     return pos;
   }
 

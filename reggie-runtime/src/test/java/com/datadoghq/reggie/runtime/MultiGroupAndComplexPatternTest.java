@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Patterns exercising SPECIALIZED_MULTI_GROUP_GREEDY, SPECIALIZED_FIXED_SEQUENCE,
- * SPECIALIZED_BOUNDED_QUANTIFIERS, GREEDY_BACKTRACK, and DFA generator code paths.
+ * SPECIALIZED_BOUNDED_QUANTIFIERS, greedy-group give-back, and DFA generator code paths.
  */
 class MultiGroupAndComplexPatternTest {
 
@@ -155,7 +155,7 @@ class MultiGroupAndComplexPatternTest {
     assertFalse(m.matches("abcdefghi"));
   }
 
-  // GREEDY_BACKTRACK patterns
+  // Greedy group that must give characters back to a suffix
 
   @Test
   void greedyBacktrackLiteralSuffix() {

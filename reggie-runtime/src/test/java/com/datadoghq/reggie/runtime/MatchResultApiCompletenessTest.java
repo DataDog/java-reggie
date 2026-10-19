@@ -113,11 +113,10 @@ class MatchResultApiCompletenessTest {
     assertEquals("<b>bold</b>", r.group());
   }
 
-  // ── NESTED_QUANTIFIED_GROUPS ──────────────────────────────────────────────
+  // ── Nested quantified groups ──────────────────────────────────────────────
 
   @Test
   void nestedQuantifiedGroups_match_doesNotThrow() {
-    // ((a+)+) routes to NESTED_QUANTIFIED_GROUPS
     ReggieMatcher m = (ReggieMatcher) Reggie.compile("((a+)+)");
     assertTrue(m.matches("aaa"));
     MatchResult r = assertDoesNotThrow(() -> m.match("aaa"));

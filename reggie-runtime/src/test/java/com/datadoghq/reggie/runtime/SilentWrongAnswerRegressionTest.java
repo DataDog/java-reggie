@@ -82,7 +82,7 @@ public class SilentWrongAnswerRegressionTest {
     assertAgrees("[1][^-]?\\Z|_{2}", "1a");
   }
 
-  // ---- A3: greedy group on empty/newline input (GREEDY_BACKTRACK) ----
+  // ---- A3: greedy group on empty/newline input ----
 
   @Test
   void a3_greedyGroup_emptyInput() {
@@ -125,8 +125,7 @@ public class SilentWrongAnswerRegressionTest {
   }
 
   @Test
-  void control_greedyBacktrack_nonEmptyStillFastPath() throws Exception {
-    assertRoutes("(.*)bar", PatternAnalyzer.MatchingStrategy.GREEDY_BACKTRACK);
+  void control_greedyDotStarLiteralSuffix() {
     assertAgrees("(.*)bar", "xxbar");
     assertAgrees("(.*)bar", "foo");
     assertAgrees("(.*)bar", "a bar b");

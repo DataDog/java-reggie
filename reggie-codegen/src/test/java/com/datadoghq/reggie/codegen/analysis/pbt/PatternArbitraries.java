@@ -149,7 +149,7 @@ public class PatternArbitraries {
 
   /**
    * Generate patterns with context-free features (subroutines, conditionals). Examples: (?R),
-   * a(?1)b, (?(1)yes|no)
+   * (a)(?1)b, (a)(?(1)b|c)
    *
    * <p>Note: These are limited to known valid patterns since context-free syntax is complex and
    * error-prone to generate randomly.
@@ -157,7 +157,7 @@ public class PatternArbitraries {
   public static Arbitrary<String> contextFree() {
     return Arbitraries.oneOf(
         Arbitraries.just("(?R)"), // Recursive subroutine
-        Arbitraries.just("a(?1)b"), // Numbered subroutine
+        Arbitraries.just("(a)(?1)b"), // Numbered subroutine
         Arbitraries.just("(a)(?(1)b|c)"), // Conditional
         Arbitraries.just("(?|a|b)") // Branch reset
         );

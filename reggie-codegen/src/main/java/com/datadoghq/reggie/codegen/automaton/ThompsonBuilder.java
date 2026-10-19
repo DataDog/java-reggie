@@ -54,12 +54,43 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private int nextAtomicId = 0;
   private final boolean lazyAware;
 
+  /**
+   * Build subroutine calls as call states ({@link NFA.NFAState#callTarget}) instead of throwing.
+   * Only BackrefBacktrackMatcher executes call states.
+   */
+  private final boolean callStates;
+
+  /** Call states and their AST nodes, resolved to targets at the end of {@link #build}. */
+  private final List<NFA.NFAState> calls = new ArrayList<>();
+
+  private final List<SubroutineNode> callNodes = new ArrayList<>();
+
+  /** Every built instance of each capturing group (call-state builds only). */
+  private final Map<GroupNode, List<NFAFragment>> groupInstances = new IdentityHashMap<>();
+
+  /**
+   * Number of enclosing quantifiers that can repeat (max &gt; 1), outside lookaround bodies, atomic
+   * groups and possessive repeats.
+   */
+  private int repeatDepth = 0;
+
+  /**
+   * Quantifier wrapped directly in an atomic group: the parser's form of a possessive quantifier,
+   * which java.util.regex does not compile to GroupCurly.
+   */
+  private RegexNode atomicBody;
+
   public ThompsonBuilder() {
-    this.lazyAware = false;
+    this(false, false);
   }
 
   public ThompsonBuilder(boolean lazyAware) {
+    this(lazyAware, false);
+  }
+
+  public ThompsonBuilder(boolean lazyAware, boolean callStates) {
     this.lazyAware = lazyAware;
+    this.callStates = callStates;
   }
 
   /**
@@ -92,7 +123,96 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       exit.addEpsilonTransition(acceptState);
     }
 
+    if (!calls.isEmpty()) {
+      resolveCalls(ast, fragment.entry, acceptState);
+    }
     return new NFA(allStates, fragment.entry, Set.of(acceptState), groupCount);
+  }
+
+  /**
+   * Sets each call state's target, entry and return states. The target is the first capturing group
+   * in pattern order with the call's number, or with the named group's number when the call is
+   * named; the call runs its instance reachable from the start with the lowest entry id (a
+   * quantifier builds one instance per copy). A target with no such instance ({@code
+   * (?:(a)){0}(?1)}, or a group inside a lookaround) gets one call-only instance, built here and
+   * entered by calls alone; calls inside it are resolved by the same loop.
+   *
+   * @throws UnsupportedOperationException when the target does not exist
+   */
+  private void resolveCalls(RegexNode ast, NFA.NFAState start, NFA.NFAState accept) {
+    Set<NFA.NFAState> reachable = reachableFrom(start);
+    Map<GroupNode, NFAFragment> callOnly = new IdentityHashMap<>();
+    for (int i = 0; i < calls.size(); i++) {
+      NFA.NFAState call = calls.get(i);
+      SubroutineNode node = callNodes.get(i);
+      if (node.name == null && node.groupNumber <= 0) {
+        call.callTarget = 0;
+        call.callEntry = start;
+        call.callReturns = Set.of(accept);
+        continue;
+      }
+      GroupNode group = ast.accept(new GroupFinder(node.groupNumber, node.name));
+      if (group != null && node.name != null) {
+        // A name stands for its number: in a branch reset (?&n) calls the first group numbered as n
+        group = ast.accept(new GroupFinder(group.groupNumber, null));
+      }
+      NFAFragment instance = null;
+      if (group != null) {
+        for (NFAFragment f : groupInstances.getOrDefault(group, List.of())) {
+          if (reachable.contains(f.entry) && (instance == null || f.entry.id < instance.entry.id)) {
+            instance = f;
+          }
+        }
+      }
+      if (instance == null && group != null) {
+        instance = callOnly.get(group);
+        if (instance == null) {
+          instance = group.accept(this);
+          callOnly.put(group, instance);
+        }
+      }
+      if (instance == null) {
+        throw new UnsupportedOperationException("Subroutine call to a missing group: " + node);
+      }
+      call.callTarget = group.groupNumber;
+      call.callEntry = instance.entry.getEpsilonTransitions().get(0);
+      call.callReturns = instance.exits;
+    }
+  }
+
+  /**
+   * States reachable from {@code start} outside lookaround bodies: epsilon, character, counted-loop
+   * and conditional edges.
+   */
+  private Set<NFA.NFAState> reachableFrom(NFA.NFAState start) {
+    NFA.NFAState[] byId = allStates.toArray(new NFA.NFAState[0]);
+    Set<NFA.NFAState> seen = new HashSet<>();
+    ArrayDeque<NFA.NFAState> queue = new ArrayDeque<>();
+    seen.add(start);
+    queue.add(start);
+    while (!queue.isEmpty()) {
+      NFA.NFAState s = queue.poll();
+      List<NFA.NFAState> next = new ArrayList<>(s.getEpsilonTransitions());
+      for (NFA.Transition t : s.getTransitions()) {
+        next.add(t.target);
+      }
+      if (s.countedLoopId != null) {
+        next.add(byId[s.countedLoopBodyEntryId]);
+        next.add(byId[s.countedLoopStopId]);
+      }
+      if (s.thenBranch != null) {
+        next.add(s.thenBranch);
+      }
+      if (s.elseBranch != null) {
+        next.add(s.elseBranch);
+      }
+      for (NFA.NFAState t : next) {
+        if (seen.add(t)) {
+          queue.add(t);
+        }
+      }
+    }
+    return seen;
   }
 
   private NFA.NFAState createState() {
@@ -183,6 +303,111 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   @Override
   public NFAFragment visitQuantifier(QuantifierNode node) {
+    Integer pinGroup = pinGroupOf(node);
+    int savedDepth = repeatDepth;
+    // A possessive repeat finishes its own iterations before the continuation runs, so groups
+    // inside it keep their last iteration: outer repeats do not reach through it.
+    if (node.possessive) repeatDepth = 0;
+    else if (node.max == -1 || node.max > 1) repeatDepth++;
+    // + and * become {1,} and {0,} so exits after min iterations stay distinguishable.
+    NFAFragment fragment =
+        pinGroup != null
+            ? buildCountedQuantifier(node.child, node.min, node.max, true, pinGroup)
+            : buildQuantifier(node);
+    repeatDepth = savedDepth;
+    return fragment;
+  }
+
+  /**
+   * Group number to pin for {@code node}, or null. java.util.regex compiles a greedy {@code
+   * (X){min,max}} with a deterministic body to GroupCurly, which on success after more than min
+   * iterations rewrites the group to that invocation's last iteration; when an outer repeat
+   * re-enters the group, the earliest such invocation wins over later iterations ({@code
+   * (?:(a){1,2})+} on "aaa": group 1 = [1,2)). {@code ?} compiles to Ques and is not affected.
+   */
+  private Integer pinGroupOf(QuantifierNode node) {
+    if (repeatDepth == 0 || !node.greedy || node.possessive || node == atomicBody) return null;
+    if (node.max != -1 && node.max <= node.min) return null;
+    if (node.min == 0 && node.max == 1) return null;
+    if (!(node.child instanceof GroupNode)) return null;
+    GroupNode group = (GroupNode) node.child;
+    if (!group.capturing || group.atomic || !group.child.accept(DETERMINISTIC_BODY)) return null;
+    return group.groupNumber;
+  }
+
+  /**
+   * Bodies java.util.regex treats as deterministic for GroupCurly, restricted to a conservative
+   * subset: non-empty sequences of literals and character classes, optionally wrapped in
+   * non-capturing groups.
+   */
+  private static final RegexVisitor<Boolean> DETERMINISTIC_BODY =
+      new RegexVisitor<>() {
+        @Override
+        public Boolean visitLiteral(LiteralNode node) {
+          return !(node instanceof EpsilonNode);
+        }
+
+        @Override
+        public Boolean visitCharClass(CharClassNode node) {
+          return true;
+        }
+
+        @Override
+        public Boolean visitConcat(ConcatNode node) {
+          if (node.children.isEmpty()) return false;
+          for (RegexNode child : node.children) {
+            if (!child.accept(this)) return false;
+          }
+          return true;
+        }
+
+        @Override
+        public Boolean visitAlternation(AlternationNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitQuantifier(QuantifierNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitGroup(GroupNode node) {
+          return !node.capturing && !node.atomic && node.child.accept(this);
+        }
+
+        @Override
+        public Boolean visitAnchor(AnchorNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitBackreference(BackreferenceNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitAssertion(AssertionNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitSubroutine(SubroutineNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitConditional(ConditionalNode node) {
+          return false;
+        }
+
+        @Override
+        public Boolean visitBranchReset(BranchResetNode node) {
+          return false;
+        }
+      };
+
+  private NFAFragment buildQuantifier(QuantifierNode node) {
     NFAFragment child = node.child.accept(this);
 
     boolean lazy = lazyAware && !node.greedy && !node.possessive;
@@ -275,11 +500,17 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
     } else {
       // {n}, {n,m} : counted quantifier
-      return buildCountedQuantifier(node.child, node.min, node.max, node.greedy);
+      return buildCountedQuantifier(node.child, node.min, node.max, node.greedy, null);
     }
   }
 
-  private NFAFragment buildCountedQuantifier(RegexNode child, int min, int max, boolean greedy) {
+  /**
+   * @param pinGroup when non-null (greedy only), every exit taken after more than {@code min}
+   *     iterations is routed through a {@link NFA.NFAState#pinGroup} forwarder; a lowered counted
+   *     loop carries it as {@link NFA.NFAState#countedLoopPinGroup} instead
+   */
+  private NFAFragment buildCountedQuantifier(
+      RegexNode child, int min, int max, boolean greedy, Integer pinGroup) {
     boolean lazy = lazyAware && !greedy;
 
     List<NFAFragment> fragments = new ArrayList<>();
@@ -294,7 +525,7 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       int childCost = Math.max(1, allStates.size() - sizeBefore);
       int tailCopies = max - min;
       if ((long) tailCopies * childCost > COUNTED_LOOP_UNROLL_BUDGET) {
-        return buildCountedLoopFragment(child, first, min, tailCopies, lazy);
+        return buildCountedLoopFragment(child, first, min, tailCopies, lazy, pinGroup);
       }
       // Unroll, preserving the original state-id sequence: `first` is copy #1 of the
       // required run (min >= 1) or of the optional run (min == 0).
@@ -387,6 +618,19 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
     allExits.addAll(result.exits);
 
+    if (pinGroup != null) {
+      // Appended after the continue/loop epsilons, so the pin path keeps the exit's priority.
+      for (int j = min; j < fragments.size(); j++) {
+        for (NFA.NFAState exit : fragments.get(j).exits) {
+          NFA.NFAState pin = createState();
+          pin.pinGroup = pinGroup;
+          exit.addEpsilonTransition(pin);
+          allExits.remove(exit);
+          allExits.add(pin);
+        }
+      }
+    }
+
     if (min == 0) {
       if (lazy) {
         // Lazy {0,m} or {0,}: wrap in a fresh entry state.
@@ -423,15 +667,15 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
    * precede the marker.
    */
   private NFAFragment buildCountedLoopFragment(
-      RegexNode child, NFAFragment body, int min, int tailCopies, boolean lazy) {
+      RegexNode child, NFAFragment body, int min, int tailCopies, boolean lazy, Integer pinGroup) {
     NFA.NFAState stop = createState();
     NFA.NFAState marker = createState();
     int id = nextCountedLoopId++;
     marker.countedLoopId = id;
     marker.countedLoopTailMax = tailCopies;
     marker.countedLoopLazy = lazy;
-    marker.countedLoopBodyEntryId = body.entry.id;
     marker.countedLoopStopId = stop.id;
+    marker.countedLoopPinGroup = pinGroup != null ? pinGroup : -1;
 
     // Required prefix: `body` is copy #1 when min >= 1; build the remaining min-1 copies and
     // chain them (linear in min — min copies never carry the multiplicative blowup).
@@ -446,6 +690,8 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     for (NFA.NFAState exit : last.exits) {
       exit.addEpsilonTransition(marker);
     }
+    // A tail pass re-runs only the last copy, the one whose exits reach the marker.
+    marker.countedLoopBodyEntryId = last.entry.id;
 
     NFA.NFAState entry = (min == 0) ? marker : body.entry;
     return new NFAFragment(entry, Set.of(stop));
@@ -457,7 +703,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       // Atomic group (?>X): wrap the child fragment in entry/exit epsilon states that carry
       // atomicEntry/atomicExit markers so that PikeVM can enforce backtracking prevention.
       int atomicId = nextAtomicId++;
+      // A group repeat inside the body finishes against the body's own accept, as for a possessive
+      // repeat, so enclosing repeats do not pin its groups ((?:(?>(b)*c)a)+ on "bcabca": JDK
+      // group 1 = [3,4)).
+      int savedDepth = repeatDepth;
+      RegexNode savedAtomicBody = atomicBody;
+      repeatDepth = 0;
+      atomicBody = node.child;
       NFAFragment child = node.child.accept(this);
+      repeatDepth = savedDepth;
+      atomicBody = savedAtomicBody;
 
       NFA.NFAState atomicEntryState = createState();
       atomicEntryState.atomicEntry = atomicId;
@@ -492,7 +747,11 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
         groupExits.add(groupExit);
       }
 
-      return new NFAFragment(groupEntry, groupExits);
+      NFAFragment fragment = new NFAFragment(groupEntry, groupExits);
+      if (callStates) {
+        groupInstances.computeIfAbsent(node, k -> new ArrayList<>()).add(fragment);
+      }
+      return fragment;
     }
 
     return child;
@@ -554,8 +813,11 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
     NFA.NFAState assertionState = createState();
 
-    // Build NFA for sub-pattern
+    // Build NFA for sub-pattern; group pins do not apply inside it.
+    int savedRepeatDepth = repeatDepth;
+    repeatDepth = 0;
     NFAFragment subFrag = node.subPattern.accept(this);
+    repeatDepth = savedRepeatDepth;
 
     // Store assertion information in state metadata
     assertionState.assertionType = convertAssertionType(node.type);
@@ -584,9 +846,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
 
   @Override
   public NFAFragment visitSubroutine(SubroutineNode node) {
-    // Not yet implemented - Phase 4: Subroutine support
-    throw new UnsupportedOperationException(
-        "Subroutine patterns not yet supported: (?R), (?1), etc.");
+    if (!callStates) {
+      throw new UnsupportedOperationException(
+          "Subroutine patterns not yet supported: (?R), (?1), etc.");
+    }
+    // Target, entry and returns are set by resolveCalls; the epsilons added to this state by the
+    // enclosing construct are the continuation after the call.
+    NFA.NFAState call = createState();
+    calls.add(call);
+    callNodes.add(node);
+    return new NFAFragment(call, call);
   }
 
   @Override
@@ -629,5 +898,90 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
     }
 
     return new NFAFragment(entry, allExits);
+  }
+
+  /** First capturing group in pattern order with the given number, or name when non-null. */
+  public static final class GroupFinder implements RegexVisitor<GroupNode> {
+    private final int number;
+    private final String name;
+
+    public GroupFinder(int number, String name) {
+      this.number = number;
+      this.name = name;
+    }
+
+    private GroupNode first(List<RegexNode> nodes) {
+      for (RegexNode n : nodes) {
+        GroupNode g = n.accept(this);
+        if (g != null) {
+          return g;
+        }
+      }
+      return null;
+    }
+
+    @Override
+    public GroupNode visitLiteral(LiteralNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitCharClass(CharClassNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitConcat(ConcatNode node) {
+      return first(node.children);
+    }
+
+    @Override
+    public GroupNode visitAlternation(AlternationNode node) {
+      return first(node.alternatives);
+    }
+
+    @Override
+    public GroupNode visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public GroupNode visitGroup(GroupNode node) {
+      if (node.capturing && (name != null ? name.equals(node.name) : node.groupNumber == number)) {
+        return node;
+      }
+      return node.child.accept(this);
+    }
+
+    @Override
+    public GroupNode visitAnchor(AnchorNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitBackreference(BackreferenceNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitAssertion(AssertionNode node) {
+      return node.subPattern.accept(this);
+    }
+
+    @Override
+    public GroupNode visitSubroutine(SubroutineNode node) {
+      return null;
+    }
+
+    @Override
+    public GroupNode visitConditional(ConditionalNode node) {
+      GroupNode g = node.thenBranch.accept(this);
+      return g != null || node.elseBranch == null ? g : node.elseBranch.accept(this);
+    }
+
+    @Override
+    public GroupNode visitBranchReset(BranchResetNode node) {
+      return first(node.alternatives);
+    }
   }
 }

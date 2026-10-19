@@ -18,6 +18,8 @@ package com.datadoghq.reggie.runtime;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.datadoghq.reggie.Reggie;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
@@ -160,5 +162,60 @@ class EndAnchorBeforeConsumerTest {
   @Test
   void stringEndNewline_doesNotMatchEmpty() {
     assertSameAsJdk("\\Z\\n", "");
+  }
+
+  /**
+   * {pattern, expected route}. Negated classes after the anchor ({@code [^\n]} accepts every line
+   * terminator except {@code \n}), optional consumers after the anchor, and multiline {@code $}
+   * before a consumer.
+   */
+  private static final String[][] DFA_ROUTED = {
+    {"a$[^\\n]", "DFA_UNROLLED"},
+    {"a$[^\\n]?", "DFA_UNROLLED"},
+    {"a\\Z[^\\n]*b?", "DFA_UNROLLED"},
+    {"\\Z[^1]?", "DFA_UNROLLED"},
+    {"a$.?", "DFA_UNROLLED"},
+    {"(a)\\Z[^c]?", "DFA_UNROLLED_WITH_GROUPS"},
+    {"(?m)a$[^\\n]", "DFA_UNROLLED"},
+    {"(?m)a$[^c]", "DFA_UNROLLED"},
+    {"(?m)a$\\n", "DFA_UNROLLED"},
+    {"(?m)a$[^\\n]?", "DFA_UNROLLED"},
+    {"(?m)a$\\r\\n?c", "DFA_UNROLLED"},
+    {"(?m)(a)$[^c]?", "DFA_UNROLLED_WITH_GROUPS"}
+  };
+
+  /** Every input up to length 4 over {a, b, c, \n, \r, \u2028} agrees with JDK. */
+  @Test
+  void dfaRoutedShapesAgreeWithJdkExhaustively() throws Exception {
+    char[] alphabet = {'a', 'b', 'c', '\n', '\r', '\u2028'};
+    List<String> inputs = new ArrayList<>();
+    inputs.add("");
+    for (int i = 0; i < inputs.size() && inputs.get(i).length() < 4; i++) {
+      for (char ch : alphabet) inputs.add(inputs.get(i) + ch);
+    }
+    List<String> mismatches = new ArrayList<>();
+    for (String[] c : DFA_ROUTED) {
+      String pattern = c[0];
+      String route = StrategyCorrectnessMetaTest.routeOf(pattern).name();
+      if (!route.equals(c[1])) {
+        mismatches.add(pattern + " -> " + route + " (expected " + c[1] + ")");
+        continue;
+      }
+      ReggieMatcher r = Reggie.compile(pattern);
+      Pattern j = Pattern.compile(pattern);
+      for (String in : inputs) {
+        Matcher jm = j.matcher(in);
+        boolean jFound = jm.find();
+        MatchResult rm = r.findMatch(in);
+        if (r.matches(in) != j.matcher(in).matches()
+            || r.find(in) != jFound
+            || (rm != null) != jFound
+            || (jFound && (rm.start() != jm.start() || rm.end() != jm.end()))) {
+          mismatches.add(pattern + " on " + in.chars().boxed().toList());
+          break;
+        }
+      }
+    }
+    assertEquals(List.of(), mismatches);
   }
 }

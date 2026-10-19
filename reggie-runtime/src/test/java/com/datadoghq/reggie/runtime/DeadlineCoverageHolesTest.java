@@ -53,10 +53,9 @@ class DeadlineCoverageHolesTest {
 
   /**
    * Hole 1: the 1000-lookahead cascade must complete in bounded time and memory instead of
-   * exhausting the heap. The emission budget aborts the oversized method during generation, so the
-   * compile surfaces as the standard too-large graceful path: with ALLOW_JDK_FALLBACK the JDK
-   * fallback matcher (correct lookahead semantics), without it an UnsupportedPatternException —
-   * never an OutOfMemoryError, never a multi-GB, multi-second size/frame computation.
+   * exhausting the heap — never an OutOfMemoryError, never a multi-GB, multi-second size/frame
+   * computation. Lookaround patterns run on the interpreted backtracker, so no oversized method is
+   * generated at all.
    */
 
   /** Strips the R1 PrefilteringMatcher wrapper so routing assertions see the engine class. */
@@ -82,8 +81,8 @@ class DeadlineCoverageHolesTest {
     assertTrue(
         elapsedMs < 30_000,
         "1000-lookahead compile must be bounded by the emission budget, took " + elapsedMs + "ms");
-    assertTrue(unwrap(m) instanceof JavaRegexFallbackMatcher);
-    // The fallback must be semantically correct, not just cheap to reach.
+    assertTrue(unwrap(m) instanceof BackrefBacktrackMatcher);
+    // The matcher must be semantically correct, not just cheap to reach.
     StringBuilder input = new StringBuilder();
     for (int i = 0; i < 1000; i++) {
       input.append("lk").append(i);

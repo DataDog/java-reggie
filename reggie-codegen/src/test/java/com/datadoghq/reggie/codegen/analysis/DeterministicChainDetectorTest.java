@@ -359,6 +359,16 @@ class DeterministicChainDetectorTest {
     assertTrue(multiline.branches.get(0).endAnchored);
   }
 
+  @Test
+  void multilineStartAnchorParsesUnanchored() throws Exception {
+    DeterministicChainInfo info = detect("(?m)^x");
+    assertNotNull(info);
+    assertTrue(info.branches.get(0).multilineStart);
+    assertFalse(info.branches.get(0).startAnchored);
+    // Scanned like an unanchored branch, so the unanchored admission still applies.
+    assertNull(detect("(?m)^x*"));
+  }
+
   // ------------------------------------------------------------------------------------
   // Declines — every one is a linearity or correctness requirement
   // ------------------------------------------------------------------------------------
@@ -383,8 +393,7 @@ class DeterministicChainDetectorTest {
         "\\Bx",
         "\\Ax",
         "x\\z",
-        // Anchors outside the two admissible positions: multiline ^, leading $.
-        "(?m)^x",
+        // Anchors outside the two admissible positions: leading $.
         "$[^a-zA-Z0-9]|^[0-9]",
         // NOTE: v1 declined greedy give-back loops (a+a, \\d*\\d+, (?i)[a-z]+z); v2-alpha
         // admits them with the giveBack flag — see v2AlphaGreedyGivebackFlagged.

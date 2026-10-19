@@ -189,6 +189,19 @@ final class PrefilteringMatcher extends ReggieMatcher {
   }
 
   @Override
+  public boolean matchInto(String input, int[] groupStarts, int[] groupEnds) {
+    return delegate.matchInto(input, groupStarts, groupEnds);
+  }
+
+  @Override
+  public boolean findMatchInto(String input, int start, int[] groupStarts, int[] groupEnds) {
+    if (input != null && factIndexOf(input, start) < 0) {
+      return false;
+    }
+    return delegate.findMatchInto(input, start, groupStarts, groupEnds);
+  }
+
+  @Override
   public boolean matchesBounded(CharSequence input, int start, int end) {
     return delegate.matchesBounded(input, start, end);
   }

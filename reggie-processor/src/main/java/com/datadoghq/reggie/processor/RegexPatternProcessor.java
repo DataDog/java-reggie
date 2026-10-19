@@ -17,6 +17,8 @@ package com.datadoghq.reggie.processor;
 
 import com.datadoghq.reggie.ReggieOption;
 import com.datadoghq.reggie.annotations.RegexPattern;
+import com.datadoghq.reggie.codegen.parsing.RegexParser.ParseException;
+import com.datadoghq.reggie.codegen.parsing.RegexParser.UnsupportedPatternException;
 import com.google.auto.service.AutoService;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -31,6 +33,8 @@ import javax.lang.model.util.Types;
 import javax.tools.Diagnostic;
 import javax.tools.FileObject;
 import javax.tools.StandardLocation;
+import org.objectweb.asm.ClassTooLargeException;
+import org.objectweb.asm.MethodTooLargeException;
 
 /**
  * Annotation processor that generates optimized regex matcher classes from @RegexPattern
@@ -177,9 +181,9 @@ public class RegexPatternProcessor extends AbstractProcessor {
   }
 
   /**
-   * Generates the matcher class file (for NATIVE) and returns a {@link
-   * ImplClassBytecodeGenerator.MethodInfo} describing how the impl class should wire this method.
-   * Returns {@code null} on error (error already reported to messager).
+   * Generates the matcher class file (for NATIVE) or the two hybrid class files (for HYBRID) and
+   * returns a {@link ImplClassBytecodeGenerator.MethodInfo} describing how the impl class should
+   * wire this method. Returns {@code null} on error (error already reported to messager).
    */
   private ImplClassBytecodeGenerator.MethodInfo generateMatcherClass(
       String packageName, String providerClassName, ExecutableElement method) throws Exception {
@@ -206,14 +210,48 @@ public class RegexPatternProcessor extends AbstractProcessor {
     ReggieMatcherBytecodeGenerator.Realization realization;
     try {
       realization = generator.resolveRealization(allowJdkFallback);
+    } catch (UnsupportedPatternException e) {
+      // The runtime routes parser-refused patterns to the fallback; mirror that here.
+      if (!allowJdkFallback) {
+        messager.printMessage(
+            Diagnostic.Kind.ERROR,
+            "Unsupported pattern '" + pattern + "': " + e.getMessage(),
+            method);
+        return null;
+      }
+      if (!ReggieMatcherBytecodeGenerator.jdkParses(pattern)) {
+        messager.printMessage(
+            Diagnostic.Kind.ERROR, ReggieMatcherBytecodeGenerator.noJdkFallback(pattern), method);
+        return null;
+      }
+      realization = ReggieMatcherBytecodeGenerator.Realization.DELEGATE_FALLBACK;
+    } catch (ParseException e) {
+      messager.printMessage(
+          Diagnostic.Kind.ERROR, "Invalid pattern '" + pattern + "': " + e.getMessage(), method);
+      return null;
     } catch (UnsupportedOperationException e) {
       messager.printMessage(Diagnostic.Kind.ERROR, e.getMessage(), method);
       // Return null — processClass skips errored methods; build already fails via ERROR message.
       return null;
     }
 
+    byte[] bytecode = null;
     if (realization == ReggieMatcherBytecodeGenerator.Realization.NATIVE) {
-      byte[] bytecode = generator.generate();
+      try {
+        bytecode = generator.generate();
+      } catch (MethodTooLargeException | ClassTooLargeException e) {
+        // As RuntimeCompiler: a one-way recursive-descent class over the method or class size limit
+        // runs
+        // on the backtracker when it supports the pattern.
+        if (generator.resolveRealization(allowJdkFallback, false)
+            != ReggieMatcherBytecodeGenerator.Realization.DELEGATE_BACKTRACK) {
+          throw e;
+        }
+        realization = ReggieMatcherBytecodeGenerator.Realization.DELEGATE_BACKTRACK;
+      }
+    }
+
+    if (realization == ReggieMatcherBytecodeGenerator.Realization.NATIVE) {
 
       // Loud compile-time warning for RICH_API_HYBRID patterns: native boolean matching, but the
       // rich MatchResult API (match/findMatch/findMatchFrom/matchBounded) delegates to
@@ -244,7 +282,25 @@ public class RegexPatternProcessor extends AbstractProcessor {
       try (OutputStream os = classFile.openOutputStream()) {
         os.write(bytecode);
       }
-      return ImplClassBytecodeGenerator.MethodInfo.native_(methodName, matcherClassName);
+      return strategy.hasMutableMatchState()
+          ? ImplClassBytecodeGenerator.MethodInfo.pooled(methodName, matcherClassName)
+          : ImplClassBytecodeGenerator.MethodInfo.native_(methodName, matcherClassName);
+    } else if (realization == ReggieMatcherBytecodeGenerator.Realization.HYBRID) {
+      ReggieMatcherBytecodeGenerator.HybridClasses halves = generator.generateHybrid();
+      String dfaClassName = matcherClassName + ReggieMatcherBytecodeGenerator.DFA_HALF_SUFFIX;
+      String nfaClassName = matcherClassName + ReggieMatcherBytecodeGenerator.NFA_HALF_SUFFIX;
+      FileObject dfaFile =
+          processingEnv.getFiler().createClassFile(packageName + "." + dfaClassName);
+      try (OutputStream os = dfaFile.openOutputStream()) {
+        os.write(halves.dfaHalf());
+      }
+      FileObject nfaFile =
+          processingEnv.getFiler().createClassFile(packageName + "." + nfaClassName);
+      try (OutputStream os = nfaFile.openOutputStream()) {
+        os.write(halves.nfaHalf());
+      }
+      return ImplClassBytecodeGenerator.MethodInfo.hybrid(
+          methodName, pattern, dfaClassName, nfaClassName, halves.lazyFind());
     } else if (realization == ReggieMatcherBytecodeGenerator.Realization.DELEGATE_PIKEVM) {
       messager.printMessage(
           Diagnostic.Kind.NOTE,
@@ -254,6 +310,16 @@ public class RegexPatternProcessor extends AbstractProcessor {
           method);
       String encodedNames = encodeNameMap(generator.resolvedNameMap());
       return ImplClassBytecodeGenerator.MethodInfo.pikevm(methodName, pattern, encodedNames);
+    } else if (realization == ReggieMatcherBytecodeGenerator.Realization.DELEGATE_BACKTRACK) {
+      messager.printMessage(
+          Diagnostic.Kind.NOTE,
+          "@RegexPattern '"
+              + pattern
+              + "' delegates to the runtime backtracking engine (native, not bakeable at compile"
+              + " time).",
+          method);
+      String encodedNames = encodeNameMap(generator.resolvedNameMap());
+      return ImplClassBytecodeGenerator.MethodInfo.backtrack(methodName, pattern, encodedNames);
     } else {
       // DELEGATE_FALLBACK
       messager.printMessage(

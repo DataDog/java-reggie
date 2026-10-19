@@ -441,60 +441,7 @@ public class FixedRepetitionBackrefBytecodeGenerator {
   /** Generate charset membership check. Jumps to failLabel if the char is NOT in the charset. */
   private void generateCharSetCheck(
       MethodVisitor mv, int charVar, CharSet charSet, Label failLabel) {
-    // For common cases, generate inline checks
-    if (charSet.equals(CharSet.DIGIT)) {
-      // ch >= '0' && ch <= '9'
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, '0');
-      mv.visitJumpInsn(IF_ICMPLT, failLabel);
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, '9');
-      mv.visitJumpInsn(IF_ICMPGT, failLabel);
-    } else if (charSet.equals(CharSet.WORD)) {
-      // Simplified WORD check: a-z, A-Z, 0-9, _
-      // We use a series of range checks, jumping to failLabel if none match
-      Label ok = new Label();
-
-      // Check if a-z
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, 'a');
-      Label notLower = new Label();
-      mv.visitJumpInsn(IF_ICMPLT, notLower);
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, 'z');
-      mv.visitJumpInsn(IF_ICMPLE, ok);
-
-      // Check if A-Z
-      mv.visitLabel(notLower);
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, 'A');
-      Label notUpper = new Label();
-      mv.visitJumpInsn(IF_ICMPLT, notUpper);
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, 'Z');
-      mv.visitJumpInsn(IF_ICMPLE, ok);
-
-      // Check if 0-9
-      mv.visitLabel(notUpper);
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, '0');
-      Label notDigit = new Label();
-      mv.visitJumpInsn(IF_ICMPLT, notDigit);
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, '9');
-      mv.visitJumpInsn(IF_ICMPLE, ok);
-
-      // Check if _
-      mv.visitLabel(notDigit);
-      mv.visitVarInsn(ILOAD, charVar);
-      BytecodeUtil.pushInt(mv, '_');
-      mv.visitJumpInsn(IF_ICMPNE, failLabel);
-
-      mv.visitLabel(ok);
-    } else {
-      // General case: For now, accept any char
-      // Complex charsets would need a lookup table
-    }
+    BytecodeUtil.emitCharSetCheck(mv, charSet, charVar, failLabel);
   }
 
   /** Generate match(String) method that returns MatchResult with group captures. */

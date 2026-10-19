@@ -83,14 +83,14 @@ public class BackrefDigitAmbiguityTest {
   }
 
   @Test
-  void backref0groups_falls_to_octal() {
-    // No groups: PCRE treats \1 as octal \001 (SOH). JDK does not match SOH (different semantics).
-    // Reggie follows PCRE: \1 with 0 groups = octal 001 = U+0001 (SOH).
+  void backrefToMissingGroupNeverMatches() {
+    // java.util.regex: \1 is a backreference even with no groups, so it matches nothing (not
+    // octal SOH as in PCRE).
     String pat = "\\1";
     String input = "\001"; // SOH character
+    assertFalse(Pattern.compile(pat).matcher(input).find());
     ReggieMatcher reg = Reggie.compile(pat, WITH_FALLBACK);
-    assertNotNull(
-        reg.match(input), "Reggie should match \\1 as SOH (U+0001) per PCRE octal semantics");
+    assertNull(reg.findMatch(input), "\\1 with no groups must never match");
   }
 
   @Test
