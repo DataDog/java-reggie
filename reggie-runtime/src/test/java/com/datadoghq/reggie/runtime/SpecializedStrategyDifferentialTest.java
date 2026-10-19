@@ -63,7 +63,9 @@ public class SpecializedStrategyDifferentialTest {
     "(a)b([ab]*)",
     "(a)b([ab]?)",
     "(a)b([ab]{0,2})",
-    "([^\u00ff]+)"
+    "([^\u00ff]+)",
+    "(\\d{1,21})\\.(\\d{1,3})",
+    "(\\d{1,22})\\.(\\d{1,3})"
   };
 
   /** Pattern and the strategy it routes to, so the cases keep covering the specialized engines. */
@@ -73,6 +75,8 @@ public class SpecializedStrategyDifferentialTest {
     {"[^a]{1,2}a", "SPECIALIZED_BOUNDED_QUANTIFIERS"},
     {"(\\d{1,3})\\.(\\d{1,3})", "SPECIALIZED_MULTI_GROUP_GREEDY"},
     {"(a)b([ab]{0,2})", "SPECIALIZED_MULTI_GROUP_GREEDY"},
+    {"(\\d{1,21})\\.(\\d{1,3})", "SPECIALIZED_MULTI_GROUP_GREEDY"},
+    {"(\\d{1,22})\\.(\\d{1,3})", "SPECIALIZED_MULTI_GROUP_GREEDY"},
     {"([ab]{2})(?:)", "SPECIALIZED_CONCAT_GREEDY_GROUP"},
     {"c(?:c)([^a]{2})", "SPECIALIZED_CONCAT_GREEDY_GROUP"}
   };
@@ -80,6 +84,9 @@ public class SpecializedStrategyDifferentialTest {
   private static final List<String> INPUTS =
       List.of(
           "",
+          "1".repeat(23) + ".5",
+          "1".repeat(21) + ".5",
+          "1".repeat(22) + ".5",
           "a",
           "b",
           "c",
