@@ -158,7 +158,9 @@ class RecursiveDescentChoiceAnalysisTest {
    * checks the alternation. The check is linear in the number of options.
    */
   @Test
-  @Timeout(value = 5, unit = TimeUnit.SECONDS)
+  // Wide wall-clock budget: CI runners under parallel load measure 3-4x local latency; a real
+  // algorithmic blowup here would take minutes, so 20s still catches the regression.
+  @Timeout(value = 20, unit = TimeUnit.SECONDS)
   void wideAlternationUnderCallChainIsFast() throws Exception {
     StringBuilder pattern = new StringBuilder("((?:");
     for (int i = 0; i < 2000; i++) {
