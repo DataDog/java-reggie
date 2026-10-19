@@ -126,6 +126,9 @@ Benchmarks: `./gradlew :reggie-benchmark:benchmarkAndReport` (see AGENTS convent
    wrong compiled classes.
 4. **Never hardcode bytecode local-variable slots**; never `visitLdcInsn` a primitive int
    (use `BytecodeUtil.pushInt`).
+5. **Compile caches are global static state.** Never call `clearCache()`/`describeRouting()`
+   concurrently with `compile()` in the same JVM; suspect them first for any flaky test that is
+   not a pure timing test. Full checklist: **`doc/agents-conventions.md`** (Compile-Cache Hazards).
 
 Full detail, examples, and the concurrency contract: **`doc/agents-conventions.md`**.
 
