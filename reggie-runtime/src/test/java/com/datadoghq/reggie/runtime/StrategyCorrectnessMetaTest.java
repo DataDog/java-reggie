@@ -580,6 +580,22 @@ public class StrategyCorrectnessMetaTest {
           mismatches,
           /* expectNull= */ true);
     }
+
+    // 6. matchBounded(in,1,len): spans are relative to the original input
+    if (!input.isEmpty()) {
+      boolean jdkRegion = jdk.matcher(input).region(1, input.length()).matches();
+      safeSpan(
+          strategy,
+          pattern,
+          input,
+          "matchBounded(1,len)",
+          jdkRegion ? 1 : -1,
+          jdkRegion ? input.length() : -1,
+          jdkRegion ? input.substring(1) : null,
+          () -> reggie.matchBounded(input, 1, input.length()),
+          mismatches,
+          /* expectNull= */ !jdkRegion);
+    }
   }
 
   private static int findStart(Pattern jdk, String input) {

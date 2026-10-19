@@ -724,53 +724,6 @@ public class FixedRepetitionBackrefBytecodeGenerator {
     mv.visitEnd();
   }
 
-  /**
-   * Generate matchBounded(CharSequence, int, int) — extracts the bounded region, delegates to
-   * match(String), and returns the raw result (spans are relative to the region substring).
-   */
-  public void generateMatchBoundedMethod(ClassWriter cw) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-
-    // Local vars: 0=this, 1=input, 2=start, 3=end
-    LocalVarAllocator alloc = new LocalVarAllocator(4);
-    int subStringVar = alloc.allocate();
-
-    // String sub = input.subSequence(start, end).toString();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitVarInsn(ASTORE, subStringVar);
-
-    // return this.match(sub);
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, subStringVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className,
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
-
-    mv.visitMaxs(3, alloc.peek());
-    mv.visitEnd();
-  }
-
   /** Generate findMatch(String) — delegates to findMatchFrom(input, 0). */
   public void generateFindMatchMethod(ClassWriter cw) {
     MethodVisitor mv =

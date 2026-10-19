@@ -1040,13 +1040,13 @@ public class StatelessLoopBytecodeGenerator {
         INVOKEVIRTUAL, className, "matchesBounded", "(Ljava/lang/CharSequence;II)Z", false);
     mv.visitJumpInsn(IFEQ, matchFailed);
 
-    // Match succeeded - create starts = [0], ends = [end - start] (relative positions)
+    // Match succeeded - starts = [start], ends = [end] (positions in the original input)
     int startsVar = allocator.allocate();
     mv.visitInsn(ICONST_1);
     mv.visitIntInsn(NEWARRAY, T_INT); // starts = new int[1]
     mv.visitInsn(DUP);
     mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0); // starts[0] = 0 (relative to substring start)
+    mv.visitVarInsn(ILOAD, 2); // starts[0] = start
     mv.visitInsn(IASTORE);
     mv.visitVarInsn(ASTORE, startsVar);
 
@@ -1055,23 +1055,13 @@ public class StatelessLoopBytecodeGenerator {
     mv.visitIntInsn(NEWARRAY, T_INT); // ends = new int[1]
     mv.visitInsn(DUP);
     mv.visitInsn(ICONST_0);
-    mv.visitVarInsn(ILOAD, 3); // end
-    mv.visitVarInsn(ILOAD, 2); // start
-    mv.visitInsn(ISUB); // end - start (length of match)
-    mv.visitInsn(IASTORE); // ends[0] = end - start
+    mv.visitVarInsn(ILOAD, 3); // ends[0] = end
+    mv.visitInsn(IASTORE);
     mv.visitVarInsn(ASTORE, endsVar);
 
-    // Extract substring: String matchedStr = input.subSequence(start, end).toString()
+    // String matchedStr = input.toString()
     int matchedStrVar = allocator.allocate();
     mv.visitVarInsn(ALOAD, 1); // input
-    mv.visitVarInsn(ILOAD, 2); // start
-    mv.visitVarInsn(ILOAD, 3); // end
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
     mv.visitMethodInsn(
         INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
     mv.visitVarInsn(ASTORE, matchedStrVar);

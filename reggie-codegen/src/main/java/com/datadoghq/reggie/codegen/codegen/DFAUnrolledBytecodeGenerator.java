@@ -3430,10 +3430,14 @@ public class DFAUnrolledBytecodeGenerator {
    *
    * <h3>Notes</h3>
    *
-   * Currently does not track individual group boundaries - only group 0 is set. For full group
-   * tracking in bounded matches, Tagged DFA would need adaptation.
+   * Does not track individual group boundaries - only group 0 is set. Patterns with capturing
+   * groups therefore emit nothing and inherit the base default, which shifts the spans of {@code
+   * match()} on the region.
    */
   public void generateMatchBoundedMethod(ClassWriter cw, String className) {
+    if (groupCount > 0) {
+      return;
+    }
     this.ownerInternalName = className;
     MethodVisitor mv =
         cw.visitMethod(

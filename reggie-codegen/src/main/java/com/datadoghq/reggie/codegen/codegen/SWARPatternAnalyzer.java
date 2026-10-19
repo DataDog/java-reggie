@@ -52,7 +52,7 @@ public final class SWARPatternAnalyzer {
       char c = charset.getSingleChar();
       // Only optimize for Latin-1 range
       if (c <= 0xFF) {
-        return new SingleByteOptimization(c);
+        return negated ? new NegatedRangeOptimization(c, c) : new SingleByteOptimization(c);
       }
       return null;
     }

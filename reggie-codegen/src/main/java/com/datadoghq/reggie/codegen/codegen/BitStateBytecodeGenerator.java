@@ -77,7 +77,6 @@ public class BitStateBytecodeGenerator {
     generateFindFromMethod(cw, className);
     generateMatchMethod(cw, className);
     generateMatchesBoundedMethod(cw, className);
-    generateMatchBoundedMethod(cw, className);
     generateFindMatchMethod(cw, className);
     generateFindMatchFromMethod(cw, className);
     generateFindBoundsFromMethod(cw, className);
@@ -957,39 +956,6 @@ public class BitStateBytecodeGenerator {
         INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
     mv.visitMethodInsn(INVOKEVIRTUAL, cn(className), "matches", "(Ljava/lang/String;)Z", false);
     mv.visitInsn(IRETURN);
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
-  }
-
-  /** {@code public MatchResult matchBounded(CharSequence, int, int)} — delegates to match(). */
-  public void generateMatchBoundedMethod(ClassWriter cw, String className) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        cn(className),
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
     mv.visitMaxs(0, 0);
     mv.visitEnd();
   }

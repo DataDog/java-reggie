@@ -2678,7 +2678,6 @@ public class RuntimeCompiler {
         greedyGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         greedyGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         greedyGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        greedyGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         greedyGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         greedyGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         greedyGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -2717,7 +2716,6 @@ public class RuntimeCompiler {
         multiGroupGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         multiGroupGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         multiGroupGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        multiGroupGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         multiGroupGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         multiGroupGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         multiGroupGen.generateMatchFromPositionMethod(
@@ -2765,7 +2763,6 @@ public class RuntimeCompiler {
         fixedGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        fixedGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         fixedGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -2781,7 +2778,6 @@ public class RuntimeCompiler {
         suffixGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         suffixGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         suffixGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        suffixGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         suffixGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         suffixGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         suffixGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -2797,7 +2793,6 @@ public class RuntimeCompiler {
         boundedGen.generateFindFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         boundedGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         boundedGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        boundedGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         boundedGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         boundedGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         boundedGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
@@ -2928,7 +2923,6 @@ public class RuntimeCompiler {
         fixedRepGen.generateFindMatchMethod(cw);
         fixedRepGen.generateFindMatchFromMethod(cw);
         fixedRepGen.generateMatchesBoundedMethod(cw);
-        fixedRepGen.generateMatchBoundedMethod(cw);
         break;
 
       case PINNED_BACKREFERENCE:

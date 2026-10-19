@@ -92,7 +92,6 @@ public class QuantifiedGroupBytecodeGenerator {
     generateFindMatchMethod(cw);
     generateFindMatchFromMethod(cw);
     generateMatchesBoundedMethod(cw);
-    generateMatchBoundedMethod(cw);
   }
 
   /** Generate matches() method - checks if entire string matches pattern. Returns: boolean */
@@ -1182,53 +1181,6 @@ public class QuantifiedGroupBytecodeGenerator {
     mv.visitMethodInsn(
         INVOKEVIRTUAL, className.replace('.', '/'), "matches", "(Ljava/lang/String;)Z", false);
     mv.visitInsn(IRETURN);
-
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
-  }
-
-  /** Generate matchBounded() method - returns MatchResult for substring. */
-  public void generateMatchBoundedMethod(ClassWriter cw) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-
-    // Slot 0 = this, 1 = input, 2 = start, 3 = end
-    LocalVarAllocator allocator = new LocalVarAllocator(4);
-    int inputVar = 1;
-    int startVar = 2;
-    int endVar = 3;
-    int sVar = allocator.allocate();
-
-    // String s = input.subSequence(start, end).toString();
-    mv.visitVarInsn(ALOAD, inputVar);
-    mv.visitVarInsn(ILOAD, startVar);
-    mv.visitVarInsn(ILOAD, endVar);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-
-    // return this.match(s);
-    mv.visitVarInsn(ASTORE, sVar);
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, sVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();

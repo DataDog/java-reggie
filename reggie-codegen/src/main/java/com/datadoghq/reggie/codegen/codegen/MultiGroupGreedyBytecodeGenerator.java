@@ -170,7 +170,13 @@ public class MultiGroupGreedyBytecodeGenerator {
         generateAnchorMatch(mv, (PatternAnalyzer.AnchorSegment) seg, inputVar, posVar, lenVar);
       } else if (seg instanceof PatternAnalyzer.LiteralGroupSegment) {
         generateLiteralGroupMatch(
-            mv, (PatternAnalyzer.LiteralGroupSegment) seg, inputVar, posVar, lenVar, startsVar);
+            mv,
+            (PatternAnalyzer.LiteralGroupSegment) seg,
+            inputVar,
+            posVar,
+            lenVar,
+            startsVar,
+            endsVar);
       }
     }
 
@@ -395,16 +401,28 @@ public class MultiGroupGreedyBytecodeGenerator {
       }
     }
 
+    // A bounded {n,m} stops after m chars: int limit = Math.min(len, pos + (m - n));
+    int greedyLenVar = lenVar;
+    if (seg.maxMatches >= 0) {
+      greedyLenVar = allocator.allocate();
+      mv.visitVarInsn(ILOAD, posVar);
+      pushInt(mv, seg.maxMatches - seg.minMatches);
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "min", "(II)I", false);
+      mv.visitVarInsn(ISTORE, greedyLenVar);
+    }
+
     // Greedy: match as many as possible
-    // while (pos < len && matches(input.charAt(pos))) pos++;
+    // while (pos < limit && matches(input.charAt(pos))) pos++;
     Label loopStart = new Label();
     Label loopEnd = new Label();
 
     mv.visitLabel(loopStart);
 
-    // if (pos >= len) break;
+    // if (pos >= limit) break;
     mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitVarInsn(ILOAD, greedyLenVar);
     mv.visitJumpInsn(IF_ICMPGE, loopEnd);
 
     // char c = input.charAt(pos);
@@ -918,6 +936,18 @@ public class MultiGroupGreedyBytecodeGenerator {
       }
     }
 
+    // A bounded {n,m} stops after m chars: int limit = Math.min(len, pos + (m - n));
+    int greedyLenVar = lenVar;
+    if (seg.maxMatches >= 0) {
+      greedyLenVar = 8; // limit in var 8 (c is var 7)
+      mv.visitVarInsn(ILOAD, posVar);
+      pushInt(mv, seg.maxMatches - seg.minMatches);
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "min", "(II)I", false);
+      mv.visitVarInsn(ISTORE, greedyLenVar);
+    }
+
     // Greedy: match as many as possible
     Label loopStart = new Label();
     Label loopEnd = new Label();
@@ -925,7 +955,7 @@ public class MultiGroupGreedyBytecodeGenerator {
     mv.visitLabel(loopStart);
 
     mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitVarInsn(ILOAD, greedyLenVar);
     mv.visitJumpInsn(IF_ICMPGE, loopEnd);
 
     mv.visitVarInsn(ALOAD, inputVar);
@@ -1129,54 +1159,6 @@ public class MultiGroupGreedyBytecodeGenerator {
     mv.visitMethodInsn(
         INVOKEVIRTUAL, className.replace('.', '/'), "matches", "(Ljava/lang/String;)Z", false);
     mv.visitInsn(IRETURN);
-
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
-  }
-
-  /** Generate matchBounded() method - return MatchResult for bounded region. */
-  public void generateMatchBoundedMethod(ClassWriter cw, String className) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-
-    // Slot 0 = this, slot 1 = input, slot 2 = start, slot 3 = end
-    int inputVar = 1;
-    int startVar = 2;
-    int endVar = 3;
-    LocalVarAllocator allocator = new LocalVarAllocator(4);
-    int substringVar = allocator.allocate();
-
-    // Extract substring and delegate to match()
-    // String substr = input.subSequence(start, end).toString();
-    mv.visitVarInsn(ALOAD, inputVar);
-    mv.visitVarInsn(ILOAD, startVar);
-    mv.visitVarInsn(ILOAD, endVar);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitVarInsn(ASTORE, substringVar);
-
-    // return match(substr);
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, substringVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -1512,15 +1494,27 @@ public class MultiGroupGreedyBytecodeGenerator {
       }
     }
 
+    // A bounded {n,m} stops after m chars: int limit = Math.min(len, pos + (m - n));
+    int greedyLenVar = lenVar;
+    if (seg.maxMatches >= 0) {
+      greedyLenVar = 7; // limit in var 7 (c is var 6)
+      mv.visitVarInsn(ILOAD, posVar);
+      pushInt(mv, seg.maxMatches - seg.minMatches);
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "min", "(II)I", false);
+      mv.visitVarInsn(ISTORE, greedyLenVar);
+    }
+
     // Greedy scan: match as many as possible
     Label greedyLoop = new Label();
     Label greedyEnd = new Label();
 
     mv.visitLabel(greedyLoop);
 
-    // if (pos >= len) goto greedyEnd;
+    // if (pos >= limit) goto greedyEnd;
     mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ILOAD, lenVar);
+    mv.visitVarInsn(ILOAD, greedyLenVar);
     mv.visitJumpInsn(IF_ICMPGE, greedyEnd);
 
     // char c = input.charAt(pos);
@@ -1702,15 +1696,16 @@ public class MultiGroupGreedyBytecodeGenerator {
       int inputVar,
       int posVar,
       int lenVar,
-      int startsVar) {
+      int startsVar,
+      int endsVar) {
     String literal = seg.literal;
     int groupNum = seg.groupNumber;
 
     // Save group start position if capturing
     if (groupNum > 0) {
-      // groups[groupNum * 2] = pos;
+      // starts[groupNum] = pos;
       mv.visitVarInsn(ALOAD, startsVar);
-      pushInt(mv, groupNum * 2);
+      pushInt(mv, groupNum);
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitInsn(IASTORE);
     }
@@ -1773,9 +1768,9 @@ public class MultiGroupGreedyBytecodeGenerator {
 
     // Save group end position if capturing
     if (groupNum > 0) {
-      // groups[groupNum * 2 + 1] = pos;
-      mv.visitVarInsn(ALOAD, startsVar);
-      pushInt(mv, groupNum * 2 + 1);
+      // ends[groupNum] = pos;
+      mv.visitVarInsn(ALOAD, endsVar);
+      pushInt(mv, groupNum);
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitInsn(IASTORE);
     }
@@ -1788,15 +1783,16 @@ public class MultiGroupGreedyBytecodeGenerator {
       int posVar,
       int lenVar,
       int inputVar,
-      int groupsVar,
-      int unusedVar) {
+      int startsVar,
+      int endsVar) {
     String literal = seg.literal;
     int groupNum = seg.groupNumber;
 
     // Save group start position if capturing
     if (groupNum > 0) {
-      mv.visitVarInsn(ALOAD, groupsVar);
-      pushInt(mv, groupNum * 2);
+      // starts[groupNum] = pos;
+      mv.visitVarInsn(ALOAD, startsVar);
+      pushInt(mv, groupNum);
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitInsn(IASTORE);
     }
@@ -1853,8 +1849,9 @@ public class MultiGroupGreedyBytecodeGenerator {
 
     // Save group end position if capturing
     if (groupNum > 0) {
-      mv.visitVarInsn(ALOAD, groupsVar);
-      pushInt(mv, groupNum * 2 + 1);
+      // ends[groupNum] = pos;
+      mv.visitVarInsn(ALOAD, endsVar);
+      pushInt(mv, groupNum);
       mv.visitVarInsn(ILOAD, posVar);
       mv.visitInsn(IASTORE);
     }

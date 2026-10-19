@@ -7835,12 +7835,15 @@ public class PatternAnalyzer {
     public final CharSet charset;
     public final boolean negated;
     public final int minMatches; // 0 for *, 1 for +
+    public final int maxMatches; // -1 for unbounded
     public final int groupNumber;
 
-    public VariableGroupSegment(CharSet charset, boolean negated, int minMatches, int groupNumber) {
+    public VariableGroupSegment(
+        CharSet charset, boolean negated, int minMatches, int maxMatches, int groupNumber) {
       this.charset = charset;
       this.negated = negated;
       this.minMatches = minMatches;
+      this.maxMatches = maxMatches;
       this.groupNumber = groupNumber;
     }
   }
@@ -9146,9 +9149,8 @@ public class PatternAnalyzer {
           return null; // Too large to optimize
         }
 
-        // For *, +, or reasonable {n,m}
-        int minMatches = quant.min;
-        return new VariableGroupSegment(charClass.chars, charClass.negated, minMatches, groupNum);
+        return new VariableGroupSegment(
+            charClass.chars, charClass.negated, quant.min, quant.max, groupNum);
       }
 
       // Check for char class with fixed repetition (no quantifier means {1})
@@ -9157,7 +9159,10 @@ public class PatternAnalyzer {
         return new FixedGroupSegment(charClass.chars, charClass.negated, 1, groupNum);
       }
 
-      // Check for literal group: (abc), (test), etc.
+      // Check for literal group: (abc), (test), etc. An empty group () is not a literal.
+      if (child instanceof EpsilonNode) {
+        return null;
+      }
       if (child instanceof LiteralNode) {
         LiteralNode lit = (LiteralNode) child;
         return new LiteralGroupSegment(String.valueOf(lit.ch), groupNum);
@@ -9282,7 +9287,14 @@ public class PatternAnalyzer {
       if (!isSimpleFixedWidth(node)) {
         return null; // Prefix must be simple fixed-width elements
       }
-      prefix.add(node);
+      // Unwrap non-capturing groups; the empty (?:) adds nothing. The generator only matches bare
+      // literals and char classes.
+      while (node instanceof GroupNode g) {
+        node = g.child;
+      }
+      if (!(node instanceof EpsilonNode)) {
+        prefix.add(node);
+      }
     }
 
     // Extract suffix (everything after the group)
@@ -9292,7 +9304,14 @@ public class PatternAnalyzer {
       if (!isSimpleFixedWidth(node)) {
         return null; // Suffix must be simple fixed-width elements
       }
-      suffix.add(node);
+      // Unwrap non-capturing groups; the empty (?:) adds nothing. The generator only matches bare
+      // literals and char classes.
+      while (node instanceof GroupNode g) {
+        node = g.child;
+      }
+      if (!(node instanceof EpsilonNode)) {
+        suffix.add(node);
+      }
     }
 
     // Analyze the quantifier

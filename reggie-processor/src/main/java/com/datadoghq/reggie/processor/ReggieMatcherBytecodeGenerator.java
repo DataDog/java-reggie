@@ -607,7 +607,6 @@ public class ReggieMatcherBytecodeGenerator {
         greedyGen.generateFindFromMethod(cw, cls);
         greedyGen.generateMatchMethod(cw, cls);
         greedyGen.generateMatchesBoundedMethod(cw, cls);
-        greedyGen.generateMatchBoundedMethod(cw, cls);
         greedyGen.generateFindMatchMethod(cw, cls);
         greedyGen.generateFindMatchFromMethod(cw, cls);
         greedyGen.generateFindBoundsFromMethod(cw, cls);
@@ -623,7 +622,6 @@ public class ReggieMatcherBytecodeGenerator {
         multiGroupGen.generateFindFromMethod(cw, cls);
         multiGroupGen.generateMatchMethod(cw, cls);
         multiGroupGen.generateMatchesBoundedMethod(cw, cls);
-        multiGroupGen.generateMatchBoundedMethod(cw, cls);
         multiGroupGen.generateFindMatchMethod(cw, cls);
         multiGroupGen.generateFindMatchFromMethod(cw, cls);
         multiGroupGen.generateMatchFromPositionMethod(cw, cls);
@@ -667,7 +665,6 @@ public class ReggieMatcherBytecodeGenerator {
         fixedGen.generateFindFromMethod(cw, cls);
         fixedGen.generateMatchMethod(cw, cls);
         fixedGen.generateMatchesBoundedMethod(cw, cls);
-        fixedGen.generateMatchBoundedMethod(cw, cls);
         fixedGen.generateFindMatchMethod(cw, cls);
         fixedGen.generateFindMatchFromMethod(cw, cls);
         fixedGen.generateFindBoundsFromMethod(cw, cls);
@@ -683,7 +680,6 @@ public class ReggieMatcherBytecodeGenerator {
         suffixGen.generateFindFromMethod(cw, cls);
         suffixGen.generateMatchMethod(cw, cls);
         suffixGen.generateMatchesBoundedMethod(cw, cls);
-        suffixGen.generateMatchBoundedMethod(cw, cls);
         suffixGen.generateFindMatchMethod(cw, cls);
         suffixGen.generateFindMatchFromMethod(cw, cls);
         suffixGen.generateFindBoundsFromMethod(cw, cls);
@@ -699,7 +695,6 @@ public class ReggieMatcherBytecodeGenerator {
         boundedGen.generateFindFromMethod(cw, cls);
         boundedGen.generateMatchMethod(cw, cls);
         boundedGen.generateMatchesBoundedMethod(cw, cls);
-        boundedGen.generateMatchBoundedMethod(cw, cls);
         boundedGen.generateFindMatchMethod(cw, cls);
         boundedGen.generateFindMatchFromMethod(cw, cls);
         boundedGen.generateFindBoundsFromMethod(cw, cls);
@@ -753,7 +748,6 @@ public class ReggieMatcherBytecodeGenerator {
         switchGen.generateMatchMethod(cw, cls);
         switchGen.generateMatchIntoMethod(cw, cls);
         switchGen.generateMatchesBoundedMethod(cw, cls);
-        switchGen.generateMatchBoundedMethod(cw, cls);
         switchGen.generateFindMatchMethod(cw, cls);
         switchGen.generateFindMatchFromMethod(cw, cls);
         switchGen.generateFindBoundsFromMethod(cw, cls);
@@ -1060,7 +1054,6 @@ public class ReggieMatcherBytecodeGenerator {
         fixedRepGen.generateFindFromMethod(cw);
         fixedRepGen.generateMatchMethod(cw);
         fixedRepGen.generateMatchesBoundedMethod(cw);
-        fixedRepGen.generateMatchBoundedMethod(cw);
         fixedRepGen.generateFindMatchMethod(cw);
         fixedRepGen.generateFindMatchFromMethod(cw);
         break;

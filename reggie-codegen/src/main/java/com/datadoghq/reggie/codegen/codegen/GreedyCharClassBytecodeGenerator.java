@@ -316,14 +316,25 @@ public class GreedyCharClassBytecodeGenerator {
     mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
     mv.visitVarInsn(ISTORE, lenVar);
 
+    // Each path below leaves the next candidate (a position whose char is in the class) in start,
+    // or returns -1. A candidate is a match start only if its run reaches minMatches; a shorter
+    // run cannot hold a match at any of its positions, so the search resumes past it.
+    Label retry = new Label();
+    Label candidate = new Label();
+    mv.visitLabel(retry);
+
     // OPTIMIZATION 1: Single character - use String.indexOf()
     if (!negated && charset.isSingleChar()) {
-      // Optimization: start = input.indexOf(ch, start);
+      // start = input.indexOf(ch, start); if (start < 0) return -1;
       mv.visitVarInsn(ALOAD, inputVar);
       pushInt(mv, (int) charset.getSingleChar());
       mv.visitVarInsn(ILOAD, startVar);
       mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "indexOf", "(II)I", false);
-      mv.visitInsn(IRETURN); // Return result directly (indexOf returns -1 if not found)
+      mv.visitVarInsn(ISTORE, startVar);
+      mv.visitVarInsn(ILOAD, startVar);
+      mv.visitJumpInsn(IFGE, candidate);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
     }
     // OPTIMIZATION 2: Analyze charset at compile time for SWAR
     else if (analyzeGreedyCharSet() != null) {
@@ -333,15 +344,9 @@ public class GreedyCharClassBytecodeGenerator {
       swarOpt.generateFindNextBytecode(mv, inputVar, startVar, lenVar);
 
       // if (start < 0) return -1; (no match found)
-      Label found = new Label();
       mv.visitVarInsn(ILOAD, startVar);
-      mv.visitJumpInsn(IFGE, found);
+      mv.visitJumpInsn(IFGE, candidate);
       mv.visitInsn(ICONST_M1);
-      mv.visitInsn(IRETURN);
-
-      // Match found - return position
-      mv.visitLabel(found);
-      mv.visitVarInsn(ILOAD, startVar);
       mv.visitInsn(IRETURN);
     } else {
       // STANDARD: Character-by-character search loop
@@ -363,11 +368,7 @@ public class GreedyCharClassBytecodeGenerator {
       // Quick check: does first char match charset?
       Label tryNext = new Label();
       generateInlineCharSetCheck(mv, cVar, tryNext, negated);
-
-      // First char matches - this is a candidate position
-      // Return this position (match will be validated by match() method later)
-      mv.visitVarInsn(ILOAD, startVar);
-      mv.visitInsn(IRETURN);
+      mv.visitJumpInsn(GOTO, candidate);
 
       mv.visitLabel(tryNext);
       // i++;
@@ -378,6 +379,52 @@ public class GreedyCharClassBytecodeGenerator {
       mv.visitInsn(ICONST_M1);
       mv.visitInsn(IRETURN);
     }
+
+    mv.visitLabel(candidate);
+    if (minMatches > 1) {
+      // int pos = start + 1;
+      // while (pos - start < minMatches && pos < len && inClass(input.charAt(pos))) pos++;
+      // if (pos - start < minMatches) { start = pos + 1; goto retry; }
+      int posVar = allocator.allocate();
+      int runCharVar = allocator.allocate();
+      Label runLoop = new Label();
+      Label runEnd = new Label();
+      Label runOk = new Label();
+      mv.visitVarInsn(ILOAD, startVar);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ISTORE, posVar);
+      mv.visitLabel(runLoop);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, startVar);
+      mv.visitInsn(ISUB);
+      pushInt(mv, minMatches);
+      mv.visitJumpInsn(IF_ICMPGE, runOk);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPGE, runEnd);
+      mv.visitVarInsn(ALOAD, inputVar);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false);
+      mv.visitVarInsn(ISTORE, runCharVar);
+      generateInlineCharSetCheck(mv, runCharVar, runEnd, negated);
+      mv.visitIincInsn(posVar, 1);
+      mv.visitJumpInsn(GOTO, runLoop);
+      // The run is too short; the char at pos (if any) is outside the class.
+      mv.visitLabel(runEnd);
+      mv.visitVarInsn(ILOAD, posVar);
+      mv.visitInsn(ICONST_1);
+      mv.visitInsn(IADD);
+      mv.visitVarInsn(ISTORE, startVar);
+      mv.visitVarInsn(ILOAD, startVar);
+      mv.visitVarInsn(ILOAD, lenVar);
+      mv.visitJumpInsn(IF_ICMPLE, retry);
+      mv.visitInsn(ICONST_M1);
+      mv.visitInsn(IRETURN);
+      mv.visitLabel(runOk);
+    }
+    mv.visitVarInsn(ILOAD, startVar);
+    mv.visitInsn(IRETURN);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
@@ -655,42 +702,6 @@ public class GreedyCharClassBytecodeGenerator {
     mv.visitMethodInsn(
         INVOKEVIRTUAL, className.replace('.', '/'), "matches", "(Ljava/lang/String;)Z", false);
     mv.visitInsn(IRETURN);
-
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
-  }
-
-  /** Generate matchBounded() method - returns MatchResult on bounded region. */
-  public void generateMatchBoundedMethod(ClassWriter cw, String className) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-
-    // Delegate to match() for now
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitVarInsn(ILOAD, 2);
-    mv.visitVarInsn(ILOAD, 3);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();

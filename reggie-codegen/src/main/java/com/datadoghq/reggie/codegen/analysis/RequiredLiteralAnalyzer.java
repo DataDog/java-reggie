@@ -243,18 +243,23 @@ public final class RequiredLiteralAnalyzer {
       return Analysis.none();
     }
 
+    // Analyze each child once: re-analyzing per pass is exponential in the concat nesting depth.
+    Analysis[] as = new Analysis[children.size()];
+    for (int i = 0; i < as.length; i++) {
+      as[i] = analyze(children.get(i));
+    }
+
     // Every child is required (matches once, in order): union of child facts is sound.
     Set<String> facts = new HashSet<>();
-    for (RegexNode child : children) {
-      facts.addAll(analyze(child).facts());
+    for (Analysis a : as) {
+      facts.addAll(a.facts());
     }
 
     // prefixRun: chain through children with exact content, extend into the first inexact child
     StringBuilder pre = new StringBuilder();
     String prefixRun = "";
     boolean sawInexact = false;
-    for (RegexNode child : children) {
-      Analysis a = analyze(child);
+    for (Analysis a : as) {
       if (a.exact() != null && !sawInexact) {
         pre.append(a.exact());
       } else if (!sawInexact) {
@@ -267,8 +272,8 @@ public final class RequiredLiteralAnalyzer {
     // suffixRun: symmetric from the right
     StringBuilder suf = new StringBuilder();
     boolean sawInexactSuffix = false;
-    for (int i = children.size() - 1; i >= 0; i--) {
-      Analysis a = analyze(children.get(i));
+    for (int i = as.length - 1; i >= 0; i--) {
+      Analysis a = as[i];
       if (a.exact() != null && !sawInexactSuffix) {
         suf.insert(0, a.exact());
       } else if (!sawInexactSuffix) {
@@ -282,8 +287,7 @@ public final class RequiredLiteralAnalyzer {
     String exact = null;
     StringBuilder ex = new StringBuilder();
     boolean allExact = true;
-    for (RegexNode child : children) {
-      Analysis a = analyze(child);
+    for (Analysis a : as) {
       if (a.exact() == null) {
         allExact = false;
         break;
@@ -302,19 +306,19 @@ public final class RequiredLiteralAnalyzer {
     // 3. right extension by the following child's prefixRun (it starts at that
     //    child's match start, immediately after the chain).
     // Zero-width exacts (anchors, epsilon) keep chains connected through them.
-    for (int i = 0; i < children.size(); i++) {
-      if (analyze(children.get(i)).exact() == null) {
+    for (int i = 0; i < as.length; i++) {
+      if (as[i].exact() == null) {
         continue; // not a chain start
       }
       StringBuilder chain = new StringBuilder();
       int j = i;
-      while (j < children.size() && analyze(children.get(j)).exact() != null) {
-        chain.append(analyze(children.get(j)).exact());
+      while (j < as.length && as[j].exact() != null) {
+        chain.append(as[j].exact());
         j++;
       }
       addFact(facts, chain.toString());
-      String leftSuf = i > 0 ? analyze(children.get(i - 1)).suffixRun() : "";
-      String rightPre = j < children.size() ? analyze(children.get(j)).prefixRun() : "";
+      String leftSuf = i > 0 ? as[i - 1].suffixRun() : "";
+      String rightPre = j < as.length ? as[j].prefixRun() : "";
       if (!leftSuf.isEmpty()) {
         addFact(facts, leftSuf + chain);
         if (!rightPre.isEmpty()) {

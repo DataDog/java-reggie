@@ -109,8 +109,8 @@ public class FixedSequenceMatchResultTest {
     MatchResult result = matcher.matchBounded("abc123def", 3, 6);
 
     assertNotNull(result, "Bounded match should succeed");
-    assertEquals(0, result.start(), "Match should start at 0 (relative to substring)");
-    assertEquals(3, result.end(), "Match should end at 3 (relative to substring)");
+    assertEquals(3, result.start(), "Match should start at 3 (relative to original input)");
+    assertEquals(6, result.end(), "Match should end at 6 (relative to original input)");
     assertEquals("123", result.group(), "Group 0 should be '123'");
   }
 

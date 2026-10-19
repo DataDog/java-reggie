@@ -779,61 +779,6 @@ public class BoundedQuantifierBytecodeGenerator {
     mv.visitEnd();
   }
 
-  /** Generate matchBounded() method - match bounded region with MatchResult. */
-  public void generateMatchBoundedMethod(ClassWriter cw, String className) {
-    MethodVisitor mv =
-        cw.visitMethod(
-            ACC_PUBLIC,
-            "matchBounded",
-            "(Ljava/lang/CharSequence;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
-            null,
-            null);
-    mv.visitCode();
-
-    // Slot 0 = this, slot 1 = input, slot 2 = beginIndex, slot 3 = endIndex
-    int inputVar = 1;
-    int beginVar = 2;
-    int endVar = 3;
-    LocalVarAllocator allocator = new LocalVarAllocator(4);
-    int subVar = allocator.allocate();
-
-    // if (input == null) return null;
-    Label notNull = new Label();
-    mv.visitVarInsn(ALOAD, inputVar);
-    mv.visitJumpInsn(IFNONNULL, notNull);
-    mv.visitInsn(ACONST_NULL);
-    mv.visitInsn(ARETURN);
-    mv.visitLabel(notNull);
-
-    // String sub = input.subSequence(beginIndex, endIndex).toString();
-    mv.visitVarInsn(ALOAD, inputVar);
-    mv.visitVarInsn(ILOAD, beginVar);
-    mv.visitVarInsn(ILOAD, endVar);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE,
-        "java/lang/CharSequence",
-        "subSequence",
-        "(II)Ljava/lang/CharSequence;",
-        true);
-    mv.visitMethodInsn(
-        INVOKEINTERFACE, "java/lang/CharSequence", "toString", "()Ljava/lang/String;", true);
-    mv.visitVarInsn(ASTORE, subVar);
-
-    // return match(sub);
-    mv.visitVarInsn(ALOAD, 0); // this
-    mv.visitVarInsn(ALOAD, subVar);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className,
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
-
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
-  }
-
   /**
    * Generate matching code for a single element (for matches() method). Returns the next available
    * variable slot.
