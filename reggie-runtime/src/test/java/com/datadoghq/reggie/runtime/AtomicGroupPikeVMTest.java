@@ -145,6 +145,60 @@ public class AtomicGroupPikeVMTest {
     assertEquals(List.of(), failures);
   }
 
+  /**
+   * A group repeat inside an atomic body finishes against the body's own accept, so an enclosing
+   * repeat does not pin its group to an earlier atomic invocation ({@code (?:(?>(b)*c)a)+} on
+   * "bcabca": JDK group 1 = [3,4)).
+   */
+  @Test
+  void atomicBodyGroupRepeatIsNotPinnedByEnclosingRepeat() {
+    List<String> failures = new ArrayList<>();
+    for (String p : new String[] {"(?:(?>(b)*c)a)+"}) {
+      ReggieMatcher r = Reggie.compile(p);
+      Pattern jdk = Pattern.compile(p);
+      for (String in : new String[] {"bcabca", "bbcabca", "bcabbca", "bcabcabbbca", "xbcabca"}) {
+        Matcher m = jdk.matcher(in);
+        String exp = m.find() ? spans(m) : "null";
+        String got = spans(r.findMatch(in));
+        if (!exp.equals(got))
+          failures.add("findMatch /" + p + "/ " + in + " exp " + exp + " got " + got);
+        m = jdk.matcher(in);
+        exp = m.matches() ? spans(m) : "null";
+        got = spans(r.match(in));
+        if (!exp.equals(got))
+          failures.add("match /" + p + "/ " + in + " exp " + exp + " got " + got);
+      }
+    }
+    assertEquals(List.of(), failures);
+  }
+
+  /**
+   * A nullable capture repeated inside an atomic group keeps the capture of an abandoned atomic
+   * attempt in JDK ({@code (?>(a?)*)*a} on "a": group 1 = [1,1)); whatever engine runs it must
+   * agree.
+   */
+  @Test
+  void nullableCaptureInAtomicRepeatAgreesWithJdk() {
+    List<String> failures = new ArrayList<>();
+    for (String p : new String[] {"(?>(a?)*)*a", "(?>(a?)*)b|a"}) {
+      ReggieMatcher r = Reggie.compileAllowingFallback(p);
+      Pattern jdk = Pattern.compile(p);
+      for (String in : new String[] {"a", "aa", "ab", "b", ""}) {
+        Matcher m = jdk.matcher(in);
+        String exp = m.find() ? spans(m) : "null";
+        String got = spans(r.findMatch(in));
+        if (!exp.equals(got))
+          failures.add("findMatch /" + p + "/ " + in + " exp " + exp + " got " + got);
+        m = jdk.matcher(in);
+        exp = m.matches() ? spans(m) : "null";
+        got = spans(r.match(in));
+        if (!exp.equals(got))
+          failures.add("match /" + p + "/ " + in + " exp " + exp + " got " + got);
+      }
+    }
+    assertEquals(List.of(), failures);
+  }
+
   private static String spans(Matcher m) {
     StringBuilder sb = new StringBuilder();
     for (int g = 0; g <= m.groupCount(); g++)

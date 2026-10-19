@@ -235,4 +235,35 @@ class NullableBackrefTest {
       assertEquals(Pattern.compile(pat).matcher(input).matches(), m.matches(input), input);
     }
   }
+
+  /**
+   * {@code (a*|b){2}\1}: group 1 is ambiguously nullable and repeated. JDK exits the repeat on a
+   * zero-length iteration, so matches("bb") is false; the backtracker would accept an empty first
+   * iteration followed by "b" and \1 = "b". Whatever engine runs it must agree with JDK.
+   */
+  @Test
+  void repeatedAmbiguouslyNullableGroup_agreesWithJdk() {
+    for (String pat : new String[] {"(a*|b){2}\\1", "(a*|b)+\\1"}) {
+      ReggieMatcher m = Reggie.compileAllowingFallback(pat);
+      for (String input : new String[] {"bb", "abab", "aa", "b", "", "aabaab"}) {
+        Matcher jdk = Pattern.compile(pat).matcher(input);
+        boolean jdkMatches = jdk.matches();
+        MatchResult whole = m.match(input);
+        assertEquals(jdkMatches, whole != null, pat + " match " + input);
+        if (whole != null) {
+          assertEquals(jdk.start(1), whole.start(1), pat + " match g1 start " + input);
+          assertEquals(jdk.end(1), whole.end(1), pat + " match g1 end " + input);
+        }
+        jdk = Pattern.compile(pat).matcher(input);
+        MatchResult r = m.findMatch(input);
+        assertEquals(jdk.find(), r != null, pat + " find " + input);
+        if (r != null) {
+          assertEquals(jdk.start(), r.start(), pat + " find start " + input);
+          assertEquals(jdk.end(), r.end(), pat + " find end " + input);
+          assertEquals(jdk.start(1), r.start(1), pat + " find g1 start " + input);
+          assertEquals(jdk.end(1), r.end(1), pat + " find g1 end " + input);
+        }
+      }
+    }
+  }
 }

@@ -224,11 +224,13 @@ public final class FallbackPatternDetector {
     // semantics plus the early-accept ensure correct results. Groups whose body can capture strings
     // of length > 1 (e.g. [0]?-*, a{0,2}) can produce contaminated groupLen > 1, causing spurious
     // bounds-check failures that the early-accept cannot prevent. Those cases still need fallback
-    // unless the backtracking engine runs them: it records the span of the path it takes.
+    // unless the backtracking engine runs them: it records the span of the path it takes. It does
+    // not model java.util.regex's zero-length iteration exit for such a group inside a repeat, so
+    // a repeated group still needs fallback there ((a*|b){2}\1 on "bb": JDK rejects matches(), the
+    // backtracker accepts an empty first iteration followed by "b").
     if ((strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS
             || strategy == PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE)
-        && !backtrackingEngine
-        && hasAmbiguouslyNullableBackrefGroup(ast)) {
+        && hasAmbiguouslyNullableBackrefGroup(ast, backtrackingEngine)) {
       return "backref to nullable group: parallel NFA simulation records wrong capture span";
     }
 
@@ -361,6 +363,16 @@ public final class FallbackPatternDetector {
         && hasNullableGroupContentWithNullableQuantifier(ast)) {
       return "capturing group with nullable content and nullable outer quantifier: "
           + "BITSTATE_CAPTURE and TDFA POSIX last-match spans incorrect";
+    }
+
+    // B16-atomic: inside an atomic group the same shape still diverges on PIKEVM_CAPTURE.
+    // java.util.regex keeps the zero-width iteration's capture of an atomic attempt whose
+    // continuation later fails; PikeVM drops it ((?>(a?)*)*a on "a": JDK group 1 = [1,1), PikeVM
+    // unmatched).
+    if (strategy == PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
+        && hasNullableGroupContentWithNullableQuantifierInAtomic(ast)) {
+      return "capturing group with nullable content and nullable outer quantifier inside an "
+          + "atomic group: PIKEVM_CAPTURE drops the capture of an abandoned atomic attempt";
     }
 
     // OPTIMIZED_NFA: \Z (STRING_END) in an alternation combined with capturing groups,
@@ -751,14 +763,48 @@ public final class FallbackPatternDetector {
    * semantics in {@code findMatch} ensure the non-empty path wins when it independently produces
    * the correct result; the empty-input path ({@code matches("")}) has no competing threads. Groups
    * whose body can capture ALWAYS-empty strings (like {@code ()}) are trivially safe.
+   *
+   * @param repeatedOnly count only groups inside a quantifier that can repeat
    */
-  private static boolean hasAmbiguouslyNullableBackrefGroup(RegexNode ast) {
+  private static boolean hasAmbiguouslyNullableBackrefGroup(RegexNode ast, boolean repeatedOnly) {
     Set<Integer> backrefNums = new HashSet<>();
     collectBackrefsInSubtree(ast, backrefNums);
     if (backrefNums.isEmpty()) return false;
     for (int groupNum : backrefNums) {
-      if (isGroupNullable(ast, groupNum) && isGroupBodyCapableOfLengthGtOne(ast, groupNum))
+      if (isGroupNullable(ast, groupNum)
+          && isGroupBodyCapableOfLengthGtOne(ast, groupNum)
+          && (!repeatedOnly || isGroupRepeated(ast, groupNum, false))) {
         return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if the capturing group with the given number lies inside a quantifier that can
+   * repeat (max &gt; 1 or unbounded); {@code repeated} says whether {@code node} already does.
+   */
+  private static boolean isGroupRepeated(RegexNode node, int groupNum, boolean repeated) {
+    if (node instanceof GroupNode) {
+      GroupNode g = (GroupNode) node;
+      if (g.capturing && g.groupNumber == groupNum) return repeated;
+      return isGroupRepeated(g.child, groupNum, repeated);
+    }
+    if (node instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) node).children) {
+        if (isGroupRepeated(c, groupNum, repeated)) return true;
+      }
+      return false;
+    }
+    if (node instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) node).alternatives) {
+        if (isGroupRepeated(a, groupNum, repeated)) return true;
+      }
+      return false;
+    }
+    if (node instanceof QuantifierNode) {
+      QuantifierNode q = (QuantifierNode) node;
+      return isGroupRepeated(q.child, groupNum, repeated || q.max == -1 || q.max > 1);
     }
     return false;
   }
@@ -1928,6 +1974,32 @@ public final class FallbackPatternDetector {
     if (ast instanceof AlternationNode) {
       for (RegexNode a : ((AlternationNode) ast).alternatives) {
         if (hasNullableGroupContentWithNullableQuantifier(a)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns true if a {@link #hasNullableGroupContentWithNullableQuantifier} shape lies inside an
+   * atomic group.
+   */
+  private static boolean hasNullableGroupContentWithNullableQuantifierInAtomic(RegexNode ast) {
+    if (ast instanceof GroupNode) {
+      GroupNode g = (GroupNode) ast;
+      if (g.atomic && hasNullableGroupContentWithNullableQuantifier(g.child)) return true;
+      return hasNullableGroupContentWithNullableQuantifierInAtomic(g.child);
+    }
+    if (ast instanceof QuantifierNode) {
+      return hasNullableGroupContentWithNullableQuantifierInAtomic(((QuantifierNode) ast).child);
+    }
+    if (ast instanceof ConcatNode) {
+      for (RegexNode c : ((ConcatNode) ast).children) {
+        if (hasNullableGroupContentWithNullableQuantifierInAtomic(c)) return true;
+      }
+    }
+    if (ast instanceof AlternationNode) {
+      for (RegexNode a : ((AlternationNode) ast).alternatives) {
+        if (hasNullableGroupContentWithNullableQuantifierInAtomic(a)) return true;
       }
     }
     return false;

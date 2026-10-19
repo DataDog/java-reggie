@@ -69,8 +69,8 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
   private final Map<GroupNode, List<NFAFragment>> groupInstances = new IdentityHashMap<>();
 
   /**
-   * Number of enclosing quantifiers that can repeat (max &gt; 1), outside lookaround bodies and
-   * possessive repeats.
+   * Number of enclosing quantifiers that can repeat (max &gt; 1), outside lookaround bodies, atomic
+   * groups and possessive repeats.
    */
   private int repeatDepth = 0;
 
@@ -703,8 +703,16 @@ public class ThompsonBuilder implements RegexVisitor<ThompsonBuilder.NFAFragment
       // Atomic group (?>X): wrap the child fragment in entry/exit epsilon states that carry
       // atomicEntry/atomicExit markers so that PikeVM can enforce backtracking prevention.
       int atomicId = nextAtomicId++;
+      // A group repeat inside the body finishes against the body's own accept, as for a possessive
+      // repeat, so enclosing repeats do not pin its groups ((?:(?>(b)*c)a)+ on "bcabca": JDK
+      // group 1 = [3,4)).
+      int savedDepth = repeatDepth;
+      RegexNode savedAtomicBody = atomicBody;
+      repeatDepth = 0;
       atomicBody = node.child;
       NFAFragment child = node.child.accept(this);
+      repeatDepth = savedDepth;
+      atomicBody = savedAtomicBody;
 
       NFA.NFAState atomicEntryState = createState();
       atomicEntryState.atomicEntry = atomicId;

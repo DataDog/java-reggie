@@ -150,4 +150,70 @@ class FallbackPatternDetectorTest {
         detect("(?:a)+(b+)\\1", PatternAnalyzer.MatchingStrategy.VARIABLE_CAPTURE_BACKREF),
         "non-nullable child must not trigger B12-nullable");
   }
+
+  // ── B7 on the backtracker: repeated ambiguously nullable backref group → fallback ──────────
+
+  private String detectOnBacktracker(String pattern, PatternAnalyzer.MatchingStrategy strategy)
+      throws Exception {
+    RegexNode ast = new RegexParser().parse(pattern);
+    return FallbackPatternDetector.needsFallback(ast, strategy, true);
+  }
+
+  @Test
+  void b7_backtracker_repeatedNullableBackrefGroup_needsFallback() throws Exception {
+    // (a*|b){2}\1 on "bb": JDK rejects matches(); the backtracker would accept an empty first
+    // iteration followed by "b" and \1 = "b".
+    for (PatternAnalyzer.MatchingStrategy strategy :
+        new PatternAnalyzer.MatchingStrategy[] {
+          PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+          PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE
+        }) {
+      for (String pattern : new String[] {"(a*|b){2}\\1", "(a*|b)+\\1", "(?:x(a{0,3}))*\\1"}) {
+        assertNotNull(
+            detectOnBacktracker(pattern, strategy),
+            pattern + " on the backtracker (" + strategy + ") must keep the B7 fallback");
+      }
+    }
+  }
+
+  @Test
+  void b7_backtracker_nonRepeatedNullableBackrefGroup_noFallback() throws Exception {
+    // (a{0,3})\d+\1: the group is not repeated, so the backtracker runs it.
+    for (PatternAnalyzer.MatchingStrategy strategy :
+        new PatternAnalyzer.MatchingStrategy[] {
+          PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS,
+          PatternAnalyzer.MatchingStrategy.PINNED_BACKREFERENCE
+        }) {
+      assertNull(
+          detectOnBacktracker("(a{0,3})\\d+\\1", strategy),
+          "(a{0,3})\\d+\\1 on the backtracker (" + strategy + ") must not fall back");
+    }
+  }
+
+  @Test
+  void b7_generatedCode_nonRepeatedNullableBackrefGroup_stillFallsBack() throws Exception {
+    assertNotNull(
+        detect("(a{0,3})\\d+\\1", PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA_WITH_BACKREFS),
+        "generated OPTIMIZED_NFA_WITH_BACKREFS code must keep the B7 fallback");
+  }
+
+  // ── B16-atomic: nullable-nullable capture inside an atomic group → PIKEVM_CAPTURE fallback ─
+
+  @Test
+  void b16atomic_pikeVm_nullableCaptureInAtomicRepeat_needsFallback() throws Exception {
+    // (?>(a?)*)*a on "a": JDK group 1 = [1,1) from the abandoned atomic attempt; PikeVM unmatched.
+    for (String pattern : new String[] {"(?>(a?)*)*a", "(?>(a?)*)b|a", "(?:(?>(a*)*)b)*a"}) {
+      assertNotNull(
+          detect(pattern, PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE),
+          pattern + " must not run on PIKEVM_CAPTURE");
+    }
+  }
+
+  @Test
+  void b16atomic_pikeVm_nonAtomicNullableCapture_noFallback() throws Exception {
+    // Outside an atomic group PikeVM reports JDK's final zero-width iteration.
+    assertNull(
+        detect("((x*){0,}|a)(c|bcd)", PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE),
+        "non-atomic B16 shape must stay on PIKEVM_CAPTURE");
+  }
 }
