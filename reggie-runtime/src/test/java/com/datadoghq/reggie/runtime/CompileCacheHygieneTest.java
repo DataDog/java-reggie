@@ -106,13 +106,44 @@ class CompileCacheHygieneTest {
     RuntimeCompiler.clearCache();
     Reggie.compile("(?:a|b)*c"); // literal cache (sentinel)
     Reggie.compile("a{0,6000}"); // counted-loop cache
-    Reggie.compile(
-        "^jdbc:snowflake://([^/?:]+)\\.snowflakecomputing\\.com(?::(\\d+))?/x_"); // hybrid
+    RuntimeCompiler.compileBackrefBacktrack("(.*) \\((.*)\\)", ""); // stub backtracker
+    Reggie.compile("(a|b)*(c)"); // hybrid
+    for (String name :
+        new String[] {
+          "LITERAL_CACHE", "BACKTRACK_NFA_CACHE", "STUB_BACKTRACK_NFA_CACHE", "HYBRID_CACHE"
+        }) {
+      Field f = RuntimeCompiler.class.getDeclaredField(name);
+      f.setAccessible(true);
+      assertFalse(((Map<?, ?>) f.get(null)).isEmpty(), name + " must be populated before clear");
+    }
     RuntimeCompiler.clearCache();
-    for (String name : new String[] {"LITERAL_CACHE", "BACKTRACK_NFA_CACHE", "HYBRID_CACHE"}) {
+    for (String name :
+        new String[] {
+          "LITERAL_CACHE", "BACKTRACK_NFA_CACHE", "STUB_BACKTRACK_NFA_CACHE", "HYBRID_CACHE"
+        }) {
       Field f = RuntimeCompiler.class.getDeclaredField(name);
       f.setAccessible(true);
       assertTrue(((Map<?, ?>) f.get(null)).isEmpty(), name + " must be cleared");
     }
+  }
+
+  @Test
+  void stubAndRuntimeBacktrackCachesUseSeparateNamespaces() throws Exception {
+    String pattern = "(.*) \\((.*)\\)";
+    RuntimeCompiler.clearCache();
+    RuntimeCompiler.compileBackrefBacktrack(pattern, "");
+    assertEquals(1, cache("STUB_BACKTRACK_NFA_CACHE").size());
+    assertTrue(cache("BACKTRACK_NFA_CACHE").isEmpty());
+
+    RuntimeCompiler.clearCache();
+    RuntimeCompiler.compile(pattern);
+    assertFalse(cache("BACKTRACK_NFA_CACHE").isEmpty());
+    assertTrue(cache("STUB_BACKTRACK_NFA_CACHE").isEmpty());
+  }
+
+  private static Map<?, ?> cache(String name) throws Exception {
+    Field field = RuntimeCompiler.class.getDeclaredField(name);
+    field.setAccessible(true);
+    return (Map<?, ?>) field.get(null);
   }
 }

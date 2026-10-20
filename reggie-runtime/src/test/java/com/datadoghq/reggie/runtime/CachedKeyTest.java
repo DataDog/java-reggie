@@ -59,7 +59,28 @@ class CachedKeyTest {
 
   @Test
   void repeatedCallsReturnSameInstance() {
-    assertSame(RuntimeCompiler.cached("k", "\\d+"), RuntimeCompiler.cached("k", "\\d+"));
+    assertSame(
+        RuntimeCompiler.cached("k", "\\d+", NAMED_ONLY),
+        RuntimeCompiler.cached("k", "\\d+", NAMED_ONLY));
+  }
+
+  @Test
+  void nulOptionSuffixCannotAliasDifferentPatternUnderUserKey() {
+    String suffixPattern = "a\0CAPTURE_NAMED_ONLY";
+    RuntimeCompiler.cached("collision", "a", NAMED_ONLY);
+    IllegalStateException baseFirst =
+        assertThrows(
+            IllegalStateException.class,
+            () -> RuntimeCompiler.cached("collision", suffixPattern, ReggieOptions.DEFAULT));
+    assertTrue(baseFirst.getMessage().endsWith("is already mapped to a different pattern"));
+
+    RuntimeCompiler.clearCache();
+    RuntimeCompiler.cached("collision", suffixPattern, ReggieOptions.DEFAULT);
+    IllegalStateException suffixFirst =
+        assertThrows(
+            IllegalStateException.class,
+            () -> RuntimeCompiler.cached("collision", "a", NAMED_ONLY));
+    assertTrue(suffixFirst.getMessage().endsWith("is already mapped to a different pattern"));
   }
 
   @Test

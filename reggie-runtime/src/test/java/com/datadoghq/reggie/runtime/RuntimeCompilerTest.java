@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -190,9 +191,9 @@ public class RuntimeCompilerTest {
     RuntimeCompiler.compile("abc", com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE);
 
     assertEquals(1, RuntimeCompiler.cacheSize());
-    assertEquals(1, RuntimeCompiler.cachedPatterns().size());
     assertTrue(
-        RuntimeCompiler.cachedPatterns().stream().anyMatch(k -> k.startsWith("abc [flags=")));
+        RuntimeCompiler.cachedPatterns()
+            .contains("abc [flags=" + com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE + "]"));
   }
 
   @Test
@@ -467,16 +468,21 @@ public class RuntimeCompilerTest {
   // ==================== Flagged Cache Display Tests ====================
 
   @Test
-  public void testCachedPatternsIncludeOptionsForFlaggedEntries() {
-    RuntimeCompiler.compile("abc", com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE);
-    RuntimeCompiler.compile(
-        "abc",
-        com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE,
-        com.datadoghq.reggie.ReggieOptions.builder().allowJdkFallback().build());
+  public void testCachedPatternsRendersStructuralKeysAtDiagnosticBoundary() {
+    int flags = com.datadoghq.reggie.ReggieFlags.CASE_INSENSITIVE;
+    com.datadoghq.reggie.ReggieOptions allowFallback =
+        com.datadoghq.reggie.ReggieOptions.builder().allowJdkFallback().build();
+    RuntimeCompiler.compile("diag-default");
+    RuntimeCompiler.compile("diag-optioned", allowFallback);
+    RuntimeCompiler.compile("diag-flagged", flags);
+    RuntimeCompiler.compile("diag-both", flags, allowFallback);
+    RuntimeCompiler.cached("diag-user-key", "diag-user-pattern");
 
-    // Two distinct L1 entries (same pattern+flags, different ReggieOptions) must not collapse
-    // into a single displayed string.
-    assertEquals(2, RuntimeCompiler.cacheSize());
-    assertEquals(2, RuntimeCompiler.cachedPatterns().size());
+    Set<String> displayed = RuntimeCompiler.cachedPatterns();
+    assertTrue(displayed.contains("diag-default"));
+    assertTrue(displayed.contains("diag-optioned [options=ALLOW_JDK_FALLBACK]"));
+    assertTrue(displayed.contains("diag-flagged [flags=" + flags + "]"));
+    assertTrue(displayed.contains("diag-both [flags=" + flags + " options=ALLOW_JDK_FALLBACK]"));
+    assertTrue(displayed.contains("diag-user-key"));
   }
 }

@@ -788,7 +788,15 @@ class SharedDfaBundleTest {
     f.setAccessible(true);
     @SuppressWarnings("unchecked")
     Map<Object, Object> cache = (Map<Object, Object>) f.get(null);
-    Object entry = cache.get(pattern);
+    Object entry = null;
+    for (Map.Entry<Object, Object> candidate : cache.entrySet()) {
+      Field patternField = candidate.getKey().getClass().getDeclaredField("pattern");
+      patternField.setAccessible(true);
+      if (pattern.equals(patternField.get(candidate.getKey()))) {
+        entry = candidate.getValue();
+        break;
+      }
+    }
     assertNotNull(entry, "compile must register the pattern in " + cacheField);
     return entry;
   }

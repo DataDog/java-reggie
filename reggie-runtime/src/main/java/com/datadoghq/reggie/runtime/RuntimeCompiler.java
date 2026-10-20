@@ -85,6 +85,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.ref.SoftReference;
 import java.lang.reflect.Constructor;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -102,26 +103,31 @@ import org.objectweb.asm.util.TraceClassVisitor;
 
 /**
  * Runtime compiler for regex patterns. Generates optimized bytecode at runtime and loads as hidden
- * classes (Java 21+). Thread-safe with two-level caching: - Level 1: Pattern string → matcher
+ * classes (Java 21+). Thread-safe with two-level caching: - Level 1: compilation key → matcher
  * instance (fast path) - Level 2: Structural hash → generated class (deduplication)
  */
 public class RuntimeCompiler {
 
   private static final Logger LOG = Logger.getLogger(RuntimeCompiler.class.getName());
 
-  // Level 1: Pattern string → matcher instance (fast path for exact matches).
+  // Level 1: Structural compilation identity → matcher instance (fast path for exact matches).
   // Patterns with mutable match state are NOT stored here; they use NFA_CLASS_CACHE instead.
-  private static final ConcurrentHashMap<Object, ReggieMatcher> PATTERN_CACHE =
+  private static final ConcurrentHashMap<CompilationKey, ReggieMatcher> PATTERN_CACHE =
       new ConcurrentHashMap<>();
 
   // User-keyed entries from cached(key, ...); a namespace separate from PATTERN_CACHE so a user key
   // never aliases a pattern compiled by compile().
   private static final ConcurrentHashMap<String, UserEntry> USER_CACHE = new ConcurrentHashMap<>();
 
-  /**
-   * A cached(key, ...) entry: the engine key identifies the pattern and options it was built for.
-   */
-  private record UserEntry(String pattern, String engineKey, ReggieMatcher matcher) {}
+  /** Immutable runtime compilation identity; pattern-side NUL remains ordinary pattern data. */
+  private record CompilationKey(String pattern, int flags, List<ReggieOption> enabledOptions) {
+    private CompilationKey {
+      enabledOptions = List.copyOf(enabledOptions);
+    }
+  }
+
+  /** A cached(key, ...) entry: the engine key identifies its pattern, flags, and options. */
+  private record UserEntry(String pattern, CompilationKey engineKey, ReggieMatcher matcher) {}
 
   /**
    * Factory for NFA-backed matchers. Encapsulates the compiled class and the name map so that each
@@ -156,12 +162,12 @@ public class RuntimeCompiler {
     }
   }
 
-  // Level 1b: Pattern string → matcher factory for strategies with mutable match state
+  // Level 1b: Compilation key → matcher factory for strategies with mutable match state
   // (MatchingStrategy#hasMutableMatchState). Their matchers mutate instance fields
   // (currentStates, nextStates, epsilonProcessed, configGroupStarts, lazyFindMode) during
   // matching, so a single shared instance cannot be used concurrently.
   // We cache a factory here that produces a fresh enriched instance on every compile() call.
-  private static final ConcurrentHashMap<Object, NfaMatcherFactory> NFA_CLASS_CACHE =
+  private static final ConcurrentHashMap<CompilationKey, NfaMatcherFactory> NFA_CLASS_CACHE =
       new ConcurrentHashMap<>();
 
   /**
@@ -207,16 +213,14 @@ public class RuntimeCompiler {
     }
   }
 
-  // Level 1c: Pattern string → PikeVMEntry for PIKEVM_CAPTURE patterns.
+  // Level 1c: Compilation key → PikeVMEntry for PIKEVM_CAPTURE patterns.
   // PikeVMMatcher carries mutable per-call buffers and must be freshly instantiated on every
   // compile() call; only the NFA (immutable after construction) and the name map are cached.
-  private static final ConcurrentHashMap<Object, PikeVMEntry> PIKEVM_NFA_CACHE =
+  private static final ConcurrentHashMap<CompilationKey, PikeVMEntry> PIKEVM_NFA_CACHE =
       new ConcurrentHashMap<>();
 
-  // compilePikeVm() entries, keyed by the bare pattern. Separate from PIKEVM_NFA_CACHE, whose
-  // DEFAULT-options key is also the bare pattern: compile() serves any PIKEVM_NFA_CACHE entry on
-  // its
-  // fast path, so a shared map would route compile() to PikeVM after a stub call.
+  // compilePikeVm() entries, keyed by the bare generated-stub pattern. Separate from the
+  // structurally keyed PIKEVM_NFA_CACHE so a stub call cannot alter normal compile() routing.
   private static final ConcurrentHashMap<String, PikeVMEntry> STUB_PIKEVM_CACHE =
       new ConcurrentHashMap<>();
 
@@ -260,8 +264,12 @@ public class RuntimeCompiler {
     }
   }
 
-  // Level 1d: Pattern string → BacktrackEntry for BackrefBacktrackMatcher patterns.
-  private static final ConcurrentHashMap<Object, BacktrackEntry> BACKTRACK_NFA_CACHE =
+  // Runtime BackrefBacktrackMatcher entries use structural compilation identity exclusively.
+  private static final ConcurrentHashMap<CompilationKey, BacktrackEntry> BACKTRACK_NFA_CACHE =
+      new ConcurrentHashMap<>();
+
+  // Annotation-stub backtracker entries are keyed by the generated stub's bare pattern contract.
+  private static final ConcurrentHashMap<String, BacktrackEntry> STUB_BACKTRACK_NFA_CACHE =
       new ConcurrentHashMap<>();
 
   /**
@@ -361,7 +369,7 @@ public class RuntimeCompiler {
 
   // Hybrid patterns: entry cache so compile() can return a fresh matcher per call. Hybrids carry
   // a mutable nfa-half and must never be shared through the L1 pattern cache (see HybridEntry).
-  private static final ConcurrentHashMap<Object, HybridEntry> HYBRID_CACHE =
+  private static final ConcurrentHashMap<CompilationKey, HybridEntry> HYBRID_CACHE =
       new ConcurrentHashMap<>();
 
   /**
@@ -426,10 +434,10 @@ public class RuntimeCompiler {
     }
   }
 
-  // Level 1d: Pattern string → BitStateEntry for BITSTATE_CAPTURE patterns.
+  // Level 1d: Compilation key → BitStateEntry for BITSTATE_CAPTURE patterns.
   // BitStateMatcher carries mutable per-call buffers and must be freshly instantiated on every
   // compile() call; only the NFA (immutable after construction) and the name map are cached.
-  private static final ConcurrentHashMap<Object, BitStateEntry> BITSTATE_NFA_CACHE =
+  private static final ConcurrentHashMap<CompilationKey, BitStateEntry> BITSTATE_NFA_CACHE =
       new ConcurrentHashMap<>();
 
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
@@ -508,7 +516,7 @@ public class RuntimeCompiler {
   private static ReggieMatcher compile(
       String pattern,
       ReggieOptions options,
-      Object cacheKey,
+      CompilationKey cacheKey,
       String reportedPattern,
       java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
     setTotalCompileDeadline();
@@ -523,7 +531,7 @@ public class RuntimeCompiler {
   private static ReggieMatcher compileWithDeadline(
       String pattern,
       ReggieOptions options,
-      Object cacheKey,
+      CompilationKey cacheKey,
       String reportedPattern,
       java.util.function.Supplier<LinearTokenSequenceAdmission> linearTokenSequenceAdmission) {
 
@@ -575,7 +583,7 @@ public class RuntimeCompiler {
    *       factory is cached and a new instance is created per call.
    * </ul>
    */
-  private static ReggieMatcher newMutableInstance(String pattern, Object engineKey) {
+  private static ReggieMatcher newMutableInstance(String pattern, CompilationKey engineKey) {
     PikeVMEntry pikevmEntry = PIKEVM_NFA_CACHE.get(engineKey);
     if (pikevmEntry != null) {
       return wrapCompiled(pikevmEntry.newMatcher(pattern), pattern);
@@ -836,7 +844,7 @@ public class RuntimeCompiler {
    * against a different codegen version.
    */
   public static ReggieMatcher compileBackrefBacktrack(String pattern, String encodedNames) {
-    BacktrackEntry entry = BACKTRACK_NFA_CACHE.get(pattern);
+    BacktrackEntry entry = STUB_BACKTRACK_NFA_CACHE.get(pattern);
     if (entry != null) {
       return entry.newMatcher(pattern);
     }
@@ -854,9 +862,9 @@ public class RuntimeCompiler {
         throw new UnsupportedPatternException(
             "backtracking engine does not execute " + unsupported + " in /" + pattern + "/");
       }
-      BACKTRACK_NFA_CACHE.putIfAbsent(
+      STUB_BACKTRACK_NFA_CACHE.putIfAbsent(
           pattern, new BacktrackEntry(nfa, decodeNameMap(encodedNames)));
-      return BACKTRACK_NFA_CACHE.get(pattern).newMatcher(pattern);
+      return STUB_BACKTRACK_NFA_CACHE.get(pattern).newMatcher(pattern);
     } catch (RegexParser.ParseException e) {
       throw new PatternSyntaxException(e.getMessage(), pattern, -1);
     }
@@ -918,7 +926,7 @@ public class RuntimeCompiler {
    *     same pattern with different options
    */
   public static ReggieMatcher cached(String key, String pattern, ReggieOptions options) {
-    String engineKey = cacheKeyFor(pattern, options);
+    CompilationKey engineKey = cacheKeyFor(pattern, options);
     UserEntry entry = USER_CACHE.get(key);
     if (entry == null) {
       entry =
@@ -960,7 +968,7 @@ public class RuntimeCompiler {
    * matcher for {@code engineKey} from the fast path.
    */
   private static ReggieMatcher compileUserEntry(
-      String pattern, ReggieOptions options, String engineKey) {
+      String pattern, ReggieOptions options, CompilationKey engineKey) {
     setTotalCompileDeadline();
     try {
       ReggieMatcher fresh = newMutableInstance(pattern, engineKey);
@@ -983,11 +991,11 @@ public class RuntimeCompiler {
   }
 
   /**
-   * Clears all caches, including {@code cached()} user keys: {@code PATTERN_CACHE} (matcher
-   * instances), {@code NFA_CLASS_CACHE} (NFA-backed compiled classes), and {@code STRUCTURE_CACHE}
-   * (all hidden Class objects). Clearing the structure cache releases hidden-class references,
-   * allowing the JVM to reclaim the metaspace they occupy. For workloads compiling many unique
-   * user-provided patterns, call this periodically to avoid unbounded metaspace growth.
+   * Clears all caches, including {@code cached()} user keys, runtime engine/factory entries,
+   * annotation-stub entries, and {@code STRUCTURE_CACHE} (all hidden Class objects). Clearing the
+   * structure cache releases hidden-class references, allowing the JVM to reclaim the metaspace
+   * they occupy. For workloads compiling many unique user-provided patterns, call this periodically
+   * to avoid unbounded metaspace growth.
    */
   public static void clearCache() {
     PATTERN_CACHE.clear();
@@ -998,6 +1006,7 @@ public class RuntimeCompiler {
     BITSTATE_NFA_CACHE.clear();
     STRUCTURE_CACHE.clear();
     BACKTRACK_NFA_CACHE.clear();
+    STUB_BACKTRACK_NFA_CACHE.clear();
     HYBRID_CACHE.clear();
     LITERAL_CACHE.clear();
   }
@@ -1016,14 +1025,9 @@ public class RuntimeCompiler {
   }
 
   /**
-   * Get a string snapshot of all level-1 cache keys. Plain pattern-string keys (from {@code
-   * compile(pattern[, options])}) are returned verbatim. Keys for patterns compiled with {@link
-   * ReggieFlags} (via {@code compile(pattern, flags[, options])}) are backed by an internal {@code
-   * FlaggedCacheKey} record rather than the pattern string itself; those entries are rendered as
-   * {@code "<pattern> [flags=<flags>]"}, or {@code "<pattern> [flags=<flags> options=<options>]"}
-   * when non-default {@link ReggieOptions} were also used, so flagged compilations remain visible
-   * for cache-size accounting and debugging, and entries that differ only by options no longer
-   * collapse to the same displayed string.
+   * Get a diagnostic string snapshot of all level-1 cache keys. Default unflagged patterns and user
+   * keys are returned verbatim. Flags and non-default options are rendered in a readable suffix.
+   * This display is not an identity encoding, so distinct entries may collapse in the returned set.
    */
   public static Set<String> cachedPatterns() {
     return java.util.stream.Stream.concat(
@@ -1032,38 +1036,34 @@ public class RuntimeCompiler {
         .collect(java.util.stream.Collectors.toUnmodifiableSet());
   }
 
-  private static String cacheKeyToDisplayString(Object key) {
-    if (key instanceof String s) {
-      return s;
+  private static String cacheKeyToDisplayString(CompilationKey key) {
+    if (key.flags() == 0 && key.enabledOptions().isEmpty()) {
+      return key.pattern();
     }
-    if (key instanceof FlaggedCacheKey flaggedKey) {
-      String optionsSuffix = "";
-      if (!flaggedKey.optionsKey().equals(flaggedKey.pattern())) {
-        // cacheKeyFor() appends "\0<OPTION_NAME>" for each enabled ReggieOption; render it as a
-        // comma-separated, human-readable options=... suffix so distinct ReggieOptions combined
-        // with the same pattern+flags no longer collapse to the same displayed string.
-        String encodedOptions = flaggedKey.optionsKey().substring(flaggedKey.pattern().length());
-        optionsSuffix = " options=" + encodedOptions.substring(1).replace('\0', ',');
-      }
-      return flaggedKey.pattern() + " [flags=" + flaggedKey.flags() + optionsSuffix + "]";
+    String options =
+        key.enabledOptions().stream()
+            .map(ReggieOption::name)
+            .collect(java.util.stream.Collectors.joining(","));
+    if (key.flags() == 0) {
+      return key.pattern() + " [options=" + options + "]";
     }
-    return String.valueOf(key);
+    String optionsSuffix = options.isEmpty() ? "" : " options=" + options;
+    return key.pattern() + " [flags=" + key.flags() + optionsSuffix + "]";
   }
 
-  private static String cacheKeyFor(String pattern, ReggieOptions options) {
-    StringBuilder sb = null;
-    for (ReggieOption o : ReggieOption.values()) {
-      if (options.has(o)) {
-        if (sb == null) {
-          sb = new StringBuilder(pattern);
-        }
-        sb.append('\0').append(o.name());
-      }
-    }
-    return sb == null ? pattern : sb.toString();
+  private static CompilationKey cacheKeyFor(String pattern, ReggieOptions options) {
+    return compilationKey(pattern, 0, options);
   }
 
-  private record FlaggedCacheKey(String pattern, int flags, String optionsKey) {}
+  private static CompilationKey compilationKey(String pattern, int flags, ReggieOptions options) {
+    List<ReggieOption> enabledOptions = new ArrayList<>();
+    for (ReggieOption option : ReggieOption.values()) {
+      if (options.has(option)) {
+        enabledOptions.add(option);
+      }
+    }
+    return new CompilationKey(pattern, flags, enabledOptions);
+  }
 
   /**
    * Carries the source-level semantic profile used only to admit the named-capture LTS shortcut.
@@ -1159,9 +1159,8 @@ public class RuntimeCompiler {
     return ch == 'i' || ch == 'm' || ch == 's' || ch == 'x' || ch == '-';
   }
 
-  private static FlaggedCacheKey cacheKeyForFlags(
-      String pattern, int flags, ReggieOptions options) {
-    return new FlaggedCacheKey(pattern, flags, cacheKeyFor(pattern, options));
+  private static CompilationKey cacheKeyForFlags(String pattern, int flags, ReggieOptions options) {
+    return compilationKey(pattern, flags, options);
   }
 
   /**
@@ -1444,7 +1443,7 @@ public class RuntimeCompiler {
   private static ReggieMatcher compileInternal(
       String pattern,
       ReggieOptions options,
-      Object cacheKey,
+      CompilationKey cacheKey,
       LinearTokenSequenceAdmission linearTokenSequenceAdmission) {
     try {
       // 1. Parse pattern to AST
@@ -2291,7 +2290,7 @@ public class RuntimeCompiler {
       PatternAnalyzer.MatchingStrategyResult originalResult,
       boolean caseInsensitive,
       ReggieOptions options,
-      Object cacheKey,
+      CompilationKey cacheKey,
       Map<String, Integer> nameMap)
       throws Exception {
     // dfaResult is pre-computed by compileInternal; anchor-diluted patterns are pre-filtered.
@@ -2433,7 +2432,7 @@ public class RuntimeCompiler {
   /** Registers the hybrid entry under {@code cacheKey} and returns a fresh matcher from it. */
   private static ReggieMatcher hybridEntry(
       String pattern,
-      Object cacheKey,
+      CompilationKey cacheKey,
       ReggieMatcher dfaMatcher,
       NFA captureNfa,
       PatternAnalyzer.MatchingStrategyResult originalResult,
