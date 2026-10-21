@@ -76,7 +76,7 @@ final class LaurikariDFACache {
    * make every one of the 6 new anchor types' {@code checkAnchor} outcome a pure function of {@code
    * (consumed char, lookahead class)}.
    */
-  private static final int LOOKAHEAD_CLASSES = 10;
+  static final int LOOKAHEAD_CLASSES = 10;
 
   private static final int LOOKAHEAD_WORD = 0;
   private static final int LOOKAHEAD_NEWLINE = 1;
@@ -422,7 +422,7 @@ final class LaurikariDFACache {
    *       from {@code regionEnd}, so they take the class of {@code charAt(pos)}.
    * </ul>
    */
-  private static int lookaheadClass(String input, int pos, int regionEnd) {
+  static int lookaheadClass(String input, int pos, int regionEnd) {
     int remaining = regionEnd - pos;
     if (remaining > ANCHOR_LOOKAHEAD_TAIL) return charClass(input.charAt(pos));
     if (remaining == 0) return LOOKAHEAD_AT_END;

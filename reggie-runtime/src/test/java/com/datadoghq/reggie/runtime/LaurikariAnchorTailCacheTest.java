@@ -16,10 +16,13 @@
 package com.datadoghq.reggie.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.datadoghq.reggie.codegen.automaton.NFA;
 import com.datadoghq.reggie.codegen.automaton.ThompsonBuilder;
 import com.datadoghq.reggie.codegen.parsing.RegexParser;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -32,7 +35,9 @@ import org.junit.jupiter.api.Test;
  * {@link LaurikariDFACache} memoizes anchor-dependent transitions under a lookahead class that
  * encodes the distance to {@code regionEnd} near the end of the input. One matcher per pattern is
  * shared by every input, so a transition cached for one input's tail is replayed on all the others;
- * every result must still agree with {@link PikeVMMatcher} and the JDK.
+ * every result must still agree with {@link PikeVMMatcher} and the JDK. The same holds for the
+ * start state of a scan from position 0, which {@link LaurikariDfaMatcher} caches by lookahead
+ * class.
  */
 class LaurikariAnchorTailCacheTest {
 
@@ -46,6 +51,14 @@ class LaurikariAnchorTailCacheTest {
     "(\\d+)$",
     "(\\d)\\d*\\Z",
     "[0-9a]{2,5}[0-9]{1,3}\\Z",
+    // The start closure itself evaluates these anchors at position 0
+    "\\b1",
+    "\\B.",
+    "$",
+    "\\Z",
+    "\\z",
+    "(?m)$",
+    "\\b",
   };
 
   /** Characters that select each lookahead class, including every line terminator. */
@@ -81,6 +94,7 @@ class LaurikariAnchorTailCacheTest {
     for (String pattern : PATTERNS) {
       int groupCount = Pattern.compile(pattern).matcher("").groupCount();
       NFA nfa = new ThompsonBuilder().build(new RegexParser().parse(pattern), groupCount);
+      assertTrue(LaurikariEligibility.isEligible(nfa, false), pattern);
       LaurikariDfaMatcher laurikari = new LaurikariDfaMatcher(nfa, pattern, groupCount);
       PikeVMMatcher oracle = new PikeVMMatcher(nfa, pattern);
       Pattern jdk = Pattern.compile(pattern);
@@ -102,6 +116,29 @@ class LaurikariAnchorTailCacheTest {
       assertEquals(0, laurikari.fallbackCount(), pattern);
     }
     assertEquals(List.of(), wrong);
+  }
+
+  /** A scan from position 0 stores its start state under the input's lookahead class. */
+  @Test
+  void startStateCachedPerLookaheadClass() throws Exception {
+    String pattern = "\\d+$";
+    NFA nfa = new ThompsonBuilder().build(new RegexParser().parse(pattern), 0);
+    LaurikariDfaMatcher laurikari = new LaurikariDfaMatcher(nfa, pattern, 0);
+    Field field = LaurikariDfaMatcher.class.getDeclaredField("startStateByClass");
+    field.setAccessible(true);
+    int[] starts = (int[]) field.get(laurikari);
+    int unset = starts[0];
+    for (int s : starts) assertEquals(unset, s);
+    String in = "x 12";
+    int cls = LaurikariDFACache.lookaheadClass(in, 0, in.length());
+    assertEquals(3, laurikari.findFrom("ab 12", 0));
+    int start = starts[cls];
+    assertNotEquals(unset, start);
+    assertEquals(2, laurikari.findFrom(in, 0));
+    assertEquals(start, starts[cls]);
+    int filled = 0;
+    for (int s : starts) if (s != unset) filled++;
+    assertEquals(1, filled);
   }
 
   private static String spans(Matcher m, int groupCount) {
