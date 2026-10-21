@@ -17,6 +17,8 @@ package com.datadoghq.reggie.codegen.codegen;
 
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushEndOrLength;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushFromOrZero;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -264,6 +266,18 @@ public class OnePassBytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(notNull);
 
+    emitGroupWalk(mv, -1, -1);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
+  }
+
+  /**
+   * Emits the group-tracking walk of {@code match()} from {@code fromVar} to {@code toVar} (int
+   * locals; {@code -1} selects {@code 0} and {@code input.length()}), returning a {@code
+   * MatchResultImpl} with spans in input coordinates, or null. Uses slots 2-6; anchors read the
+   * whole input.
+   */
+  private void emitGroupWalk(MethodVisitor mv, int fromVar, int toVar) {
     // int[] groupStarts = new int[groupCount + 1];
     pushInt(mv, groupCount + 1);
     mv.visitIntInsn(NEWARRAY, T_INT);
@@ -287,18 +301,18 @@ public class OnePassBytecodeGenerator {
       mv.visitInsn(IASTORE);
     }
 
-    // groupStarts[0] = 0;
+    // groupStarts[0] = from;
     mv.visitVarInsn(ALOAD, 2);
     mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0);
+    pushFromOrZero(mv, fromVar);
     mv.visitInsn(IASTORE);
 
     // int state = startState.id;
     pushInt(mv, nfa.getStartState().id);
     mv.visitVarInsn(ISTORE, 4); // state in var 4
 
-    // int pos = 0;
-    mv.visitInsn(ICONST_0);
+    // int pos = from;
+    pushFromOrZero(mv, fromVar);
     mv.visitVarInsn(ISTORE, 5); // pos in var 5
 
     // Main loop
@@ -310,10 +324,9 @@ public class OnePassBytecodeGenerator {
     // Process epsilon chain with group tracking
     generateEpsilonChainProcessing(mv, 4, 5, 1, 2, 3, false);
 
-    // Check end of input
+    // Check end of input (or of the walked range)
     mv.visitVarInsn(ILOAD, 5);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    pushEndOrLength(mv, toVar, false);
     mv.visitJumpInsn(IF_ICMPGE, loopEnd);
 
     // char ch = input.charAt(pos);
@@ -373,9 +386,6 @@ public class OnePassBytecodeGenerator {
     mv.visitLabel(notAccepting);
     mv.visitInsn(ACONST_NULL);
     mv.visitInsn(ARETURN);
-
-    mv.visitMaxs(0, 0);
-    mv.visitEnd();
   }
 
   /**
@@ -1110,7 +1120,7 @@ public class OnePassBytecodeGenerator {
 
     mv.visitLabel(hasMatch);
 
-    // Call matchInRange() for groups - single substring allocation at end
+    // return matchInRange(input, matchStart, matchEnd); (spans already in input coordinates)
     mv.visitVarInsn(ALOAD, 0);
     mv.visitVarInsn(ALOAD, 1);
     mv.visitVarInsn(ILOAD, 3);
@@ -1121,36 +1131,17 @@ public class OnePassBytecodeGenerator {
         "matchInRange",
         "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
         false);
-    mv.visitVarInsn(ASTORE, 5);
-
-    // if (result == null) return null;
-    Label hasResult = new Label();
-    mv.visitVarInsn(ALOAD, 5);
-    mv.visitJumpInsn(IFNONNULL, hasResult);
-    mv.visitInsn(ACONST_NULL);
-    mv.visitInsn(ARETURN);
-
-    mv.visitLabel(hasResult);
-
-    // Adjust group positions by matchStart offset
-    mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/HybridMatcher$OffsetMatchResult");
-    mv.visitInsn(DUP);
-    mv.visitVarInsn(ALOAD, 1); // original input
-    mv.visitVarInsn(ALOAD, 5); // delegate result
-    mv.visitVarInsn(ILOAD, 3); // offset
-    mv.visitMethodInsn(
-        INVOKESPECIAL,
-        "com/datadoghq/reggie/runtime/HybridMatcher$OffsetMatchResult",
-        "<init>",
-        "(Ljava/lang/String;Lcom/datadoghq/reggie/runtime/MatchResult;I)V",
-        false);
     mv.visitInsn(ARETURN);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();
   }
 
-  /** Generate matchInRange() helper method - returns MatchResult for range. */
+  /**
+   * Generate matchInRange(String input, int from, int to): the {@code match()} walk over {@code
+   * [from, to)} of the whole input, so anchors see the text around the range. Returns spans in
+   * input coordinates, or null.
+   */
   public void generateMatchInRangeMethod(ClassWriter cw, String className) {
     MethodVisitor mv =
         cw.visitMethod(
@@ -1161,23 +1152,12 @@ public class OnePassBytecodeGenerator {
             null);
     mv.visitCode();
 
-    // Extract substring once and delegate to match()
-    mv.visitVarInsn(ALOAD, 1);
+    // Move from/to out of slots 2 and 3, which the walk uses for the group arrays.
     mv.visitVarInsn(ILOAD, 2);
+    mv.visitVarInsn(ISTORE, 7);
     mv.visitVarInsn(ILOAD, 3);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", false);
-    mv.visitVarInsn(ASTORE, 4);
-
-    mv.visitVarInsn(ALOAD, 0);
-    mv.visitVarInsn(ALOAD, 4);
-    mv.visitMethodInsn(
-        INVOKEVIRTUAL,
-        className.replace('.', '/'),
-        "match",
-        "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
-        false);
-    mv.visitInsn(ARETURN);
+    mv.visitVarInsn(ISTORE, 8);
+    emitGroupWalk(mv, 7, 8);
 
     mv.visitMaxs(0, 0);
     mv.visitEnd();

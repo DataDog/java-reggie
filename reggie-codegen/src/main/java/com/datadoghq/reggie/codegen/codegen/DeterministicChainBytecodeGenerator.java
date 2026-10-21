@@ -1710,9 +1710,12 @@ public class DeterministicChainBytecodeGenerator {
     EmitCtx dry = newDryCtx(realCtx, noop, dryAlloc);
     int before = dryAlloc.peek();
     Label dryFail = new Label();
+    // The continuation mirrors the real pass (a jump level): a seq whose tail walk ends in a jump
+    // reports itself uncovered, so its parents emit their rest again, allocating more slots.
+    List<TailLevel> dryCont = List.of(TailLevel.jump(new Label()));
     for (DeterministicChainInfo.ChainSeq alt : e.alts) {
       dry.retryFail = null;
-      emitChainTry(dry, alt, 0, List.of(), dryFail, List.of());
+      emitChainTry(dry, alt, 0, List.of(), dryFail, dryCont);
     }
     return dryAlloc.peek() - before;
   }
@@ -1735,7 +1738,8 @@ public class DeterministicChainBytecodeGenerator {
     int before = dryAlloc.peek();
     Label dryFail = new Label();
     dry.retryFail = null;
-    emitChainTry(dry, seq, 0, List.of(), dryFail, List.of());
+    // Same continuation shape as the real pass (see measureAltChainBodySlots).
+    emitChainTry(dry, seq, 0, List.of(), dryFail, List.of(TailLevel.jump(new Label())));
     return dryAlloc.peek() - before;
   }
 

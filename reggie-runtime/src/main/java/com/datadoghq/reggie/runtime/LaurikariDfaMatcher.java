@@ -132,6 +132,15 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     return fallbackCount;
   }
 
+  /**
+   * True once a call has been delegated to the {@link PikeVMMatcher} fallback: one of the DFA
+   * caches reached its cap, and since {@link LaurikariDFACache} never evicts, any call that needs a
+   * new DFA state on that cache is delegated too.
+   */
+  boolean saturated() {
+    return fallbackCount != 0;
+  }
+
   private PikeVMMatcher fallback() {
     if (fallback == null) {
       fallback = new PikeVMMatcher(nfa, patternText);

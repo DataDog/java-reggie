@@ -38,6 +38,9 @@ public class PatternAnalyzer {
   private static final int DFA_SWITCH_STATE_LIMIT = 300;
   private static final int DFA_TABLE_ESTIMATED_BYTES_LIMIT = 1 << 20;
 
+  /** The java.util.regex line terminators. */
+  private static final CharSet LINE_TERMINATORS = CharSet.ANY_EXCEPT_NEWLINE.complement();
+
   private final RegexNode ast;
 
   /**
@@ -92,13 +95,190 @@ public class PatternAnalyzer {
   }
 
   /**
-   * Check if pattern is OnePass eligible (unambiguous single-path execution). OnePass patterns can
-   * track groups without state copying or BitSet overhead.
-   *
-   * <p>A pattern is OnePass if: 1. For each state, character transitions are disjoint (no overlap)
-   * 2. At most one non-marker epsilon transition per state 3. No backreferences (they require
-   * backtracking)
+   * True when the DFA capture route for {@code stateCount} states would record wrong group spans
+   * (see {@link #hasGroupEntryBesidePastThread}): DFA_SWITCH_WITH_GROUPS records group positions on
+   * state entry, so any past thread beside a group entry counts; DFA_UNROLLED_WITH_GROUPS applies
+   * transition tag operations, so only a past thread that still consumes chars counts. Also true
+   * when a group exit is ambiguous (see {@link #hasGroupExitBesideInsideThread}), for both routes.
    */
+  private boolean declinesDfaCaptureRoute(DFA dfa, int stateCount) {
+    boolean decline =
+        nfa != null
+            && hasGroupEntryBesidePastThread(dfa, nfa, stateCount < DFA_UNROLLED_STATE_LIMIT);
+    addTrace("hasGroupEntryBesidePastThread", decline);
+    if (!decline && nfa != null) {
+      decline = hasGroupExitBesideInsideThread(dfa, nfa);
+      addTrace("hasGroupExitBesideInsideThread", decline);
+    }
+    return decline;
+  }
+
+  /**
+   * True when some DFA state holds both a thread inside capturing group g that can still consume a
+   * char (an NFA state reachable from g's entry without passing g's exit, with char transitions)
+   * and a thread that has consumed at least one char past g's exit without re-entering g. Such a
+   * state cannot tell from the chars read so far where the group ends: the greedy group may have to
+   * give chars back to what follows ({@code (a[ab]{1,25})b{1,2}} on {@code "abab"} ends group 1 at
+   * 3, not 4), which the group positions recorded per DFA state cannot represent. The consumed past
+   * threads are tracked per DFA state along the DFA transitions, since one NFA state can be both
+   * freshly past g in one DFA state and past g with chars consumed in another.
+   */
+  private static boolean hasGroupExitBesideInsideThread(DFA dfa, NFA nfa) {
+    List<DFA.DFAState> states = dfa.getAllStates();
+    for (int g = 1; g <= nfa.getGroupCount(); g++) {
+      Integer group = g;
+      Set<NFA.NFAState> inside = new HashSet<>();
+      List<NFA.NFAState> work = new ArrayList<>();
+      for (NFA.NFAState s : nfa.getStates()) {
+        if (group.equals(s.enterGroup) && inside.add(s)) {
+          work.add(s);
+        }
+      }
+      while (!work.isEmpty()) {
+        NFA.NFAState s = work.remove(work.size() - 1);
+        for (NFA.NFAState n : s.getEpsilonTransitions()) {
+          if (!group.equals(n.exitGroup) && inside.add(n)) {
+            work.add(n);
+          }
+        }
+        for (NFA.Transition t : s.getTransitions()) {
+          if (!group.equals(t.target.exitGroup) && inside.add(t.target)) {
+            work.add(t.target);
+          }
+        }
+      }
+      // Per DFA state: threads past g's exit (fresh or consumed), and those that consumed a char
+      Map<DFA.DFAState, Set<NFA.NFAState>> past = new HashMap<>();
+      Map<DFA.DFAState, Set<NFA.NFAState>> consumed = new HashMap<>();
+      List<DFA.DFAState> queue = new ArrayList<>();
+      for (DFA.DFAState state : states) {
+        Set<NFA.NFAState> fresh = new HashSet<>();
+        for (NFA.NFAState s : state.nfaStates) {
+          if (group.equals(s.exitGroup)) {
+            fresh.add(s);
+          }
+        }
+        if (!fresh.isEmpty()) {
+          past.put(state, closeWithin(fresh, state.nfaStates, group));
+          queue.add(state);
+        }
+      }
+      while (!queue.isEmpty()) {
+        DFA.DFAState state = queue.remove(queue.size() - 1);
+        Set<NFA.NFAState> from = past.get(state);
+        for (Map.Entry<CharSet, DFA.DFATransition> e : state.transitions.entrySet()) {
+          DFA.DFAState target = e.getValue().target;
+          Set<NFA.NFAState> reached = new HashSet<>();
+          for (NFA.NFAState s : from) {
+            for (NFA.Transition t : s.getTransitions()) {
+              if (t.chars.intersects(e.getKey())
+                  && target.nfaStates.contains(t.target)
+                  && !group.equals(t.target.enterGroup)) {
+                reached.add(t.target);
+              }
+            }
+          }
+          if (reached.isEmpty()) {
+            continue;
+          }
+          closeWithin(reached, target.nfaStates, group);
+          Set<NFA.NFAState> targetConsumed = consumed.computeIfAbsent(target, k -> new HashSet<>());
+          Set<NFA.NFAState> targetPast = past.computeIfAbsent(target, k -> new HashSet<>());
+          if (targetConsumed.addAll(reached) | targetPast.addAll(reached)) {
+            queue.add(target);
+          }
+        }
+      }
+      for (Map.Entry<DFA.DFAState, Set<NFA.NFAState>> e : consumed.entrySet()) {
+        // Inside threads that a consumed past thread re-enters (a quantified group) start a new
+        // iteration; the newest iteration's span wins, so they do not count.
+        Set<NFA.NFAState> reentered = new HashSet<>(e.getValue());
+        List<NFA.NFAState> pending = new ArrayList<>(reentered);
+        while (!pending.isEmpty()) {
+          for (NFA.NFAState n : pending.remove(pending.size() - 1).getEpsilonTransitions()) {
+            if (e.getKey().nfaStates.contains(n) && reentered.add(n)) {
+              pending.add(n);
+            }
+          }
+        }
+        for (NFA.NFAState s : e.getKey().nfaStates) {
+          if (inside.contains(s) && !s.getTransitions().isEmpty() && !reentered.contains(s)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Adds to {@code seeds} the states of {@code within} reachable from them by epsilon transitions
+   * that do not enter {@code group}; returns {@code seeds}.
+   */
+  private static Set<NFA.NFAState> closeWithin(
+      Set<NFA.NFAState> seeds, Set<NFA.NFAState> within, Integer group) {
+    List<NFA.NFAState> work = new ArrayList<>(seeds);
+    while (!work.isEmpty()) {
+      NFA.NFAState s = work.remove(work.size() - 1);
+      for (NFA.NFAState n : s.getEpsilonTransitions()) {
+        if (!group.equals(n.enterGroup) && within.contains(n) && seeds.add(n)) {
+          work.add(n);
+        }
+      }
+    }
+    return seeds;
+  }
+
+  /**
+   * True when some DFA state holds both a thread that has just entered capturing group g (an NFA
+   * state with {@code enterGroup == g}) and a thread past group g (an NFA state reachable from g's
+   * exit without re-entering g). Such a state cannot tell from the chars read so far where the
+   * group starts, which a single set of group positions per DFA state cannot represent ({@code
+   * [ab]{1,25}(\w)} on {@code "abab"}). With {@code pastMustConsume}, only past threads that still
+   * consume chars count: an accepting-only past thread ({@code \w+(\d)}) is resolved by the
+   * transition tag operations of the unrolled generator, a past thread that keeps consuming ({@code
+   * [ab]+(\w)[ab]+}) is not. An entry reachable from g's own exit (a quantified group, {@code
+   * (abc){1,2}}) is a re-entry and does not count: the newest iteration's span wins.
+   */
+  private static boolean hasGroupEntryBesidePastThread(DFA dfa, NFA nfa, boolean pastMustConsume) {
+    for (int g = 1; g <= nfa.getGroupCount(); g++) {
+      Set<NFA.NFAState> past = new HashSet<>();
+      Set<NFA.NFAState> reentries = new HashSet<>();
+      List<NFA.NFAState> work = new ArrayList<>();
+      for (NFA.NFAState s : nfa.getStates()) {
+        if (Integer.valueOf(g).equals(s.exitGroup) && past.add(s)) {
+          work.add(s);
+        }
+      }
+      while (!work.isEmpty()) {
+        NFA.NFAState s = work.remove(work.size() - 1);
+        List<NFA.NFAState> next = new ArrayList<>(s.getEpsilonTransitions());
+        for (NFA.Transition t : s.getTransitions()) {
+          next.add(t.target);
+        }
+        for (NFA.NFAState n : next) {
+          if (Integer.valueOf(g).equals(n.enterGroup)) {
+            reentries.add(n);
+          } else if (past.add(n)) {
+            work.add(n);
+          }
+        }
+      }
+      for (DFA.DFAState state : dfa.getAllStates()) {
+        boolean entered = false;
+        boolean beyond = false;
+        for (NFA.NFAState s : state.nfaStates) {
+          entered |= Integer.valueOf(g).equals(s.enterGroup) && !reentries.contains(s);
+          beyond |= past.contains(s) && (!pastMustConsume || !s.getTransitions().isEmpty());
+        }
+        if (entered && beyond) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /**
    * True when any capturing group's content can end at an earlier position than its longest
    * possible consumption — i.e. the content's CONCAT spine ends with a skippable (nullable)
@@ -189,6 +369,14 @@ public class PatternAnalyzer {
     return java.util.Collections.emptyList();
   }
 
+  /**
+   * Check if pattern is OnePass eligible (unambiguous single-path execution). OnePass patterns can
+   * track groups without state copying or BitSet overhead.
+   *
+   * <p>A pattern is OnePass if: 1. For each state, character transitions are disjoint (no overlap)
+   * 2. At most one non-marker epsilon transition per state 3. No backreferences (they require
+   * backtracking)
+   */
   private boolean isOnePassEligible() {
     // Backreferences require backtracking
     if (hasBackreferences(ast)) {
@@ -898,8 +1086,11 @@ public class PatternAnalyzer {
         // The assertion DFA executors are exact only for assertion placements the construction
         // certifies, and they resolve competing accepts by longest match rather than priority
         // (x(?=a)(?:a|ab) on "xab" must end at 2). A trailing-lookahead admission is certified for
-        // the unrolled executor only. Route the rest to NFA.
+        // the unrolled executor only. A DFA whose construction erased an anchor guard (an
+        // unguarded and an anchor-guarded path sharing a charset) is not exact either. Route the
+        // rest to NFA.
         if (constructor.hasUnsoundAssertionPlacement()
+            || dfa.isAnchorConditionDiluted()
             || dfaHasPriorityConflictTransition(dfa)
             || (constructor.hasTrailingLookaheadAdmission() && dfa.getStateCount() >= 20)) {
           return new MatchingStrategyResult(
@@ -1374,8 +1565,10 @@ public class PatternAnalyzer {
         if (dfa.isAnchorConditionDiluted()) {
           // Anchor condition diluted in DFA: capture-ambiguous patterns are safe for PikeVM
           // because PikeVM evaluates anchors natively per position (via checkAnchor) and tracks
-          // captures per thread. Non-capture-ambiguous patterns fall back to OPTIMIZED_NFA.
-          if (dfa.isCaptureAmbiguous()) {
+          // captures per thread, as are $/\Z before a non-newline consumer (which OPTIMIZED_NFA
+          // does not model). Other patterns fall back to OPTIMIZED_NFA.
+          if (dfa.isCaptureAmbiguous()
+              || FallbackPatternDetector.hasEndAnchorBeforeNonNewlineConsumer(ast)) {
             return new MatchingStrategyResult(
                 MatchingStrategy.PIKEVM_CAPTURE,
                 null,
@@ -1637,6 +1830,16 @@ public class PatternAnalyzer {
             }
             // Pure-regular, anchor-free: C2 priority-ordered TDFA gives correct spans.
             int stateCount = dfa.getStateCount();
+            if (declinesDfaCaptureRoute(dfa, stateCount)) {
+              return new MatchingStrategyResult(
+                  MatchingStrategy.PIKEVM_CAPTURE,
+                  null,
+                  null,
+                  false,
+                  requiredLiterals,
+                  null,
+                  needsPosixSemantics);
+            }
             addTrace(
                 "DFA state count → DFA_UNROLLED / DFA_SWITCH / OPTIMIZED_NFA (stateCount="
                     + stateCount
@@ -1806,6 +2009,16 @@ public class PatternAnalyzer {
               needsPosixSemantics);
         }
         int stateCount = dfa.getStateCount();
+        if (declinesDfaCaptureRoute(dfa, stateCount)) {
+          return new MatchingStrategyResult(
+              MatchingStrategy.PIKEVM_CAPTURE,
+              null,
+              null,
+              false,
+              requiredLiterals,
+              null,
+              needsPosixSemantics);
+        }
         if (stateCount < DFA_UNROLLED_STATE_LIMIT) {
           return new MatchingStrategyResult(
               MatchingStrategy.DFA_UNROLLED_WITH_GROUPS,
@@ -1885,8 +2098,10 @@ public class PatternAnalyzer {
         return new MatchingStrategyResult(
             MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
       }
-      // Alternation with any accepting DFA state with transitions: PIKEVM_CAPTURE gives correct
-      // leftmost-first semantics for nullable/optional/end-anchor alternation branches. Previous
+      // Alternation, or a loop followed by an optional sequence it can steal from (see
+      // LoopThenOptionalSeqDetector), with any accepting DFA state with transitions: PIKEVM_CAPTURE
+      // gives correct leftmost-first semantics for nullable/optional/end-anchor alternation
+      // branches and for such optional tails. Previous
       // exclusions for hasNullableAlternationBranch, subtreeContainsOptional, and
       // hasEndAnchorLeadingInAlternationBranch are removed: ThompsonBuilder now wraps {0,n}
       // fragments in a skip-entry state (preventing mixed char+epsilon states), and
@@ -1896,8 +2111,16 @@ public class PatternAnalyzer {
       // This block runs BEFORE the isAnchorConditionDiluted guard below: a diluted-anchor
       // pattern (e.g. ^c|[^1][b]) is handled correctly by PIKEVM, whereas OPTIMIZED_NFA
       // (the dilution fallback target) shares the old find() anchor bug.
+      // The end-accept check is skipped in the captureless analysis (ignoreGroupCount). Its DFA
+      // is the hybrid DFA half: HybridMatcher reads match existence and the leftmost start from
+      // it, neither of which depends on alternation priority, and takes spans from the NFA half
+      // (the DFA's own span only when the NFA half finds no match from that start).
+      // The literal-lookahead main-pattern analysis only checks that a result exists.
+      boolean alternation = containsAlternation(ast);
       boolean altWithAcceptingTransFlag =
-          containsAlternation(ast) && dfaHasAcceptingStateWithTransitions(dfa);
+          ((alternation || ast.accept(new LoopThenOptionalSeqDetector()))
+                  && dfaHasAcceptingStateWithTransitions(dfa))
+              || (alternation && !ignoreGroupCount && dfaHasEndAcceptBeforeLineTerminator(dfa));
       // Alternation priority affects match boundaries only when there's an actual
       // priority conflict (different-length alternatives where a lower-priority thread
       // can select a longer match). The DFA's hasPriorityConflictTransition flag detects
@@ -1979,6 +2202,13 @@ public class PatternAnalyzer {
       result =
           new MatchingStrategyResult(
               MatchingStrategy.OPTIMIZED_NFA, null, null, false, requiredLiterals);
+    }
+    // OPTIMIZED_NFA does not model $/\Z before a non-newline consumer (FallbackPatternDetector
+    // sends that to the JDK); PIKEVM_CAPTURE evaluates the anchor per position.
+    if (result.strategy == MatchingStrategy.OPTIMIZED_NFA
+        && FallbackPatternDetector.hasEndAnchorBeforeNonNewlineConsumer(ast)) {
+      return new MatchingStrategyResult(
+          MatchingStrategy.PIKEVM_CAPTURE, null, null, false, requiredLiterals);
     }
     // Promote large anchor-free group-free NFA patterns to the lazy DFA strategy.
     if (result.strategy == MatchingStrategy.OPTIMIZED_NFA
@@ -2792,6 +3022,39 @@ public class PatternAnalyzer {
   }
 
   /**
+   * Returns true if an accepting DFA state is conditioned on {@code $}, multiline {@code $} or
+   * {@code \Z} and has a transition on a line terminator. These anchors also fire before a line
+   * terminator, where that transition can still advance past the zero-width accept (e.g. {@code
+   * (?:$b?|\r)} on {@code "\r\n"}: JDK [0,0), longest match [0,1)). The caller applies it to
+   * alternations only, where an earlier branch can prefer the zero-width accept.
+   */
+  private static boolean dfaHasEndAcceptBeforeLineTerminator(DFA dfa) {
+    for (DFA.DFAState state : dfa.getAllStates()) {
+      if (!state.accepting || !hasLineTerminatorTransition(state)) {
+        continue;
+      }
+      for (NFA.AnchorType a : state.acceptanceAnchorConditions) {
+        if (a == NFA.AnchorType.END
+            || a == NFA.AnchorType.END_MULTILINE
+            || a == NFA.AnchorType.STRING_END) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Returns true if any outgoing transition of {@code state} accepts a line terminator. */
+  private static boolean hasLineTerminatorTransition(DFA.DFAState state) {
+    for (CharSet chars : state.transitions.keySet()) {
+      if (chars.intersects(LINE_TERMINATORS)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Returns true if any accepting DFA state has {@link DFA.DFAState#hasPriorityConflictTransition},
    * meaning a lower-priority consuming thread can fire and select a longer match over the accept.
    * In hybrid mode (ignoreGroupCount=true), the DFA uses untagged longest-match semantics for
@@ -2952,6 +3215,11 @@ public class PatternAnalyzer {
    * ({@code (0*-?)*} on {@code "0"}: JDK group 1 = {@code [1,1)}, BitState {@code [0,1)}). Declines
    * NFAs with group pins ({@link NFA#hasPinnedGroups}), which only PikeVM honors.
    */
+  public boolean isBitStateEligible() {
+    return isBitStateEligible(ast);
+  }
+
+  /** The eligibility check of {@link #isBitStateEligible()} applied to {@code node}. */
   private boolean isBitStateEligible(RegexNode node) {
     if (nfa != null && nfa.hasPinnedGroups()) return false;
     if (hasBackreferences(node)) return false;
@@ -6013,6 +6281,224 @@ public class PatternAnalyzer {
         minCount,
         separatorNode,
         totalGroupCount);
+  }
+
+  /**
+   * Detects a greedy quantifier L followed, in the same sequence (groups without a quantifier and
+   * nested concatenations are read inline, nullable elements in between are skipped), by a nullable
+   * element E whose non-empty matches can start with a char L consumes. Leftmost-first priority
+   * lets L take that char and E then falls back to its preferred, possibly empty, match where a
+   * longest-match DFA would have L give the char back for a longer E match ({@code
+   * x{1,25}(?:x\s?)?} on {@code "xx\n"} ends at 2, not 3). E is exempt when it is a greedy
+   * quantifier over a single char or char class (a given-back char only shifts its count), or when
+   * L is unbounded and every char E can consume is a char L consumes. When a char set cannot be
+   * determined the pair counts as a conflict.
+   */
+  private class LoopThenOptionalSeqDetector implements RegexVisitor<Boolean> {
+    @Override
+    public Boolean visitLiteral(LiteralNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitCharClass(CharClassNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConcat(ConcatNode node) {
+      List<RegexNode> seq = new ArrayList<>();
+      inline(node, seq);
+      for (int i = 0; i < seq.size(); i++) {
+        if (!(seq.get(i) instanceof QuantifierNode)) {
+          continue;
+        }
+        QuantifierNode loop = (QuantifierNode) seq.get(i);
+        if (!loop.greedy || loop.max == 0) {
+          continue;
+        }
+        for (int j = i + 1; j < seq.size() && isNullable(seq.get(j)); j++) {
+          if (conflicts(loop, seq.get(j))) {
+            return true;
+          }
+        }
+      }
+      for (RegexNode child : node.children) {
+        if (child.accept(this)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /** Appends the sequence elements of {@code node}, reading unquantified groups inline. */
+    private void inline(RegexNode node, List<RegexNode> seq) {
+      if (node instanceof ConcatNode) {
+        for (RegexNode child : ((ConcatNode) node).children) {
+          inline(child, seq);
+        }
+      } else if (node instanceof GroupNode) {
+        inline(((GroupNode) node).child, seq);
+      } else {
+        seq.add(node);
+      }
+    }
+
+    private boolean conflicts(QuantifierNode loop, RegexNode tail) {
+      RegexNode body = tail;
+      while (body instanceof GroupNode) {
+        body = ((GroupNode) body).child;
+      }
+      if (body instanceof QuantifierNode && ((QuantifierNode) body).greedy) {
+        RegexNode atom = ((QuantifierNode) body).child;
+        while (atom instanceof GroupNode) {
+          atom = ((GroupNode) atom).child;
+        }
+        if (atom instanceof LiteralNode || atom instanceof CharClassNode) {
+          return false;
+        }
+      }
+      CharSet loopChars = consumedChars(loop.child);
+      CharSet tailFirst = leadingChars(tail);
+      if (loopChars == null || tailFirst == null) {
+        return true;
+      }
+      if (!loopChars.intersects(tailFirst)) {
+        return false;
+      }
+      CharSet tailChars = loop.max == -1 ? consumedChars(tail) : null;
+      return tailChars == null || !tailChars.minus(loopChars).isEmpty();
+    }
+
+    /** Every char {@code node} can consume, or null when undetermined. */
+    private CharSet consumedChars(RegexNode node) {
+      if (node instanceof LiteralNode || node instanceof CharClassNode) {
+        return getNodeCharSet(node);
+      }
+      if (node instanceof AnchorNode) {
+        return CharSet.empty();
+      }
+      if (node instanceof GroupNode) {
+        return consumedChars(((GroupNode) node).child);
+      }
+      if (node instanceof QuantifierNode) {
+        return consumedChars(((QuantifierNode) node).child);
+      }
+      List<RegexNode> parts;
+      if (node instanceof ConcatNode) {
+        parts = ((ConcatNode) node).children;
+      } else if (node instanceof AlternationNode) {
+        parts = ((AlternationNode) node).alternatives;
+      } else {
+        return null;
+      }
+      CharSet result = CharSet.empty();
+      for (RegexNode part : parts) {
+        CharSet c = consumedChars(part);
+        if (c == null) {
+          return null;
+        }
+        result = result.union(c);
+      }
+      return result;
+    }
+
+    /** Chars a non-empty match of {@code node} can start with, or null when undetermined. */
+    private CharSet leadingChars(RegexNode node) {
+      if (node instanceof LiteralNode || node instanceof CharClassNode) {
+        return getNodeCharSet(node);
+      }
+      if (node instanceof AnchorNode) {
+        return CharSet.empty();
+      }
+      if (node instanceof GroupNode) {
+        return leadingChars(((GroupNode) node).child);
+      }
+      if (node instanceof QuantifierNode) {
+        return leadingChars(((QuantifierNode) node).child);
+      }
+      CharSet result = CharSet.empty();
+      if (node instanceof ConcatNode) {
+        for (RegexNode child : ((ConcatNode) node).children) {
+          CharSet c = leadingChars(child);
+          if (c == null) {
+            return null;
+          }
+          result = result.union(c);
+          if (!isNullable(child) && !(child instanceof AnchorNode)) {
+            return result;
+          }
+        }
+        return result;
+      }
+      if (node instanceof AlternationNode) {
+        for (RegexNode alt : ((AlternationNode) node).alternatives) {
+          CharSet c = leadingChars(alt);
+          if (c == null) {
+            return null;
+          }
+          result = result.union(c);
+        }
+        return result;
+      }
+      return null;
+    }
+
+    @Override
+    public Boolean visitAlternation(AlternationNode node) {
+      for (RegexNode alt : node.alternatives) {
+        if (alt.accept(this)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    @Override
+    public Boolean visitQuantifier(QuantifierNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitGroup(GroupNode node) {
+      return node.child.accept(this);
+    }
+
+    @Override
+    public Boolean visitAnchor(AnchorNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitBackreference(BackreferenceNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitAssertion(AssertionNode node) {
+      return node.subPattern != null && node.subPattern.accept(this);
+    }
+
+    @Override
+    public Boolean visitSubroutine(SubroutineNode node) {
+      return false;
+    }
+
+    @Override
+    public Boolean visitConditional(ConditionalNode node) {
+      return node.thenBranch.accept(this)
+          || (node.elseBranch != null && node.elseBranch.accept(this));
+    }
+
+    @Override
+    public Boolean visitBranchReset(BranchResetNode node) {
+      for (RegexNode alt : node.alternatives) {
+        if (alt.accept(this)) {
+          return true;
+        }
+      }
+      return false;
+    }
   }
 
   /** Visitor to detect capturing groups in AST. */

@@ -72,25 +72,34 @@ final class LaurikariDFACache {
   static final int FALLBACK = -3;
 
   /**
-   * Number of {@link #lookaheadClass} buckets. See that method's javadoc for why exactly these 4
-   * suffice to make every one of the 6 new anchor types' {@code checkAnchor} outcome a pure
-   * function of {@code (consumed char, lookahead class)} away from {@code regionEnd}.
+   * Number of {@link #lookaheadClass} buckets. See that method's javadoc for why these suffice to
+   * make every one of the 6 new anchor types' {@code checkAnchor} outcome a pure function of {@code
+   * (consumed char, lookahead class)}.
    */
-  private static final int LOOKAHEAD_CLASSES = 4;
+  private static final int LOOKAHEAD_CLASSES = 10;
 
   private static final int LOOKAHEAD_WORD = 0;
   private static final int LOOKAHEAD_NEWLINE = 1;
   private static final int LOOKAHEAD_OTHER = 2;
   private static final int LOOKAHEAD_OTHER_TERMINATOR = 3;
 
+  /** {@code pos == regionEnd}. */
+  private static final int LOOKAHEAD_AT_END = 4;
+
+  /** {@code pos == regionEnd - 1}: this base plus the class of {@code charAt(pos)}. */
+  private static final int LOOKAHEAD_LAST_CHAR = 5;
+
+  /** {@code pos == regionEnd - 2} and the remaining two characters are {@code \r\n}. */
+  private static final int LOOKAHEAD_FINAL_CRLF = 9;
+
   /**
-   * Below this distance from {@code regionEnd}, {@code checkAnchor}'s {@code END}/{@code
-   * STRING_END}/{@code STRING_END_ABSOLUTE} cases depend on more than just {@link #lookaheadClass}
-   * (up to 2 characters of literal lookahead for a {@code \r\n} pair, plus the {@code pos ==
-   * regionEnd} case itself) — see {@link #lookaheadClass}'s javadoc. Transitions this close to the
-   * end are always recomputed live, never memoized.
+   * Within this distance from {@code regionEnd}, {@code checkAnchor}'s {@code END}/{@code
+   * STRING_END}/{@code STRING_END_ABSOLUTE} cases depend on the distance itself (up to 2 characters
+   * of literal lookahead for a {@code \r\n} pair, plus the {@code pos == regionEnd} case), so
+   * {@link #lookaheadClass} gives distances 0 and 1, and distance 2 before {@code \r\n}, their own
+   * classes.
    */
-  private static final int ANCHOR_LOOKAHEAD_LIVE_MARGIN = 2;
+  private static final int ANCHOR_LOOKAHEAD_TAIL = 2;
 
   private final ConcurrentHashMap<LaurikariStateSetKey, Integer> stateIndex;
   final int[][] asciiTables; // asciiTables[id] = int[128] or null
@@ -115,11 +124,9 @@ final class LaurikariDFACache {
    * transitions must never be memoized in {@link #asciiTables} keyed on the consumed char alone
    * (the cached result would silently apply one call's anchor outcome to a different
    * position/call); {@link #step} instead memoizes them in {@link #anchorLookaheadTables},
-   * additionally keyed on {@link #lookaheadClass}, except within {@link
-   * #ANCHOR_LOOKAHEAD_LIVE_MARGIN} characters of {@code regionEnd}, where it always calls {@link
-   * #lookupOrCompute} directly. Always all-false when {@code anchorBearingStates} is {@code null}
-   * (every pre-extension caller), so behavior for those callers is byte-identical to before this
-   * field existed.
+   * additionally keyed on {@link #lookaheadClass}. Always all-false when {@code
+   * anchorBearingStates} is {@code null} (every pre-extension caller), so behavior for those
+   * callers is byte-identical to before this field existed.
    *
    * <p>{@link #lookupOrCompute}'s caching gate additionally checks this flag on the
    * <em>destination</em> state of a transition, not just the source: a source state with no
@@ -129,7 +136,7 @@ final class LaurikariDFACache {
    * moment it becomes epsilon-reachable, so this is a purely structural, position-independent check
    * — see issue #108, where checking only the source let a live, position-specific {@code
    * checkAnchor} outcome get memoized under {@code (state, c)} and wrongly replayed at a later
-   * position.
+   * position. {@link #step} memoizes such a transition in {@link #anchorLookaheadTables} instead.
    */
   final boolean[] anchorSensitive;
 
@@ -257,34 +264,52 @@ final class LaurikariDFACache {
   }
 
   int step(int state, int c, LaurikariNfaStep nfaStep, String input, int pos, int regionEnd) {
-    if (anchorSensitive[state]) {
-      if (c >= 128 || regionEnd - pos <= ANCHOR_LOOKAHEAD_LIVE_MARGIN) {
-        return lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
-      }
-      int cls = lookaheadClass(input, pos);
+    if (!anchorSensitive[state]) {
       int[] table =
           NEEDS_INT_ARRAY_ACQUIRE
-              ? (int[]) TABLES_VH.getAcquire(anchorLookaheadTables, state)
-              : anchorLookaheadTables[state];
-      if (table != null) {
-        int idx = c * LOOKAHEAD_CLASSES + cls;
-        int cached =
-            NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, idx) : table[idx];
-        if (cached != UNCACHED) return cached;
+              ? (int[]) TABLES_VH.getAcquire(asciiTables, state)
+              : asciiTables[state];
+      int next =
+          (table != null && c < 128)
+              ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
+              : UNCACHED;
+      if (next != UNCACHED) return next;
+      if (anchorBearingStates == null) {
+        return lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
       }
-      int next = lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
-      if (next != FALLBACK) cacheAnchorLookaheadEntry(state, c, cls, next);
-      return next;
     }
+    return anchorStep(state, c, nfaStep, input, pos, regionEnd);
+  }
+
+  /**
+   * A transition from an {@link #anchorSensitive} state, or an {@link #asciiTables} miss while the
+   * NFA has anchor-bearing states. A transition whose source or destination is anchor-sensitive is
+   * memoized in {@link #anchorLookaheadTables} under {@code (c, lookaheadClass)}. Whether the
+   * destination is anchor-sensitive does not depend on the lookahead class: {@code addClosure} adds
+   * the first anchor-bearing state it reaches before evaluating its anchor. {@code pos == 0} (no
+   * consumed char at {@code pos - 1}) and {@code c >= 128} are always recomputed live.
+   */
+  private int anchorStep(
+      int state, int c, LaurikariNfaStep nfaStep, String input, int pos, int regionEnd) {
+    if (c >= 128 || pos <= 0) {
+      return lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
+    }
+    int cls = lookaheadClass(input, pos, regionEnd);
     int[] table =
         NEEDS_INT_ARRAY_ACQUIRE
-            ? (int[]) TABLES_VH.getAcquire(asciiTables, state)
-            : asciiTables[state];
-    int next =
-        (table != null && c < 128)
-            ? (NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, c) : table[c])
-            : UNCACHED;
-    return next == UNCACHED ? lookupOrCompute(state, c, nfaStep, input, pos, regionEnd) : next;
+            ? (int[]) TABLES_VH.getAcquire(anchorLookaheadTables, state)
+            : anchorLookaheadTables[state];
+    if (table != null) {
+      int idx = c * LOOKAHEAD_CLASSES + cls;
+      int cached = NEEDS_INT_ARRAY_ACQUIRE ? (int) INT_ARRAY_VH.getAcquire(table, idx) : table[idx];
+      if (cached != UNCACHED) return cached;
+    }
+    int next = lookupOrCompute(state, c, nfaStep, input, pos, regionEnd);
+    // A transition between two states that are not anchor-sensitive is already in asciiTables
+    if (next >= 0 && (anchorSensitive[state] || anchorSensitive[next])) {
+      cacheAnchorLookaheadEntry(state, c, cls, next);
+    }
+    return next;
   }
 
   int lookupOrCompute(int state, int c, LaurikariNfaStep step) {
@@ -359,12 +384,12 @@ final class LaurikariDFACache {
   }
 
   /**
-   * Classifies the not-yet-consumed character at {@code input.charAt(pos)} into one of {@link
-   * #LOOKAHEAD_CLASSES} buckets, sufficient (together with the already-consumed char {@code c},
-   * which is a separate cache dimension) to determine every one of the 6 new anchor types' {@code
-   * PikeVMMatcher.checkAnchor} outcome, <b>provided</b> the caller has already excluded positions
-   * within {@link #ANCHOR_LOOKAHEAD_LIVE_MARGIN} of {@code regionEnd} (guaranteed by {@link
-   * #step}):
+   * Classifies the input at and after {@code pos} into one of {@link #LOOKAHEAD_CLASSES} buckets,
+   * sufficient (together with the already-consumed char {@code c == input.charAt(pos - 1)}, which
+   * is a separate cache dimension) to determine every one of the 6 new anchor types' {@code
+   * PikeVMMatcher.checkAnchor} outcome at {@code pos}. More than {@link #ANCHOR_LOOKAHEAD_TAIL}
+   * characters before {@code regionEnd}, the class is that of {@code charAt(pos)} ({@link
+   * #charClass}):
    *
    * <ul>
    *   <li>{@code END}/{@code STRING_END}/{@code STRING_END_ABSOLUTE}: always false away from {@code
@@ -372,7 +397,7 @@ final class LaurikariDFACache {
    *   <li>{@code END_MULTILINE}: {@code LineTerminators.isMultilineEnd} — true for {@link
    *       #LOOKAHEAD_OTHER_TERMINATOR} ({@code \r}, U+0085, U+2028, U+2029), and for {@link
    *       #LOOKAHEAD_NEWLINE} ({@code \n}) unless the consumed char {@code c} is {@code \r}.
-   *   <li>{@code WORD_BOUNDARY}: {@code isWordChar(charAt(pos-1)) != isWordChar(charAt( pos))}. The
+   *   <li>{@code WORD_BOUNDARY}: {@code isWordChar(charAt(pos-1)) != isWordChar(charAt(pos))}. The
    *       first operand is {@code PikeVMMatcher.isWordChar((char) c)} (already a cache dimension);
    *       the second is true iff {@link #LOOKAHEAD_WORD} (a line terminator is never a word char,
    *       so the terminator classes and {@link #LOOKAHEAD_WORD} are mutually exclusive).
@@ -380,9 +405,34 @@ final class LaurikariDFACache {
    *       two operands, {@code ==} instead of {@code !=} — so it depends on this class exactly the
    *       same way.
    * </ul>
+   *
+   * <p>Closer to {@code regionEnd}, the class also encodes the distance:
+   *
+   * <ul>
+   *   <li>{@link #LOOKAHEAD_AT_END}: every end anchor is true, {@code WORD_BOUNDARY} is {@code
+   *       isWordChar(c)} and {@code NON_WORD_BOUNDARY} its negation.
+   *   <li>{@link #LOOKAHEAD_LAST_CHAR} plus the class of {@code charAt(pos)}: {@code
+   *       STRING_END_ABSOLUTE} is false. {@code END}/{@code STRING_END} match before a final line
+   *       terminator that is not the {@code \n} of a {@code \r\n}, which is the same function of
+   *       {@code c} and the class as {@code END_MULTILINE}. The word-boundary anchors are as above.
+   *   <li>{@link #LOOKAHEAD_FINAL_CRLF}, when the two remaining characters are {@code \r\n}: {@code
+   *       END}/{@code STRING_END}/{@code END_MULTILINE} are true, {@code STRING_END_ABSOLUTE} is
+   *       false, and the word-boundary anchors see a non-word {@code charAt(pos)}. Any other two
+   *       remaining characters leave every end anchor but {@code END_MULTILINE} false, as further
+   *       from {@code regionEnd}, so they take the class of {@code charAt(pos)}.
+   * </ul>
    */
-  private static int lookaheadClass(String input, int pos) {
+  private static int lookaheadClass(String input, int pos, int regionEnd) {
+    int remaining = regionEnd - pos;
+    if (remaining > ANCHOR_LOOKAHEAD_TAIL) return charClass(input.charAt(pos));
+    if (remaining == 0) return LOOKAHEAD_AT_END;
     char next = input.charAt(pos);
+    if (remaining == 1) return LOOKAHEAD_LAST_CHAR + charClass(next);
+    if (next == '\r' && input.charAt(pos + 1) == '\n') return LOOKAHEAD_FINAL_CRLF;
+    return charClass(next);
+  }
+
+  private static int charClass(char next) {
     if (next == '\n') return LOOKAHEAD_NEWLINE;
     if (LineTerminators.isLineTerminator(next)) return LOOKAHEAD_OTHER_TERMINATOR;
     return PikeVMMatcher.isWordChar(next) ? LOOKAHEAD_WORD : LOOKAHEAD_OTHER;

@@ -42,8 +42,8 @@ import org.junit.jupiter.api.Test;
  *   <li>the exact SQL_ANSI/SQL_MYSQL/SQL_POSTGRESQL patterns from {@code IastRegexpBenchmark}, at
  *       both the benchmark's LONG-scale match and no-match inputs;
  *   <li>hand-crafted adversarial shapes covering {@code \b\d+}, {@code (?m)...--.*$}, boundary
- *       positions within {@code ANCHOR_LOOKAHEAD_LIVE_MARGIN} (2 chars) of the region end, and
- *       {@code \r}/{@code \n}/{@code \r\n} combinations near end-of-input and {@code (?m)$}.
+ *       positions within {@code ANCHOR_LOOKAHEAD_TAIL} (2 chars) of the region end, and {@code
+ *       \r}/{@code \n}/{@code \r\n} combinations near end-of-input and {@code (?m)$}.
  * </ul>
  */
 class LaurikariAnchorLookaheadFuzzTest {
@@ -104,7 +104,7 @@ class LaurikariAnchorLookaheadFuzzTest {
         oracle.findMatchFrom(input, 0), laurikari.findMatchFrom(input, 0), groupCount, ctx);
 
     // Exercise findFrom at every start offset -- covers the reinject/reinjectAfterNl seeding and
-    // the ANCHOR_LOOKAHEAD_LIVE_MARGIN boundary from many different regionEnd distances.
+    // the ANCHOR_LOOKAHEAD_TAIL boundary from many different regionEnd distances.
     for (int start = 0; start <= input.length(); start++) {
       assertEquals(
           oracle.findFrom(input, start),
@@ -303,7 +303,7 @@ class LaurikariAnchorLookaheadFuzzTest {
   }
 
   // ==============================================================================================
-  // Boundary cases within ANCHOR_LOOKAHEAD_LIVE_MARGIN (2 chars) of regionEnd / string end
+  // Boundary cases within ANCHOR_LOOKAHEAD_TAIL (2 chars) of regionEnd / string end
   // ==============================================================================================
 
   @Test

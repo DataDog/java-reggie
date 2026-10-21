@@ -425,11 +425,11 @@ class LaurikariDFACacheTest {
   // (including a checkAnchor call) on nearly every character. This proves the follow-up fix: away
   // from regionEnd, the anchor outcome collapses to a small (consumed-char, lookahead-class) pair
   // (see LaurikariDFACache#lookaheadClass), so those transitions ARE cached now (in
-  // anchorLookaheadTables, never asciiTables), while positions within
-  // ANCHOR_LOOKAHEAD_LIVE_MARGIN characters of regionEnd are still always recomputed live.
+  // anchorLookaheadTables, never asciiTables). Within ANCHOR_LOOKAHEAD_TAIL characters of
+  // regionEnd the lookahead class also encodes the distance, so each distance is cached apart.
 
   @Test
-  void anchorSensitiveState_cachesTransitionsAwayFromRegionEnd_liveNearRegionEnd() {
+  void anchorSensitiveState_cachesTransitionsPerLookaheadClass() {
     boolean[] anchorBearingStates = {true, false};
     int[] calls = {0};
     LaurikariNfaStep countingPassThrough =
@@ -462,8 +462,41 @@ class LaurikariDFACacheTest {
         "repeated (state, char, lookahead-class) transitions must hit the cache, not recompute"
             + " live");
 
-    // Within ANCHOR_LOOKAHEAD_LIVE_MARGIN of regionEnd: always live, never cached.
+    // One and zero characters before regionEnd are distinct lookahead classes: each recomputes
+    // live once, then hits the cache.
     cache.step(0, 'a', countingPassThrough, input, regionEnd - 1, regionEnd);
-    assertTrue(calls[0] > callsAfterFirst, "positions near regionEnd must always recompute live");
+    assertEquals(callsAfterFirst + 1, calls[0], "last char is a new lookahead class");
+    cache.step(0, 'a', countingPassThrough, input, regionEnd, regionEnd);
+    assertEquals(callsAfterFirst + 2, calls[0], "end of region is a new lookahead class");
+    cache.step(0, 'a', countingPassThrough, input, regionEnd - 1, regionEnd);
+    cache.step(0, 'a', countingPassThrough, input, regionEnd, regionEnd);
+    assertEquals(callsAfterFirst + 2, calls[0], "tail lookahead classes must hit the cache");
+  }
+
+  // A state that is not anchor-sensitive can step into one that is: the transition evaluated an
+  // anchor, so it must stay out of asciiTables but is cached per lookahead class.
+  @Test
+  void transitionIntoAnchorSensitiveState_cachedPerLookaheadClass() {
+    boolean[] anchorBearingStates = {false, true};
+    int[] calls = {0};
+    LaurikariNfaStep intoAnchorState =
+        (curStates, curRegs, c, input, pos, regionEnd) -> {
+          calls[0]++;
+          return new LaurikariStepResult(new int[] {1}, new int[][] {{}});
+        };
+
+    LaurikariDFACache cache =
+        new LaurikariDFACache(new int[] {0}, new int[][] {{}}, new int[0], anchorBearingStates);
+    String input = "aaaaaaaaaa";
+    int regionEnd = input.length();
+
+    int next = cache.step(0, 'a', intoAnchorState, input, 1, regionEnd);
+    assertTrue(cache.anchorSensitive[next]);
+    assertNull(cache.asciiTables[0], "a transition into an anchor-sensitive state is not ascii");
+    assertNotNull(cache.anchorLookaheadTables[0]);
+    for (int i = 2; i < 6; i++) {
+      assertEquals(next, cache.step(0, 'a', intoAnchorState, input, i, regionEnd));
+    }
+    assertEquals(1, calls[0], "repeated transitions into an anchor-sensitive state must hit");
   }
 }

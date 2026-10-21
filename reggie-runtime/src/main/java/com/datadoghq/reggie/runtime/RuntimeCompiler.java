@@ -440,6 +440,44 @@ public class RuntimeCompiler {
   private static final ConcurrentHashMap<CompilationKey, BitStateEntry> BITSTATE_NFA_CACHE =
       new ConcurrentHashMap<>();
 
+  /**
+   * Cached entry for patterns routed to {@link OverJitSplitMatcher} (see {@link #overJitNative}):
+   * holds the NFA, the compile-time name map, and the JDK half. The JDK half is built once and
+   * shared by every matcher this entry produces; each compile() call gets a fresh {@link
+   * LaurikariDfaMatcher} find half, because that matcher writes its DFA caches while matching.
+   */
+  private static final class OverJitSplitEntry {
+    final NFA nfa;
+    final int groupCount;
+    final Map<String, Integer> nameMap;
+    final ReggieMatcher wholeHalf;
+
+    OverJitSplitEntry(
+        NFA nfa, int groupCount, Map<String, Integer> nameMap, ReggieMatcher wholeHalf) {
+      this.nfa = nfa;
+      this.groupCount = groupCount;
+      this.nameMap = nameMap;
+      this.wholeHalf = wholeHalf;
+      if (!nameMap.isEmpty()) {
+        wholeHalf.setNameToIndex(nameMap);
+      }
+    }
+
+    ReggieMatcher newMatcher(String pattern) {
+      ReggieMatcher findHalf = new LaurikariDfaMatcher(nfa, pattern, groupCount);
+      if (!nameMap.isEmpty()) {
+        findHalf.setNameToIndex(nameMap);
+      }
+      return new OverJitSplitMatcher(pattern, findHalf, wholeHalf);
+    }
+  }
+
+  // L1 cache key (see cacheKeyFor/cacheKeyForFlags) → OverJitSplitEntry. Like BITSTATE_NFA_CACHE,
+  // it keeps the mutable find half out of the L1 pattern cache: compile() returns a fresh matcher
+  // per call.
+  private static final ConcurrentHashMap<Object, OverJitSplitEntry> OVER_JIT_SPLIT_CACHE =
+      new ConcurrentHashMap<>();
+
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
   // Key is Long (64-bit) to make birthday collisions essentially impossible across large pattern
   // sets; an int key was observed to cause structural-cache false-hits with wrong match semantics.
@@ -577,6 +615,8 @@ public class RuntimeCompiler {
    * <ul>
    *   <li>PIKEVM_CAPTURE ({@code PIKEVM_NFA_CACHE}) and BITSTATE_CAPTURE ({@code
    *       BITSTATE_NFA_CACHE}): mutable per-call buffers;
+   *   <li>over-JIT-limit split matchers ({@code OVER_JIT_SPLIT_CACHE}): the Laurikari find half
+   *       writes its DFA caches; only the JDK half instance is shared;
    *   <li>hybrids ({@code HYBRID_CACHE}): the nfa-half (PikeVM/BitState, or a generated NFA
    *       matcher) is mutable; only the stateless dfa-half instance is shared;
    *   <li>NFA-backed ({@code NFA_CLASS_CACHE}): generated NFA matchers mutate instance fields, so a
@@ -591,6 +631,10 @@ public class RuntimeCompiler {
     BitStateEntry bitStateEntry = BITSTATE_NFA_CACHE.get(engineKey);
     if (bitStateEntry != null) {
       return wrapCompiled(bitStateEntry.newMatcher(pattern), pattern);
+    }
+    OverJitSplitEntry splitEntry = OVER_JIT_SPLIT_CACHE.get(engineKey);
+    if (splitEntry != null) {
+      return wrapCompiled(splitEntry.newMatcher(pattern), pattern);
     }
     HybridEntry hybridEntry = HYBRID_CACHE.get(engineKey);
     if (hybridEntry != null) {
@@ -1004,6 +1048,7 @@ public class RuntimeCompiler {
     PIKEVM_NFA_CACHE.clear();
     STUB_PIKEVM_CACHE.clear();
     BITSTATE_NFA_CACHE.clear();
+    OVER_JIT_SPLIT_CACHE.clear();
     STRUCTURE_CACHE.clear();
     BACKTRACK_NFA_CACHE.clear();
     STUB_BACKTRACK_NFA_CACHE.clear();
@@ -1261,12 +1306,22 @@ public class RuntimeCompiler {
   /**
    * HotSpot's HugeMethodLimit: methods whose bytecode exceeds this are not JIT-compiled and run
    * interpreted (measured 20.8x/17.8x penalty via -XX:-DontCompileHugeMethods on identical code —
-   * see doc find-jit-hugemethodlimit). Generated classes whose largest method exceeds it are
-   * declined to the JDK fallback when allowed and the JDK can parse the pattern (see the generation
-   * gate in compileInternal), keeping the strict-compile contract unchanged: without
-   * ALLOW_JDK_FALLBACK the generated (interpreted but correct) matcher is still returned.
+   * see doc find-jit-hugemethodlimit). With ALLOW_JDK_FALLBACK, generated classes whose largest
+   * method exceeds it are declined to a matcher from {@link #overJitNative} or, when that returns
+   * {@code null}, to the JDK fallback (see the generation gate in compileInternal); one-way
+   * recursive-descent classes go to the backtracker instead, and keep the generated (interpreted)
+   * class when the backtracker cannot run them. When the JDK cannot parse the pattern either, a
+   * structure-cache miss keeps the generated (interpreted) class, but a verified structure-cache
+   * hit throws {@link UnsupportedPatternException}. The strict-compile contract is unchanged:
+   * without ALLOW_JDK_FALLBACK the generated (interpreted but correct) matcher is still returned.
    */
   static final int JIT_HUGE_METHOD_LIMIT = 8000;
+
+  /** JDK-fallback reason for a generated method over {@link #JIT_HUGE_METHOD_LIMIT}. */
+  private static final String OVER_JIT_LIMIT_REASON =
+      "generated method exceeds HotSpot's JIT method-size limit ("
+          + JIT_HUGE_METHOD_LIMIT
+          + " bytecodes) — interpreted execution would be slower than the JDK";
 
   /**
    * Largest single-method bytecode length in a generated class, by direct classfile walk (magic,
@@ -1410,6 +1465,95 @@ public class RuntimeCompiler {
       note = "unknown (pipeline did not record a decision)";
     }
     return new RoutingInfo(note, engineChainOf(m), m);
+  }
+
+  /**
+   * Native matcher replacing a generated method over the JIT size limit, or {@code null} when
+   * {@code candidate} is false, the pattern is not BitState-eligible, or {@link
+   * FallbackPatternDetector} refuses BitState for it. Otherwise, with the lazy-aware Thompson NFA
+   * of {@code ast}:
+   *
+   * <ol>
+   *   <li>When {@code options} allow JDK fallback, {@link #mayEnableCaseInsensitive} is false for
+   *       {@code pattern}, {@link LaurikariEligibility} accepts the NFA, and the JDK can parse
+   *       {@code pattern}: an {@link OverJitSplitMatcher} that runs the find family on a {@link
+   *       LaurikariDfaMatcher} over the NFA and the whole-input family on a {@link
+   *       JavaRegexFallbackMatcher} (the find family moves to the JDK half too once the Laurikari
+   *       DFA cache is full; see {@link OverJitSplitMatcher}). Only this step builds a JDK half, so
+   *       only this step requires JDK fallback. Case-insensitive patterns are excluded because
+   *       {@link JavaRegexFallbackMatcher} compiles with {@code UNICODE_CASE}, which adds case
+   *       folds (for example U+212A to k, U+017F to s) that the parser's case folding does not; the
+   *       two halves would then disagree on such input.
+   *   <li>Otherwise: a BitState matcher over the NFA.
+   * </ol>
+   */
+  private static ReggieMatcher overJitNative(
+      boolean candidate,
+      PatternAnalyzer analyzer,
+      RegexNode ast,
+      int groupCount,
+      boolean usePosixLastMatch,
+      Object cacheKey,
+      Map<String, Integer> nameMap,
+      String pattern,
+      ReggieOptions options) {
+    if (!candidate
+        || !analyzer.isBitStateEligible()
+        || FallbackPatternDetector.needsFallback(
+                ast, PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE)
+            != null) {
+      return null;
+    }
+    NFA nativeNfa = new ThompsonBuilder(true).build(ast, groupCount);
+    if (options.has(ReggieOption.ALLOW_JDK_FALLBACK)
+        && !mayEnableCaseInsensitive(pattern)
+        && LaurikariEligibility.isEligible(nativeNfa, usePosixLastMatch)) {
+      // Search calls start on the Laurikari half, so the JDK half is built without the fallback
+      // warning
+      OverJitSplitEntry entry =
+          OVER_JIT_SPLIT_CACHE.computeIfAbsent(
+              cacheKey,
+              k -> {
+                try {
+                  return new OverJitSplitEntry(
+                      nativeNfa, groupCount, nameMap, new JavaRegexFallbackMatcher(pattern));
+                } catch (PatternSyntaxException e) {
+                  return null; // No JDK half: use BitState below
+                }
+              });
+      if (entry != null) {
+        noteRouting("LAURIKARI find / JDK matches (over JIT limit)");
+        return entry.newMatcher(pattern);
+      }
+    }
+    BITSTATE_NFA_CACHE.putIfAbsent(
+        cacheKey, new BitStateEntry(nativeNfa, nameMap, usePosixLastMatch));
+    noteRouting("BITSTATE_CAPTURE (generated method over the JIT size limit)");
+    return BITSTATE_NFA_CACHE.get(cacheKey).newMatcher(pattern);
+  }
+
+  /**
+   * True when {@code pattern} contains {@code (?} followed by a run of letters and {@code -} that
+   * includes {@code i}. Every way to enable case-insensitive matching produces such a run: inline
+   * {@code (?i)}, scoped {@code (?i:...)}, and {@link ReggieFlags#CASE_INSENSITIVE}, which {@link
+   * #normalizePatternFlags} turns into a {@code (?i)} prefix. The check is conservative: it is also
+   * true for {@code (?-i)} and for such text inside an escape, a character class or a {@code
+   * \Q...\E} quote.
+   */
+  private static boolean mayEnableCaseInsensitive(String pattern) {
+    int len = pattern.length();
+    for (int i = pattern.indexOf("(?"); i >= 0; i = pattern.indexOf("(?", i + 2)) {
+      for (int k = i + 2; k < len; k++) {
+        char c = pattern.charAt(k);
+        if (c == 'i') {
+          return true;
+        }
+        if (c != '-' && !Character.isLetter(c)) {
+          break;
+        }
+      }
+    }
+    return false;
   }
 
   /** Unwraps PrefilteringMatcher/NameEnrichingMatcher layers to describe the engine chain. */
@@ -1783,6 +1927,17 @@ public class RuntimeCompiler {
       // One-way RD classes are generated per pattern: the RD structural hash collides on
       // distinct patterns (epsilon vs \0, Group without atomic, Subroutine without the name).
       CachedStructure cached = rdOneWay ? null : STRUCTURE_CACHE.get(structHash);
+      // Strategies whose generated method may exceed the JIT size limit and that overJitNative may
+      // replace (with JDK fallback allowed).
+      boolean overJitNativeCandidate =
+          nfa != null
+              && (result.strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
+                  || result.strategy == PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
+                  || result.strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH
+                  || result.strategy == PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS
+                  || result.strategy == PatternAnalyzer.MatchingStrategy.DFA_TABLE
+                  || result.strategy == PatternAnalyzer.MatchingStrategy.LAZY_DFA
+                  || result.strategy == PatternAnalyzer.MatchingStrategy.OPTIMIZED_NFA);
       Class<? extends ReggieMatcher> matcherClass = null;
       boolean cacheable = !rdOneWay;
       if (cached != null) {
@@ -1791,14 +1946,26 @@ public class RuntimeCompiler {
               && cached.largestMethodBytecodes > JIT_HUGE_METHOD_LIMIT) {
             // The size gate applies to verified hits too: without this, a strict compile that
             // cached an oversized class would hand it to a later fallback-enabled compile of the
-            // same structure — the very compile that opted into the faster JDK matcher.
-            return fallbackOrThrow(
-                pattern,
-                "generated method exceeds HotSpot's JIT method-size limit ("
-                    + JIT_HUGE_METHOD_LIMIT
-                    + " bytecodes) — interpreted execution would be slower than the JDK",
-                nameMap,
-                options);
+            // same structure — the very compile that opted into the faster JDK matcher. The
+            // overJitNative re-route of the cache-miss path below applies here too. One case
+            // differs from that path: when overJitNative returns null and the JDK cannot parse the
+            // pattern, this hit throws (fallbackOrThrow), while the miss path keeps the generated
+            // matcher.
+            ReggieMatcher overJit =
+                overJitNative(
+                    overJitNativeCandidate,
+                    analyzer,
+                    ast,
+                    groupCount,
+                    result.usePosixLastMatch,
+                    cacheKey,
+                    nameMap,
+                    pattern,
+                    options);
+            if (overJit != null) {
+              return overJit;
+            }
+            return fallbackOrThrow(pattern, OVER_JIT_LIMIT_REASON, nameMap, options);
           }
           matcherClass = cached.clazz; // verified structural match — safe to reuse
         } else {
@@ -1867,14 +2034,24 @@ public class RuntimeCompiler {
           // matcher is faster than an interpreted generated one; without the option we keep
           // the generated (correct, interpreted) matcher — the strict-compile contract
           // (native-or-throw) is unchanged and the refusal set does not grow.
+          // A DFA, lazy-DFA or optimized-NFA strategy is first offered to overJitNative: the
+          // Laurikari/JDK split and BitState run without a size-bound generated method.
+          ReggieMatcher overJit =
+              overJitNative(
+                  overJitNativeCandidate,
+                  analyzer,
+                  ast,
+                  groupCount,
+                  result.usePosixLastMatch,
+                  cacheKey,
+                  nameMap,
+                  pattern,
+                  options);
+          if (overJit != null) {
+            return overJit;
+          }
           try {
-            return fallbackOrThrow(
-                pattern,
-                "generated method exceeds HotSpot's JIT method-size limit ("
-                    + JIT_HUGE_METHOD_LIMIT
-                    + " bytecodes) — interpreted execution would be slower than the JDK",
-                nameMap,
-                options);
+            return fallbackOrThrow(pattern, OVER_JIT_LIMIT_REASON, nameMap, options);
           } catch (UnsupportedPatternException jdkCannotParse) {
             // Keep the generated (interpreted) matcher, as without the option
           }
@@ -2856,9 +3033,7 @@ public class RuntimeCompiler {
         switchGen.generateMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchIntoMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateMatchesBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
-        // matchBounded is inherited from the base default, which delegates to the (correct)
-        // generated match(); the generated DFA-switch matchBounded returned null for whole-region
-        // matches.
+        switchGen.generateMatchBoundedMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindMatchMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindMatchFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
         switchGen.generateFindBoundsFromMethod(cw, "com/datadoghq/reggie/runtime/" + className);
