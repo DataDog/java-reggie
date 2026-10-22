@@ -307,8 +307,10 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
         // The whole call is redone from the scan's original start (clamped), not the frozen
         // position i: a match may have started anywhere in [clamped, i) and not yet reached an
         // accept, and restarting PikeVMMatcher at i would silently lose that prefix (see class
-        // javadoc -- this is meant to be a whole-call delegation, not a tail continuation).
-        return best == null ? fallbackFind(input, clamped) : best;
+        // javadoc -- this is meant to be a whole-call delegation, not a tail continuation). An
+        // already-recorded best is not final either: a live higher-priority (greedy) thread may
+        // still extend it, so the result must come from the fallback.
+        return fallbackFind(input, clamped);
       }
       if (next == LaurikariDFACache.DEAD) {
         // Every applyFind() call reinjects a fresh (anchor-blocked) start candidate (see

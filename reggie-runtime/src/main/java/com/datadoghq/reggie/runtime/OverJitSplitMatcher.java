@@ -30,7 +30,8 @@ import java.util.function.Function;
  * wholeHalf} instead once {@link LaurikariDfaMatcher#saturated()} is true: from then on the
  * Laurikari half would delegate every call that needs a new DFA state to its PikeVM fallback, which
  * is slower than the JDK half. The call during which the cache fills still completes on the
- * Laurikari half, which handles that overflow itself.
+ * Laurikari half, which redoes that call in full on its PikeVM fallback, so its result does not
+ * depend on when the cache fills.
  */
 final class OverJitSplitMatcher extends ReggieMatcher {
 

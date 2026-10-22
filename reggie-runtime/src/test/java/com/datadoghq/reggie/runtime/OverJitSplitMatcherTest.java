@@ -16,11 +16,14 @@
 package com.datadoghq.reggie.runtime;
 
 import static com.datadoghq.reggie.runtime.DotLineTerminatorTest.escape;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.datadoghq.reggie.Reggie;
 import com.datadoghq.reggie.ReggieFlags;
 import com.datadoghq.reggie.ReggieOptions;
 import java.util.ArrayList;
@@ -282,6 +285,176 @@ class OverJitSplitMatcherTest {
             "whole.findAll",
             "whole.cursor"),
         wholeHalf.calls);
+  }
+
+  /** Over-limit pattern with a named group (1) and an unnamed group (2) that named-only drops. */
+  private static final String NAMED_ONLY_PATTERN =
+      "(?<lead>[xy])(x)[a-z]{2,30}[a-z0-9]{2,30}\\d{2,30}$";
+
+  private static final ReggieOptions NAMED_ONLY_FALLBACK =
+      ReggieOptions.builder().namedOnly().allowJdkFallback().build();
+
+  private static final ReggieOptions NAMED_ONLY_STRICT =
+      ReggieOptions.builder().namedOnly().build();
+
+  /** Compiles {@code p} on a fresh cache and returns the routing note of that compile. */
+  private static String freshRoute(String p, ReggieOptions options, ReggieMatcher[] out) {
+    RuntimeCompiler.clearCache();
+    RuntimeCompiler.ROUTING_NOTE.remove();
+    out[0] = RuntimeCompiler.compile(p, options);
+    return RuntimeCompiler.ROUTING_NOTE.get();
+  }
+
+  /** findMatch/findMatchInto and match/matchInto report the same spans for every group. */
+  private static void assertFindAndMatchAgree(ReggieMatcher m, String in, int groupCount) {
+    MatchResult f = m.findMatch(in);
+    MatchResult w = m.match(in);
+    assertNotNull(f, "findMatch on " + in);
+    assertNotNull(w, "match on " + in);
+    for (int g = 0; g <= groupCount; g++) {
+      assertEquals(w.start(g), f.start(g), "group " + g + " start on " + in);
+      assertEquals(w.end(g), f.end(g), "group " + g + " end on " + in);
+    }
+    int[] fs = new int[groupCount + 1];
+    int[] fe = new int[groupCount + 1];
+    int[] ws = new int[groupCount + 1];
+    int[] we = new int[groupCount + 1];
+    assertTrue(m.findMatchInto(in, fs, fe));
+    assertTrue(m.matchInto(in, ws, we));
+    assertArrayEquals(ws, fs, "group starts on " + in);
+    assertArrayEquals(we, fe, "group ends on " + in);
+  }
+
+  /**
+   * A named-only over-limit pattern routes to BitState, not to the split: the JDK half compiles the
+   * unprojected pattern and would report the unnamed group that the find half drops. Every API then
+   * reports the projected layout.
+   */
+  @Test
+  void namedOnlyOverJitLimitRoutesToBitState() {
+    // Non-vacuity: without named-only the pattern is split-admitted
+    RuntimeCompiler.RoutingInfo info = RuntimeCompiler.describeRouting(NAMED_ONLY_PATTERN);
+    assertEquals(SPLIT_ROUTE, info.routing);
+    assertTrue(info.engineChain.endsWith("OverJitSplitMatcher"), info.engineChain);
+
+    ReggieMatcher[] out = new ReggieMatcher[1];
+    assertEquals(BITSTATE_ROUTE, freshRoute(NAMED_ONLY_PATTERN, NAMED_ONLY_FALLBACK, out));
+    ReggieMatcher m = out[0];
+    assertFalse(unwrap(m) instanceof OverJitSplitMatcher, unwrap(m).getClass().getName());
+
+    // (x) participates in the JDK at [1,2) on both inputs; named-only must still drop it
+    for (String in : new String[] {"xxabcd12", "yxabcd12"}) {
+      assertFindAndMatchAgree(m, in, 2);
+      MatchResult r = m.findMatch(in);
+      assertEquals(2, r.groupCount(), "group indexes are preserved under named-only");
+      assertEquals(0, r.start(1));
+      assertEquals(1, r.end(1));
+      assertEquals(-1, r.start(2), "unnamed group is projected away");
+      assertEquals(-1, r.end(2), "unnamed group is projected away");
+    }
+  }
+
+  /** The structural-cache-hit call site of overJitNative applies the named-only exclusion too. */
+  @Test
+  void namedOnlyExclusionAppliesOnStructuralCacheHit() {
+    RuntimeCompiler.clearCache();
+    assertFalse(Reggie.compile(NAMED_ONLY_PATTERN, NAMED_ONLY_STRICT).isJdkFallback());
+    RuntimeCompiler.ROUTING_NOTE.remove();
+    RuntimeCompiler.cached("named-only-overjit-hit", NAMED_ONLY_PATTERN, NAMED_ONLY_FALLBACK);
+    assertEquals(BITSTATE_ROUTE, RuntimeCompiler.ROUTING_NOTE.get());
+
+    // Control: the same hit path without named-only reaches the split
+    RuntimeCompiler.clearCache();
+    assertFalse(Reggie.compile(NAMED_ONLY_PATTERN).isJdkFallback());
+    RuntimeCompiler.ROUTING_NOTE.remove();
+    RuntimeCompiler.cached("overjit-hit-control", NAMED_ONLY_PATTERN, FALLBACK);
+    assertEquals(SPLIT_ROUTE, RuntimeCompiler.ROUTING_NOTE.get());
+  }
+
+  /** Split and named-only entries for the same pattern do not alias each other in the caches. */
+  @Test
+  void namedOnlyAndSplitCompilationsDoNotAlias() {
+    String in = "xxabcd12";
+    RuntimeCompiler.clearCache();
+    ReggieMatcher split = RuntimeCompiler.compile(NAMED_ONLY_PATTERN, FALLBACK);
+    assertEquals(OverJitSplitMatcher.class, unwrap(split).getClass());
+
+    RuntimeCompiler.ROUTING_NOTE.remove();
+    ReggieMatcher named = RuntimeCompiler.compile(NAMED_ONLY_PATTERN, NAMED_ONLY_FALLBACK);
+    assertEquals(BITSTATE_ROUTE, RuntimeCompiler.ROUTING_NOTE.get());
+    assertFalse(unwrap(named) instanceof OverJitSplitMatcher);
+    assertFindAndMatchAgree(named, in, 2);
+    assertEquals(-1, named.match(in).start(2));
+
+    ReggieMatcher again = RuntimeCompiler.compile(NAMED_ONLY_PATTERN, FALLBACK);
+    assertEquals(OverJitSplitMatcher.class, unwrap(again).getClass());
+    Matcher j = Pattern.compile(NAMED_ONLY_PATTERN).matcher(in);
+    assertTrue(j.matches());
+    MatchResult r = again.match(in);
+    assertEquals(j.start(2), r.start(2));
+    assertEquals(j.end(2), r.end(2));
+    assertFindAndMatchAgree(again, in, 2);
+  }
+
+  private static final String SATURATING_PATTERN = "(?s)[0-9a-f]{4,40}[0-9]{4,40}.*(?m:$)";
+
+  private static final String SATURATING_INPUT = "abcd1234\n" + "x".repeat(10000);
+
+  /** A fresh split matcher for {@link #SATURATING_PATTERN} with an unsaturated find half. */
+  private static OverJitSplitMatcher freshSaturatingSplit() {
+    RuntimeCompiler.clearCache();
+    OverJitSplitMatcher split =
+        (OverJitSplitMatcher) unwrap(RuntimeCompiler.compile(SATURATING_PATTERN, FALLBACK));
+    assertFalse(((LaurikariDfaMatcher) split.findHalf).saturated());
+    return split;
+  }
+
+  /**
+   * The call that fills the Laurikari DFA cache returns the full JDK span, the same as every later
+   * call (which the split serves from the JDK half): results do not depend on cache state.
+   */
+  @Test
+  void saturatingCallReturnsFullSpan() {
+    assertEquals(SPLIT_ROUTE, RuntimeCompiler.describeRouting(SATURATING_PATTERN).routing);
+    Matcher j = Pattern.compile(SATURATING_PATTERN).matcher(SATURATING_INPUT);
+    assertTrue(j.find());
+    int js = j.start();
+    int je = j.end();
+    assertEquals(SATURATING_INPUT.length(), je, "JDK sanity check");
+
+    OverJitSplitMatcher split = freshSaturatingSplit();
+    LaurikariDfaMatcher lk = (LaurikariDfaMatcher) split.findHalf;
+    MatchResult r1 = split.findMatch(SATURATING_INPUT);
+    assertTrue(lk.saturated(), "the first call must fill the Laurikari DFA cache");
+    assertNotNull(r1);
+    assertEquals(js, r1.start());
+    assertEquals(je, r1.end());
+    MatchResult r2 = split.findMatch(SATURATING_INPUT);
+    assertNotNull(r2);
+    assertEquals(r1.start(), r2.start());
+    assertEquals(r1.end(), r2.end());
+
+    split = freshSaturatingSplit();
+    int[] gs = new int[1];
+    int[] ge = new int[1];
+    assertTrue(split.findMatchInto(SATURATING_INPUT, gs, ge));
+    assertTrue(((LaurikariDfaMatcher) split.findHalf).saturated());
+    assertEquals(js, gs[0]);
+    assertEquals(je, ge[0]);
+
+    split = freshSaturatingSplit();
+    int[] b = new int[2];
+    assertTrue(split.findBoundsFrom(SATURATING_INPUT, 0, b));
+    assertTrue(((LaurikariDfaMatcher) split.findHalf).saturated());
+    assertEquals(js, b[0]);
+    assertEquals(je, b[1]);
+
+    split = freshSaturatingSplit();
+    assertTrue(split.find(SATURATING_INPUT));
+    assertTrue(((LaurikariDfaMatcher) split.findHalf).saturated());
+    assertTrue(split.findBoundsFrom(SATURATING_INPUT, 0, b));
+    assertEquals(js, b[0]);
+    assertEquals(je, b[1]);
   }
 
   /**

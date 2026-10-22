@@ -1474,16 +1474,20 @@ public class RuntimeCompiler {
    * of {@code ast}:
    *
    * <ol>
-   *   <li>When {@code options} allow JDK fallback, {@link #mayEnableCaseInsensitive} is false for
-   *       {@code pattern}, {@link LaurikariEligibility} accepts the NFA, and the JDK can parse
-   *       {@code pattern}: an {@link OverJitSplitMatcher} that runs the find family on a {@link
+   *   <li>When {@code options} allow JDK fallback, {@code options} do not request {@link
+   *       ReggieOption#CAPTURE_NAMED_ONLY}, {@link #mayEnableCaseInsensitive} is false for {@code
+   *       pattern}, {@link LaurikariEligibility} accepts the NFA, and the JDK can parse {@code
+   *       pattern}: an {@link OverJitSplitMatcher} that runs the find family on a {@link
    *       LaurikariDfaMatcher} over the NFA and the whole-input family on a {@link
    *       JavaRegexFallbackMatcher} (the find family moves to the JDK half too once the Laurikari
    *       DFA cache is full; see {@link OverJitSplitMatcher}). Only this step builds a JDK half, so
    *       only this step requires JDK fallback. Case-insensitive patterns are excluded because
    *       {@link JavaRegexFallbackMatcher} compiles with {@code UNICODE_CASE}, which adds case
    *       folds (for example U+212A to k, U+017F to s) that the parser's case folding does not; the
-   *       two halves would then disagree on such input.
+   *       two halves would then disagree on such input. Named-only compilations ({@link
+   *       ReggieOption#CAPTURE_NAMED_ONLY}) are excluded because {@code ast} has already had
+   *       unnamed captures projected away while {@link JavaRegexFallbackMatcher} compiles the
+   *       unprojected {@code pattern}; the two halves would then report different group sets.
    *   <li>Otherwise: a BitState matcher over the NFA.
    * </ol>
    */
@@ -1506,6 +1510,7 @@ public class RuntimeCompiler {
     }
     NFA nativeNfa = new ThompsonBuilder(true).build(ast, groupCount);
     if (options.has(ReggieOption.ALLOW_JDK_FALLBACK)
+        && !options.has(ReggieOption.CAPTURE_NAMED_ONLY)
         && !mayEnableCaseInsensitive(pattern)
         && LaurikariEligibility.isEligible(nativeNfa, usePosixLastMatch)) {
       // Search calls start on the Laurikari half, so the JDK half is built without the fallback
