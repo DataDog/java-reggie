@@ -475,7 +475,7 @@ public class RuntimeCompiler {
   // L1 cache key (see cacheKeyFor/cacheKeyForFlags) → OverJitSplitEntry. Like BITSTATE_NFA_CACHE,
   // it keeps the mutable find half out of the L1 pattern cache: compile() returns a fresh matcher
   // per call.
-  private static final ConcurrentHashMap<Object, OverJitSplitEntry> OVER_JIT_SPLIT_CACHE =
+  private static final ConcurrentHashMap<CompilationKey, OverJitSplitEntry> OVER_JIT_SPLIT_CACHE =
       new ConcurrentHashMap<>();
 
   // Level 2: Structural hash → generated class (deduplication for similar patterns).
@@ -1493,7 +1493,7 @@ public class RuntimeCompiler {
       RegexNode ast,
       int groupCount,
       boolean usePosixLastMatch,
-      Object cacheKey,
+      CompilationKey cacheKey,
       Map<String, Integer> nameMap,
       String pattern,
       ReggieOptions options) {
