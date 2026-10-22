@@ -147,15 +147,14 @@ public final class FallbackPatternDetector {
         return "assertion inside quantifier references captured group value";
       }
 
-      // B4 — END/STRING_END anchor ($, \Z) immediately before a non-newline char consumer.
-      // DFA_UNROLLED and DFA_SWITCH (including _WITH_GROUPS variants) now handle this path
-      // correctly via charset narrowing to line terminators
-      // (SubsetConstructor#narrowEndGuardedCharset) and the fixed END entry guard in the codegen.
-      // However, this only works for REQUIRED consumers (min >= 1). Optional consumers (\Z[^1]?)
-      // produce
-      // wrong spans on empty input because the DFA mishandles the zero-width accept path.
-      // Other strategies (DFA_TABLE, BITPARALLEL_GLUSHKOV, OPTIMIZED_NFA, RECURSIVE_DESCENT)
-      // lack the entry-guard codegen, so they must still fall back.
+      // B4 — END/STRING_END anchor ($, \Z) immediately before a char consumer.
+      // DFA_UNROLLED and DFA_SWITCH (including _WITH_GROUPS variants) handle this path via
+      // charset narrowing to line terminators (SubsetConstructor#narrowEndGuardedCharset) and the
+      // END entry guard in their codegen, for required and optional (\Z[^1]?) consumers alike.
+      // An optional consumer additionally leaves a zero-width accept path, which PIKEVM_CAPTURE
+      // and BITSTATE_CAPTURE also model. Other strategies (DFA_TABLE, BITPARALLEL_GLUSHKOV,
+      // OPTIMIZED_NFA, RECURSIVE_DESCENT) lack the entry-guard codegen, so they must still fall
+      // back.
       if (hasEndAnchorBeforeNonNewlineConsumer(ast)
           && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
           && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
@@ -167,7 +166,9 @@ public final class FallbackPatternDetector {
           && strategy != PatternAnalyzer.MatchingStrategy.PIKEVM_CAPTURE
           && strategy != PatternAnalyzer.MatchingStrategy.BITSTATE_CAPTURE
           && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED
-          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS) {
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_UNROLLED_WITH_GROUPS
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_SWITCH
+          && strategy != PatternAnalyzer.MatchingStrategy.DFA_SWITCH_WITH_GROUPS) {
         return "end-anchor before optional consumer: strategy does not model zero-width accept path";
       }
     }
@@ -1021,7 +1022,7 @@ public final class FallbackPatternDetector {
    * {@code \n}. The "$ before terminal \n" path is handled correctly by the DFA (4B fix), but
    * patterns like {@code \Z[^c]} produce wrong results.
    */
-  private static boolean hasEndAnchorBeforeNonNewlineConsumer(RegexNode ast) {
+  static boolean hasEndAnchorBeforeNonNewlineConsumer(RegexNode ast) {
     if (ast instanceof ConcatNode) {
       ConcatNode concat = (ConcatNode) ast;
       for (int i = 0; i < concat.children.size() - 1; i++) {

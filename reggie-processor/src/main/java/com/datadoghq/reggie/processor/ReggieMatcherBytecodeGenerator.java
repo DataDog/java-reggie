@@ -739,11 +739,9 @@ public class ReggieMatcherBytecodeGenerator {
       case DFA_SWITCH_WITH_ASSERTIONS:
       case DFA_SWITCH_WITH_GROUPS:
         // Switch-based DFA for patterns with 50-300 states
-        // NOTE: the NFA must be passed (same as RuntimeCompiler). DFA_SWITCH emits no
-        // per-transition anchor guards (its emitTransitionEntryGuard is dead code), so the
-        // nfa-derived requiresStartAnchor/hasMultilineStart findFrom position guard is the
-        // ONLY enforcement of a leading ^/\A/(multiline) ^ — omitting the NFA made generated
-        // find() match mid-input on anchored patterns.
+        // NOTE: the NFA must be passed (same as RuntimeCompiler): the nfa-derived
+        // requiresStartAnchor/hasMultilineStart flags drive findFrom's start-position filtering
+        // for a leading ^/\A/(multiline) ^.
         DFASwitchBytecodeGenerator switchGen =
             new DFASwitchBytecodeGenerator(dfa, nfa.getGroupCount(), nfa);
         switchGen.generateMatchesMethod(cw, cls);

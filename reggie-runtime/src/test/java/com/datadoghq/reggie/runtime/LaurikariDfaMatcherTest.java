@@ -641,53 +641,43 @@ class LaurikariDfaMatcherTest {
     assertNull(m.findMatchFrom(shortInput, start));
   }
 
-  // --- runFind's FALLBACK-mid-scan ternary's "best != null" branch: unlike
-  // --- findSurvivesDfaCacheOverflowMidMatch (whose pattern can't accept before the mandatory
-  // --- trailing 'c', so `best` is always still null when FALLBACK hits), this pattern's trailing
-  // --- 'c' is optional, so every prefix "a", "ab", "abb", ... is already a valid (shorter) match
-  // --
-  // --- `best` is non-null well before the cache overflows deep into the 'b' run. Per runFind's own
-  // --- javadoc (LaurikariDfaMatcher.java:279-283), a mid-scan FALLBACK with a non-null `best`
-  // returns
-  // --- that already-recorded (possibly non-maximal) match as-is rather than delegating to the
-  // --- fallback engine to keep extending -- a deliberate whole-call-delegation-or-nothing
-  // trade-off,
-  // --- not a bug -- so this test checks self-consistency against the pattern, not equality with
-  // the
-  // --- oracle's true greedy (longest) match.
-
+  /**
+   * runFind's mid-scan FALLBACK with an already-recorded {@code best}. Unlike {@link
+   * #findSurvivesDfaCacheOverflowMidMatch} (whose pattern cannot accept before the mandatory
+   * trailing 'c', so {@code best} is still null when FALLBACK hits), this pattern's trailing {@code
+   * c?} is optional, so {@code best} is non-null long before the cache overflows deep in the 'b'
+   * run. The overflow must still redo the whole call on the PikeVM fallback from the scan start: a
+   * higher-priority greedy thread may still extend the recorded match, so returning {@code best}
+   * would truncate it.
+   */
   @Test
   void findSurvivesDfaCacheOverflow_withAlreadyRecordedBest() throws Exception {
     String pattern = "\\b(a)(b)*c?";
     int groupCount = 2;
-    LaurikariDfaMatcher m = laurikari(pattern, groupCount);
     PikeVMMatcher oracle = pikeVm(pattern, groupCount);
 
     StringBuilder sb = new StringBuilder("a");
     for (int i = 0; i < 10_000; i++) sb.append('b');
     String input = sb.toString();
 
-    assertTrue(oracle.find(input), "oracle sanity check");
-    assertTrue(m.find(input), "find() must keep the already-recorded best match on cache overflow");
+    MatchResult expected = oracle.findMatch(input);
+    assertNotNull(expected, "oracle sanity check");
+    assertEquals(input.length(), expected.end(0), "oracle sanity check: greedy match spans input");
+
+    // The first call on a fresh instance is the one that overflows findCache mid-scan
+    LaurikariDfaMatcher m = laurikari(pattern, groupCount);
+    assertMatchEquals(expected, m.findMatch(input), groupCount, input);
     assertTrue(m.fallbackCount() > 0, "input must overflow findCache mid-scan");
 
-    MatchResult oracleResult = oracle.findMatch(input);
-    MatchResult actual = m.findMatch(input);
-    assertNotNull(actual, "the already-recorded best match must survive the overflow");
-    assertEquals(0, actual.start(0), "group 0 start diverged");
-    assertEquals(0, actual.start(1), "group 1 start diverged");
-    assertEquals(1, actual.end(1), "group 1 ('a') must end right after position 0");
-    assertTrue(
-        actual.end(0) >= 1 && actual.end(0) <= oracleResult.end(0),
-        "the recorded best is truncated by the overflow, so its span must be a proper prefix of "
-            + "the oracle's true greedy match: expected 1 <= "
-            + actual.end(0)
-            + " <= "
-            + oracleResult.end(0));
-    assertTrue(
-        java.util.regex.Pattern.compile(pattern)
-            .matcher(input.substring(0, actual.end(0)))
-            .matches(),
-        "the recorded best span itself must be a valid, self-consistent match of the pattern");
+    // find() on a fresh instance: also the overflowing call
+    LaurikariDfaMatcher f = laurikari(pattern, groupCount);
+    assertTrue(f.find(input));
+    assertTrue(f.fallbackCount() > 0, "input must overflow findCache mid-scan");
+    int[] bounds = new int[2];
+    LaurikariDfaMatcher b = laurikari(pattern, groupCount);
+    assertTrue(b.findBoundsFrom(input, 0, bounds));
+    assertTrue(b.fallbackCount() > 0, "input must overflow findCache mid-scan");
+    assertEquals(0, bounds[0]);
+    assertEquals(input.length(), bounds[1], "the overflowing call must return the full span");
   }
 }

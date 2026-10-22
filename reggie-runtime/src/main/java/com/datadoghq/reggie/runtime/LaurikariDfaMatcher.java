@@ -16,6 +16,7 @@
 package com.datadoghq.reggie.runtime;
 
 import com.datadoghq.reggie.codegen.automaton.NFA;
+import java.util.Arrays;
 import java.util.Collections;
 
 /**
@@ -61,7 +62,8 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
    * True when {@code step} has at least one end-anchor/{@code \b}-bearing NFA state — the seed
    * closures ({@code anchoredCache}/{@code findCache} state 0, {@link #reinjectDfaState}) were then
    * constructed against an empty placeholder input and must be recomputed live from the real input
-   * at the top of every {@link #runAnchored}/{@link #runFind} call.
+   * at the top of every {@link #runAnchored}/{@link #runFind} call ({@link #runFind} from position
+   * 0 reuses {@link #startStateByClass}).
    */
   private final boolean hasNewAnchor;
 
@@ -84,6 +86,16 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
    * #reinjectDfaState} covers every case).
    */
   private final int reinjectAfterNlDfaState;
+
+  /**
+   * When {@link #hasNewAnchor}: the {@code findCache} start state of a scan from position 0,
+   * indexed by {@link LaurikariDFACache#lookaheadClass} at position 0, or {@link #UNSET_START}. The
+   * class decides every anchor the start closure evaluates there: position 0 has no previous
+   * character. Null when {@link #hasNewAnchor} is false.
+   */
+  private final int[] startStateByClass;
+
+  private static final int UNSET_START = Integer.MIN_VALUE;
 
   private PikeVMMatcher fallback;
   private long fallbackCount;
@@ -115,6 +127,12 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
         reinjectAfterNl == null
             ? -1
             : findCache.intern(reinjectAfterNl.states, reinjectAfterNl.regs);
+    if (hasNewAnchor) {
+      this.startStateByClass = new int[LaurikariDFACache.LOOKAHEAD_CLASSES];
+      Arrays.fill(startStateByClass, UNSET_START);
+    } else {
+      this.startStateByClass = null;
+    }
     markNativeRichApi();
   }
 
@@ -130,6 +148,15 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
   /** Number of calls delegated to the {@link PikeVMMatcher} fallback (cache-cap overflow). */
   long fallbackCount() {
     return fallbackCount;
+  }
+
+  /**
+   * True once a call has been delegated to the {@link PikeVMMatcher} fallback: one of the DFA
+   * caches reached its cap, and since {@link LaurikariDFACache} never evicts, any call that needs a
+   * new DFA state on that cache is delegated too.
+   */
+  boolean saturated() {
+    return fallbackCount != 0;
   }
 
   private PikeVMMatcher fallback() {
@@ -280,8 +307,10 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
         // The whole call is redone from the scan's original start (clamped), not the frozen
         // position i: a match may have started anywhere in [clamped, i) and not yet reached an
         // accept, and restarting PikeVMMatcher at i would silently lose that prefix (see class
-        // javadoc -- this is meant to be a whole-call delegation, not a tail continuation).
-        return best == null ? fallbackFind(input, clamped) : best;
+        // javadoc -- this is meant to be a whole-call delegation, not a tail continuation). An
+        // already-recorded best is not final either: a live higher-priority (greedy) thread may
+        // still extend it, so the result must come from the fallback.
+        return fallbackFind(input, clamped);
       }
       if (next == LaurikariDFACache.DEAD) {
         // Every applyFind() call reinjects a fresh (anchor-blocked) start candidate (see
@@ -317,7 +346,13 @@ final class LaurikariDfaMatcher extends ReggieMatcher {
     if (hasNewAnchor) {
       LaurikariStepResult liveSeed;
       if (clamped == 0) {
+        int cls = LaurikariDFACache.lookaheadClass(input, 0, len);
+        int cached = startStateByClass[cls];
+        if (cached != UNSET_START) return cached;
         liveSeed = step.truncatedInitialClosure(input, len);
+        int start = findCache.intern(liveSeed.states, liveSeed.regs);
+        if (start != LaurikariDFACache.FALLBACK) startStateByClass[cls] = start;
+        return start;
       } else if (LineTerminators.isLineTerminator(input.charAt(clamped - 1))) {
         LaurikariStepResult afterNl = step.reinjectAfterNlClosure(input, clamped, len);
         liveSeed = afterNl != null ? afterNl : step.reinjectClosure(input, clamped, len);

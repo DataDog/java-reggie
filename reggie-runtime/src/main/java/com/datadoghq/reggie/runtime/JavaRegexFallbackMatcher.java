@@ -20,7 +20,7 @@ import java.util.regex.Pattern;
 
 /**
  * Fallback matcher that delegates to {@code java.util.regex} when the reggie engine has a known
- * correctness bug for the given pattern. A warning is logged once at construction time.
+ * correctness bug for the given pattern. The {@code (pattern, reason)} constructor logs a warning.
  */
 public final class JavaRegexFallbackMatcher extends ReggieMatcher {
 
@@ -29,13 +29,21 @@ public final class JavaRegexFallbackMatcher extends ReggieMatcher {
   private final Pattern javaPattern;
 
   JavaRegexFallbackMatcher(String pattern, String reason) {
+    this(pattern);
+    LOG.warning("Falling back to java.util.regex for pattern '" + pattern + "': " + reason);
+  }
+
+  /**
+   * Creates the matcher without the fallback warning, for callers that pair it with a native
+   * matcher for the same pattern.
+   */
+  JavaRegexFallbackMatcher(String pattern) {
     super(pattern);
     // UNICODE_CASE is a no-op unless the pattern also enables case-insensitive matching (via an
     // inline (?i) modifier), in which case it makes java.util.regex fold non-ASCII letters the
     // same way Reggie's native parser does (Character.toLowerCase/toUpperCase), instead of JDK's
     // default ASCII-only case folding.
     this.javaPattern = Pattern.compile(toJdkCompatible(pattern), Pattern.UNICODE_CASE);
-    LOG.warning("Falling back to java.util.regex for pattern '" + pattern + "': " + reason);
   }
 
   /**

@@ -17,6 +17,8 @@ package com.datadoghq.reggie.codegen.codegen;
 
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineEnd;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.invokeMultilineStart;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushEndOrLength;
+import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushFromOrZero;
 import static com.datadoghq.reggie.codegen.codegen.BytecodeUtil.pushInt;
 import static org.objectweb.asm.Opcodes.*;
 
@@ -2276,7 +2278,7 @@ public class DFAUnrolledBytecodeGenerator {
     if (groupCount > 0 && (hasGroupActions() || hasAssertionGroups())) {
       // Create allocator: slots 0=this, 1=input
       LocalVarAllocator allocator = new LocalVarAllocator(2);
-      generateMatchWithGroupTracking(mv, className, allocator);
+      generateMatchWithGroupTracking(mv, allocator, -1, -1);
       mv.visitMaxs(0, 0);
       mv.visitEnd();
       return;
@@ -2843,6 +2845,9 @@ public class DFAUnrolledBytecodeGenerator {
       generateFindMatchFromMethodTagged(cw, className);
       return;
     }
+    if (groupCount > 0 && (hasGroupActions() || hasAssertionGroups())) {
+      generateMatchGroupsInRangeMethod(cw, className);
+    }
 
     MethodVisitor mv =
         cw.visitMethod(
@@ -2891,62 +2896,41 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitInsn(ARETURN);
     mv.visitLabel(hasMatch);
 
-    if (groupCount == 0) {
-      // Group 0 is [matchStart, longestEnd] whatever match(substring) returns: skip the substring
-      // and the re-match, and take the known-bounds branch below.
-      mv.visitInsn(ACONST_NULL);
-      mv.visitVarInsn(ASTORE, 7); // groupResult
-    } else {
-      // Extract groups by calling match() on the matched substring
-      // String matchedSubstring = input.substring(matchStart, longestEnd);
+    if (groupCount > 0 && (hasGroupActions() || hasAssertionGroups())) {
+      // Group spans: the match() walk over [matchStart, longestEnd) of the whole input, so anchors
+      // and assertions see the text around the match.
+      // MatchResult groupResult = matchGroupsInRange(input, matchStart, longestEnd);
+      // if (groupResult != null) return groupResult;
+      Label noGroupResult = new Label();
+      mv.visitVarInsn(ALOAD, 0);
       mv.visitVarInsn(ALOAD, 1);
-      mv.visitVarInsn(ILOAD, 3); // matchStart
-      mv.visitVarInsn(ILOAD, 4); // longestEnd
+      mv.visitVarInsn(ILOAD, 3);
+      mv.visitVarInsn(ILOAD, 4);
       mv.visitMethodInsn(
-          INVOKEVIRTUAL, "java/lang/String", "substring", "(II)Ljava/lang/String;", false);
-      mv.visitVarInsn(ASTORE, 6); // matchedSubstring
-
-      // MatchResult groupResult = match(matchedSubstring);
-      // NOTE: For patterns with lookaround assertions, match(substring) may return null because the
-      // substring lacks the surrounding context needed to evaluate the assertions. When that
-      // happens
-      // we fall back to the known match bounds [matchStart, longestEnd] for group 0 and -1 for any
-      // inner groups (losing per-group positions, but correctly reporting the overall match).
-      mv.visitVarInsn(ALOAD, 0); // this
-      mv.visitVarInsn(ALOAD, 6); // matchedSubstring
-      mv.visitMethodInsn(
-          INVOKEVIRTUAL,
+          INVOKESPECIAL,
           className.replace('.', '/'),
-          "match",
-          "(Ljava/lang/String;)Lcom/datadoghq/reggie/runtime/MatchResult;",
+          "matchGroupsInRange",
+          "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
           false);
-      mv.visitVarInsn(ASTORE, 7); // groupResult
+      mv.visitInsn(DUP);
+      mv.visitJumpInsn(IFNULL, noGroupResult);
+      mv.visitInsn(ARETURN);
+      mv.visitLabel(noGroupResult);
+      mv.visitInsn(POP);
     }
 
-    // Adjust group positions by adding matchStart offset
-    // int[] starts = new int[groupCount + 1];
+    // Otherwise (or when the walk rejects): group 0 = [matchStart, longestEnd], inner groups -1.
     pushInt(mv, groupCount + 1);
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitVarInsn(ASTORE, 8); // starts array
-
-    // int[] ends = new int[groupCount + 1];
     pushInt(mv, groupCount + 1);
     mv.visitIntInsn(NEWARRAY, T_INT);
     mv.visitVarInsn(ASTORE, 9); // ends array
-
-    // If groupResult is null (e.g., assertion pattern where substring lacks context),
-    // use the known bounds: group 0 = [matchStart, longestEnd], inner groups = -1.
-    Label groupResultNotNull = new Label();
-    Label groupsPopulated = new Label();
-    mv.visitVarInsn(ALOAD, 7); // groupResult
-    mv.visitJumpInsn(IFNONNULL, groupResultNotNull);
-
-    // groupResult == null: group 0 = [matchStart, longestEnd], inner groups = -1
-    mv.visitVarInsn(ALOAD, 8); // starts
+    mv.visitVarInsn(ALOAD, 8);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ILOAD, 3); // matchStart
     mv.visitInsn(IASTORE);
-    mv.visitVarInsn(ALOAD, 9); // ends
+    mv.visitVarInsn(ALOAD, 9);
     mv.visitInsn(ICONST_0);
     mv.visitVarInsn(ILOAD, 4); // longestEnd
     mv.visitInsn(IASTORE);
@@ -2960,54 +2944,6 @@ public class DFAUnrolledBytecodeGenerator {
       mv.visitInsn(ICONST_M1);
       mv.visitInsn(IASTORE);
     }
-    mv.visitJumpInsn(GOTO, groupsPopulated);
-
-    mv.visitLabel(groupResultNotNull);
-    // Copy and adjust group positions
-    for (int i = 0; i <= groupCount; i++) {
-      // starts[i] = groupResult.start(i) + matchStart;
-      mv.visitVarInsn(ALOAD, 8);
-      pushInt(mv, i);
-      mv.visitVarInsn(ALOAD, 7); // groupResult
-      pushInt(mv, i);
-      mv.visitMethodInsn(
-          INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "start", "(I)I", true);
-      // Only add offset if not -1
-      Label skipStartAdjust = new Label();
-      Label doneStartAdjust = new Label();
-      mv.visitInsn(DUP);
-      mv.visitInsn(ICONST_M1);
-      mv.visitJumpInsn(IF_ICMPEQ, skipStartAdjust);
-      mv.visitVarInsn(ILOAD, 3); // matchStart
-      mv.visitInsn(IADD);
-      mv.visitJumpInsn(GOTO, doneStartAdjust);
-      mv.visitLabel(skipStartAdjust);
-      // Stack already has -1 from DUP, no need to push again
-      mv.visitLabel(doneStartAdjust);
-      mv.visitInsn(IASTORE);
-
-      // ends[i] = groupResult.end(i) + matchStart;
-      mv.visitVarInsn(ALOAD, 9);
-      pushInt(mv, i);
-      mv.visitVarInsn(ALOAD, 7); // groupResult
-      pushInt(mv, i);
-      mv.visitMethodInsn(
-          INVOKEINTERFACE, "com/datadoghq/reggie/runtime/MatchResult", "end", "(I)I", true);
-      // Only add offset if not -1
-      Label skipEndAdjust = new Label();
-      Label doneEndAdjust = new Label();
-      mv.visitInsn(DUP);
-      mv.visitInsn(ICONST_M1);
-      mv.visitJumpInsn(IF_ICMPEQ, skipEndAdjust);
-      mv.visitVarInsn(ILOAD, 3); // matchStart
-      mv.visitInsn(IADD);
-      mv.visitJumpInsn(GOTO, doneEndAdjust);
-      mv.visitLabel(skipEndAdjust);
-      // Stack already has -1 from DUP, no need to push again
-      mv.visitLabel(doneEndAdjust);
-      mv.visitInsn(IASTORE);
-    }
-    mv.visitLabel(groupsPopulated);
 
     // Create MatchResultImpl with adjusted positions
     mv.visitTypeInsn(NEW, "com/datadoghq/reggie/runtime/MatchResultImpl");
@@ -3561,7 +3497,7 @@ public class DFAUnrolledBytecodeGenerator {
     // Generate transition checks (bounded path uses CharSequence). Transitions sharing a target
     // and guard merge into one check (see emitTransitionChecks); range-heavy merged sets use the
     // static boolean[] lookup table.
-    InputAccess boundedAccess = charSequenceInputAccess(mv, endVar);
+    InputAccess boundedAccess = charSequenceInputAccess(mv, startVar, endVar);
     emitTransitionChecks(
         mv,
         state,
@@ -3591,7 +3527,7 @@ public class DFAUnrolledBytecodeGenerator {
         Label rejectAtEnd = new Label();
         Label endAccepted = new Label();
         emitAcceptanceAnchorChecksBounded(
-            mv, state.acceptanceAnchorConditions, posVar, endVar, rejectAtEnd);
+            mv, state.acceptanceAnchorConditions, posVar, startVar, endVar, rejectAtEnd);
         mv.visitInsn(ICONST_1);
         mv.visitJumpInsn(GOTO, endAccepted);
         mv.visitLabel(rejectAtEnd);
@@ -4136,18 +4072,20 @@ public class DFAUnrolledBytecodeGenerator {
    * groupCount);
    */
   private void generateMatchWithGroupTracking(
-      MethodVisitor mv, String className, LocalVarAllocator allocator) {
-    // if (input == null) return null;
-    Label notNull = new Label();
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitJumpInsn(IFNONNULL, notNull);
-    mv.visitInsn(ACONST_NULL);
-    mv.visitInsn(ARETURN);
-    mv.visitLabel(notNull);
+      MethodVisitor mv, LocalVarAllocator allocator, int fromVar, int toVar) {
+    if (fromVar < 0) {
+      // if (input == null) return null;
+      Label notNull = new Label();
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitJumpInsn(IFNONNULL, notNull);
+      mv.visitInsn(ACONST_NULL);
+      mv.visitInsn(ARETURN);
+      mv.visitLabel(notNull);
+    }
 
-    // int pos = 0;
+    // int pos = from;
     int posVar = allocator.allocate();
-    mv.visitInsn(ICONST_0);
+    pushFromOrZero(mv, fromVar);
     mv.visitVarInsn(ISTORE, posVar);
 
     // int[] groupStarts = new int[groupCount + 1];
@@ -4163,10 +4101,10 @@ public class DFAUnrolledBytecodeGenerator {
     mv.visitVarInsn(ASTORE, groupEndsVar);
 
     // Initialize group 0 (full match)
-    // groupStarts[0] = 0;
+    // groupStarts[0] = from;
     mv.visitVarInsn(ALOAD, groupStartsVar);
     mv.visitInsn(ICONST_0);
-    mv.visitInsn(ICONST_0);
+    pushFromOrZero(mv, fromVar);
     mv.visitInsn(IASTORE);
 
     // Initialize inner groups to -1
@@ -4185,7 +4123,7 @@ public class DFAUnrolledBytecodeGenerator {
     }
 
     // Process group actions for start state (before any character consumption)
-    // At the start, both pre-increment and post-increment positions are 0
+    // At the start, both pre-increment and post-increment positions are from
     generateGroupActionsForState(
         mv, dfa.getStartState(), posVar, posVar, groupStartsVar, groupEndsVar);
 
@@ -4198,15 +4136,42 @@ public class DFAUnrolledBytecodeGenerator {
     // Generate code for start state
     mv.visitLabel(stateLabels.get(dfa.getStartState()));
     generateStateCodeWithGroupTracking(
-        mv, dfa.getStartState(), stateLabels, posVar, groupStartsVar, groupEndsVar, allocator);
+        mv,
+        dfa.getStartState(),
+        stateLabels,
+        posVar,
+        groupStartsVar,
+        groupEndsVar,
+        allocator,
+        toVar);
 
     // Generate code for all other states
     for (DFA.DFAState state : dfa.getAllStates()) {
       if (state == dfa.getStartState()) continue;
       mv.visitLabel(stateLabels.get(state));
       generateStateCodeWithGroupTracking(
-          mv, state, stateLabels, posVar, groupStartsVar, groupEndsVar, allocator);
+          mv, state, stateLabels, posVar, groupStartsVar, groupEndsVar, allocator, toVar);
     }
+  }
+
+  /**
+   * Generates the private {@code matchGroupsInRange(String input, int from, int to)} helper: the
+   * group-tracking walk of {@code match()} over {@code [from, to)} of the whole input, returning
+   * spans in input coordinates, or null when the walk rejects. Assertions read the whole input.
+   */
+  private void generateMatchGroupsInRangeMethod(ClassWriter cw, String className) {
+    MethodVisitor mv =
+        cw.visitMethod(
+            ACC_PRIVATE,
+            "matchGroupsInRange",
+            "(Ljava/lang/String;II)Lcom/datadoghq/reggie/runtime/MatchResult;",
+            null,
+            null);
+    mv.visitCode();
+    // Slots: 0=this, 1=input, 2=from, 3=to
+    generateMatchWithGroupTracking(mv, new LocalVarAllocator(4), 2, 3);
+    mv.visitMaxs(0, 0);
+    mv.visitEnd();
   }
 
   /**
@@ -4220,7 +4185,8 @@ public class DFAUnrolledBytecodeGenerator {
       int posVar,
       int groupStartsVar,
       int groupEndsVar,
-      LocalVarAllocator allocator) {
+      LocalVarAllocator allocator,
+      int toVar) {
     Label endOfInput = new Label();
     Label assertionFailed = new Label();
 
@@ -4233,10 +4199,9 @@ public class DFAUnrolledBytecodeGenerator {
       }
     }
 
-    // Check if at end of input
+    // Check if at end of input (or of the walked range)
     mv.visitVarInsn(ILOAD, posVar);
-    mv.visitVarInsn(ALOAD, 1);
-    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    pushEndOrLength(mv, toVar, false);
     mv.visitJumpInsn(IF_ICMPGE, endOfInput);
 
     // Get next character
@@ -4260,10 +4225,10 @@ public class DFAUnrolledBytecodeGenerator {
     // merged sets use the static boolean[] lookup table.
     for (TransGroup group : transitionGroups(state)) {
       Label nextCheck = new Label();
-      // Generate group actions for target state BEFORE jumping to it (once per target)
+      generateCharSetCheck(mv, group.mergedChars(), chVar, nextCheck);
+      // Target state's group actions, applied only once its transition is taken
       generateGroupActionsForState(
           mv, group.target, preIncrementPosVar, posVar, groupStartsVar, groupEndsVar);
-      generateCharSetCheck(mv, group.mergedChars(), chVar, nextCheck);
       mv.visitJumpInsn(GOTO, stateLabels.get(group.target));
       mv.visitLabel(nextCheck);
     }
@@ -4275,11 +4240,10 @@ public class DFAUnrolledBytecodeGenerator {
     // End of input - check if accepting
     mv.visitLabel(endOfInput);
     if (state.accepting) {
-      // groupEnds[0] = input.length();
+      // groupEnds[0] = to;
       mv.visitVarInsn(ALOAD, groupEndsVar);
       mv.visitInsn(ICONST_0);
-      mv.visitVarInsn(ALOAD, 1);
-      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+      pushEndOrLength(mv, toVar, false);
       mv.visitInsn(IASTORE);
 
       // return new MatchResultImpl(input, groupStarts, groupEnds, groupCount);
@@ -4486,13 +4450,17 @@ public class DFAUnrolledBytecodeGenerator {
    * local to anchor-check helpers so the rest of the generator is unaffected.
    */
   private static final class InputAccess {
+    /** Emit the input start ({@code 0}, or the region start on the bounded path) on the stack. */
+    final Runnable loadStart;
+
     /** Emit {@code input.length()} on the stack. */
     final Runnable loadLength;
 
     /** Emit {@code input.charAt(<top of stack int>)}. The int operand is consumed. */
     final Runnable invokeCharAt;
 
-    InputAccess(Runnable loadLength, Runnable invokeCharAt) {
+    InputAccess(Runnable loadStart, Runnable loadLength, Runnable invokeCharAt) {
+      this.loadStart = loadStart;
       this.loadLength = loadLength;
       this.invokeCharAt = invokeCharAt;
     }
@@ -4501,6 +4469,7 @@ public class DFAUnrolledBytecodeGenerator {
   /** Access for the String-typed input held in local slot 1 (unbounded path). */
   private InputAccess stringInputAccess(MethodVisitor mv) {
     return new InputAccess(
+        () -> mv.visitInsn(ICONST_0),
         () -> {
           mv.visitVarInsn(ALOAD, 1);
           mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
@@ -4508,17 +4477,22 @@ public class DFAUnrolledBytecodeGenerator {
         () -> mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "charAt", "(I)C", false));
   }
 
-  /** Access for the CharSequence-typed input held in local slot 1 (bounded path). */
-  private InputAccess charSequenceInputAccess(MethodVisitor mv, int endVar) {
+  /**
+   * Access for the CharSequence-typed input held in local slot 1 (bounded path), with the region
+   * bounds held in the int locals {@code startVar} and {@code endVar}.
+   */
+  private InputAccess charSequenceInputAccess(MethodVisitor mv, int startVar, int endVar) {
     return new InputAccess(
+        () -> mv.visitVarInsn(ILOAD, startVar),
         () -> mv.visitVarInsn(ILOAD, endVar),
         () ->
             mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "charAt", "(I)C", true));
   }
 
   /**
-   * Emit a check for one anchor type at {@code posVar} against the end position; jump to {@code
-   * failed} if the anchor's positional precondition does not hold.
+   * Emit a check for one anchor type at {@code posVar} against the start and end positions supplied
+   * by {@code access}; jump to {@code failed} if the anchor's positional precondition does not
+   * hold.
    */
   private void emitSingleAnchorCheck(
       MethodVisitor mv, NFA.AnchorType anchor, int posVar, Label failed, InputAccess access) {
@@ -4531,9 +4505,10 @@ public class DFAUnrolledBytecodeGenerator {
         break;
       case START:
       case STRING_START:
-        // if (pos != 0) goto failed
+        // if (pos != start) goto failed
         mv.visitVarInsn(ILOAD, posVar);
-        mv.visitJumpInsn(IFNE, failed);
+        access.loadStart.run();
+        mv.visitJumpInsn(IF_ICMPNE, failed);
         break;
       case END:
       // $ (non-multiline): same semantics as \Z; all Java line terminators recognized. Fall
@@ -4631,10 +4606,10 @@ public class DFAUnrolledBytecodeGenerator {
         mv.visitJumpInsn(IFEQ, failed);
         break;
       case START_MULTILINE:
-        // if (!LineTerminators.isMultilineStart(input, pos, 0, end)) goto failed;
+        // if (!LineTerminators.isMultilineStart(input, pos, start, end)) goto failed;
         mv.visitVarInsn(ALOAD, 1);
         mv.visitVarInsn(ILOAD, posVar);
-        mv.visitInsn(ICONST_0);
+        access.loadStart.run();
         access.loadLength.run();
         invokeMultilineStart(mv);
         mv.visitJumpInsn(IFEQ, failed);
@@ -4654,12 +4629,17 @@ public class DFAUnrolledBytecodeGenerator {
   }
 
   /**
-   * Emit acceptance-condition checks against a precomputed end length held in {@code endVar}
-   * (CharSequence path).
+   * Emit acceptance-condition checks against the region bounds held in {@code startVar} and {@code
+   * endVar} (CharSequence path).
    */
   private void emitAcceptanceAnchorChecksBounded(
-      MethodVisitor mv, EnumSet<NFA.AnchorType> conditions, int posVar, int endVar, Label failed) {
-    InputAccess access = charSequenceInputAccess(mv, endVar);
+      MethodVisitor mv,
+      EnumSet<NFA.AnchorType> conditions,
+      int posVar,
+      int startVar,
+      int endVar,
+      Label failed) {
+    InputAccess access = charSequenceInputAccess(mv, startVar, endVar);
     for (NFA.AnchorType anchor : conditions) {
       emitSingleAnchorCheck(mv, anchor, posVar, failed, access);
     }
@@ -4674,8 +4654,9 @@ public class DFAUnrolledBytecodeGenerator {
   /**
    * Emit a transition entry-guard check. {@code posVar} is the position AFTER the char was consumed
    * (i.e. source pos + 1). If any START-class anchor required by the guard does not hold at the
-   * source position, jump to {@code skipTransition}. {@code access} selects the
-   * input-shape-specific {@code charAt} call kind (String virtual vs CharSequence interface).
+   * source position, jump to {@code skipTransition}. {@code access} supplies the input start and
+   * end and selects the input-shape-specific {@code charAt} call kind (String virtual vs
+   * CharSequence interface).
    */
   private void emitTransitionEntryGuard(
       MethodVisitor mv,
@@ -4687,19 +4668,21 @@ public class DFAUnrolledBytecodeGenerator {
       switch (anchor) {
         case START:
         case STRING_START:
-          // source_pos == 0 iff pos == 1 (after pre-transition increment)
+          // source_pos == start iff pos - 1 == start (after pre-transition increment)
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitInsn(ICONST_1);
+          mv.visitInsn(ISUB);
+          access.loadStart.run();
           mv.visitJumpInsn(IF_ICMPNE, skipTransition);
           break;
         case START_MULTILINE:
           // The consume-increment already ran, so source_pos = pos - 1.
-          // if (!LineTerminators.isMultilineStart(input, pos - 1, 0, end)) skip;
+          // if (!LineTerminators.isMultilineStart(input, pos - 1, start, end)) skip;
           mv.visitVarInsn(ALOAD, 1);
           mv.visitVarInsn(ILOAD, posVar);
           mv.visitInsn(ICONST_1);
           mv.visitInsn(ISUB);
-          mv.visitInsn(ICONST_0);
+          access.loadStart.run();
           access.loadLength.run();
           invokeMultilineStart(mv);
           mv.visitJumpInsn(IFEQ, skipTransition);

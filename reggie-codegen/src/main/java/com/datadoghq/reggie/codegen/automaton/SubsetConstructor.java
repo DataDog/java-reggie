@@ -851,17 +851,18 @@ public class SubsetConstructor {
    * <ul>
    *   <li>{@code STRING_END_ABSOLUTE} (\z) requires {@code pos == length} exactly, so no char can
    *       be consumed.
-   *   <li>{@code END} ($) and {@code STRING_END} (\Z) match at {@code pos == length} OR at {@code
-   *       pos == length-1} when {@code charAt(pos) == '\n'}. They allow consuming a {@code \n}-only
-   *       transition (the "$ before terminal newline" path) but block everything else.
+   *   <li>{@code END} ($) and {@code STRING_END} (\Z) match only at the end or before a final line
+   *       terminator, so they block {@code chars} that contain no {@link #LINE_TERMINATORS}. A
+   *       killed source neither contributes targets nor weakens the transition guard. Charsets that
+   *       contain a line terminator are narrowed after the partition loop instead (see {@link
+   *       #narrowEndGuardedCharset}).
    * </ul>
    */
   private static boolean containsConsumeKillingAnchor(
       EnumSet<NFA.AnchorType> conds, CharSet chars) {
     if (conds.contains(NFA.AnchorType.STRING_END_ABSOLUTE)) return true;
-    // END/STRING_END: the transition charset is narrowed to line terminators after the
-    // partition loop (see narrowEndGuardedCharset), so we no longer kill here.
-    return false;
+    return (conds.contains(NFA.AnchorType.END) || conds.contains(NFA.AnchorType.STRING_END))
+        && !chars.intersects(LINE_TERMINATORS);
   }
 
   /**

@@ -48,6 +48,32 @@ public class BytecodeUtil {
 
   private static final String LINE_TERMINATORS = "com/datadoghq/reggie/runtime/LineTerminators";
 
+  /** Push the int local {@code fromVar}, or {@code 0} when {@code fromVar} is {@code -1}. */
+  public static void pushFromOrZero(MethodVisitor mv, int fromVar) {
+    if (fromVar < 0) {
+      mv.visitInsn(ICONST_0);
+    } else {
+      mv.visitVarInsn(ILOAD, fromVar);
+    }
+  }
+
+  /**
+   * Push the input end: the int local {@code endVar}, or, when {@code endVar} is {@code -1}, the
+   * length of the input in local slot 1 (a {@link CharSequence} when {@code charSequence}, else a
+   * {@link String}).
+   */
+  public static void pushEndOrLength(MethodVisitor mv, int endVar, boolean charSequence) {
+    if (endVar >= 0) {
+      mv.visitVarInsn(ILOAD, endVar);
+    } else if (charSequence) {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEINTERFACE, "java/lang/CharSequence", "length", "()I", true);
+    } else {
+      mv.visitVarInsn(ALOAD, 1);
+      mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+    }
+  }
+
   /**
    * Emit {@code LineTerminators.isMultilineStart(input, pos, start, end)}. Stack: {@code
    * CharSequence, int, int, int} → {@code boolean}.

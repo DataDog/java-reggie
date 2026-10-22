@@ -67,7 +67,9 @@ class CompileCacheHygieneTest {
   /**
    * The JIT size gate must also apply on verified structural-cache hits: a strict compile caches
    * the oversized class, and a later fallback-enabled compile of the same structure (different
-   * cache key) used to get the oversized class back without the gate.
+   * cache key) used to get the oversized class back without the gate. The hit takes the same route
+   * as an uncached fallback-enabled compile: the Laurikari/JDK split for this Laurikari-eligible
+   * pattern.
    */
   @Test
   void jitSizeGateAppliesOnStructuralCacheHit() {
@@ -76,11 +78,16 @@ class CompileCacheHygieneTest {
     // strict compile: oversized but kept (native-or-throw contract), class lands in the
     // structural cache
     assertFalse(Reggie.compile(monster).isJdkFallback());
-    // same structure, fresh cache key, fallback enabled: must decline instead of reusing
-    ReggieMatcher hit =
-        RuntimeCompiler.cached(
-            "jit-gate-hit-test", monster, ReggieOptions.builder().allowJdkFallback().build());
-    assertTrue(hit.isJdkFallback(), "structural-cache hit must apply the JIT size gate");
+    // same structure, fresh cache key, fallback enabled: must not reuse the oversized class
+    RuntimeCompiler.ROUTING_NOTE.remove();
+    RuntimeCompiler.cached(
+        "jit-gate-hit-test", monster, ReggieOptions.builder().allowJdkFallback().build());
+    String hitRoute = RuntimeCompiler.ROUTING_NOTE.get();
+    assertEquals(
+        "LAURIKARI find / JDK matches (over JIT limit)",
+        hitRoute,
+        "structural-cache hit must apply the JIT size gate");
+    assertEquals(RuntimeCompiler.describeRouting(monster).routing, hitRoute);
   }
 
   /**
@@ -108,19 +115,23 @@ class CompileCacheHygieneTest {
     Reggie.compile("a{0,6000}"); // counted-loop cache
     RuntimeCompiler.compileBackrefBacktrack("(.*) \\((.*)\\)", ""); // stub backtracker
     Reggie.compile("(a|b)*(c)"); // hybrid
-    for (String name :
-        new String[] {
-          "LITERAL_CACHE", "BACKTRACK_NFA_CACHE", "STUB_BACKTRACK_NFA_CACHE", "HYBRID_CACHE"
-        }) {
+    Reggie.compile(
+        "^(?:[^a-z]*[a-z]+){40}",
+        ReggieOptions.builder().allowJdkFallback().build()); // over-JIT-limit split
+    String[] caches = {
+      "LITERAL_CACHE",
+      "BACKTRACK_NFA_CACHE",
+      "STUB_BACKTRACK_NFA_CACHE",
+      "HYBRID_CACHE",
+      "OVER_JIT_SPLIT_CACHE"
+    };
+    for (String name : caches) {
       Field f = RuntimeCompiler.class.getDeclaredField(name);
       f.setAccessible(true);
       assertFalse(((Map<?, ?>) f.get(null)).isEmpty(), name + " must be populated before clear");
     }
     RuntimeCompiler.clearCache();
-    for (String name :
-        new String[] {
-          "LITERAL_CACHE", "BACKTRACK_NFA_CACHE", "STUB_BACKTRACK_NFA_CACHE", "HYBRID_CACHE"
-        }) {
+    for (String name : caches) {
       Field f = RuntimeCompiler.class.getDeclaredField(name);
       f.setAccessible(true);
       assertTrue(((Map<?, ?>) f.get(null)).isEmpty(), name + " must be cleared");
