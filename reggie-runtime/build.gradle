@@ -1,6 +1,7 @@
 plugins {
     id 'java-library'
     id 'com.vanniktech.maven.publish'
+    id 'reggie.grapheme.data'
 }
 
 description = 'Reggie - high-performance regex with compile-time and runtime pattern compilation'
@@ -92,6 +93,30 @@ tasks.register('linearFindTest', Test) {
 
 tasks.named('check') {
     dependsOn tasks.named('linearFindTest')
+}
+
+// Keep compilation on Java 21 while exercising runtime Unicode profiles on another JVM.
+tasks.register('graphemeTest', Test) {
+    group = 'verification'
+    description = 'Runs native grapheme parity tests on the selected test JVM'
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter { includeTestsMatching 'com.datadoghq.reggie.runtime.Grapheme*Test' }
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(providers.gradleProperty('graphemeTestJava').orElse('21').get().toInteger())
+    }
+}
+
+tasks.register('jacocoGraphemeTestReport', JacocoReport) {
+    group = 'verification'
+    description = 'Reports coverage for the selected native grapheme profile'
+    dependsOn tasks.named('graphemeTest')
+    executionData tasks.named('graphemeTest').map { it.jacoco.destinationFile }
+    sourceSets sourceSets.main
+    reports {
+        xml.required = true
+    }
 }
 
 // Task to run bytecode debugger

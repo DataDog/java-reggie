@@ -33,6 +33,7 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = 'reggie'
+includeBuild('build-logic')
 include('reggie-annotations')
 include('reggie-codegen')
 include('reggie-processor')

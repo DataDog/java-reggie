@@ -237,3 +237,4 @@ tasks.register('jacocoVerify', JacocoCoverageVerification) {
 
 // Wire coverage gate into the standard check lifecycle
 check.dependsOn jacocoVerify
+check.dependsOn gradle.includedBuild('build-logic').task(':check')
