@@ -35,6 +35,18 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
+tasks.register('graphemeTest', Test) {
+    group = 'verification'
+    description = 'Runs Java 21 generated grapheme matchers on the selected test JVM'
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter { includeTestsMatching 'com.datadoghq.reggie.processor.GraphemeProcessorTest' }
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(providers.gradleProperty('graphemeTestJava').orElse('21').get().toInteger())
+    }
+}
+
 tasks.register('verifyCoverage', JacocoCoverageVerification) {
     dependsOn tasks.named('test')
     executionData tasks.named('test')

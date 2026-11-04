@@ -7,11 +7,16 @@ conditions, and current known limitations.
 
 Reggie never silently returns a wrong answer for an accepted pattern. Every result is either:
 
-- **(a) provably correct** — generated natively by one of Reggie's bytecode strategies, or
+- **(a) provably correct** - implemented by Reggie's native matchers, or
 - **(b) explicitly rejected** — pattern compilation via `Reggie.compile()` throws
   `UnsupportedPatternException` for unsupported constructs; `@RegexPattern` rejects the pattern
   at build time. To enable JDK delegation for unsupported patterns, use
   `Reggie.compileAllowingFallback()` or pass `ReggieOption.ALLOW_JDK_FALLBACK`.
+
+The exact standalone `\X` pattern uses a native grapheme matcher on supported GA JDKs.
+Its annotation-generated accessor selects the profile on the executing JVM and can throw
+`UnsupportedPatternException` there when the profile is unsupported. See
+[native grapheme matching](native-grapheme.md) for the supported profiles and scope.
 
 This guarantee is enforced continuously in CI by two automated gates:
 

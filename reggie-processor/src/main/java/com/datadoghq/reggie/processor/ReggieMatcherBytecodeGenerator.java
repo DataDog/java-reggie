@@ -107,6 +107,8 @@ public class ReggieMatcherBytecodeGenerator {
      * Two generated classes, a captureless DFA half and an NFA half; see {@link #generateHybrid}.
      */
     HYBRID,
+    /** Selects the standalone grapheme matcher on the executing JDK. */
+    DELEGATE_GRAPHEME,
     DELEGATE_PIKEVM,
     /** Runs on the runtime backtracker; see {@code BacktrackSupport#routesToBacktracker}. */
     DELEGATE_BACKTRACK,
@@ -171,6 +173,9 @@ public class ReggieMatcherBytecodeGenerator {
   }
 
   private Realization resolve(boolean allowJdkFallback, boolean oneWayRoute) throws Exception {
+    if (pattern.equals("\\X")) {
+      return Realization.DELEGATE_GRAPHEME;
+    }
     RegexParser parser = new RegexParser();
     RegexNode ast = parser.parse(pattern);
     int groupCount = GroupCounter.count(pattern);

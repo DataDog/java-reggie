@@ -3,12 +3,16 @@
 ## Prerequisites
 
 Before releasing, ensure:
+
 1. All changes are merged to `main`
 2. The following AWS SSM parameters are populated (one-time infra setup):
    - `ci.java-reggie.maven_central_username` — Sonatype Central Portal token username
    - `ci.java-reggie.maven_central_password` — Sonatype Central Portal token password
    - `ci.java-reggie.signing.gpg_private_key` — armored GPG private key (set by `create_key` CI job)
    - `ci.java-reggie.signing.gpg_passphrase` — GPG key passphrase (set by `create_key` CI job)
+3. When enabling a new native grapheme JDK profile, audit its Unicode rules and property data,
+   regenerate the tables, and run the runtime and cross-JDK annotation processor matrix.
+   Record the tested vendor/builds in [native grapheme matching](native-grapheme.md).
 
 ## Published Artifacts
 
