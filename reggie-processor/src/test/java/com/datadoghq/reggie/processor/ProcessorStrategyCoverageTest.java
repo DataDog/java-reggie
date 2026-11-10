@@ -18,14 +18,21 @@ package com.datadoghq.reggie.processor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.datadoghq.reggie.codegen.analysis.PatternAnalyzer.MatchingStrategy;
 import com.datadoghq.reggie.runtime.MatchResult;
 import com.datadoghq.reggie.runtime.ReggieMatcher;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -118,5 +125,106 @@ class ProcessorStrategyCoverageTest {
     Class<?> defineClass(String name, byte[] bytecode) {
       return super.defineClass(name, bytecode, 0, bytecode.length);
     }
+  }
+
+  /**
+   * Strategies intentionally without a {@code case} label in the processor's strategy switch;
+   * {@code resolveRealization} routes them to a delegate realization before dispatch (mirrors
+   * {@code scripts/check-dual-path.py} EXEMPT budget).
+   */
+  private static final java.util.Set<String> PROCESSOR_EXEMPT =
+      java.util.Set.of("PIKEVM_CAPTURE", "BITSTATE_CAPTURE");
+
+  /**
+   * Dual-path completeness gate (AGENTS.md Critical Rule 2): every {@link MatchingStrategy}
+   * constant must have a statement-form {@code case} label in BOTH {@code RuntimeCompiler} (runtime
+   * path) and {@code ReggieMatcherBytecodeGenerator} (@RegexPattern compile-time path) — minus the
+   * processor EXEMPT budget. The historical fault class: a strategy wired into RuntimeCompiler
+   * first (LAZY_DFA, OPTIMIZED_NFA_WITH_BACKREFS) while the processor path lagged until runtime
+   * failure ("Unknown strategy", missing bounded methods, IllegalAccessError in user packages).
+   * Mirrors scripts/check-dual-path.py so the fault class fails plain {@code ./gradlew build} on
+   * every PR, not only agent PRs behind the agent-gates workflow.
+   */
+  @Test
+  void processorDispatchCoversRuntimeStrategies() throws IOException {
+    // Gradle runs tests with the module directory as working directory; source layout is
+    // ../reggie-codegen, ../reggie-runtime, and this module's src/main.
+    Path codegen = Path.of("..", "reggie-codegen");
+    Path runtime = Path.of("..", "reggie-runtime");
+    assumeTrue(
+        Files.isDirectory(codegen), "source checkout not present: " + codegen.toAbsolutePath());
+    assumeTrue(
+        Files.isDirectory(runtime), "source checkout not present: " + runtime.toAbsolutePath());
+
+    String enumSrc =
+        stripComments(
+            Files.readString(
+                codegen.resolve(
+                    "src/main/java/com/datadoghq/reggie/codegen/analysis/PatternAnalyzer.java")));
+    String runtimeSrc =
+        stripComments(
+            Files.readString(
+                runtime.resolve(
+                    "src/main/java/com/datadoghq/reggie/runtime/RuntimeCompiler.java")));
+    String processorSrc =
+        stripComments(
+            Files.readString(
+                Path.of(
+                    "src/main/java/com/datadoghq/reggie/processor/ReggieMatcherBytecodeGenerator.java")));
+
+    java.util.Set<String> constants = enumConstants(enumSrc);
+    assertTrue(!constants.isEmpty(), "no MatchingStrategy constants parsed");
+    java.util.Set<String> runtimeCases = caseLabels(runtimeSrc);
+    java.util.Set<String> processorCases = caseLabels(processorSrc);
+
+    var missing = new java.util.ArrayList<String>();
+    for (String c : constants) {
+      if (!runtimeCases.contains(c)) {
+        missing.add(c + ": no `case " + c + "` in RuntimeCompiler.java");
+      } else if (!processorCases.contains(c) && !PROCESSOR_EXEMPT.contains(c)) {
+        missing.add(c + ": no `case " + c + "` in ReggieMatcherBytecodeGenerator.java");
+      }
+    }
+    assertTrue(
+        missing.isEmpty(),
+        "Dual-path rule (AGENTS.md Critical Rule 2) violated — update BOTH compilation paths:\n    "
+            + String.join("\n    ", missing));
+  }
+
+  private static String stripComments(String src) {
+    String noBlock = src.replaceAll("(?s)/\\*.*?\\*/", "");
+    return noBlock.replaceAll("//[^\n]*", "");
+  }
+
+  private static java.util.Set<String> enumConstants(String src) {
+    java.util.regex.Matcher m = Pattern.compile("enum\\s+MatchingStrategy\\s*\\{").matcher(src);
+    assertTrue(m.find(), "MatchingStrategy enum not found");
+    String body = src.substring(m.end());
+    int end = Integer.min(body.indexOf(';'), body.indexOf('}'));
+    var out = new LinkedHashSet<String>();
+    for (String part : body.substring(0, end).split(",")) {
+      String c = part.strip();
+      if (!c.isEmpty()) {
+        out.add(c);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Statement-form labels only ({@code case X:} / {@code case X, Y:}); arrow-form switch
+   * expressions are auxiliary lookups, not strategy dispatch.
+   */
+  private static java.util.Set<String> caseLabels(String src) {
+    var out = new LinkedHashSet<String>();
+    java.util.regex.Matcher m =
+        Pattern.compile("\\bcase\\s+([A-Z][A-Z0-9_]*(?:\\s*,\\s*[A-Z][A-Z0-9_]*)*)\\s*:")
+            .matcher(src);
+    while (m.find()) {
+      for (String label : m.group(1).split(",")) {
+        out.add(label.strip());
+      }
+    }
+    return out;
   }
 }
