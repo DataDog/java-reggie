@@ -1,0 +1,26 @@
+name: Agent Gates
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Deterministic repo gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Dual-path gate (AGENTS.md Critical Rule 2)
+        run: python3 scripts/check-dual-path.py
+
+      - name: Scratch-file gate (task-scoped docs stay in doc/temp/)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python3 scripts/check-scratch-files.py "origin/$BASE_REF" HEAD

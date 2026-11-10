@@ -5,7 +5,7 @@ conditions, and current known limitations.
 
 ## Correctness Guarantee
 
-Reggie never silently returns a wrong answer for an accepted pattern. Every result is either:
+Reggie never silently returns a wrong answer for an accepted pattern. This covers every execution route, including fast paths that bypass `MatchingStrategy` (e.g. `LinearTokenSequenceMatcher`). Such a route must take character-class semantics from the parsed `CharSet` (never a re-implemented predicate). It must reject at admission any construct it cannot execute without backtracking. A test must pin it against the general engine for each construct it admits. Every result is either:
 
 - **(a) provably correct** — generated natively by one of Reggie's bytecode strategies, or
 - **(b) explicitly rejected** — pattern compilation via `Reggie.compile()` throws
@@ -21,9 +21,10 @@ This guarantee is enforced continuously in CI by two automated gates:
   `DFA_UNROLLED_WITH_GROUPS` and `SPECIALIZED_CONCAT_GREEDY_GROUP`; boolean divergences in
   `OPTIMIZED_NFA_WITH_BACKREFS`, `DFA_SWITCH` (\\A anchor), and backref/anchor-combo patterns).
   Override with `-Dreggie.fuzz.maxFindings=N`.
+  Divergences within the budget are tracked pre-existing bugs, not regressions of the PR under review: inventory in `doc/fuzz/*.md` and the budget constant's Javadoc in `AlgorithmicFuzzTest`. Flag fuzz results only when the count exceeds the budget or a divergence is absent from that inventory.
 - **Per-strategy correctness meta-test** (`StrategyCorrectnessMetaTest`): all 8 public
   `ReggieMatcher` methods exercised for every `MatchingStrategy` against JDK — 0 mismatches
-  required (enforced via `-Dreggie.metatest.enforce=true` in every build).
+  required (enforced via `-Dreggie.metatest.enforce=true` in every build). A representative meant to test native bytecode must assert the compiled matcher is not a `JavaRegexFallbackMatcher`; a representative that routes to JDK fallback (e.g. the `OPTIMIZED_NFA` alternation-priority case) validates only the routing decision and the delegated results, and carries a `NOTE` comment saying so.
 
 ## Automatic Fallback to java.util.regex
 

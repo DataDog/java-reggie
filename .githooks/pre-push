@@ -1,0 +1,30 @@
+#!/bin/sh
+# Pre-push gate. Install once per clone: git config core.hooksPath .githooks
+# Policy is loaded from the trusted ref (refs/remotes/origin/main), never from
+# the checkout being pushed; fails open when the policy or python3 is absent.
+TRUSTED_REF=refs/remotes/origin/main
+ZERO=0000000000000000000000000000000000000000
+command -v python3 >/dev/null 2>&1 || exit 0
+POLICY=$(git show "$TRUSTED_REF:scripts/check-scratch-files.py" 2>/dev/null) || exit 0
+failed=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$ZERO" ] && continue
+  case "$remote_ref" in refs/heads/*) ;; *) continue ;; esac
+  base=$(git merge-base "$TRUSTED_REF" "$local_sha" 2>/dev/null) || continue
+  printf '%s\n' "$POLICY" | python3 - "$base" "$local_sha" || failed="$failed $remote_ref"
+done
+if [ -n "$failed" ]; then
+  echo "pre-push: refused push to$failed. Remove the listed files, or bypass deliberately with --no-verify." >&2
+  exit 1
+fi
+# Spotless gate (AGENTS.md Critical Rule 1): spotlessJavaCheck failing in CI after a
+# push costs a follow-up formatting commit. The gate inspects the WORKING TREE, so an
+# uncommitted formatting fix can mask an unformatted commit -- run spotlessApply and
+# commit before pushing.
+if [ -f gradlew ]; then
+  ./gradlew -q spotlessCheck || {
+    echo "pre-push: spotlessCheck failed. Run ./gradlew spotlessApply, commit, and push again (bypass deliberately with --no-verify)." >&2
+    exit 1
+  }
+fi
+exit 0

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 300,
+            "command": "cmd=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get(\"tool_input\", {}).get(\"command\", \"\"))' 2>/dev/null) || exit 0; case \"$cmd\" in *'git push'*) cd \"${CLAUDE_PROJECT_DIR:-.}\" && ./gradlew -q spotlessCheck >/dev/null 2>&1 || { echo 'BLOCKED: ./gradlew spotlessCheck failed. Run ./gradlew spotlessApply, commit the formatting, then push (AGENTS.md Critical Rule 1).' >&2; exit 2; } ;; esac; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
