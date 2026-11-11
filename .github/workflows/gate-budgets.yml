@@ -1,0 +1,22 @@
+name: Gate Budgets
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  gate-budgets:
+    name: Gate-budget ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Gate-budget self-test (allowed and prohibited cases)
+        run: python3 scripts/check-gate-budgets.py --self-test
+
+      - name: Gate-budget ratchet (fuzz budget, coverage floors, metatest enforcement)
+        run: python3 scripts/check-gate-budgets.py

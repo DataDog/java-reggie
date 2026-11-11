@@ -5,7 +5,7 @@ conditions, and current known limitations.
 
 ## Correctness Guarantee
 
-Reggie never silently returns a wrong answer for an accepted pattern. This covers every execution route, including fast paths that bypass `MatchingStrategy` (e.g. `LinearTokenSequenceMatcher`). Such a route must take character-class semantics from the parsed `CharSet` (never a re-implemented predicate). It must reject at admission any construct it cannot execute without backtracking. A test must pin it against the general engine for each construct it admits. Every result is either:
+Reggie never silently returns a wrong answer for an accepted pattern. This covers every execution route, including fast paths that bypass `MatchingStrategy` (e.g. `LinearTokenSequenceMatcher`). Such a route must take character-class semantics from the parsed `CharSet` (never a re-implemented predicate). Admission checks fail closed: a predicate that admits a pattern to a native path must reject at least every construct that path's layout builder or executor rejects, and each rejected construct is pinned by a test asserting the pattern is not admitted. It must reject at admission any construct it cannot execute without backtracking. A test must pin it against the general engine for each construct it admits. Every result is either:
 
 - **(a) provably correct** — generated natively by one of Reggie's bytecode strategies, or
 - **(b) explicitly rejected** — pattern compilation via `Reggie.compile()` throws
@@ -17,7 +17,9 @@ This guarantee is enforced continuously in CI by two automated gates:
 
 - **Differential fuzzer** (`AlgorithmicFuzzTest.divergenceGate_enforcedViaProperty`):
   400k+ deterministic (pattern, input) pairs checked against JDK — divergences must stay within
-  the known budget (28 pre-existing divergences on adversarial inputs: group-span gaps in
+  `KNOWN_FINDINGS_BUDGET` in `AlgorithmicFuzzTest.java`, the single source of truth for the count
+  (do not restate the number in docs). The CI `-Dreggie.fuzz.maxFindings` override in
+  `.github/workflows/ci.yml` must be less than or equal to it (pre-existing divergences on adversarial inputs: group-span gaps in
   `DFA_UNROLLED_WITH_GROUPS` and `SPECIALIZED_CONCAT_GREEDY_GROUP`; boolean divergences in
   `OPTIMIZED_NFA_WITH_BACKREFS`, `DFA_SWITCH` (\\A anchor), and backref/anchor-combo patterns).
   Override with `-Dreggie.fuzz.maxFindings=N`.
