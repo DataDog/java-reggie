@@ -136,14 +136,25 @@ class ProcessorStrategyCoverageTest {
       java.util.Set.of("PIKEVM_CAPTURE", "BITSTATE_CAPTURE");
 
   /**
+   * Strategies intentionally without a {@code case} label in the runtime dispatch switch; the
+   * PikeVM/BitState interpreter caches realize them before {@code generateBytecode} dispatch
+   * (mirrors {@code scripts/check-dual-path.py} EXEMPT budget).
+   */
+  private static final java.util.Set<String> RUNTIME_EXEMPT =
+      java.util.Set.of("PIKEVM_CAPTURE", "BITSTATE_CAPTURE");
+
+  /**
    * Dual-path completeness gate (AGENTS.md Critical Rule 2): every {@link MatchingStrategy}
-   * constant must have a statement-form {@code case} label in BOTH {@code RuntimeCompiler} (runtime
-   * path) and {@code ReggieMatcherBytecodeGenerator} (@RegexPattern compile-time path) — minus the
-   * processor EXEMPT budget. The historical fault class: a strategy wired into RuntimeCompiler
-   * first (LAZY_DFA, OPTIMIZED_NFA_WITH_BACKREFS) while the processor path lagged until runtime
-   * failure ("Unknown strategy", missing bounded methods, IllegalAccessError in user packages).
-   * Mirrors scripts/check-dual-path.py so the fault class fails plain {@code ./gradlew build} on
-   * every PR, not only agent PRs behind the agent-gates workflow.
+   * constant must have a statement-form {@code case} label inside the strategy-dispatch switch of
+   * BOTH {@code RuntimeCompiler} (runtime path) and {@code ReggieMatcherBytecodeGenerator}
+   * (@RegexPattern compile-time path) — minus the runtime and processor EXEMPT budgets. Each
+   * dispatch switch is located by brace-matching outward from its unique {@code default: throw new
+   * IllegalStateException("Unknown strategy: ...")} anchor, so unrelated switches cannot masquerade
+   * as generator coverage. The historical fault class: a strategy wired into RuntimeCompiler first
+   * (LAZY_DFA, OPTIMIZED_NFA_WITH_BACKREFS) while the processor path lagged until runtime failure
+   * ("Unknown strategy", missing bounded methods, IllegalAccessError in user packages). Mirrors
+   * scripts/check-dual-path.py so the fault class fails plain {@code ./gradlew build} on every PR,
+   * not only agent PRs behind the agent-gates workflow.
    */
   @Test
   void processorDispatchCoversRuntimeStrategies() throws IOException {
@@ -174,12 +185,15 @@ class ProcessorStrategyCoverageTest {
 
     java.util.Set<String> constants = enumConstants(enumSrc);
     assertTrue(!constants.isEmpty(), "no MatchingStrategy constants parsed");
-    java.util.Set<String> runtimeCases = caseLabels(runtimeSrc);
-    java.util.Set<String> processorCases = caseLabels(processorSrc);
+    java.util.Set<String> runtimeCases =
+        caseLabels(dispatchSwitchBody(runtimeSrc, "result.strategy", "RuntimeCompiler.java"));
+    java.util.Set<String> processorCases =
+        caseLabels(
+            dispatchSwitchBody(processorSrc, "strategy", "ReggieMatcherBytecodeGenerator.java"));
 
     var missing = new java.util.ArrayList<String>();
     for (String c : constants) {
-      if (!runtimeCases.contains(c)) {
+      if (!runtimeCases.contains(c) && !RUNTIME_EXEMPT.contains(c)) {
         missing.add(c + ": no `case " + c + "` in RuntimeCompiler.java");
       } else if (!processorCases.contains(c) && !PROCESSOR_EXEMPT.contains(c)) {
         missing.add(c + ": no `case " + c + "` in ReggieMatcherBytecodeGenerator.java");
@@ -212,7 +226,68 @@ class ProcessorStrategyCoverageTest {
   }
 
   /**
-   * Statement-form labels only ({@code case X:} / {@code case X, Y:}); arrow-form switch
+   * Length-preserving mask of double-quoted string literal contents (quotes kept, contents become
+   * {@code x}), so brace indices computed on the masked text stay valid in the original.
+   */
+  private static String maskStrings(String src) {
+    return Pattern.compile("\"(?:[^\"\\\\]|\\\\.)*\"")
+        .matcher(src)
+        .replaceAll(m -> "\"" + "x".repeat(m.group().length() - 2) + "\"");
+  }
+
+  /**
+   * Returns the strategy-dispatch switch body of {@code src} (comment-stripped), located by
+   * backward-then-forward brace matching from the file's unique 'Unknown strategy' default throw.
+   * Fails the test loudly if the anchor or braces cannot be resolved, instead of scanning nothing
+   * and passing.
+   */
+  private static String dispatchSwitchBody(String src, String strategyVar, String fileName) {
+    String maskedSrc = maskStrings(src);
+    String anchor =
+        maskStrings(
+            "throw new IllegalStateException(\"Unknown strategy: \" + " + strategyVar + ");");
+    int idx = maskedSrc.indexOf(anchor);
+    assertTrue(
+        idx >= 0,
+        "dispatch-switch anchor not found in "
+            + fileName
+            + " (was the 'Unknown strategy' default throw renamed?)");
+    int depth = 0;
+    int start = -1;
+    for (int i = idx - 1; i >= 0; i--) {
+      char ch = maskedSrc.charAt(i);
+      if (ch == '}') {
+        depth++;
+      } else if (ch == '{') {
+        if (depth == 0) {
+          start = i;
+          break;
+        }
+        depth--;
+      }
+    }
+    assertTrue(start >= 0, "dispatch-switch opening brace not found in " + fileName);
+    depth = 0;
+    int end = -1;
+    for (int j = start; j < maskedSrc.length(); j++) {
+      char ch = maskedSrc.charAt(j);
+      if (ch == '{') {
+        depth++;
+      } else if (ch == '}') {
+        depth--;
+        if (depth == 0) {
+          end = j;
+          break;
+        }
+      }
+    }
+    assertTrue(end >= 0, "dispatch-switch closing brace not found in " + fileName);
+    return maskedSrc.substring(start + 1, end);
+  }
+
+  /**
+   * Statement-form labels only ({@code case X:} / {@code case X, Y:}), collected from the
+   * strategy-dispatch switch body returned by {@link #dispatchSwitchBody}; arrow-form switch
    * expressions are auxiliary lookups, not strategy dispatch.
    */
   private static java.util.Set<String> caseLabels(String src) {
