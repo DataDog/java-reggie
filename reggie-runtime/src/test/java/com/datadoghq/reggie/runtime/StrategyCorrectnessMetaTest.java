@@ -83,7 +83,24 @@ public class StrategyCorrectnessMetaTest {
         new Spec("(\\d+)", List.of("12345", "abc123def", "abc", "", "４2")));
     m.put(
         PatternAnalyzer.MatchingStrategy.GREEDY_SUFFIX,
-        new Spec("(.*)\\b(\\d+)$", List.of("abc 123", "x12", "12", "a1\n", "", "abc", "1 2 3\n")));
+        new Spec(
+            "(.*)\\b(\\d+)$",
+            // END-anchor terminator set: \$ tolerates one final JDK line terminator (CRLF, NEL,
+            // LS, PS included) — the CRLF pair was missed by a per-config END anchor (silent
+            // divergence, fixed in review); keep the set covered here.
+            List.of(
+                "abc 123",
+                "x12",
+                "12",
+                "a1\n",
+                "",
+                "abc",
+                "1 2 3\n",
+                "a1\r\n",
+                "a1\u0085",
+                "a1\u2028",
+                "a1\u2029",
+                "a1\r\n\r\n")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_MULTI_GROUP_GREEDY,
         new Spec(
@@ -99,7 +116,20 @@ public class StrategyCorrectnessMetaTest {
             List.of("123-456-7890", "call 123-456-7890 now", "12-34-5678", "", "１23-456-7890")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_SUFFIX_SEQUENCE,
-        new Spec("\\.?0+$", List.of("ab.000", "000", "000\n", "ab0", "", "a\\.000")));
+        new Spec(
+            "\\.?0+$",
+            // Same END-anchor terminator set as the GREEDY_SUFFIX spec above (CRLF/NEL/LS/PS).
+            List.of(
+                "ab.000",
+                "000",
+                "000\n",
+                "ab0",
+                "",
+                "a\\.000",
+                "000\r\n",
+                "000\u0085",
+                "000\u2028",
+                "000\u2029")));
     m.put(
         PatternAnalyzer.MatchingStrategy.SPECIALIZED_BOUNDED_QUANTIFIERS,
         new Spec(

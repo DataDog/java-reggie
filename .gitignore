@@ -16,8 +16,9 @@ bin/
 *.old
 *.orig
 
-# Claude Code
-.claude/
+# Claude Code (local state ignored; shared hook config .claude/settings.json is committed)
+.claude/*
+!.claude/settings.json
 
 # OS
 .DS_Store

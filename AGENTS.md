@@ -161,7 +161,9 @@ groups), and performance-only gaps:
 - `reggie-runtime/.../runtime/RuntimeCompiler.java` — runtime bytecode generation
 - Bytecode generators: `reggie-codegen/.../codegen/*BytecodeGenerator.java`
 
-Temporary/task-scoped documents go in `doc/temp/` (gitignored) — never in `.github/` or repo root.
+Temporary/task-scoped documents (benchmark write-ups, task notes, dated `*-YYYY-MM-DD.md` reports) go in
+`doc/temp/` (gitignored) — never in `doc/` itself, `.github/`, or repo root. Before committing, `git diff --cached --name-only -- doc/`
+must list no such task-scoped file.
 
 ## Publishing & Releasing
 
