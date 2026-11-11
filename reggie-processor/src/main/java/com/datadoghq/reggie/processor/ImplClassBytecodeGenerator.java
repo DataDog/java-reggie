@@ -41,6 +41,8 @@ public class ImplClassBytecodeGenerator {
       /** Generated matcher that writes instance state while matching; cached as a PooledMatcher. */
       POOLED,
       HYBRID,
+      GRAPHEME,
+      GRAPHEME_ALLOWING_FALLBACK,
       PIKEVM,
       /** Stateless runtime backtracker, cached and shared like the other kinds. */
       BACKTRACK,
@@ -52,7 +54,7 @@ public class ImplClassBytecodeGenerator {
     public final String matcherClassName; // NATIVE, POOLED; HYBRID: the DFA half
     public final String nfaClassName; // HYBRID only
     public final boolean lazyFind; // HYBRID only
-    public final String pattern; // HYBRID, PIKEVM, BACKTRACK and FALLBACK
+    public final String pattern; // HYBRID, GRAPHEME*, PIKEVM, BACKTRACK and FALLBACK
     public final String encodedNames; // PIKEVM and BACKTRACK
 
     private MethodInfo(
@@ -92,6 +94,17 @@ public class ImplClassBytecodeGenerator {
 
     public static MethodInfo pikevm(String methodName, String pattern, String encodedNames) {
       return new MethodInfo(methodName, Kind.PIKEVM, null, null, false, pattern, encodedNames);
+    }
+
+    public static MethodInfo grapheme(String methodName, String pattern, boolean allowJdkFallback) {
+      return new MethodInfo(
+          methodName,
+          allowJdkFallback ? Kind.GRAPHEME_ALLOWING_FALLBACK : Kind.GRAPHEME,
+          null,
+          null,
+          false,
+          pattern,
+          null);
     }
 
     public static MethodInfo backtrack(String methodName, String pattern, String encodedNames) {
@@ -165,12 +178,9 @@ public class ImplClassBytecodeGenerator {
   }
 
   /**
-   * Generate method with lazy initialization and double-check locking for NATIVE, POOLED, HYBRID,
-   * BACKTRACK and FALLBACK kinds, or a direct compilePikeVm() call for PIKEVM (PikeVMMatcher has
-   * mutable per-call buffers and must not be cached/shared across invocations). The cached matcher
-   * is shared by all callers, so every matcher that writes instance state while matching is reached
-   * through a PooledMatcher: the POOLED matcher, the NFA half of HYBRID and the runtime-compiled
-   * FALLBACK matcher.
+   * Generates accessors that cache thread-safe matchers with double-check locking. PikeVM returns a
+   * fresh matcher on each call because it has mutable per-call buffers. Other mutable engines are
+   * wrapped in a PooledMatcher before being cached.
    */
   private void generateLazyInitMethod(ClassWriter cw, MethodInfo method) {
     MethodVisitor mv =
@@ -273,6 +283,16 @@ public class ImplClassBytecodeGenerator {
             "com/datadoghq/reggie/runtime/RuntimeCompiler",
             "compileBackrefBacktrack",
             "(Ljava/lang/String;Ljava/lang/String;)L" + REGGIE_MATCHER + ";",
+            false);
+        break;
+      case GRAPHEME:
+      case GRAPHEME_ALLOWING_FALLBACK:
+        mv.visitLdcInsn(method.pattern);
+        mv.visitMethodInsn(
+            INVOKESTATIC,
+            "com/datadoghq/reggie/Reggie",
+            method.kind == MethodInfo.Kind.GRAPHEME ? "compile" : "compileAllowingFallback",
+            "(Ljava/lang/String;)L" + REGGIE_MATCHER + ";",
             false);
         break;
       case FALLBACK:

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- feat: native standalone `\X` matching with runtime JDK grapheme profiles and allocation-free bounds traversal
+
 ## [0.5.0] - 2026-09-28
 
 - #48 feat: support self-referencing backreferences in RECURSIVE_DESCENT
