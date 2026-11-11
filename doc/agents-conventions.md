@@ -5,9 +5,11 @@ whose violation produces hard-to-debug wrong results.
 
 ## Bytecode Generation Dual-Path Rule
 
-**CRITICAL**: Changes to bytecode generation require updates to BOTH (this includes strategy-realization and fallback-guard decisions: every path that returns a realization must call `FallbackPatternDetector.needsFallback(ast, strategy)` — check `RuntimeCompiler` and `ReggieMatcherBytecodeGenerator.resolveRealization` together):
+**CRITICAL**: Changes to bytecode generation require updates to BOTH (this includes strategy-realization and fallback-guard decisions: every path that returns a realization must call `FallbackPatternDetector.needsFallback(ast, strategy)` — check `RuntimeCompiler` (including `compilePikeVm()`) and `ReggieMatcherBytecodeGenerator.resolveRealization` together):
 1. `RuntimeCompiler.java` (runtime path: `Reggie.compile()`)
 2. `ReggieMatcherBytecodeGenerator.java` (compile-time path: `@RegexPattern`)
+
+A change to one strategy's `case` in either file (constructor arguments, flags, generated methods) must be mirrored in the same strategy's `case` in the other file in the same commit: run `grep -n '<STRATEGY_NAME>'` on both files before pushing and confirm the two branches make the same calls.
 
 The rule covers every per-strategy `case` body: constructor arguments, flags, and the set of
 generated methods (e.g. `findBoundsFrom`, `matchesBounded`) must be identical for the same
@@ -32,6 +34,10 @@ When you change how one engine implements a shared construct (end-anchor `$`/`\Z
 - End-anchor terminator set (non-`UNIX_LINES`): `\n` unless preceded by `\r`, lone `\r`, the `\r\n` pair, `\u0085`, `\u2028`, `\u2029`.
 - `findFrom` with a negative start clamps to 0; it never returns -1 for that reason.
 - Add a JDK-differential test covering the construct for each strategy you touched.
+
+`ReggieMatcherBytecodeGenerator` emits matcher classes into the user's package, so the code it generates may reference only `public` members of `reggie-runtime`. Package-private runtime internals link only from hidden classes in `com.datadoghq.reggie.runtime`; anywhere else they fail with `IllegalAccessError`. A new strategy needs a processor-path test that compiles it into a non-runtime package and calls `matches`, `match`, `matchBounded` and `findMatchFrom`.
+
+The same applies to `MatchResult`/`ReggieMatcher` result behavior (e.g. `hasNamedGroups()`, name-to-index lookup): implement and test it on every result-producing path — generated runtime matchers, annotation-processor `$Impl`, `JavaRegexFallbackMatcher`, `NameEnrichingMatcher`, and wrappers such as `HybridMatcher.OffsetMatchResult`.
 
 ## Structural Hash Rule
 
@@ -80,7 +86,7 @@ Missing fields → cache collisions → wrong results.
 
 ## Bytecode Generation Best Practices
 
-1. **Never hardcode local variable slots** — this includes method parameters: bind every parameter and temp to a named slot variable (e.g. `depthSlot`) allocated from `highestSlot`, and never emit `ILOAD`/`ISTORE` with a numeric literal slot, because a literal can silently alias a slot another path repurposes:
+1. **Never hardcode local variable slots** — this includes method parameters and scratch reuse: bind every parameter and temp to a named slot variable (e.g. `depthSlot`) allocated from the method's slot counter (`highestSlot`), never emit `ILOAD`/`ISTORE` with a numeric literal slot, never repurpose a parameter slot as scratch (e.g. `ISTORE 5` over `depth`), and never save values into literal slots (`7`, `8`), because a literal can silently alias a slot another path repurposes:
    ```java
    // WRONG: int var = 50;
    // RIGHT: int var = highestSlot + 1;
@@ -95,6 +101,14 @@ Missing fields → cache collisions → wrong results.
 3. **Document slot allocation** in method comments
 
 4. **`MatchResultImpl` contract**: generated code passes the original `input` and `starts[g]`/`ends[g]` arrays indexed by group (group 0 = whole match at index 0, length `groupCount + 1`) holding absolute offsets into that input — never offsets relative to a substring copy. Every new strategy has tests asserting `start(0)`/`end(0)`/`group()` for `match()` and `matchBounded(input, s, e)` with `s > 0`.
+
+5. **Decide routing/admission from the parsed AST or analysis plan, never by scanning the pattern source string**: substring checks (`pattern.contains(".*")`) and hand-rolled source scanners misread quoted text, escapes and character classes (a leading `]` in `[]]`/`[^]]` is a literal). If a source scan is unavoidable, add tests covering `\Q...\E`, escaped metacharacters and leading-`]` classes.
+
+6. **End-anchor terminator parity**: every `$`/`\Z` implementation (`PikeVMMatcher.checkAnchor` and each `*BytecodeGenerator` end-anchor emitter) accepts exactly the JDK final-terminator set (see the Cross-Engine Semantic Parity Rule above). When changing one emitter, grep the others and pin each terminator with a JDK-differential test.
+
+7. **Keep strategy eligibility identical to generator capability** (see the Routing/Generator Alignment Rule above): share one helper (e.g. `hasTrailingOptionalQuantifier`) between analyzer and generator instead of re-deriving the condition, and add a routing test for each construct the generator does not handle, asserting it is not routed there.
+
+8. **Failed attempts leave capture state unchanged**: generated code that writes `groups[]` before a child match (e.g. a partial-open sentinel) must save the prior start/end and restore them on the child's `-1` path. Pin it with a test where a greedy iteration fails after a successful one and assert `group(n)` still holds the last successful capture.
 
 ## Concurrency Contract
 
@@ -122,7 +136,7 @@ Missing fields → cache collisions → wrong results.
   `DETERMINISTIC_CHAIN_BYTECODE` PikeVM fallback (`RuntimeCompiler.createChainFallback`) is a
   `PooledMatcher` too.
 
-- **Static state shared across matcher instances and mutated during matching** (e.g. `LazyDFACache`): every publication of a lazily built object or slot uses a release write paired with an acquire read (`VarHandle.setRelease`/`getAcquire`, or `Atomic*Array`), in both the runtime class and generated bytecode. Plain stores plus writer-side fences (`storeStoreFence`, `fullFence`) are not sufficient on weakly ordered CPUs (ARM), and this is never deferred as an x86-only non-issue.
+- **Static state shared across matcher instances and mutated during matching** (e.g. `LazyDFACache` tables filled lazily while matching): every publication of a lazily built object or slot uses a release write paired with an acquire read (`VarHandle.setRelease`/`getAcquire`, or `volatile`/`AtomicReferenceArray`), in both the runtime class and generated bytecode. Plain writes and writer-only fences (`storeStoreFence`, `fullFence`) create no happens-before with plain readers — on ARM a reader can see default `0` entries — and this is never deferred as an x86-only non-issue.
 
 This contract is verified by `DfaMatcherConcurrencyTest`, `NfaMatcherConcurrencyTest`,
 `ChainFallbackPoolingTest` and `HybridRealizationProcessorTest`.
@@ -171,7 +185,7 @@ A predicate that admits a pattern onto a specialized path (e.g. `CaptureProjecti
 - **Documentation**: Javadoc for public APIs; no hallucinations — documentation must match actual code. Every system property, flag, class, or method named in a Javadoc/comment must exist (grep for it before committing), and a Javadoc must state any filtering or exclusion the method performs; update the Javadoc in the same commit that changes the behavior.
   When a change alters routing or fallback behavior (`PatternAnalyzer`, `FallbackPatternDetector`, `RuntimeCompiler`), grep `src/main` and `src/test` for comments naming the affected strategy, pattern shape, or fallback reason and update every comment that describes the old routing in the same commit. This covers Javadoc, design specs, plan docs and the PR description alike: every repo path a doc references must exist (`git ls-files <path>`), and a commit that changes routing, eligibility, or concurrency behavior updates the spec/PR-description statements about that behavior in the same push. Documentation includes code comments, test names/section labels, and the PR description: when a change removes a limitation or guard, delete the comment claiming it; never label code with a property it lacks (e.g. "allocation-free" around `match()`, which allocates); every API the PR description names must exist in the diff.
 - **Imports**: specific imports (no wildcards except `java.*`/`javax.*`); prefer importing over fully-qualified names; order java/javax → external → internal.
-- **No redundant work**: no dead stores or unread allocations (e.g. a saved `groups.clone()` that is never read); compute a compile-time analysis once per method and reuse the local; read authoritative existing state (e.g. `ReggieMatcher.nameToIndex`) instead of re-deriving it from the pattern string.
+- **No redundant or write-only code**: every local, slot save, clone, latch or field a change introduces must be read on some path — no dead stores or unread allocations (e.g. a saved `groups.clone()` that is never read, a `CountDownLatch` counted down but never awaited); compute a compile-time analysis once per method and reuse the local; read authoritative existing state (e.g. `ReggieMatcher.nameToIndex`) instead of re-deriving it from the pattern string.
 
 ## Testing Requirements
 
@@ -182,6 +196,7 @@ A predicate that admits a pattern onto a specialized path (e.g. `CaptureProjecti
 - A test's method name and comment must state what it actually asserts. When a change flips an asserted outcome (e.g. fallback → native) or the pattern under test, rename the test and update its comment in the same commit; a name that claims a construct ("double backref", "Fallback") must match the pattern and assertions.
 - Coverage must meet both gates: `./gradlew jacocoVerify` (target 70-75% line coverage overall; see `doc/coverage-baseline.md`) AND the Codecov **patch** gate (`codecov.yml` coverage.status.patch, target 70%, threshold 5%) — overall coverage passing while the PR's changed lines sit below 70% fails CI; a PR that passed jacocoVerify yet failed the patch gate at 64.9% is the precedent. Adding tests only to untouched files does not satisfy the patch gate.
 - Each test must fail if the behavior it names is broken: a test for one eligibility guard uses an input that passes every other guard; matcher tests include at least one deterministic accepting input next to random/rejecting ones; tests comparing two instances first `assertNotSame` them (bypass `PATTERN_CACHE`, e.g. `RuntimeCompiler.cached(key, pattern)`).
+- A JMH benchmark named for a specific execution path (cold/miss, warm/hit, frozen/fallback) must check in `@Setup` that the path is reached (e.g. assert the cache `isFrozen()` and throw `IllegalStateException` otherwise), and its Javadoc states exactly which path it measures.
 
 ## Commit Guidelines
 

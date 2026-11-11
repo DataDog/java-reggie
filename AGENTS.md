@@ -115,6 +115,8 @@ See `doc/ARCHITECTURE.md` for the full pipeline, module structure, and design pa
 
 Coverage: `./gradlew jacocoVerify` (thresholds in `doc/coverage-baseline.md`).
 Benchmarks: `./gradlew :reggie-benchmark:benchmarkAndReport` (see AGENTS conventions doc for baselines/profiling).
+CI fuzz gate (`./gradlew build` may use a looser source-default budget): `./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.divergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforce=true -Dreggie.fuzz.maxFindings=28` — healthy: `[divergence-gate] … findings=N` (N ≤ 28), then `BUILD SUCCESSFUL`.
+Required checks with healthy outputs, hook install, prohibited actions and protected paths: **`doc/agents-guardrails.md`**.
 
 ## Critical Rules — read before editing bytecode generation
 
@@ -162,8 +164,8 @@ groups), and performance-only gaps:
 - Bytecode generators: `reggie-codegen/.../codegen/*BytecodeGenerator.java`
 
 Temporary/task-scoped documents (benchmark write-ups, task notes, dated `*-YYYY-MM-DD.md` reports) go in
-`doc/temp/` (gitignored) — never in `doc/` itself, `.github/`, or repo root. Before committing, `git diff --cached --name-only -- doc/`
-must list no such task-scoped file.
+`doc/temp/` (gitignored) — never in `doc/` itself, `.github/`, the repo root, or tool workspace dirs such as `.sphinx/`.
+Before committing, `git diff --cached --name-only` must list no such task-scoped file.
 
 ## Publishing & Releasing
 

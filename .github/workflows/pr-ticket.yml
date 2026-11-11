@@ -1,0 +1,43 @@
+name: PR Ticket
+
+on:
+  pull_request:
+    types: [ opened, edited, reopened, synchronize, labeled, unlabeled ]
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  ticket:
+    name: PR links its ticket
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: github.event.pull_request.user.type != 'Bot'
+    steps:
+      - name: Related Issue(s) names a ticket (or the PR carries the no-ticket label)
+        run: |
+          python3 - <<'EOF'
+          import json, os, re, sys
+          pr = json.load(open(os.environ["GITHUB_EVENT_PATH"]))["pull_request"]
+          labels = {label["name"] for label in pr.get("labels", [])}
+          if "no-ticket" in labels:
+              print("PR ticket check skipped: no-ticket label")
+              sys.exit(0)
+          body = re.sub(r"<!--.*?-->", "", pr.get("body") or "", flags=re.S)
+          ref = r"(#\d+|https://github\.com/[\w.-]+/[\w.-]+/issues/\d+|\b[A-Z][A-Z0-9]+-\d+\b)"
+          section = re.search(r"^###\s*Related Issue\(s\)\s*$(.*?)(?=^###\s|\Z)", body, re.M | re.S)
+          if section:
+              ticket = re.search(ref, section.group(1))
+          else:
+              ticket = re.search(r"(?i:\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?|implements|refs?|part of)"
+                                 r"\b\s*:?\s*)" + ref, body)
+          if ticket:
+              print("PR ticket check OK: %s" % ticket.group(0))
+              sys.exit(0)
+          print("PR ticket check FAILED: the 'Related Issue(s)' section of the PR template must link "
+                "the ticket this work originates from (e.g. 'Fixes #123' or a Jira key). For a "
+                "trivial change a maintainer adds the 'no-ticket' label (CONTRIBUTING.md: create an "
+                "issue first for non-trivial changes).")
+          sys.exit(1)
+          EOF
