@@ -27,7 +27,7 @@ def main(argv):
     base, head = argv[1], argv[2] if len(argv) == 3 else "HEAD"
     try:
         out = subprocess.run(
-            ["git", "diff", "--name-only", "--diff-filter=A", "%s...%s" % (base, head)],
+            ["git", "diff", "--name-only", "--no-renames", "--diff-filter=A", "%s...%s" % (base, head)],
             check=True, capture_output=True, text=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as e:
