@@ -55,6 +55,7 @@ class GraphemeMatcherTest {
           "e\u0301",
           "日本",
           "\r\n",
+          "\r\u0301",
           "\t\u0301",
           "\u007f\u0301",
           "\r\n\u0301",
@@ -65,10 +66,16 @@ class GraphemeMatcherTest {
           "\uD83C\uDDEB\uD83C\uDDF7\uD83C\uDDE9",
           "\u1100\u1161\u11a8",
           "\u0915\u094d\u0915",
+          "\u0915\u093c\u0915",
+          "\u0915\u094d\u093c\u0915",
           "\ud800",
           "\udc00",
           "a\ud800b\udc00",
           "\u0378\u0301",
+          "\u0380\u0301",
+          "\u0fe0\u0301",
+          "\uD83D\uDC68\u200D\u200D\uD83D\uDC68",
+          "\uD83D\uDC68\u0301\u200D\u200D\uD83D\uDC68",
           "\uD83D\uDC69\u0903\u200D\uD83D\uDCBB");
 
   @Test

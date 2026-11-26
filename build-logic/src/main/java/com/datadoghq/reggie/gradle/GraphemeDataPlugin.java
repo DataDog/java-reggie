@@ -80,7 +80,7 @@ public class GraphemeDataPlugin implements Plugin<Project> {
                           .getLayout()
                           .getProjectDirectory()
                           .file(project.getProviders().gradleProperty("graphemeUnicodeData")));
-              for (int feature : new int[] {21, 25, 26, 27}) {
+              for (int feature : new int[] {21, 22, 23, 24, 25, 26, 27}) {
                 task.getProfileJdks()
                     .add(
                         toolchains.compilerFor(

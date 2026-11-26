@@ -57,7 +57,7 @@ class GraphemeDataPluginTest {
                 languageVersion = JavaLanguageVersion.of(JavaVersion.current().majorVersion)
             }
             profileJdks.set([])
-            [21, 25, 26, 27].each { profileJdks.add(jdk) }
+            [21, 22, 23, 24, 25, 26, 27].each { profileJdks.add(jdk) }
         }
         """
             .formatted(classpath));

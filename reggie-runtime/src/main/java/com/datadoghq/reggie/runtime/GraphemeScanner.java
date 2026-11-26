@@ -33,7 +33,11 @@ import static com.datadoghq.reggie.runtime.GraphemeData.T;
 import static com.datadoghq.reggie.runtime.GraphemeData.V;
 import static com.datadoghq.reggie.runtime.GraphemeData.ZWJ;
 
-/** Forward extended-grapheme scan, with UTF-16 offsets and executing-JDK compatibility rules. */
+/**
+ * Forward extended-grapheme scan, with UTF-16 offsets and executing-JDK compatibility rules.
+ * Callers must ensure {@code 0 <= start < limit <= input.length()} for both {@code nextEnd}
+ * overloads.
+ */
 final class GraphemeScanner {
   private GraphemeScanner() {}
 

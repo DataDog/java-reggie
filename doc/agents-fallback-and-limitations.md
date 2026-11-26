@@ -14,6 +14,7 @@ Reggie never silently returns a wrong answer for an accepted pattern. Every resu
   `Reggie.compileAllowingFallback()` or pass `ReggieOption.ALLOW_JDK_FALLBACK`.
 
 The exact standalone `\X` pattern uses a native grapheme matcher on supported GA JDKs.
+External flags leave grapheme segmentation unchanged; `LITERAL` selects literal matching.
 Its annotation-generated accessor selects the profile on the executing JVM and can throw
 `UnsupportedPatternException` there when the profile is unsupported. See
 [native grapheme matching](native-grapheme.md) for the supported profiles and scope.

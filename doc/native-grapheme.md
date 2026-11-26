@@ -34,6 +34,13 @@ executing JDK; bundled property tables require regeneration when their data chan
 Feature-version admission does not establish compatibility with every vendor and
 patch build. Verification results must identify the vendor and complete JDK version.
 
+The JDK sets emoji joining context from the first code point of each match and
+keeps it through Extend, ZWJ and SpacingMark characters. A leading Prepend leaves
+that context unset. Unassigned code points outside Extended_Pictographic use Control,
+except U+0378, which uses Other. U+0380 and U+0FE0 therefore break before a combining
+mark, while U+0378 joins it. These compatibility cases are tested separately from
+the unchanged Unicode fixtures.
+
 Unknown versions and early-access builds throw `UnsupportedPatternException` from
 strict compilation. `Reggie.compileAllowingFallback("\\X")` or
 `ALLOW_JDK_FALLBACK` permits JDK delegation on those runtimes. This preserves the
@@ -62,6 +69,10 @@ methods reject null input and invalid regions. `matchInto` and `findMatchInto` r
 null input or group arrays before matching, and require space for group 0 when a match
 succeeds. `findBoundsFrom` requires two array entries when a match succeeds. A failed
 match leaves caller-provided arrays unchanged.
+
+Successful bounded rich matches snapshot non-String input with `toString()` for the
+immutable result. String input is reused. Boolean and bounds scans do not need this
+snapshot.
 
 ## Verification
 
@@ -198,9 +209,10 @@ Run the explicit Gradle maintenance task with the pinned Unicode file:
 ./gradlew spotlessApply
 ```
 
-Gradle selects JDKs 21, 25, 26 and 27 through its toolchains. The task updates the
-committed tables and verifies every profile on each invocation. Normal compilation,
-benchmarks and CI use the committed tables without running generation.
+Gradle toolchains select every JDK version from 21 through 27. The task
+checks all code points against each JDK before updating the committed tables, so a
+shared table that differs from any member of its group fails generation. Normal
+compilation, benchmarks and CI use the committed tables without running generation.
 
 Generation preserves the scanner and classifier method bodies. Rerun the JDK matrix
 before enabling a new profile. The versioned Unicode fixtures and derived property

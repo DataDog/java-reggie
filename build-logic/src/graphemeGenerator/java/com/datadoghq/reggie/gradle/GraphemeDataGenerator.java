@@ -32,8 +32,8 @@ import javax.tools.ToolProvider;
 /**
  * Regenerates factual property deltas from audited GA JDKs. Internal JDK access occurs only here.
  *
- * <p>Run from the checkout root with the pinned JDK 22 Unicode file. Gradle selects JDKs 21, 25, 26
- * and 27 through its toolchains:
+ * <p>Run from the checkout root with the pinned JDK 22 Unicode file. Gradle selects JDKs 21 through
+ * 27 through its toolchains:
  *
  * <pre>
  * ./gradlew :reggie-runtime:generateGraphemeData -PgraphemeUnicodeData=/path/to/DerivedCoreProperties.txt
@@ -43,9 +43,9 @@ import javax.tools.ToolProvider;
  * <p>The Unicode input comes from
  * https://raw.githubusercontent.com/openjdk/jdk/jdk-22%2B36/src/java.base/share/data/unicodedata/DerivedCoreProperties.txt.
  * Its checksum is validated. Its licence is retained in runtime META-INF/LICENSE-Unicode.txt.
- * Source audit establishes identical classifier corrections for JDKs 21-23, 24-25 and 26-27. JDK
- * 22-23 Indic properties come from Unicode 15.1; the other profiles are extracted from installed
- * JDKs. The generator checks every code point before and after writing.
+ * Classifier corrections are shared by JDKs 21-23, 24-25 and 26-27. JDK 22-23 Indic properties come
+ * from Unicode 15.1; the other profiles are extracted from installed JDKs. The generator checks
+ * every code point on every supported feature version before updating the target file.
  */
 public class GraphemeDataGenerator {
   private static final int CODE_POINTS = Character.MAX_CODE_POINT + 1;
@@ -61,30 +61,37 @@ public class GraphemeDataGenerator {
       check(Path.of(args[1]));
       return;
     }
-    if (args.length != 7) {
+    if (args.length != 10) {
       throw new IllegalArgumentException(
-          "Expected JDK21_HOME JDK25_HOME JDK26_HOME JDK27_HOME DerivedCoreProperties.txt target work");
+          "Expected JDK21_HOME JDK22_HOME JDK23_HOME JDK24_HOME JDK25_HOME JDK26_HOME JDK27_HOME"
+              + " DerivedCoreProperties.txt target work");
     }
     String hash =
         HexFormat.of()
             .formatHex(
-                MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(args[4]))));
+                MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(args[7]))));
     if (!hash.equals("39295118c4c32768a5c071850fba66d0789ab5f7967eaeffee86294b6901ce5c")) {
       throw new IllegalArgumentException(
           "Unexpected JDK 22 DerivedCoreProperties.txt checksum: " + hash);
     }
-    Path target = Path.of(args[5]);
-    Path work = Path.of(args[6]);
+    Path target = Path.of(args[8]);
+    Path work = Path.of(args[9]);
     compile(target, work);
     int[] features = {21, 25, 26, 27};
     List<int[][]> profiles = new ArrayList<>();
     for (int i = 0; i < features.length; i++) {
       Path data = work.resolve("profile-" + features[i]);
-      run(args[i], "--profile", work.toString(), data.toString(), "-", "" + features[i]);
+      run(
+          args[features[i] - 21],
+          "--profile",
+          work.toString(),
+          data.toString(),
+          "-",
+          "" + features[i]);
       profiles.add(read(data));
     }
     Path indic15 = work.resolve("indic-15.1");
-    run(args[0], "--profile", work.toString(), indic15.toString(), args[4], "21");
+    run(args[0], "--profile", work.toString(), indic15.toString(), args[7], "21");
     if (!Arrays.deepEquals(profiles.get(2), profiles.get(3))) {
       throw new IllegalStateException(
           "JDK 26 and 27 property profiles differ; audit before updating");
@@ -110,7 +117,7 @@ public class GraphemeDataGenerator {
         Files.createDirectories(work.resolve("generated")).resolve("GraphemeData.java");
     Files.writeString(candidate, updated);
     compile(candidate, work);
-    for (int i = 0; i < features.length; i++) {
+    for (int i = 0; i < 7; i++) {
       run(args[i], "--check", work.toString());
     }
     Files.writeString(target, updated);
