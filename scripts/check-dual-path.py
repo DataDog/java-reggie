@@ -98,12 +98,70 @@ def enum_constants():
     return [c.strip() for c in body[:end].split(",") if c.strip()]
 
 
+# Case-body parity (AGENTS.md Critical Rule 2): for every strategy, the set of
+# `<gen>.generate*Method(` calls in its dispatch case body must be identical on
+# both paths (review history: PR #55 OPTIMIZED_NFA_WITH_BACKREFS, PR #67 LAZY_DFA
+# shipped with a different generated-method set on one path). Bodies that only
+# delegate to a helper (no direct generate*Method call on either path) are not
+# compared. Known asymmetries are budgeted per strategy and per method with the
+# reason; adding an entry is a reviewed change, and a stale entry fails the gate.
+METHOD_ASYMMETRY = {
+    "LAZY_DFA": {
+        "generateMatchesMethod": "runtime inlines matches(); the AOT class cannot reach package-private LazyDFACache members",
+        "generateMatchesDelegatingMethod": "processor emits the delegating matches() for the same reason",
+    },
+    "OPTIMIZED_NFA_WITH_LOOKAROUND": {
+        "generateFindLongestMatchEndMethod": "pre-existing at 43a22cf: runtime only; reconcile or document, then drop",
+    },
+    "SPECIALIZED_BACKREFERENCE": {
+        "generateMatchesBoundedMethod": "pre-existing at 43a22cf: runtime only; reconcile or document, then drop",
+    },
+    "SPECIALIZED_LITERAL_LOOKAHEADS": {
+        "generateFindLongestMatchEndMethod": "pre-existing at 43a22cf: runtime only; reconcile or document, then drop",
+    },
+}
+_CASE_LABEL = re.compile(r"\bcase\s+([A-Z][A-Z0-9_]*(?:\s*,\s*[A-Z][A-Z0-9_]*)*)\s*:")
+_GEN_CALL = re.compile(r"\.(generate\w*Method)\s*\(")
+
+
+def case_method_sets(body):
+    """Map each top-level case label of a dispatch switch body to the set of
+    generate*Method calls in its case body; fall-through labels share the body."""
+    depth_at = []
+    depth = 0
+    for ch in body:
+        depth_at.append(depth)
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+    labels = [m for m in _CASE_LABEL.finditer(body) if depth_at[m.start()] == 0]
+    ends = [m.start() for m in re.finditer(r"\bdefault\s*:", body) if depth_at[m.start()] == 0]
+    out = {}
+    pending = []
+    for i, m in enumerate(labels):
+        if i + 1 < len(labels):
+            end = labels[i + 1].start()
+        else:
+            end = min([e for e in ends if e > m.end()] or [len(body)])
+        seg = body[m.end():end]
+        pending += [x.strip() for x in m.group(1).split(",")]
+        if not seg.strip():
+            continue
+        calls = set(_GEN_CALL.findall(seg))
+        for label in pending:
+            out[label] = calls
+        pending = []
+    return out
+
+
 def main():
     consts = enum_constants()
     if not consts:
         print("check-dual-path: no MatchingStrategy constants parsed", file=sys.stderr)
         return 2
     failures = []
+    method_sets = {}
     for name, path in PATHS.items():
         text = strip_comments(path.read_text(encoding="utf-8"))
         try:
@@ -111,6 +169,7 @@ def main():
         except ValueError as e:
             print("check-dual-path: %s in %s" % (e, path.relative_to(ROOT)), file=sys.stderr)
             return 2
+        method_sets[name] = case_method_sets(body)
         # Statement-form labels only (`case X:` / `case X, Y:`), collected from
         # the strategy-dispatch switch body only; arrow-form switch expressions
         # are auxiliary lookups, not strategy dispatch.
@@ -124,6 +183,19 @@ def main():
         for c in exempt:
             if c in cases:
                 failures.append("%s: %s is EXEMPT but now has a case label; drop the exemption" % (name, c))
+    rt, pr = method_sets["runtime"], method_sets["processor"]
+    for c in consts:
+        if c not in rt or c not in pr:
+            continue
+        diff = rt[c] ^ pr[c]
+        if not rt[c] or not pr[c]:
+            diff = set()
+        allowed = METHOD_ASYMMETRY.get(c, {})
+        for meth in sorted(diff - set(allowed)):
+            side = "runtime" if meth in rt[c] else "processor"
+            failures.append("case %s: %s() generated on the %s path only" % (c, meth, side))
+        for meth in sorted(set(allowed) - diff):
+            failures.append("case %s: METHOD_ASYMMETRY entry %s is stale; drop it" % (c, meth))
     if failures:
         print("Dual-path gate FAILED (AGENTS.md Critical Rule 2):")
         for f in failures:
