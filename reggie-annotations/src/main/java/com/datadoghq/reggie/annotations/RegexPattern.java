@@ -30,6 +30,11 @@ import java.lang.annotation.Target;
  * extending ReggieMatcher 2. An implementation of the containing class (e.g., MyPatterns$Impl) with
  * lazy-initialized, cached matcher instances
  *
+ * <p>For the exact pattern {@code \X}, the generated accessor selects and caches a matcher using
+ * the executing JDK's grapheme profile. If that profile is unsupported, each accessor call throws
+ * {@code UnsupportedPatternException}, unless {@code ALLOW_JDK_FALLBACK} permits JDK delegation.
+ * The annotation processor does not embed the compiling JDK's Unicode data.
+ *
  * <p>Example usage:
  *
  * <pre>{@code
@@ -52,7 +57,8 @@ public @interface RegexPattern {
   /**
    * Compilation flags. {@code ALLOW_JDK_FALLBACK} permits a delegating stub that routes to {@code
    * java.util.regex} at runtime for patterns Reggie cannot compile natively; without it such
-   * patterns are a build error. Has no effect on natively-compilable patterns.
+   * patterns are a build error. The exact pattern {@code \X} is checked on the executing JDK when
+   * its generated accessor is called. Has no effect on natively-compilable patterns.
    */
   ReggieOption[] options() default {};
 }

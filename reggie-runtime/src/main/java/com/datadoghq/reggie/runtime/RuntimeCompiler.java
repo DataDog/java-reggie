@@ -1595,6 +1595,19 @@ public class RuntimeCompiler {
       CompilationKey cacheKey,
       LinearTokenSequenceAdmission linearTokenSequenceAdmission) {
     try {
+      if (cacheKey.pattern().equals("\\X") && (cacheKey.flags() & ReggieFlags.LITERAL) == 0) {
+        if (!GraphemeData.supported(
+            Runtime.version().feature(), Runtime.version().pre().isPresent())) {
+          return fallbackOrThrow(
+              pattern,
+              "native grapheme matching requires a supported GA JDK 21-27 profile; running "
+                  + Runtime.version(),
+              null,
+              options);
+        }
+        noteRouting("GRAPHEME");
+        return new GraphemeMatcher(pattern);
+      }
       // 1. Parse pattern to AST
       RegexParser parser = new RegexParser();
       RegexNode ast = parser.parse(pattern);

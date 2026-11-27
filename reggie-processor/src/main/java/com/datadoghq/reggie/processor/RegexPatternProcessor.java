@@ -285,6 +285,15 @@ public class RegexPatternProcessor extends AbstractProcessor {
       return strategy.hasMutableMatchState()
           ? ImplClassBytecodeGenerator.MethodInfo.pooled(methodName, matcherClassName)
           : ImplClassBytecodeGenerator.MethodInfo.native_(methodName, matcherClassName);
+    } else if (realization == ReggieMatcherBytecodeGenerator.Realization.DELEGATE_GRAPHEME) {
+      messager.printMessage(
+          Diagnostic.Kind.NOTE,
+          "@RegexPattern '\\X' selects its grapheme matcher on the executing JDK."
+              + (allowJdkFallback
+                  ? " Unsupported JDK profiles use the permitted java.util.regex fallback."
+                  : " Unsupported JDK profiles throw UnsupportedPatternException from the accessor."),
+          method);
+      return ImplClassBytecodeGenerator.MethodInfo.grapheme(methodName, pattern, allowJdkFallback);
     } else if (realization == ReggieMatcherBytecodeGenerator.Realization.HYBRID) {
       ReggieMatcherBytecodeGenerator.HybridClasses halves = generator.generateHybrid();
       String dfaClassName = matcherClassName + ReggieMatcherBytecodeGenerator.DFA_HALF_SUFFIX;
