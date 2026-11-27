@@ -116,6 +116,7 @@ See `doc/ARCHITECTURE.md` for the full pipeline, module structure, and design pa
 Coverage: `./gradlew jacocoVerify` (thresholds in `doc/coverage-baseline.md`).
 Benchmarks: `./gradlew :reggie-benchmark:benchmarkAndReport` (see AGENTS conventions doc for baselines/profiling).
 CI fuzz gate (`./gradlew build` may use a looser source-default budget): `./gradlew :reggie-integration-tests:test --tests '*AlgorithmicFuzzTest.divergenceGate_enforcedViaProperty' -Dreggie.fuzz.enforce=true -Dreggie.fuzz.maxFindings=28` — healthy: `[divergence-gate] … findings=N` (N ≤ 28), then `BUILD SUCCESSFUL`.
+Reviewers: divergences within that budget are tracked pre-existing bugs (inventory: `doc/fuzz/*.md`), not defects of the PR under review — flag fuzz results only when the count exceeds the budget or a divergence is missing from the inventory (see Correctness Guarantee in `doc/agents-fallback-and-limitations.md`).
 Required checks with healthy outputs, hook install, prohibited actions and protected paths: **`doc/agents-guardrails.md`**.
 
 ## Critical Rules — read before editing bytecode generation

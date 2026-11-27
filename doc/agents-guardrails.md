@@ -14,6 +14,7 @@ Update this list in the same PR that adds, removes or retunes a gate.
 | Coverage gates | `./gradlew jacocoAggregateReport jacocoVerify` | `ci.yml`; Codecov patch gate (`codecov.yml`) | `BUILD SUCCESSFUL` |
 | Dual-path gate | `python3 scripts/check-dual-path.py` | `.github/workflows/agent-gates.yml` | `Dual-path gate OK: 39 strategies covered on both paths` (the count follows `MatchingStrategy`) |
 | Scratch-file gate | `python3 scripts/check-scratch-files.py origin/main HEAD` | `agent-gates.yml`, `.githooks/pre-push` | `Scratch-file gate OK` |
+| Literal-slot ratchet | `python3 scripts/check-literal-slots.py` | `.github/workflows/agent-gates.yml` | `Literal-slot gate OK: 1001 literal slots in 27 files, all at budget` (the totals follow the `BUDGETS` table, which only ratchets down) |
 | Gate-budget ratchet | `python3 scripts/check-gate-budgets.py` (and `--self-test`) | `.github/workflows/gate-budgets.yml` | `Gate-budget check OK: fuzz budget 28, …`; a `WARN:` line names any source default that differs from the CI budget |
 | Secrets, dependencies, CodeQL | CI only | `security.yml` | all jobs green |
 

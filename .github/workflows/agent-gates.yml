@@ -24,3 +24,6 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: python3 scripts/check-scratch-files.py "origin/$BASE_REF" HEAD
+
+      - name: Literal-slot ratchet (AGENTS.md Critical Rule 4)
+        run: python3 scripts/check-literal-slots.py
