@@ -164,6 +164,13 @@ with an `UnsupportedOperationException`. Use `Reggie.compile()` instead for thos
 - **Possessive quantifiers**: Supported (`*+`, `++`, `?+`)
 - **Inline flags**: Supported - `(?i)`, `(?m)`, `(?s)`, `(?x)` work globally; scoped flags like
   `(?i:...)` are also supported
+- **Replacement strings**: `ReggieMatcher.replaceFirst`/`replaceAll(String, String)` diverge from
+  JDK `Matcher.replaceFirst`/`replaceAll`. `MatchCursor.appendReplacement` does not diverge. The
+  `ReggieMatcher` methods read one digit after `$`, keep an out-of-range `$n` literal (pinned by
+  `ReplacementAPITest#testBackreferenceInvalidGroup`) and expand `$$` to `$`. They also keep a
+  trailing `$`, `$x`, `${name}` and `\` literal. In each of these cases the JDK throws, expands the
+  named group or treats `\` as an escape. Use `MatchCursor` when you need JDK-exact replacement
+  semantics.
 
 ### Performance known gaps
 
