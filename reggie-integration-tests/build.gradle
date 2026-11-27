@@ -17,7 +17,7 @@ dependencies {
     implementation project(':reggie-annotations')
 
     // JSON parsing for test data
-    implementation 'com.google.code.gson:gson:2.14.0'
+    implementation 'com.google.code.gson:gson:2.15.0'
 
     // RegexParser/ThompsonBuilder/NFA/PatternAnalyzer for LaurikariAlgorithmicFuzzTest's
     // direct-construction driver. reggie-runtime declares this as 'implementation' (not 'api'),
